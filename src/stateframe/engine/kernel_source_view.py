@@ -192,6 +192,32 @@ def window_claims(content: object, *, path: str, revision: str,
     return claims
 
 
+_READ_PAGE_HEADER = re.compile(
+    r"\[read page\] path=(?P<path>\S+) revision=(?P<revision>sha256:[0-9a-f]{64}) "
+    r"lines=(?P<start>\d+)-(?P<end>\d+)/(?P<total>\d+)[^\n]*\n[^\n]*\n")
+
+
+def _read_page_claim(content: object, *, path: str, revision: str,
+                     total_lines: int) -> tuple[int, int, str] | None:
+    """(start, end, body) of a host read page for ``path`` at ``revision``; None otherwise.
+
+    A subframe's own read result is the only copy of a file once the host retires that
+    file's source window, so it is source evidence. Nothing is compared with source here.
+    """
+    if not isinstance(content, str) or not content.startswith("[read page] "):
+        return None
+    match = _READ_PAGE_HEADER.match(content)
+    if (match is None
+            or match.group("path").replace("\\", "/") != path.replace("\\", "/")
+            or match.group("revision") != revision
+            or int(match.group("total")) != total_lines):
+        return None
+    start, end = int(match.group("start")), int(match.group("end"))
+    if not 1 <= start <= end <= total_lines:
+        return None
+    return start, end, content[match.end():]
+
+
 def page_carries_span(page: object, *, path: str, revision: str, first: int, last: int,
                       payload: str) -> bool:
     """True when ``page`` is a window whose exact text for ``first..last`` is ``payload``.
@@ -270,6 +296,13 @@ def source_view(final_messages: Sequence[Mapping[str, object]], *, path: str,
                                               total_lines=total):
             if end <= total and (text.encode("utf-8", errors="surrogateescape")
                                  == source[offsets[start - 1]:offsets[end]]):
+                own.append((start, end))
+        page = _read_page_claim(content, path=path, revision=digest, total_lines=total)
+        if page is not None:
+            start, end, body = page
+            expected = source[offsets[start - 1]:offsets[end]]
+            # The page body is the exact line bytes, optionally followed by a host notice.
+            if body.encode("utf-8", errors="surrogateescape").startswith(expected):
                 own.append((start, end))
         verified.extend(own)
         if total and _merge(own) == ((1, total),):
