@@ -116,6 +116,11 @@ def _valid_worker_state_fields(value: object) -> bool:
         if watch.threshold != 32:
             return False
         value = {key: child for key, child in value.items() if key != "unbounded_progress_watch"}
+    if "edit_repair_ledger" in value:
+        from kernel_edit_repair_hook import valid_snapshot
+        if not valid_snapshot(value["edit_repair_ledger"]):
+            return False
+        value = {key: child for key, child in value.items() if key != "edit_repair_ledger"}
     base = set(WORKER_FIELDS)
     extra = set(value) - base
     if not extra:

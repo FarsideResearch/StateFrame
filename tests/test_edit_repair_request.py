@@ -375,6 +375,7 @@ def test_module_is_pure_and_unwired():
     # The handle module is injected, never imported, so legacy requests stay byte-identical.
     assert not re.search(r"^\s*(from|import)\s+kernel_edit_handles\b", text, re.MULTILINE)
     assert "kernel_edit_source_batch" not in text
+    # The repair hook is the single wiring point; nothing else imports the builder.
     for py in (ROOT / "src").rglob("*.py"):
-        if py.name != "kernel_edit_repair_request.py":
+        if py.name not in {"kernel_edit_repair_request.py", "kernel_edit_repair_hook.py"}:
             assert "kernel_edit_repair_request" not in py.read_text(encoding="utf-8"), py

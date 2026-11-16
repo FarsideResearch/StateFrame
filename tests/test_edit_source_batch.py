@@ -321,6 +321,7 @@ def test_module_is_pure_and_only_tests_import_it():
     assert not imported & {"os", "sys", "io", "pathlib", "time", "subprocess"}
     assert "os.environ" not in text and "open(" not in text
     for py in ENGINE.rglob("*.py"):
-        # The edit_source executor is the one engine consumer of the validator.
-        if py.name not in {"kernel_edit_source_batch.py", "kernel_edit_source_tool.py"}:
+        # Consumers: the edit_source executor and the legacy_safe single-edit route.
+        if py.name not in {"kernel_edit_source_batch.py", "kernel_edit_source_tool.py",
+                           "kernel_legacy_safe_edit.py"}:
             assert "kernel_edit_source_batch" not in py.read_text(encoding="utf-8"), py

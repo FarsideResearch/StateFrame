@@ -161,3 +161,9 @@ def test_bound_mode_keeps_legacy_prose_for_shared_outcomes():
     golden = _golden()
     for outcome in ("not_found", "n_places", "parse_break", "success"):
         assert golden[f"on_{outcome}"] == golden[f"off_{outcome}"]
+
+
+def test_golden_file_unchanged_by_routing():
+    """The routing change must not need a golden regen: this sha is e91a2a5b's fixture."""
+    import hashlib
+    assert hashlib.sha256(FIXTURE.read_bytes()).hexdigest() == "5a2fc757e8c420ca418eb7b516cfbd5e41a08a1f641dc9ed3bddc37e749246e4"
