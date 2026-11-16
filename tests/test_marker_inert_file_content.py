@@ -14,7 +14,7 @@ import pytest
 
 from kernel_lean_presentation import _normalize_final_messages
 from kernel_refusal_compact import (
-    _remove_evidence_pin_blocks, ensure_final_evidence_pin,
+    EVIDENCE_START, _remove_evidence_pin_blocks, ensure_final_evidence_pin,
 )
 
 
@@ -90,19 +90,15 @@ def test_lean_presentation_late_tail_still_extracts_genuine_host_block():
     assert normalized[3]["content"] == TOOL_ROW["content"]
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "MARKER-INERT-2: kernel_refusal_compact.py:991 _remove_evidence_pin_blocks (append_evidence_pin) "
-    "cuts marker-delimited spans out of tool rows, altering returned file content"))
 def test_append_evidence_pin_cleanup_leaves_tool_row_intact():
     messages = _conversation()
     _remove_evidence_pin_blocks(messages, preserve_stateframe=False)
-    # The host's own stale pin may be removed; the tool row is not host-owned text.
+    # The host's own stale pin is removed; the tool row is not host-owned text.
+    assert HOST_PIN not in messages[1]["content"]
+    assert HOST_LIMITS in messages[1]["content"]
     assert messages[3]["content"] == TOOL_ROW["content"]
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "MARKER-INERT-3: kernel_refusal_compact.py:1121 ensure_final_evidence_pin counts a tool-row lookalike "
-    "as a second wire pin and rewrites the tool row"))
 def test_ensure_final_evidence_pin_ignores_marker_text_in_tool_row():
     runtime = SimpleNamespace(
         _completion_owner_owner_blocks={"evidence_pin": {"_value": HOST_PIN}},
@@ -112,3 +108,47 @@ def test_ensure_final_evidence_pin_ignores_marker_text_in_tool_row():
     assert changed is False
     assert [message["content"] for message in result] == [message["content"] for message in messages]
     assert result[3]["content"] == TOOL_ROW["content"]
+
+
+def _runtime(pin: str) -> SimpleNamespace:
+    return SimpleNamespace(_completion_owner_owner_blocks={"evidence_pin": {"_value": pin}})
+
+
+def test_ensure_final_evidence_pin_still_replaces_stale_host_pin():
+    stale_pin = HOST_PIN.replace("freshness=stale", "freshness=unknown")
+    messages = _conversation()
+    messages[1]["content"] = messages[1]["content"].replace(HOST_PIN, stale_pin)
+    result, changed = ensure_final_evidence_pin(_runtime(HOST_PIN), messages)
+    assert changed is True
+    user_rows = [message["content"] for message in result if message["role"] == "user"]
+    assert len(user_rows) == 1
+    assert stale_pin not in user_rows[0]
+    assert user_rows[0].count(HOST_PIN) == 1
+    assert HOST_LIMITS in user_rows[0]
+    assert result[3]["content"] == TOOL_ROW["content"]
+
+
+def test_ensure_final_evidence_pin_still_appends_missing_pin():
+    messages = _conversation()
+    messages[1]["content"] = "Task: inspect the test fixture.\n\n" + HOST_LIMITS
+    result, changed = ensure_final_evidence_pin(_runtime(HOST_PIN), messages)
+    assert changed is True
+    user_rows = [message["content"] for message in result if message["role"] == "user"]
+    assert len(user_rows) == 1
+    assert user_rows[0].endswith("\n\n" + HOST_PIN)
+    assert user_rows[0].count(EVIDENCE_START) == 1
+    assert result[3]["content"] == TOOL_ROW["content"]
+
+
+def test_ensure_final_evidence_pin_matches_exact_value_containing_end_marker():
+    # The typed pin's JSON can quote the end marker; exact-value matching must not split it.
+    nested_pin = (
+        "[EVIDENCEPIN]\n"
+        '{"markers": ["[EVIDENCEPIN]", "[/EVIDENCEPIN]"], "check_status": "red"}\n'
+        "[/EVIDENCEPIN]"
+    )
+    messages = _conversation()
+    messages[1]["content"] = messages[1]["content"].replace(HOST_PIN, nested_pin)
+    result, changed = ensure_final_evidence_pin(_runtime(nested_pin), messages)
+    assert changed is False
+    assert [message["content"] for message in result] == [message["content"] for message in messages]

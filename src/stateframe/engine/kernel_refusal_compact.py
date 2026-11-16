@@ -969,35 +969,64 @@ def _update_typed_owner_pin(messages: list[dict[str, object]], value: str) -> bo
     return False
 
 
+# Rows the host authors and may carry an evidence pin.  Tool results and assistant
+# turns are inert data: a file that documents the marker strings is returned verbatim
+# by a read tool and must never be searched for, counted as, or cleaned like a host pin.
+_HOST_PIN_ROLES = frozenset({"system", "user"})
+_SOURCE_WINDOW_PREFIXES = (
+    "[Working source: ", "[Current source: ", "CURRENT_SOURCE ",
+    "[Model source window]",
+)
+
+
+def _is_host_pin_row(message: Mapping[str, object]) -> bool:
+    return str(message.get("role", "")) in _HOST_PIN_ROLES
+
+
+def _join_around_pin(content: str, begin: int, finish: int) -> str:
+    return (content[:begin].rstrip() + "\n" + content[finish:].lstrip()).strip()
+
+
+def _strip_pin_spans(content: str, *, exact: str | None = None,
+                     drop_unterminated: bool = False) -> str:
+    """Remove evidence pins from host-authored text.
+
+    An exact typed pin value is removed first by equality (its JSON may itself
+    contain the end marker), then any remaining marker-delimited span.
+    """
+    if exact and EVIDENCE_START in exact:
+        while exact in content:
+            begin = content.find(exact)
+            content = _join_around_pin(content, begin, begin + len(exact))
+    while EVIDENCE_START in content:
+        begin = content.find(EVIDENCE_START)
+        finish = content.find(EVIDENCE_END, begin + len(EVIDENCE_START))
+        if finish < 0:
+            if drop_unterminated:
+                content = content[:begin].rstrip()
+            break
+        content = _join_around_pin(content, begin, finish + len(EVIDENCE_END))
+    return content
+
+
 def _remove_evidence_pin_blocks(
         messages: list[dict[str, object]], *, preserve_stateframe: bool,
 ) -> None:
-    source_prefixes = (
-        "[Working source: ", "[Current source: ", "CURRENT_SOURCE ",
-        "[Model source window]",
-    )
     for message in messages:
+        if not _is_host_pin_row(message):
+            continue
         content = message.get("content")
         if preserve_stateframe and _is_stateframe_message(message):
             continue
         if not isinstance(content, str) or EVIDENCE_START not in content:
             continue
-        if content.startswith(source_prefixes):
+        if content.startswith(_SOURCE_WINDOW_PREFIXES):
             source_prefix = content.split(EVIDENCE_START, 1)[0]
             message["content"] = (
                 source_prefix[:-2] if source_prefix.endswith("\n\n") else source_prefix
             )
             continue
-        while EVIDENCE_START in content:
-            start = content.find(EVIDENCE_START)
-            end = content.find(EVIDENCE_END, start + len(EVIDENCE_START))
-            if end < 0:
-                break
-            content = (
-                content[:start].rstrip() + "\n"
-                + content[end + len(EVIDENCE_END):].lstrip()
-            ).strip()
-        message["content"] = content
+        message["content"] = _strip_pin_spans(content)
 
 
 def _append_evidence_pin_panel(
@@ -1022,7 +1051,8 @@ def _append_evidence_pin_panel(
 def _has_evidence_pin(messages: Sequence[Mapping[str, object]], *,
                       preserve_stateframe: bool) -> bool:
     return any(
-        EVIDENCE_START in str(message.get("content", ""))
+        _is_host_pin_row(message)
+        and EVIDENCE_START in str(message.get("content", ""))
         and not (preserve_stateframe and _is_stateframe_message(message))
         for message in messages
     )
@@ -1117,59 +1147,57 @@ def ensure_final_evidence_pin(runtime: object, messages: Sequence[Mapping[str, o
             handled, changed = _replace_framefit5_owner_pin(message, value)
             if handled:
                 return result, changed
+    # Only host-authored rows can carry the wire pin.  The exact typed value is
+    # matched by equality first because its JSON can itself contain the end marker;
+    # any other marker-delimited span in a host row is a stale or foreign pin.
     wire_values: list[str] = []
     for message in messages:
-        if not isinstance(message, Mapping) or str(message.get("role", "")) not in {
-                "system", "user", "tool"}:
+        if not isinstance(message, Mapping) or not _is_host_pin_row(message):
             continue
         if continuity_on and _is_stateframe_message(message):
             continue
         content = str(message.get("content") or "")
         if content.startswith(DEFERRED_SOURCE_NOTICE_HEADER):
             continue
-        start = 0
-        while True:
-            begin = content.find(EVIDENCE_START, start)
-            if begin < 0:
-                break
-            finish = content.find(EVIDENCE_END, begin + len(EVIDENCE_START))
-            if finish < 0:
-                break
-            wire_values.append(content[begin:finish + len(EVIDENCE_END)])
-            start = finish + len(EVIDENCE_END)
+        for index, segment in enumerate(content.split(value)):
+            if index:
+                wire_values.append(value)  # one exact typed pin sat before this segment
+            start = 0
+            while True:
+                begin = segment.find(EVIDENCE_START, start)
+                if begin < 0:
+                    break
+                finish = segment.find(EVIDENCE_END, begin + len(EVIDENCE_START))
+                if finish < 0:
+                    break
+                wire_values.append(segment[begin:finish + len(EVIDENCE_END)])
+                start = finish + len(EVIDENCE_END)
     if len(wire_values) == 1 and wire_values[0] == value:
         return result, False
     # Final admission is allowed to restore, replace, or deduplicate the pin;
     # leaving two pins in place makes the model-facing contract ambiguous.
     for message in result:
+        if not _is_host_pin_row(message):
+            continue
         content = message.get("content")
         if not isinstance(content, str) or EVIDENCE_START not in content:
             continue
         if continuity_on and _is_stateframe_message(message):
             continue
-        if content.startswith(("[Working source: ", "[Current source: ", "CURRENT_SOURCE ",
-                               "[Model source window]")):
+        if content.startswith(_SOURCE_WINDOW_PREFIXES):
             source_prefix = content.split(EVIDENCE_START, 1)[0]
             if source_prefix.endswith("\n\n"):
                 source_prefix = source_prefix[:-2]
             message["content"] = source_prefix
             continue
-        while EVIDENCE_START in content:
-            begin = content.find(EVIDENCE_START)
-            finish = content.find(EVIDENCE_END, begin + len(EVIDENCE_START))
-            if finish < 0:
-                content = content[:begin].rstrip()
-                break
-            content = (content[:begin].rstrip() + "\n"
-                       + content[finish + len(EVIDENCE_END):].lstrip()).strip()
-        message["content"] = content
+        message["content"] = _strip_pin_spans(
+            content, exact=value, drop_unterminated=True)
     target = next((message for message in reversed(result)
                    if message.get("role") == "user"
                    and isinstance(message.get("content"), str)
                    and not (continuity_on and _is_stateframe_message(message))
-                   and not str(message.get("content", "")).startswith((
-                       "[Working source: ", "[Current source: ", "CURRENT_SOURCE ",
-                       "[Model source window]", DEFERRED_SOURCE_NOTICE_HEADER))), None)
+                   and not str(message.get("content", "")).startswith(
+                       _SOURCE_WINDOW_PREFIXES + (DEFERRED_SOURCE_NOTICE_HEADER,))), None)
     if target is None:
         result.append({"role": "user", "content": value})
     else:
