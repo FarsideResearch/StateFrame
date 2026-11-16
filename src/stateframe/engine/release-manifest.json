@@ -767,7 +767,7 @@
   "kernel_working_set_windows.py": "35aff7836ee18805497c2600c5a930f3e5480dc0ab4571e58546442467a4a935",
   "kernel_working_sets.py": "06b4e264eb3186239cce6ade731f173baa431f642eb6eb3196d219af188b66f6",
   "kernel_workspace_truth.py": "de8e806566e3f513db4bc72c830830c3860b4cd30306d4c2862564cbde8dd69d",
-  "line_stage.py": "de73ceaa77ce03c0b81c6f6cd387bd8530b01b68cfaf16d843b72710c3ca8e4e",
+  "line_stage.py": "4f653ed88d7cc970080ae148f1438edc0a407260514554586ec637a00c79ecc2",
   "long_horizon_decode_logging.py": "445b5215530b8d6ad1a718e4ceb31a5a0e76fe184f6249f4c95dc6218c14b90b",
   "long_horizon_metrics.py": "86a5c49905f70c74ee28c32a4555ce772b737699a9600a545a8228a09b8938fe",
   "long_horizon_protocol.py": "2bfbc23264aff2f9f2b8580313d74e7aee94bcf3aa470b209823257379013805",

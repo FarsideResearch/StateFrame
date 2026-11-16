@@ -51,9 +51,12 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import logging
 import re
 from dataclasses import dataclass, field, replace
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
+
+_log = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------- #
 # SEAM
@@ -122,13 +125,18 @@ TIMEOUT = "timeout"
 INVALID_OUTPUT = "invalid_output"
 TRUNCATED_OUTPUT = "truncated_output"
 MODEL_UNAVAILABLE = "model_unavailable"
+#: The ask raised a programming error (TypeError, AttributeError, ...), not a
+#: transport failure. Typed separately so an engine defect never reads as a
+#: model outage; the exception type is kept in the cert as `engine_error`.
+ENGINE_ERROR = "engine_error"
 NO_CANDIDATES = "no_candidates"
 
 #: Every state in which the model contributed NOTHING to ordering. Downstream
 #: must behave identically for all of them: enumerate `P` by static score.
 NON_SELECTING_STATES = frozenset({
     EXPLICIT_ABSTAIN, SKIPPED_BUDGET, SKIPPED_LARGE_SET, SKIPPED_DISABLED,
-    TIMEOUT, INVALID_OUTPUT, TRUNCATED_OUTPUT, MODEL_UNAVAILABLE, NO_CANDIDATES,
+    TIMEOUT, INVALID_OUTPUT, TRUNCATED_OUTPUT, MODEL_UNAVAILABLE, ENGINE_ERROR,
+    NO_CANDIDATES,
 })
 
 # --------------------------------------------------------------------------- #
@@ -458,23 +466,34 @@ def _collect_spans(fn: ast.AST) -> List[_Span]:
 
 
 def _dataflow(fn: ast.AST, rel_path: str, qualname: str):
-    """Lazy per-function def-use via `graphs.dataflow`, or None.
+    """Lazy per-function def-use via `graphs.dataflow`: `(df, failure)`.
 
     The import is INSIDE the function and guarded: line pruning must degrade to
     the symptom + structural signals rather than fail when the dataflow layer is
     unavailable. `analyze_function` is pure and takes an AST node, so no corpus,
     no minter and no store is materialized — this is the lazy per-function path
     the layer was built for, not a repo build.
+
+    `failure` is "" on success. When the import or the analysis raises, `df` is
+    None, `failure` names the stage and the exception type, and a WARNING is
+    logged: the caller copies `failure` into `degrade_reason` so the universe
+    records the degraded-analysis state instead of losing the cause.
     """
     try:
         from graphs.dataflow import analyze_function
-    except Exception:                                       # pragma: no cover
-        return None
+    except Exception as exc:
+        why = "dataflow layer unavailable: import failed (%s)" % type(exc).__name__
+        _log.warning("line_stage: %s; %s:%s pruned without dataflow",
+                     why, rel_path, qualname)
+        return None, why
     try:
         return analyze_function(fn, f"lines:{rel_path}:{qualname}",
-                                rel_path, qualname)
-    except Exception:                                       # pragma: no cover
-        return None
+                                rel_path, qualname), ""
+    except Exception as exc:
+        why = "dataflow analysis failed (%s)" % type(exc).__name__
+        _log.warning("line_stage: %s; %s:%s pruned without dataflow",
+                     why, rel_path, qualname, exc_info=True)
+        return None, why
 
 
 def _slice_lines(df, seed_lines: frozenset, seed_names: frozenset):
@@ -571,7 +590,8 @@ def prune_candidates(file_lines: Sequence[str],
         if any(t == n.lower() for n in _WORD_RE.findall("\n".join(lines[fn_lo - 1:fn_hi]))))
 
     # --- dataflow --------------------------------------------------------- #
-    df = _dataflow(fn, rel_path or "<mem>", fn_name or getattr(fn, "name", "?"))
+    df, df_failure = _dataflow(fn, rel_path or "<mem>",
+                               fn_name or getattr(fn, "name", "?"))
     backward, forward = _slice_lines(df, frozenset(seed_lines), seed_names)
     df_truncated = bool(getattr(df, "truncated", False))
 
@@ -636,7 +656,8 @@ def prune_candidates(file_lines: Sequence[str],
     return CandidateUniverse(
         candidates=ranked[:limits.p_max],
         degraded=df is None or df_truncated,
-        degrade_reason=("dataflow layer unavailable" if df is None else
+        degrade_reason=((df_failure or "dataflow layer unavailable")
+                        if df is None else
                         ("dataflow truncated: function exceeds the statement cap"
                          if df_truncated else "")),
         truncated=truncated,
@@ -1043,6 +1064,26 @@ def run_line_stage(file_lines: Sequence[str],
     return _finish(universe, selected, state, cert)
 
 
+#: Exception types that are engine defects, never model/transport outcomes.
+#: The `LineAsk` contract types every transport failure (`LineAskTimeout`,
+#: `LineAskUnavailable`, `LineAskTruncated`); anything else that escapes is
+#: still read as an unavailable model UNLESS it is one of these, so a bug in
+#: the ask adapter or the menu plumbing cannot pass as a model outage.
+_ENGINE_ERRORS = (TypeError, AttributeError, NameError, LookupError,
+                  AssertionError, ArithmeticError, NotImplementedError,
+                  RecursionError)
+
+
+def _ask_failure(exc: Exception, call: str) -> Tuple[str, Dict[str, str]]:
+    """(state, detail) for an untyped exception raised by `ask.<call>`."""
+    name = type(exc).__name__
+    if isinstance(exc, _ENGINE_ERRORS):
+        _log.warning("line_stage: ask.%s raised %s; classified as %s",
+                     call, name, ENGINE_ERROR, exc_info=True)
+        return ENGINE_ERROR, {"engine_error": name}
+    return MODEL_UNAVAILABLE, {"transport_error": name}
+
+
 def _run_probes(ask, items):
     """Binary probes for a very small set. Ordering only; `no` never deletes."""
     detail = {"probe_answers": {}, "probe_scores": {}}
@@ -1057,8 +1098,9 @@ def _run_probes(ask, items):
         except LineAskTruncated:
             return TRUNCATED_OUTPUT, tuple(selected), detail
         except Exception as exc:                            # transport blew up
-            detail["transport_error"] = type(exc).__name__
-            return MODEL_UNAVAILABLE, tuple(selected), detail
+            state, typed = _ask_failure(exc, "probe")
+            detail.update(typed)
+            return state, tuple(selected), detail
         ans, score, err = parse_probe_answer(payload)
         if err:
             detail["probe_answers"][cid] = "invalid"
@@ -1086,8 +1128,9 @@ def _run_menu(ask, items, limits):
     except LineAskTruncated:
         return TRUNCATED_OUTPUT, (), detail
     except Exception as exc:
-        detail["transport_error"] = type(exc).__name__
-        return MODEL_UNAVAILABLE, (), detail
+        state, typed = _ask_failure(exc, "menu")
+        detail.update(typed)
+        return state, (), detail
 
     ids, conf, err = parse_menu_answer(payload, offered)
     detail["confidence"] = conf
