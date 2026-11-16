@@ -2458,6 +2458,56 @@ def _declared_dependencies(admission: AdmissionResult) -> dict[str, set[str]]:
     return dependencies
 
 
+_SALVAGE_MAX_BYTES = 16 << 20
+
+
+def preserve_unit_candidate(call_root: Path, unit_id: str) -> dict[str, object] | None:
+    """Keep an unsubmitted subframe's newest candidate bundle in the parent call root.
+
+    The child captures its workspace edits as worker/candidates/NNNN.json before every
+    request. When it ends without a submission (a refused or exhausted replan, a
+    harness or budget stop), that bundle is the only record of its edits. Copy it,
+    byte for byte, to parallel/<call>/salvage/<unit>.json so the parent keeps it
+    regardless of unit-directory cleanup. Returns the receipt, or None when the unit
+    left no edit. Never raises: salvage must not change the unit's terminal outcome.
+    """
+    try:
+        candidates = call_root / "units" / unit_id / "worker" / "candidates"
+        if candidates.is_symlink() or not candidates.is_dir():
+            return None
+        names = sorted(path.name for path in candidates.iterdir()
+                       if re.fullmatch(r"\d{4,}\.json", path.name))
+        if not names:
+            return None
+        source = candidates / names[-1]
+        if source.is_symlink() or not source.is_file() or source.stat().st_size > _SALVAGE_MAX_BYTES:
+            return {"status": "REFUSED", "reason": "candidate bundle is a symlink or too large"}
+        raw = source.read_bytes()
+        bundle = json.loads(raw)
+        patch = bundle.get("patch") if isinstance(bundle, Mapping) else None
+        if not isinstance(patch, str) or not patch.strip():
+            return None
+        hashes = bundle.get("file_hashes")
+        files = sorted(str(path) for path in hashes) if isinstance(hashes, Mapping) else []
+        target = call_root / "salvage" / f"{unit_id}.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary = tempfile.mkstemp(dir=target.parent, prefix=f".{unit_id}.", suffix=".tmp")
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(raw)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, target)
+        except BaseException:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+            raise
+        return {"status": "PRESERVED", "path": str(target.relative_to(call_root)),
+                "source": names[-1], "sha256": hashlib.sha256(raw).hexdigest(), "files": files}
+    except (OSError, ValueError, TypeError) as error:
+        return {"status": "FAILED", "reason": f"{type(error).__name__}: {str(error)[:200]}"}
+
+
 def _failure_outcome(unit_id: str, reason: str, detail: str, usage: UnitUsage,
                      wall: float, queue_wait: float) -> UnitOutcome:
     status = reason if reason in {"BLOCKED", "BUDGET_EXHAUSTED", "ENGINE_ERROR", "TIMED_OUT", "CANCELLED"} else "REFUSED"
@@ -3132,6 +3182,12 @@ def execute_parallel(context: ParallelContext, args: Mapping, *, host: HostClien
                         detail = (f"first_frame_tokens={usage.initial_frame_tokens}; "
                                   f"cap={info['spec'].limits.unit_request_tokens}")
                     outcome = _failure_outcome(unit_id, reason, detail, usage, wall, queue_wait)
+                # An unsubmitted unit's edits live only in its candidate bundle.
+                salvage = preserve_unit_candidate(call_root, unit_id)
+                if salvage is not None:
+                    context.runtime.journal.emit("parallel_unit_salvaged", unit=unit_id,
+                                                 terminal=str(terminal or "ENGINE_ERROR"),
+                                                 **salvage)
             _record_outcome(call_root, outcome, budget, parent_steps)
             outcomes[unit_id] = outcome
             context.runtime.journal.emit("parallel_unit_terminal", unit=unit_id,
