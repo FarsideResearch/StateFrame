@@ -21,6 +21,7 @@ from types import SimpleNamespace
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src/stateframe/engine"), str(ROOT / "src")]
 
+from _journal import journal_bytes, measurement_journal_paths
 from kernel_read_receipts import DecodedSpan, ReceiptIdentity
 from kernel_working_set_snapshot import (
     PreparationSnapshot,
@@ -32,8 +33,8 @@ FIXTURE = ROOT / "tests/fixtures/working_set_98.json.gz"
 
 
 def reconstruct(run: Path) -> PreparationSnapshot:
-    events = next((run / "worker/measurement-runs").glob("*/events.jsonl"))
-    rows = [json.loads(line) for line in events.read_text().splitlines()]
+    events = measurement_journal_paths(run)[0]
+    rows = [json.loads(line) for line in journal_bytes(events, decompress=True).decode("utf-8").splitlines()]
 
     def hydrate(value):
         if isinstance(value, dict):

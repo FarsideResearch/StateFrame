@@ -4270,9 +4270,7 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
     if removed["env"] is not None:
         printer(f"Removed run env ({removed['env'] / 1e6:,.0f} MB); run finished. "
                 "Use --keep-run-env to keep it.")
-    if (summary["runtime_outcome"] in ("cancelled", "engine_error", "missing_result", "budget_stop",
-                                      "recovery_required")
-            and not summary.get("engine_error_reason")):  # a seal failure would only repeat on resume
+    if outcomes.resume_hint_applies(summary):
         limit = " --max-turns <more>" if summary["runtime_outcome"] == "budget_stop" else ""
         printer(f"stopped before finishing; continue it with: stateframe resume {run_dir}{limit}")
     return summary

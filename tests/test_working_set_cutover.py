@@ -2,15 +2,13 @@
 from __future__ import annotations
 
 import json
-import lzma
 import os
-from pathlib import Path
-import subprocess
 import sys
 from types import SimpleNamespace
 
 import pytest
 
+from _journal import measurement_events
 from kernel_working_set_stop import MANDATORY_ENVELOPE_REASONS, ReasonCode
 
 
@@ -168,10 +166,7 @@ def test_on_real_qualified_hook_sends_certified_wire(tmp_path, monkeypatch):
     monkeypatch.setenv("STATEFRAME_WORKING_SET_ALLOCATOR", "on")
     _hashes, requests, _ = _run_scripted_example(
         monkeypatch, "discount_bug", EXAMPLES["discount_bug"], tmp_path)
-    events = []
-    for path in (tmp_path / "run").rglob("events.jsonl*"):
-        raw = lzma.decompress(path.read_bytes()) if path.suffix == ".xz" else path.read_bytes()
-        events.extend(json.loads(line) for line in raw.splitlines() if line)
+    events = measurement_events(tmp_path / "run")
     plans = [row for row in events if row.get("kind") == "working_set_prepared"]
     assert plans, "build_qualified_request never published a certified candidate"
     assert len(plans) == len(requests)
