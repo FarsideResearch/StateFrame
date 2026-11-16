@@ -308,3 +308,40 @@ def test_adapter_sized_first_child_requests_fit_default_estimate(adapter: str, c
     assert after_tokens <= default_subframe_token_cap(ENDPOINT_PROMPT_TOKEN_BUDGET)
     if count:
         assert after_tokens < before_tokens
+
+
+
+def _scope_unit(owns: list[str]) -> SimpleNamespace:
+    return SimpleNamespace(to_json=lambda: {
+        "unit_id": "a", "contract": {
+            "id": "a", "owns": owns, "creates": [], "reads": [], "requirement_ids": [],
+            "check": {"command_kind": "none", "selectors": [], "source_paths": []},
+        }, "requirement_clauses": [],
+    })
+
+
+def test_allocator_on_scope_inlines_next_site_and_never_references(
+        tmp_path: Path, monkeypatch) -> None:
+    """Final delivery is unknown at scope time, so the allocator-on producer inlines."""
+    path = tmp_path / "pkg" / "reader.py"
+    path.parent.mkdir()
+    source = "alpha\nbeta\ngamma\n"
+    path.write_text(source)
+    site = _site("pkg/reader.py", source)
+    window = _window(site, source, 1, 3)
+    state = {"schema": "stateframe-framefit5/1", "mode": "FRAME_ONLY",
+             "open_sites": [site], "next_site": site}
+    unit = _scope_unit(["pkg/reader.py"])
+
+    monkeypatch.setenv("STATEFRAME_WORKING_SET_ALLOCATOR", "on")
+    on = framefit5.scope_typed_state_for_unit(
+        state, unit, root=tmp_path, delivered_windows=[window])
+    assert "source_ref" not in on["open_sites"][0]
+    assert on["open_sites"][0]["current_bytes"] == source
+    assert on["next_site"] == on["open_sites"][0]
+
+    monkeypatch.setenv("STATEFRAME_WORKING_SET_ALLOCATOR", "off")
+    off = framefit5.scope_typed_state_for_unit(
+        state, unit, root=tmp_path, delivered_windows=[window])
+    assert off["open_sites"][0]["source_ref"]["content_sha256"] == site["content_sha256"]
+    assert "current_bytes" not in off["open_sites"][0]

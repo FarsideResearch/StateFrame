@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.14 (2026-11-16)
+
+- Fixed (parallel subframes): subframes now commit their edits in live runs. A subframe that edited one of its files no longer fails allocation validation on every replan and ends the run; the validated frame and the live request now agree on the owner contract and on which read pins the request already delivers. When a replan is needed, the subframe replans instead of stopping.
+- Fixed (parallel subframes): edits are no longer lost when a subframe ends without submitting. The parent copies the unit's newest candidate edits to `parallel/<call>/salvage/<unit>.json` and records it in the run journal; the unit's outcome is unchanged.
+- Subframes: workers now inherit the parent's working-set allocator setting. With the allocator on, a subframe's first request is admitted when its owned source is carried as byte-verified pages (listed in a new `[Current source map]` block) or deferred under a current-revision obligation, and large owned files page in instead of failing; a file too large for the subframe's request budget is refused before any model call (`SUBFRAME_CONTEXT_TOO_LARGE`). Edits are admitted only against the request that was actually sent. Subframe workers still use the legacy allocation by default, and requests outside subframes are unchanged.
+- Fixed (parallel subframes): several allocator-on checks were tightened so they fail closed instead of guessing. An edit with no prior read of its file gets no site, a clipped read page counts only for the lines it carries, a deferral notice no longer lists a file the request already carries, and a retained owned file that renders no verified source now raises an error instead of being sent empty.
+- Fixed: a subframe whose owned test file sorts before its source no longer stops with "row.entry.path is not declared in files"; the entry is the first owned non-test source.
+
 ## 0.7.13 (2026-11-16)
 
 - Security: a `problems.jsonl` fault row, and its reason line on stderr, could contain a secret registered with the checkpoint guard when the caught error's message included it. Such messages (raw or JSON-escaped) are now replaced with a fixed "withheld" text, and an error whose `str()` raises is recorded without breaking the fault path.

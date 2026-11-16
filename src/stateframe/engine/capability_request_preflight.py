@@ -1007,6 +1007,10 @@ def preflight_presentation_or_degrade(
         if (getattr(runtime, "stateframe_framefit_mode", "off") == "on"
                 or has_framefit5_state(messages)):
             _journal_framefit5_preflight_error(runtime, initial_error)
+            from kernel_frame_optional_allocation import FrameAllocationReplanNeeded
+            if isinstance(initial_error, FrameAllocationReplanNeeded):
+                # Send-side boundary handling replans only on this exact type; wrapping it aborts the run.
+                raise
             from kernel_request_seal import RequestSealError, log_seal_violation
             log_seal_violation("frame-only request preflight failed")
             raise RequestSealError("frame-only request preflight failed") from initial_error

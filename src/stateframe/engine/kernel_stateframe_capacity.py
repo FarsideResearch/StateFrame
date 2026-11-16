@@ -178,6 +178,60 @@ def _segments(messages: Sequence[Mapping[str, object]],
     return segments
 
 
+def drop_unbacked_range_pins(ledger: dict[str, object],
+                             messages: Sequence[Mapping[str, object]],
+                             frame: Mapping[str, object] | None = None) -> None:
+    """Drop exact range pins whose revision is not a complete current source window.
+
+    A pin for a superseded revision carries bytes the request no longer shows as
+    current. The fitted frame drops it (see kernel_working_set_facts._update_frame);
+    the host projection must drop it too before the two are compared.
+
+    A pin whose exact bytes this request delivers through another carrier (a whole
+    read page after an edit, or with ``frame`` its selected next_site/headcarry) is
+    backed too: the fitted frame keeps it and drop_delivered_range_pins converts it
+    to a same_request receipt, so the projection must leave it for that same rule.
+    """
+    from kernel_request_source_window import parse_model_source_window
+
+    current: dict[str, object] = {}
+    for message in messages:
+        meta = parse_model_source_window(message.get("content"))
+        if (meta is not None and meta.get("absence") == "NONE"
+                and meta.get("status") == "COMPLETE" and isinstance(meta.get("path"), str)):
+            current[meta["path"]] = meta.get("revision")
+    # Only carriers outside the ledger back a pin; another pin cannot back itself.
+    carriers = _read_source_segments(messages, frame if frame is not None else {}, ())
+    for row in ledger["reads"]:
+        if "pinned_range" in row and current.get(row.get("path")) != row.get("revision"):
+            pin = row["pinned_range"]
+            if (isinstance(pin, str)
+                    and hashlib.sha256(pin.encode()).hexdigest() == row.get("content_sha256")
+                    and _delivered(row, carriers)):
+                continue
+            row.pop("pinned_range")
+
+
+def drop_delivered_range_pins(ledger: dict[str, object],
+                              messages: Sequence[Mapping[str, object]],
+                              frame: Mapping[str, object]) -> None:
+    """Replace byte-identical range pins whose bytes this request already delivers.
+
+    Shared by the fit and the allocation validator so both apply one rule. The newest
+    retained ledger pin or a current source carrier owns each same-request receipt.
+    """
+    retained: list[Mapping[str, object]] = []
+    for row in reversed(ledger["reads"]):
+        pin = row.get("pinned_range")
+        if (isinstance(pin, str)
+                and hashlib.sha256(pin.encode()).hexdigest() == row.get("content_sha256")
+                and _delivered(row, _read_source_segments(messages, frame, retained))):
+            row.pop("pinned_range")
+            row["range_delivery"] = "same_request"
+        else:
+            retained.append(row)
+
+
 def _read_source_segments(messages: Sequence[Mapping[str, object]],
                           frame: Mapping[str, object],
                           reads: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
@@ -392,6 +446,16 @@ def refresh_read_ranges(messages: list[dict[str, object]],
         ledger = frame.get("action_ledger")
         reads = ledger.get("reads") if isinstance(ledger, Mapping) else None
         original = copy.deepcopy(frame)
+        # Allocator-on: apply the same delivery rule the allocation validator
+        # projects with, so a pin this request delivers converts even before any
+        # same_request row exists. An unconverted wire frame fails the validator's
+        # ledger comparison (fu070 red 2).
+        from kernel_read_receipts import enabled as allocator_enabled
+
+        if allocator_enabled() and isinstance(reads, list):
+            from kernel_cache_layout_view import semantic_messages
+
+            drop_delivered_range_pins(ledger, semantic_messages(messages), frame)
         has_same_request_receipt = isinstance(reads, list) and any(
             isinstance(row, Mapping) and row.get("range_delivery") == "same_request"
             for row in reads
@@ -656,18 +720,7 @@ def fit_protected_frame(body: dict[str, object], *,
                                    "call_id_sha256": row["call_id_sha256"]}, kind="call_identity",
                           coverage=coverage)
                     covered_ids.add(full_id)
-        # Replace only byte-identical range copies. The newest retained ledger
-        # pin or a current source carrier owns each same-request receipt.
-        retained = []
-        for row in reversed(ledger["reads"]):
-            pin = row.get("pinned_range")
-            if (isinstance(pin, str)
-                    and hashlib.sha256(pin.encode()).hexdigest() == row.get("content_sha256")
-                    and _delivered(row, _read_source_segments(messages, frame, retained))):
-                row.pop("pinned_range")
-                row["range_delivery"] = "same_request"
-            else:
-                retained.append(row)
+        drop_delivered_range_pins(ledger, messages, frame)
         size = publish()
 
     # Repeated typed reads and journal receipts are two views of the same

@@ -295,6 +295,13 @@ def _read_fact(
     return fact, content
 
 
+def _working_set_allocator_on() -> bool:
+    # Read at call time: the switch is an env var, not an import-time constant.
+    from kernel_read_receipts import enabled as allocator_enabled
+
+    return allocator_enabled()
+
+
 def _read_site_window(
     arguments: Mapping[str, object], result_text: str,
 ) -> tuple[dict[str, object], str] | None:
@@ -313,6 +320,12 @@ def _read_site_window(
     byte_count = re.search(r"\bbytes=(\d+)\b", metadata)
     clip = re.search(r"\bclip=([^\s]+)", metadata, re.IGNORECASE)
     truncated = re.search(r"\btruncated=(true|false)\b", metadata, re.IGNORECASE)
+    # max_chars clips are an allocator-only page shape; OFF keeps the historical clip set.
+    clip_modes = (
+        frozenset({"none", "max_lines", "max_chars"})
+        if _working_set_allocator_on()
+        else frozenset({"none", "max_lines"})
+    )
     if (
         not path
         or not requested_path
@@ -323,11 +336,12 @@ def _read_site_window(
         or total < end
         or chars is None
         or clip is None
-        or clip.group(1).casefold() not in {"none", "max_lines"}
+        or clip.group(1).casefold() not in clip_modes
         or "decoded_with_replacement=true" in metadata.casefold()
         or (truncated is not None and clip.group(1).casefold() == "none"
             and truncated.group(1).casefold() != "false")
-        or (clip.group(1).casefold() == "max_lines"
+        # Clipped pages carry the EFFECTIVE range in lines=; the typed truncation must say so.
+        or (clip.group(1).casefold() in clip_modes - {"none"}
             and (truncated is None or truncated.group(1).casefold() != "true"))
     ):
         return None
@@ -1215,6 +1229,11 @@ def _fallback_edit_open_site_locator(
     if len(old_text.encode("utf-8")) + len(new_text.encode("utf-8")) > MAX_OPEN_EDIT_SITE_BYTES:
         return None
     prior_read = current_reads.get(path)
+    # Allocator ON: no prior read means no anchored site, so return None and let the
+    # caller fail closed with its typed missing-site reason. OFF keeps the legacy
+    # line-1 anchor with an empty revision.
+    if prior_read is None and _working_set_allocator_on():
+        return None
     read_fact, read_text = prior_read if prior_read is not None else ({}, "")
     read_lines = read_fact.get("lines")
     start = int(read_lines.get("start", 1)) if isinstance(read_lines, Mapping) else 1

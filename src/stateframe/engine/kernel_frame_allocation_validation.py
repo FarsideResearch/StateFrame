@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import os
 import sys
 from collections.abc import Mapping, Sequence
@@ -61,6 +62,94 @@ def _with_unit_sites(
     elif encoding != "singleton_next_site":
         raise FrameAllocationReplanNeeded("unit allocation site encoding is invalid")
     return result
+
+
+# read_facts keys that describe how a read body was delivered on the wire. The
+# working-set renderer and source-metadata pruning own them per request, so the
+# host-derived unit authority cannot carry them; the non-subframe path never
+# compares them either. Every other read_facts key stays authority-strict.
+READ_FACT_DELIVERY_KEYS = frozenset({
+    "body_delivery", "delivery_notice", "visible_symbols", "receipts",
+    "historical_receipts", "journal_workspace_revisions",
+    "historical_workspace_revisions", "receipt_count", "revision_scope",
+    # Also removed by _prune_redundant_source_metadata once a whole-file window
+    # is on the wire (the host view prunes, the allocator's frame is pre-window).
+    "content_sha256", "lines",
+})
+
+
+def _authority_view(frame: Mapping[str, object]) -> dict[str, object]:
+    """Return the frame with per-request delivery metadata removed from read_facts."""
+    view = dict(frame)
+    for key in ("open_sites",):
+        rows = view.get(key)
+        if isinstance(rows, list):
+            view[key] = [_site_view(row) if isinstance(row, Mapping) else row for row in rows]
+    if isinstance(view.get("next_site"), Mapping):
+        view["next_site"] = _site_view(view["next_site"])
+    facts = view.get("read_facts")
+    if isinstance(facts, list):
+        view["read_facts"] = [
+            {key: value for key, value in fact.items() if key not in READ_FACT_DELIVERY_KEYS}
+            if isinstance(fact, Mapping) else fact
+            for fact in facts
+        ]
+    return view
+
+
+def _owner_protocol_mismatch_keys(
+    frame_view: Mapping[str, object], projection_view: Mapping[str, object]
+) -> list[str] | None:
+    """Return owner_protocol subkeys that differ, or None when either side is not a mapping.
+
+    Key names only: values are never included so the message stays free of payload data.
+    """
+    frame_owner = frame_view.get("owner_protocol")
+    projection_owner = projection_view.get("owner_protocol")
+    if not isinstance(frame_owner, Mapping) or not isinstance(projection_owner, Mapping):
+        return None
+    keys = set(frame_owner) | set(projection_owner)
+    differing = [key for key in keys if frame_owner.get(key) != projection_owner.get(key)]
+    return [str(key) for key in sorted(differing, key=str)]
+
+
+def _authority_mismatch_message(
+    changed: list[str], frame_view: Mapping[str, object], projection_view: Mapping[str, object]
+) -> str:
+    """Build the replan reason for a scoped frame whose authority differs from its unit projection."""
+    message = f"scoped allocation frame differs from its unit authority (fields={changed!r}"
+    if "owner_protocol" in changed:
+        owner_keys = _owner_protocol_mismatch_keys(frame_view, projection_view)
+        if owner_keys is not None:
+            message += f", owner_protocol_keys={owner_keys!r}"
+    return message + ")"
+
+
+def _site_view(site: Mapping[str, object]) -> dict[str, object]:
+    """Identity of an open site independent of how its bytes ride the wire.
+
+    Allocation snapshots a site before the working-set renderer adds its source
+    window, so the bytes are inline; the final request may carry the same bytes by
+    ``source_ref``. Only that representation is dropped, and only when the digest
+    proves the bytes (or the reference) are exactly the site's own content.
+    """
+    view = dict(site)
+    digest = view.get("content_sha256")
+    inline, ref = view.get("current_bytes"), view.get("source_ref")
+    if isinstance(digest, str):
+        if isinstance(inline, str) and hashlib.sha256(inline.encode("utf-8")).hexdigest() == digest:
+            view.pop("current_bytes", None)
+            view.pop("source_ref", None)
+        elif (inline is None and isinstance(ref, Mapping)
+                and ref.get("content_sha256") == digest):
+            view.pop("current_bytes", None)
+            view.pop("source_ref", None)
+    return view
+
+
+def site_authority_identity(site: Mapping[str, object]) -> str:
+    """Digest of ``_site_view``: the site's authority fields only."""
+    return identity(_site_view(site))
 
 
 def unit_allocation_projection(
@@ -200,6 +289,7 @@ def validate_allocation_authority(
     scoped = isinstance(frame.get("subframe_scope"), Mapping)
     unit_projection: dict[str, object] | None = None
     unit_sites: list[dict[str, object]] | None = None
+    site_inventory: Mapping[str, object] = allocation.site_inventory
     if active_unit is not None:
         if not isinstance(context, Mapping) or not isinstance(context_frame, Mapping):
             raise FrameAllocationReplanNeeded("unit allocation has no host action authority")
@@ -230,13 +320,22 @@ def validate_allocation_authority(
         unit_sites = wire_host_projection["open_sites"]
         inventory = allocation.site_inventory
         site_ids = [site_identity(site) for site in unit_sites]
-        if site_ids != inventory["inventory_identity"]:
+        allocated_ids = [site_authority_identity(site) for site in inventory.get("sites", ())]
+        if ([site_authority_identity(site) for site in unit_sites] != allocated_ids
+                or len(allocated_ids) != len(inventory["inventory_identity"])):
             raise FrameAllocationReplanNeeded(
                 "unit-scoped allocation inventory differs from host authority "
                 f"(allocated={inventory['inventory_identity']!r}, host={site_ids!r})"
             )
-        if inventory.get("next_site") is not None and inventory.get("next_site") not in site_ids:
+        recorded_next = inventory.get("next_site")
+        if recorded_next is not None and recorded_next not in inventory["inventory_identity"]:
             raise FrameAllocationReplanNeeded("unit-scoped allocation frontier differs from host authority")
+        # Same sites, now in the representation this request's windows give them.
+        host_next = (site_ids[inventory["inventory_identity"].index(recorded_next)]
+                     if recorded_next is not None else None)
+        site_inventory = {**inventory, "sites": copy.deepcopy(unit_sites),
+                          "inventory_identity": list(site_ids), "selected_identities": list(site_ids),
+                          "open_sites": list(site_ids), "next_site": host_next}
         if not scoped:
             serialized_frame = {
                 **frame, "open_sites": _frame_site_rows(frame, root),
@@ -266,7 +365,7 @@ def validate_allocation_authority(
         if unit_sites is None or unit_projection is None:
             raise FrameAllocationReplanNeeded("unit allocation projection is unavailable")
         authority_frame = _with_unit_sites(
-            authority_frame, unit_sites, allocation.site_inventory,
+            authority_frame, unit_sites, site_inventory,
         )
         if scoped:
             projected_ledger = unit_projection.get("action_ledger")
@@ -278,7 +377,7 @@ def validate_allocation_authority(
     expected = render_optional_selection(
         authority_frame,
         allocation.optional_heads,
-        allocation.site_inventory,
+        site_inventory,
         root=_workspace_root(runtime),
     )
     for key in ("headcarry", "open_sites"):
@@ -331,19 +430,37 @@ def validate_allocation_authority(
             if str(row.get("content") or "").startswith(STATE_HEADER + "\n")
         )
         wire_projection = _state_payload(projected_frame)[1]["framefit5"]
+        # The host projection re-derives exact range pins from the journal. Apply the
+        # fit's delivery rule so a pin this request already carries is compared as the
+        # same-request representation the fitted frame holds.
+        from kernel_stateframe_capacity import drop_delivered_range_pins, drop_unbacked_range_pins
+
+        projected_ledger = copy.deepcopy(wire_projection.get("action_ledger"))
+        if isinstance(projected_ledger, dict) and isinstance(projected_ledger.get("reads"), list):
+            drop_unbacked_range_pins(projected_ledger, semantic_messages(messages), frame)
+            drop_delivered_range_pins(projected_ledger, semantic_messages(messages), frame)
+            wire_projection = {**wire_projection, "action_ledger": projected_ledger}
         if frame.get("action_ledger") != wire_projection.get("action_ledger"):
             raise FrameAllocationReplanNeeded(
                 "unit-scoped serialized ledger differs from host projection"
             )
-        if dict(frame) != wire_projection:
+        if ("open_sites" not in frame and site_inventory.get("encoding_mode") == "singleton_next_site"
+                and isinstance(frame.get("next_site"), Mapping)
+                and [site_authority_identity(site) for site in wire_projection.get("open_sites", ())]
+                == [site_authority_identity(frame["next_site"])]):
+            # The singleton alias omits open_sites; the host projection always
+            # lists it. Drop it only when it is exactly the aliased next_site.
+            wire_projection = {k: v for k, v in wire_projection.items() if k != "open_sites"}
+        if _authority_view(frame) != _authority_view(wire_projection):
+            authority_frame_view = _authority_view(frame)
+            authority_projection_view = _authority_view(wire_projection)
             changed = sorted(
-                key for key in set(frame) | set(wire_projection)
-                if frame.get(key) != wire_projection.get(key)
+                key for key in set(authority_frame_view) | set(authority_projection_view)
+                if authority_frame_view.get(key) != authority_projection_view.get(key)
             )
-            raise FrameAllocationReplanNeeded(
-                "scoped allocation frame differs from its unit authority "
-                f"(fields={changed!r})"
-            )
+            raise FrameAllocationReplanNeeded(_authority_mismatch_message(
+                changed, authority_frame_view, authority_projection_view,
+            ))
 
 
 def require_active_allocation(
