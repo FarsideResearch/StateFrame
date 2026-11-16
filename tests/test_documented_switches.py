@@ -46,6 +46,9 @@ RETIRED = {"STATEFRAME_EDIT_NTURN_RUN_BUDGET_SECONDS"}
 # Removed switches: no engine code reads them and no profile sets them. Older CHANGELOG entries still name them as
 # history, so they are exempt from the check. Nothing may register them (see test_retired_switch_is_not_registered_anywhere).
 RETIRED_SWITCHES = {"STATEFRAME_READ_LOCKOUT"}
+# Internal repair-probe inputs set by the runner child (runner.py:1231, _child.py:1641), not user switches;
+# only named in a historical rename note in CHANGELOG.md.
+INTERNAL_PROBE_INPUTS = {"STATEFRAME_SOURCE_REPO_PRIMARY", "STATEFRAME_SOURCE_REPO_SECONDARY"}
 PREFIXES = {"STATEFRAME_ROUTE_"}
 NAME = re.compile(r"STATEFRAME_[A-Z0-9_]+")
 
@@ -73,7 +76,8 @@ def unsupported(documented: dict[str, list[str]], allowlist, product: set[str]) 
     """Documented names a user could export to no effect, with the reason."""
     problems = []
     for name, sentences in sorted(documented.items()):
-        if name in EXAMPLES or name in PREFIXES or name in allowlist or name in TEST_FIXTURE_ONLY or name in RETIRED:
+        if (name in EXAMPLES or name in PREFIXES or name in allowlist or name in TEST_FIXTURE_ONLY
+                or name in RETIRED or name in INTERNAL_PROBE_INPUTS):
             continue
         if name in RETIRED_SWITCHES:
             continue
@@ -258,3 +262,10 @@ def test_engine_only_settings_require_profile_guidance(name):
     assert unsupported({name: [f"Set {name}=on in the shell."]}, {}, set()) == [
         f"{name}: profile-only switch, but no doc sentence says to set it in a profile"]
     assert unsupported({name: [f"Set {name}=on in a custom profile."]}, {}, set()) == []
+
+
+def test_internal_probe_inputs_skip_but_unrelated_names_still_fail():
+    documented = {name: [f"Set {name} in the shell."] for name in INTERNAL_PROBE_INPUTS}
+    documented["STATEFRAME_UNRELATED_SWITCH"] = ["Set `STATEFRAME_UNRELATED_SWITCH` in the shell."]
+    problems = unsupported(documented, runner.OPT_IN_SWITCHES, set())
+    assert [p.split(":", 1)[0] for p in problems] == ["STATEFRAME_UNRELATED_SWITCH"]
