@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.7.9 (2026-11-15)
+
+- Fixed: editing a file during a run no longer stops it with "allocation semantic site inventory changed" (source_revision_replan_exhausted); the site inventory now ignores per-request delivery annotations.
 
 ## 0.7.8 (2026-11-15)
 
