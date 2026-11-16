@@ -76,6 +76,8 @@ APPROVED_TEST_SIGNALS: dict[tuple[str, str, str], tuple[int, str]] = {
         (1, 'Reaps the fixture-owned synthetic worker groups, without model requests.'),
     ('test_parallel_bridge_recorded.py', '_kill_leader', 'process.kill()'):
         (1, 'Stops a held standalone sleeper after verifying its command on Linux.'),
+    ('test_no_engine_wall_clock_stops.py', 'test_job_watch_dispatches_when_summed_job_wall_exceeds_old_cap', 'process.kill()'):
+        (1, 'Stops the standalone sleep job this test launched through the job watch; no engine run.'),
     ('test_parallel_supervisor_scale.py', 'test_live_unit_reports_a_dead_unit_from_the_same_single_scan', 'os.killpg(handle.pgid, signal.SIGKILL)'):
         (1, 'Kills the held synthetic worker to test the shared process scan.'),
     ('test_parallel_supervisor_scale.py', 'test_siblings_are_polled_from_one_scan', 'os.killpg(handle.pgid, signal.SIGKILL)'):
