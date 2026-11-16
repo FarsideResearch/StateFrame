@@ -246,8 +246,6 @@ Measured so far on one multi-file task that had stopped on every previously obse
 
 A completed batch made up entirely of unchanged reads costs one no-progress watch unit, rather than one per file. Mixed or unproved batches keep per-action accounting. If the model continues to repeat unchanged reads, the run still ends with `STALLED` and preserves its partial changes for inspection.
 
-The optional `STATEFRAME_READ_LOCKOUT=on` restriction is off by default. When enabled, it can hide source-reading routes for up to two requests after unchanged reads, while a current failing check, editable bookmarked source, and an edit and check route are available. If the no-progress watch is one step from its limit, it can stop the run before the restriction takes effect.
-
 ## Memory on long runs
 
 This release moves run history out of memory (see "Disk use for run history"). Measured on a release-candidate build in short runs: the engine's memory footprint held at about 1.7 GB from request 10 to 60 (1,723 to 1,782 MB), growing about 0.8 to 1.1 MB per request between requests 20 and 40. The 1.7 GB is a fixed base, mostly repository analysis, and grows with repository size. Runs past about 60 requests on this build are still being measured. Measured on the previous engine (before this change), on one long task: memory grew about 12 to 30 MB per model request, about 11 GB at 240 requests. Measure footprint (Activity Monitor "Memory" or `top -stats mem`), not `ps` rss, which leaves out compressed memory.

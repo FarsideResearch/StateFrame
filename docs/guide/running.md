@@ -240,8 +240,6 @@ A profile is a JSON file (`"schema": "stateframe-product-profile/1"`) whose `swi
 
 A completed batch made entirely of proved unchanged reads costs one no-progress watch unit instead of one per file. Mixed or unproved batches keep per-action accounting. Repeated unchanged batches still reach `STALLED`.
 
-`STATEFRAME_READ_LOCKOUT=on` is an independent optional profile switch; it is off by default and requires bookmarks. After a completed batch of unchanged reads, the current failing check must still apply, editable bookmarked source must be visible, and an edit and check route must be available. The next request then hides source-reading routes. The restriction lasts at most two requests and releases sooner when new evidence appears or the repair route disappears. If the no-progress watch is one step from its limit, the run can stop before this restriction takes effect.
-
 ### Profile-only settings
 
 `STATEFRAME_BOUNDARY_CHECKS` is a profile switch that the shipped product profile sets to `on`; the engine treats it as `off` when a custom profile leaves it out. When on, StateFrame compiles extra checks from public material only: the task brief, the declared public product files and the declared public tests. It never reads private task files. Those checks run through the same check executor as every other check. Public files that are not Python, such as `TASK.md` or `pyproject.toml`, are used as context and skipped by the compiler; unsafe paths are refused. Accepted values are `on` and `off`; anything else is refused at startup. Set it in a profile, not as a shell variable.

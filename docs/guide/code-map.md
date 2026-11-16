@@ -42,7 +42,7 @@ The engine is a flat package of modules, each owning one mechanism; `release-man
 | `kernel_hook_exec.py`, `kernel_hook_driver.py` | Sandboxed hook execution, process and stream bounds, durable replay records, scoped formatter effects and raw output files. |
 | `kernel_hook_wiring.py` | Child event seams, pre-tool decisions, post-tool notes, stop gates and checkpointed hook state. |
 | `kernel_stateframe_runtime.py` | `StateFrameRuntime`: building, fitting and qualifying each request (`prepare`) and recording what each action observed. |
-| `kernel_code_bookmarks.py`, `kernel_read_lockout.py` | Current-failure source bookmarks and optional bounded read restriction after unchanged reads. |
+| `kernel_code_bookmarks.py` | Current-failure source bookmarks. |
 | `kernel_frame_*.py` | The frame's sections and how they are budgeted. |
 | `kernel_checkpoint.py` | Saving and loading signed checkpoints. |
 | `kernel_shell_tool.py`, `kernel_exec_session.py` | Foreground shell admission, per-run execution, effects, confirmation and replay. |
