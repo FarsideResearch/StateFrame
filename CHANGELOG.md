@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- A request waiting in a healthy server's queue is no longer failed after 30 minutes. Queue wait is only capped if you set STATEFRAME_QUEUE_WAIT_MAX_S; a server that stops answering is still detected by the 90 second liveness probe.
+
 ## 0.7.17 (2026-11-16)
 
 - Fixed: SWE-bench workspace lookup rejects a task-row cache_key that is not a hex digest or that resolves outside the cache's instances directory, and skips cached instances whose directories are symlinks out of the cache (ENV_WORKSPACE_CACHE_KEY_*).

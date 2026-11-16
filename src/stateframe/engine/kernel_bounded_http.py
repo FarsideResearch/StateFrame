@@ -39,7 +39,6 @@ RELAY_ERROR_LABELS = frozenset({
 
 
 DEFAULT_PROVIDER_LIVENESS_S = 90.0
-DEFAULT_QUEUE_WAIT_MAX_S = 1800.0
 DEFAULT_SEND_STALL_S = 90.0
 
 
@@ -237,11 +236,14 @@ def provider_liveness_timeout_seconds() -> float:
     return seconds
 
 
-def queue_wait_max_seconds() -> float:
-    """Maximum total time for a silent, reachable provider request."""
+def queue_wait_max_seconds() -> float | None:
+    """User cap on total silent wait for a reachable provider request, or None (no engine cap).
+
+    A dead server is still caught by the provider liveness probe, not by this cap.
+    """
     raw = os.environ.get("STATEFRAME_QUEUE_WAIT_MAX_S")
     if raw is None:
-        return DEFAULT_QUEUE_WAIT_MAX_S
+        return None
     try:
         seconds = float(raw)
     except ValueError as error:
@@ -249,6 +251,14 @@ def queue_wait_max_seconds() -> float:
     if not math.isfinite(seconds) or seconds <= 0:
         raise ValueError("STATEFRAME_QUEUE_WAIT_MAX_S must be finite and positive")
     return seconds
+
+
+def _hard_deadline(run_deadline: float, now: float) -> float:
+    """Absolute cap for a send: the run deadline, or sooner if the user set a queue wait cap."""
+    cap = queue_wait_max_seconds()
+    if cap is None:
+        return run_deadline
+    return min(run_deadline, now + cap)
 
 
 def send_stall_seconds() -> float:
@@ -867,8 +877,7 @@ def request_bytes(wire: bytes, endpoint: str, key: str, *,
     if run_deadline is not None:
         if not math.isfinite(run_deadline):
             raise ValueError("invalid run deadline")
-        hard_deadline = min(run_deadline,
-                            time.monotonic() + queue_wait_max_seconds())
+        hard_deadline = _hard_deadline(run_deadline, time.monotonic())
     if hard_deadline <= time.monotonic():
         raise TimeoutError("HTTP run deadline expired before submission")
     packet_data = {"wire": wire.decode("utf-8"), "endpoint": endpoint, "key": key,

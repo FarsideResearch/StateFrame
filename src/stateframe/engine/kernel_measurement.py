@@ -918,10 +918,11 @@ def request_timeout_budget_seconds() -> float:
 
 
 def request_queue_budget_seconds(wall_timeout: float) -> float:
-    """Include the provider queue allowance in a captured send's total deadline."""
+    """Include the user's provider queue cap in a captured send's total deadline, if one is set."""
     from kernel_bounded_http import queue_wait_max_seconds
-    return max(request_timeout_budget_seconds(), wall_timeout * 2,
-               queue_wait_max_seconds())
+    queue_cap = queue_wait_max_seconds()
+    base = max(request_timeout_budget_seconds(), wall_timeout * 2)
+    return base if queue_cap is None else max(base, queue_cap)
 
 
 def _safe_timeout_endpoint(endpoint: str) -> str:
@@ -4078,11 +4079,17 @@ class RequestCapture:
                 # Keep its key transient, but retain its credential-free provenance in captures.
                 _record_probe_destination_provenance(self, endpoint)
                 self._provider_probe_destination = (endpoint, key)
+                queue_cap = queue_wait_max_seconds()
+                if active_deadline is not None:
+                    run_deadline = active_deadline
+                elif queue_cap is not None:
+                    run_deadline = attempt_started + queue_cap
+                else:
+                    run_deadline = None  # no engine cap; the attempt deadline still bounds the send
                 raw_response = _request_bytes_for_capture(
                     self, wire, endpoint, key, deadline=attempt_deadline,
                     socket_timeout=attempt_timeout,
-                    run_deadline=(active_deadline if active_deadline is not None
-                                  else attempt_started + queue_wait_max_seconds()),
+                    run_deadline=run_deadline,
                     record_queue_wait=lambda seconds, status, origin: self.journal.emit(
                         "provider_queue_wait", producer="kernel_measurement",
                         fact_owner="HOST", request_id=self.request_id,
