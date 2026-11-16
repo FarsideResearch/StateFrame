@@ -5845,6 +5845,7 @@ class RequestCapture:
                 if record is None:
                     raise RequestPreparationContractError("replacement did not publish a qualified request")
             wire, body = record.wire, record.body
+            self._emit_host_authorship_manifest(body, wire)
             sealed_metadata = json.loads(record.metadata)
             request_extensions = sealed_metadata["request_extensions"]
             visibility_receipt = sealed_metadata["visibility_receipt"]

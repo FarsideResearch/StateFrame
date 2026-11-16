@@ -5,6 +5,7 @@ import ast
 import hashlib
 import inspect
 import json
+import textwrap
 
 import kernel_host_authorship as authorship
 import kernel_measurement
@@ -53,12 +54,55 @@ def test_manifest_rows_match_submitted_wire(tmp_path, monkeypatch):
     # The manifest is journal-only: the wire has no trace of the ledger.
     assert b"host_authorship" not in wire and b"plain_source" not in wire
     assert wire == json.dumps(body).encode()
-    # It is emitted beside every final serialization of the send path.
+    # It is emitted beside every final wire of the send path: the three legacy
+    # serializations and the sealed qualified request (the default send path).
     tree = ast.parse(inspect.getsource(kernel_measurement))
     names = [getattr(node.func, "id", getattr(node.func, "attr", None))
              for node in ast.walk(tree) if isinstance(node, ast.Call)]
     assert names.count("_serialize_final_request_body") == 3
-    assert names.count("_emit_host_authorship_manifest") == 3
+    assert names.count("_emit_host_authorship_manifest") == 4
+
+
+def _is_call(statement, name):
+    return (isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call)
+            and getattr(statement.value.func, "attr", None) == name)
+
+
+def _assigns_wire_from(statement, source):
+    """``wire, body = record.wire, ...`` or ``wire = _serialize_final_request_body(...)``."""
+    if not isinstance(statement, ast.Assign):
+        return False
+    target = statement.targets[0]
+    names = [target] if isinstance(target, ast.Name) else list(getattr(target, "elts", ()))
+    if not any(isinstance(name, ast.Name) and name.id == "wire" for name in names):
+        return False
+    return any((isinstance(node, ast.Attribute) and node.attr == source
+                and isinstance(node.value, ast.Name) and node.value.id == "record")
+               or (isinstance(node, ast.Call) and getattr(node.func, "id", None) == source)
+               for node in ast.walk(statement.value))
+
+
+def test_every_final_wire_of_the_send_path_journals_its_manifest():
+    """Each final wire of _send_once is followed at once by its manifest call.
+
+    The default send path takes its wire from the sealed qualified request, not
+    from a fresh serialization; a run with the switch on journaled no manifest
+    while only the legacy serializations were covered.
+    """
+    source = textwrap.dedent(inspect.getsource(kernel_measurement.RequestCapture._send_once))
+    sites = []
+    blocks = [block for node in ast.walk(ast.parse(source))
+              for block in (getattr(node, field, None) for field in ("body", "orelse", "finalbody"))
+              if isinstance(block, list)]
+    for statements in blocks:
+        for index, statement in enumerate(statements):
+            if (_assigns_wire_from(statement, "wire")
+                    or _assigns_wire_from(statement, "_serialize_final_request_body")):
+                following = statements[index + 1] if index + 1 < len(statements) else None
+                sites.append((statement.lineno, following is not None
+                               and _is_call(following, "_emit_host_authorship_manifest")))
+    assert len(sites) == 4, sites
+    assert all(covered for _line, covered in sites), sites
 
 
 def test_off_and_shadow_emit_no_manifest_and_same_bytes(tmp_path, monkeypatch):
