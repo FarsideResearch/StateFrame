@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.13 (2026-11-16)
+
+- Security: a `problems.jsonl` fault row, and its reason line on stderr, could contain a secret registered with the checkpoint guard when the caught error's message included it. Such messages (raw or JSON-escaped) are now replaced with a fixed "withheld" text, and an error whose `str()` raises is recorded without breaking the fault path.
+
 ## 0.7.12 (2026-11-16)
 
 - Fixed: a run no longer stops with a frame-fit error when the next site to edit is covered only jointly by adjacent read captures; the site is now treated as not yet shown and re-read. Affected default runs could crash within the first few requests.
