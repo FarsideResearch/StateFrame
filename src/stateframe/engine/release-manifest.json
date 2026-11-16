@@ -10,7 +10,7 @@
   "build_tasks/multifile_row.py": "726f62bbcfc80098cdf4f78230d676f9c1d5e5c6d367271658c4ddf6031f3908",
   "build_tasks/noncoding_oracles.py": "f5c163db03dced275bd1cf0e4a25d578bc6b1a400b02817fa727a16c71b0899c",
   "build_tasks/swebench_adapter.py": "2ca0372b858eaf03fe31556f5b05a52bd32975e7d56c9261b187a43d53f7254b",
-  "build_tasks/swebench_env.py": "ac94d7cdd7f5a09556d8414426a9d3a2ebd24806792be25bd834d869c29f3366",
+  "build_tasks/swebench_env.py": "b184b0a4ec3c591109d5cfe534e49b2ea3717321c9feb35c56cc73a369d5799e",
   "build_test_path.py": "dfcf13bdc24ba2280b56a23320867e193477c185b7620cda4dd8c145f5fea646",
   "cache_prefill_economics.py": "ed69ede7c63a401696ef8d898b8a1b70c48678a6a555bfb944ef9c401236865a",
   "capability_capacity_preflight.py": "fa96c9089ac6dcce84f63b59fc244633d6aa1835f8d4718d22a8c654ce97187b",

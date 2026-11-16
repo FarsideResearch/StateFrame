@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fixed: SWE-bench workspace lookup rejects a task-row cache_key that is not a hex digest or that resolves outside the cache's instances directory, and skips cached instances whose directories are symlinks out of the cache (ENV_WORKSPACE_CACHE_KEY_*).
 ## 0.7.16 (2026-11-16)
 
 - Changed: the engine no longer limits edit continuation turns by its own clock. The 1800 s edit budget and its `STATEFRAME_EDIT_NTURN_RUN_BUDGET_SECONDS` override (0.7.15) are removed; only a run deadline you set still applies.
