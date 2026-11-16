@@ -9,6 +9,7 @@ same_request receipt. The validator's host projection dropped that pin first as
 from __future__ import annotations
 
 import copy
+import json
 import hashlib
 
 import kernel_stateframe_capacity as capacity
@@ -105,3 +106,101 @@ def test_pin_with_mismatched_digest_is_not_backed_by_a_read_page() -> None:
     ledger["reads"][0]["content_sha256"] = "0" * 64
     capacity.drop_unbacked_range_pins(ledger, messages)
     assert "pinned_range" not in ledger["reads"][0]
+
+
+# A pin whose only backing is a read page at an OLD (pre-edit) revision.
+#
+# The fit never asks whether a carrier's revision is current: refresh_read_ranges
+# applies drop_delivered_range_pins, which matches path + revision + exact bytes, and
+# validate_read_ranges accepts the resulting same_request receipt the same way. So a
+# whole, unmodified pre-edit read page still on the wire delivers the pre-edit pin.
+# (When the working-set renderer retires that page as stale, it is replaced by a
+# "[Source page deferred]" notice; then no carrier remains and both sides drop it.)
+
+
+def _model_window(revision: str) -> dict[str, object]:
+    """A COMPLETE model source window that marks ``revision`` current for PATH."""
+    from kernel_request_source_window import MODEL_WINDOW_MARKER, MODEL_WINDOW_SCHEMA
+
+    meta = {"schema": MODEL_WINDOW_SCHEMA, "path": PATH, "revision": revision,
+            "absence": "NONE", "status": "COMPLETE"}
+    return {"role": "user", "content": MODEL_WINDOW_MARKER + "\n" + json.dumps(meta) + "\n"}
+
+
+def _old_then_new_pages() -> list[dict[str, object]]:
+    messages = _messages(_read_page(PRE_EDIT, PRE_REVISION))
+    messages += [
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "call_2", "type": "function",
+             "function": {"name": "read", "arguments": '{"path": "owned_source.py"}'}}]},
+        {"role": "tool", "tool_call_id": "call_2", "content": _read_page()},
+    ]
+    return messages
+
+
+def _assert_old_pin_agrees(messages, frame) -> None:
+    fitted = _fit(_ledger(PRE_EDIT, PRE_REVISION), messages, frame)
+    row = fitted["reads"][0]
+    assert row["range_delivery"] == "same_request"
+    assert "pinned_range" not in row
+    # The fit's receipt is one the validator's read-range check accepts.
+    capacity.validate_read_ranges({"action_ledger": fitted}, messages)
+
+    for with_frame in (True, False):
+        projected = _project(_ledger(PRE_EDIT, PRE_REVISION), messages, frame,
+                             with_frame=with_frame)
+        assert projected == fitted
+
+
+def test_old_revision_read_page_pin_projects_as_the_fit_converts_it() -> None:
+    # Only the pre-edit read page is on the wire; no source window names a revision.
+    _assert_old_pin_agrees(_messages(_read_page(PRE_EDIT, PRE_REVISION)), {})
+
+
+def test_old_revision_read_page_pin_agrees_after_the_post_edit_read() -> None:
+    # Pre-edit page, then the post-edit page: the old pin is still exactly delivered.
+    _assert_old_pin_agrees(_old_then_new_pages(), {})
+
+
+def test_old_revision_read_page_pin_agrees_when_a_window_marks_the_new_revision() -> None:
+    # The superseded-revision branch: a COMPLETE window makes REVISION current, so the
+    # unbacked rule reaches its carrier check for the pre-edit pin.
+    messages = [*_old_then_new_pages(), _model_window(REVISION)]
+    probe = _ledger(PRE_EDIT, PRE_REVISION)
+    capacity.drop_unbacked_range_pins(probe, messages, {})
+    assert probe["reads"][0]["pinned_range"] == PRE_EDIT
+    _assert_old_pin_agrees(messages, {})
+
+
+def test_old_revision_pin_is_not_backed_by_a_next_site_at_the_new_revision() -> None:
+    # Selected next_site bytes at the current revision cannot back the pre-edit pin.
+    frame = {"next_site": {"path": PATH, "revision": REVISION,
+                           "lines": {"start": 1, "end": len(LINES)}, "current_bytes": BODY}}
+    messages = [*_messages("[read page] unavailable"), _model_window(REVISION)]
+    fitted = _fit(_ledger(PRE_EDIT, PRE_REVISION), messages, frame)
+    assert "range_delivery" not in fitted["reads"][0]
+    projected = _project(_ledger(PRE_EDIT, PRE_REVISION), messages, frame, with_frame=True)
+    assert "pinned_range" not in projected["reads"][0]
+    assert "range_delivery" not in projected["reads"][0]
+
+
+def test_stale_deferred_notice_does_not_back_the_old_revision_pin() -> None:
+    # The renderer's stale notice names the old revision but carries no bytes.
+    notice = ("[Source page deferred]\n"
+              f'path="{PATH}" revision={PRE_REVISION} lines=1-{len(LINES)} '
+              f"digest={hashlib.sha256(PRE_EDIT.encode()).hexdigest()}\n"
+              "These bytes are stale since your edit; re-read current source if needed.")
+    messages = [*_messages(_read_page()), {"role": "user", "content": notice}]
+    projected = _project(_ledger(PRE_EDIT, PRE_REVISION), messages, {}, with_frame=True)
+    assert "pinned_range" not in projected["reads"][0]
+    assert "range_delivery" not in projected["reads"][0]
+
+
+def test_old_revision_page_with_other_bytes_does_not_back_the_pin() -> None:
+    # Same old revision label, different body bytes: digest-checked, so not delivered.
+    other = PRE_EDIT.replace("return 1", "return 3")
+    messages = _messages(_read_page(other, PRE_REVISION))
+    fitted = _fit(_ledger(PRE_EDIT, PRE_REVISION), messages, {})
+    assert "range_delivery" not in fitted["reads"][0]
+    projected = _project(_ledger(PRE_EDIT, PRE_REVISION), messages, {}, with_frame=True)
+    assert "pinned_range" not in projected["reads"][0]
