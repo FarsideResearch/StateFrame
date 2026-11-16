@@ -31,6 +31,8 @@ PROVIDER_OVERRIDE_ENV = "STATEFRAME_PROVIDER"
 PROBE_RETRY_DELAYS = (0.25, 0.5, 1.0)
 PROBE_DEGRADED_EVENT = "provider_probe_degraded"
 PROBE_DEGRADED_CODE = "props_probe_unreachable"
+PROBE_FAULT_HANDLER = "kernel_provider_dialect.props_probe"
+PROBE_FALLBACK_ID = "openai_strict_without_props"
 RUN_CAPABILITY_CACHE: dict[str, "ProviderCapabilities"] = {}
 RUN_DIALECT_JOURNALED: set[str] = set()
 _ORIGIN_LOCKS: dict[str, threading.Lock] = {}
@@ -45,6 +47,23 @@ class ProbeDegradation:
     attempts: int
     last_error_type: str
     elapsed_ms: int
+
+
+class ProbePropsUnreachable(RuntimeError):
+    """Fault-record carrier for a transient /props failure. Built for record_fault, never raised.
+
+    The text names only the transport exception class, attempt count and elapsed time: no origin,
+    no key, no errno text.
+    """
+
+    fault_code = PROBE_DEGRADED_CODE
+
+    def __init__(self, degradation: ProbeDegradation) -> None:
+        super().__init__(
+            f"{degradation.last_error_type} after {degradation.attempts} attempt(s) "
+            f"in {degradation.elapsed_ms} ms"
+        )
+        self.degradation = degradation
 
 
 @dataclass(frozen=True)
@@ -239,6 +258,14 @@ def probe_degradation_event(
         return None
     # Standalone adapters have no host preflight, so the child prints its own line.
     print(warning, file=sys.stderr, flush=True)
+    # Typed fault row in problems.jsonl (logging only; never raises, never changes the fallback).
+    # Lazy top-level import: this function runs only in the engine process, where the engine dir is on
+    # sys.path; the host runner uses probe_degradation_warning and must not import the reason log.
+    from kernel_fault_disposition import record_fault
+
+    record_fault(PROBE_FAULT_HANDLER, ProbePropsUnreachable(degradation), disposition="degraded",
+                 observed_at=PROBE_FAULT_HANDLER, origin=origin, fallback_id=PROBE_FALLBACK_ID,
+                 journal=False)
     return {
         "code": PROBE_DEGRADED_CODE,
         "endpoint_origin": origin,

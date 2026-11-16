@@ -16,6 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 import kernel_provider_dialect as dialect
+from _fault_contract import isolated_reason_log
 from kernel_provider_dialect import LLAMA_CPP, OPENAI_STRICT, capabilities_for, origin_of
 
 LLAMA_PROPS = {
@@ -102,7 +103,7 @@ def test_slow_props_retries_then_detects_llama():
 
 
 @pytest.mark.host_sandbox
-def test_props_unreachable_falls_back_loudly(capsys):
+def test_props_unreachable_falls_back_loudly(capsys, monkeypatch, tmp_path):
     plans = {"/props": ["hang"], "/slots": ["hang"]}
     with _stub(plans) as (endpoint, _stub_state):
         caps = capabilities_for(
@@ -111,7 +112,12 @@ def test_props_unreachable_falls_back_loudly(capsys):
         origin = origin_of(endpoint)
     assert caps.dialect == OPENAI_STRICT
     assert getattr(caps, "probe_degradation", None) is not None, "fallback was not marked degraded"
-    event = dialect.probe_degradation_event(caps, origin)
+    with isolated_reason_log(monkeypatch, tmp_path) as harness:
+        event = dialect.probe_degradation_event(caps, origin)
+        rows = harness.rows()
+    assert len(rows) == 1, rows
+    message = rows[0]["fields"]["exception_message"]
+    assert "Errno" not in message and "refused" not in message.lower() and "/props" not in message
     assert event is not None
     assert set(event) == {
         "code", "endpoint_origin", "attempts", "last_error_type", "elapsed_ms", "dialect", "tokenizer",
@@ -271,7 +277,7 @@ def test_seed_round_trip_keeps_degradation_and_drops_malformed(run_cache):
     assert dialect.RUN_CAPABILITY_CACHE[origin].props_status == 503
 
 
-def test_seeded_degradation_journals_exactly_one_event_on_request_path(run_cache, capsys):
+def test_seeded_degradation_journals_exactly_one_event_on_request_path(run_cache, capsys, monkeypatch, tmp_path):
     from kernel_plain_host import _PlainHTTPProvider
 
     origin = "http://127.0.0.1:1"
@@ -279,12 +285,15 @@ def test_seeded_degradation_journals_exactly_one_event_on_request_path(run_cache
 
     # The engine request path: one dialect journal entry per origin per run.
     events = []
-    for _request in range(3):
-        caps = capabilities_for(origin + "/v1/chat/completions", KEY, cache=dialect.RUN_CAPABILITY_CACHE)
-        if dialect.mark_dialect_journaled(origin):
-            degraded = dialect.probe_degradation_event(caps, origin)
-            if degraded is not None:
-                events.append(degraded)
+    with isolated_reason_log(monkeypatch, tmp_path) as harness:
+        for _request in range(3):
+            caps = capabilities_for(origin + "/v1/chat/completions", KEY, cache=dialect.RUN_CAPABILITY_CACHE)
+            if dialect.mark_dialect_journaled(origin):
+                degraded = dialect.probe_degradation_event(caps, origin)
+                if degraded is not None:
+                    events.append(degraded)
+        # One fault row for the run: the once-per-origin guard gates it like the journal event.
+        assert len(harness.rows()) == 1, harness.rows()
     assert len(events) == 1, events
     assert events[0]["code"] == dialect.PROBE_DEGRADED_CODE
     assert events[0]["last_error_type"] == "HTTPServerError"
@@ -303,6 +312,45 @@ def test_seeded_degradation_journals_exactly_one_event_on_request_path(run_cache
     assert sum(1 for kind, _fields in journal.events if kind == "provider_dialect") == 1
     err = capsys.readouterr().err
     assert len([line for line in err.splitlines() if line.startswith("WARNING: /props probe")]) == 2
+
+
+def test_degraded_probe_records_fault_row(run_cache, monkeypatch, tmp_path, capsys):
+    origin = "http://127.0.0.1:8080"
+    with isolated_reason_log(monkeypatch, tmp_path) as harness:
+        event = dialect.probe_degradation_event(_degraded_caps(), origin)
+        rows = harness.rows()
+        journal_events = harness.journal_events()
+    assert event is not None and event["code"] == dialect.PROBE_DEGRADED_CODE
+    assert journal_events == 0  # journal=False: the caller owns provider_probe_degraded
+    assert len(rows) == 1, rows
+    row, fields = rows[0], rows[0]["fields"]
+    assert row["category"] == "degrade"
+    assert fields["site_id"] == fields["handler_id"] == "kernel_provider_dialect.props_probe"
+    assert fields["kind"] == "B" and fields["disposition"] == "degraded"
+    assert fields["disposition_mismatch"] is False
+    assert fields["expectation"] == "expected"
+    assert fields["cause_code"] == "ProbePropsUnreachable:props_probe_unreachable"
+    assert fields["fallback_id"] == "openai_strict_without_props"
+    assert fields["origin"] == origin
+    assert fields["exception_message"] == "HTTPServerError after 4 attempt(s) in 1810 ms"
+    assert KEY not in row["why"] and "/props" not in row["why"]
+    capsys.readouterr()
+
+
+def test_no_degradation_records_no_fault_row(run_cache, monkeypatch, tmp_path):
+    with isolated_reason_log(monkeypatch, tmp_path) as harness:
+        assert dialect.probe_degradation_event(_degraded_caps(probe_degradation=None), "http://127.0.0.1:1") is None
+        assert harness.rows() == []
+
+
+def test_props_probe_handler_is_registered():
+    from kernel_fault_registry import HANDLERS
+
+    spec = HANDLERS[dialect.PROBE_FAULT_HANDLER]
+    assert spec.owner == "engine" and spec.taxonomy == "B" and spec.requiredness == "optional"
+    assert spec.expected == ("ProbePropsUnreachable",) and spec.dispositions == ("degraded",)
+    assert spec.fallback_id == dialect.PROBE_FALLBACK_ID
+    assert dialect.ProbePropsUnreachable.fault_code == dialect.PROBE_DEGRADED_CODE
 
 
 def test_runner_preflight_warns_once_per_degraded_origin(capsys):

@@ -89,6 +89,17 @@ HANDLERS: dict[str, HandlerSpec] = {
         ),
         policy_version=1, required_work_id="engine_run",
     ),
+    # /props stayed unreachable (no answer or 5xx) after bounded retries; the run keeps going as openai-strict
+    # with no tokenizer and no llama.cpp request shape. Recorded once per run from probe_degradation_event.
+    "kernel_provider_dialect.props_probe": HandlerSpec(
+        handler_id="kernel_provider_dialect.props_probe", module="kernel_provider_dialect",
+        function="probe_degradation_event", op="kernel_provider_dialect.props_probe",
+        taxonomy="B", tier="T1", requiredness="optional",
+        expected=("ProbePropsUnreachable",),
+        dispositions=("degraded",), fallback_id="openai_strict_without_props", owner="engine",
+        contract_tests=("tests/test_props_probe_fallback.py::test_degraded_probe_records_fault_row",),
+        policy_version=1,
+    ),
 }
 
 _TEST_HANDLERS: dict[str, HandlerSpec] = {}
