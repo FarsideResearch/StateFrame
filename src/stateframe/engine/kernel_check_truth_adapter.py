@@ -3,13 +3,19 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 
 from kernel_check_receipts import (
     canonical_execution_id,
     check_execution_binding_mode,
+    emit_check_truth_failure,
     record_check_output,
 )
-from kernel_vacuity_sentinel import structured_pytest_counts
+from kernel_vacuity_sentinel import UNKNOWN, structured_pytest_counts
+
+
+class CheckExecutionBindingError(RuntimeError):
+    """The pre-launch binding could not be pinned while binding mode is 'on'."""
 
 
 def begin_check_execution(
@@ -37,8 +43,8 @@ def pin_check_execution_context(
 ) -> None:
     """Keep the first detached pre-launch binding for an execution identity."""
     identity = str(execution_id or "").strip()
-    if (not identity or not isinstance(binding, Mapping)
-            or check_execution_binding_mode(runtime) == "off"):
+    mode = check_execution_binding_mode(runtime)
+    if not identity or not isinstance(binding, Mapping) or mode == "off":
         return
     try:
         contexts = getattr(runtime, "_stateframe_check_execution_contexts", None)
@@ -60,8 +66,17 @@ def pin_check_execution_context(
             "selector_scope": copy.deepcopy(scope),
         }
         setattr(runtime, "_stateframe_check_execution_contexts", contexts)
-    except Exception:
-        # The optimization is disposable; failure leaves today's revision path intact.
+    except Exception as error:
+        emit_check_truth_failure(
+            runtime, "check_execution_binding_register_failed",
+            producer="kernel_check_truth_adapter", error=error,
+            execution_id=identity, mode=mode)
+        if mode == "on":
+            # The pinned binding is the receipt contract in 'on' mode; recording
+            # against the current revision instead would mislabel the check.
+            raise CheckExecutionBindingError(
+                f"could not pin the check execution binding for {identity}") from error
+        # Shadow mode only compares; the current-revision path stays authoritative.
         return
 
 
@@ -396,9 +411,17 @@ def _refresh_vacuity_view(runtime: object, receipt: Mapping[str, object]) -> Non
                     certificate = current_view(
                         certificate, binding, journal_records=records,
                         current_revision=_current_revision(runtime))
-                except Exception:
-                    # Journal truth is supplemental; preserve the completed check certificate.
-                    pass
+                except Exception as error:
+                    # In vacuity-truth mode the journal decides whether the check is
+                    # still current (edits since, never-run gates). Without it the
+                    # completed result cannot be shown as current: report it unverified.
+                    certificate = replace(
+                        certificate, status=UNKNOWN,
+                        reason=(f"journal truth unavailable; last check result "
+                                f"{certificate.status} cannot be confirmed current"))
+                    emit_check_truth_failure(
+                        runtime, "check_truth_vacuity_journal_failed",
+                        producer="kernel_check_truth_adapter", error=error)
         setattr(runtime, "_vacuity_certificate", certificate)
     except (AttributeError, ImportError, KeyError, TypeError, ValueError) as error:
         journal = getattr(runtime, "journal", None)
@@ -410,6 +433,7 @@ def _refresh_vacuity_view(runtime: object, receipt: Mapping[str, object]) -> Non
 
 
 __all__ = [
+    "CheckExecutionBindingError",
     "begin_check_execution", "finish_check_execution", "handoff_automatic_result",
     "pin_check_execution_context",
     "pending_check_execution_id", "receipt_ids", "receipts_since",

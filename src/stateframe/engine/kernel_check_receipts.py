@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import logging
 import os
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -13,6 +14,8 @@ import sys
 from kernel_measurement import digest
 from kernel_test_isolation import SandboxReadGrants
 
+
+logger = logging.getLogger(__name__)
 
 SCHEMA = "stateframe-check-output-receipt/1"
 CHECK_EXECUTION_BINDING_ENV = "STATEFRAME_CHECK_EXECUTION_BINDING"
@@ -719,6 +722,29 @@ def _emit_shadow_mismatch(
         pass
 
 
+def emit_check_truth_failure(
+        runtime: object, kind: str, *, producer: str, error: BaseException,
+        **fields: object,
+) -> None:
+    """Journal a typed opt-in check-truth failure (error type only, never its text).
+
+    Callers decide whether to raise or degrade; this only makes the failure
+    visible, so a broken journal never replaces the caller's own outcome.
+    """
+    journal = getattr(runtime, "journal", None)
+    emit = getattr(journal, "emit", None)
+    if not callable(emit):
+        return
+    try:
+        emit(kind, producer=producer, event_schema=SCHEMA,
+             error_type=type(error).__name__, dispatch=False, **fields)
+    except Exception as journal_error:
+        # The caller's raise or typed downgrade stays the outcome; a broken
+        # journal must not replace it, so the lost event goes to the log.
+        logger.warning("could not journal %s (%s): %s", kind, type(error).__name__,
+                       type(journal_error).__name__)
+
+
 def _receipt_content_equal(
         candidate: Mapping[str, object], existing: Mapping[str, object],
 ) -> bool:
@@ -853,14 +879,19 @@ def record_check_output(
             if execution_binding_mode == "on" and pinned_revision != "UNKNOWN":
                 effective_revision = pinned_binding
         pinned_scope = execution_context.get("selector_scope")
-        has_pinned_scope = False
+        # Only a successfully applied pinned scope may be reported as applied:
+        # the flag lets a later view overwrite a settled receipt's scope.
+        pinned_scope_resolved = False
+        proposed_scope = scope
         try:
-            has_pinned_scope = pinned_scope not in (None, "")
-            proposed_scope = (
-                _selector_scope(selector_text, pinned_scope) if has_pinned_scope else scope
-            )
-        except Exception:
-            proposed_scope = scope
+            if pinned_scope not in (None, ""):
+                proposed_scope = _selector_scope(selector_text, pinned_scope)
+                pinned_scope_resolved = True
+        except Exception as error:
+            emit_check_truth_failure(
+                runtime, "check_execution_binding_scope_failed",
+                producer="kernel_check_receipts", error=error,
+                execution_id=execution_text, mode=execution_binding_mode)
         if execution_binding_mode == "shadow" and proposed_scope != scope:
             _emit_shadow_mismatch(
                 runtime,
@@ -872,7 +903,7 @@ def record_check_output(
             )
         if execution_binding_mode == "on":
             scope = proposed_scope
-            pinned_scope_applied = has_pinned_scope
+            pinned_scope_applied = pinned_scope_resolved
     wrapper_text = _text(wrapper_parse_error or wrapper_error).strip()
     if len(wrapper_text) > 1200:
         wrapper_text = wrapper_text[:1200]
@@ -1326,5 +1357,6 @@ __all__ = [
     "CHECK_OUTCOMES", "FAILURE_PHASES", "canonical_execution_id",
     "check_execution_binding_mode", "check_receipt_enrichment_dedup_mode",
     "classify_check_outcome",
-    "compact_observation", "record_check_output", "retrieve_check_output",
+    "compact_observation", "emit_check_truth_failure",
+    "record_check_output", "retrieve_check_output",
 ]
