@@ -14,7 +14,7 @@ import kernel_stateframe_framefit5 as framefit5
 from kernel_request_source_window import MODEL_WINDOW_MARKER, MODEL_WINDOW_SCHEMA, WINDOW_CONTENT_MARKER, WINDOW_END_MARKER
 from kernel_stateframe_envelope import serialize_stateframe_payload
 from kernel_completion_owner import _wire_continuation_limits
-from kernel_frame_optional_allocation import identity
+from kernel_frame_optional_allocation import identity, site_identity
 from kernel_parallel_records import default_subframe_token_cap
 from kernel_request_budget import ENDPOINT_PROMPT_TOKEN_BUDGET, HARD_MAX_REQUEST_BYTES
 from kernel_frame_allocation_validation import validate_allocation_authority, template_environment
@@ -228,7 +228,7 @@ def test_allocation_compares_reference_identity_from_full_host_site(monkeypatch,
     monkeypatch.setattr(framefit5, "_journal_read_facts", lambda _context, _root, _ledger: [])
     monkeypatch.setattr("kernel_frame_source_snapshot.frame_source_snapshot",
                         lambda _runtime, _plan: None)
-    key = identity(wire_site)
+    key = site_identity(wire_site)
     allocation = SimpleNamespace(
         validate=lambda: None,
         identity={"product_revision": "sha256:revision",
