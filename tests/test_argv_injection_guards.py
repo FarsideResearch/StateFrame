@@ -288,3 +288,31 @@ def test_react_repair_option_shaped_target_is_refused(tmp_path, monkeypatch, sel
     assert dispatched == [], observation
     assert "-pevil" not in " ".join(" ".join(cmd) for cmd, _ in dispatched)
     assert observation.startswith(("[selector] REFUSED_PREDISPATCH", "pytest exit 4")), observation
+
+
+def test_react_composed_command_keeps_every_option_before_separator():
+    # The xdist/worker path appends plugin and worker options to a composed React command.
+    # Each option must land before "--"; only the screened targets may follow it.
+    base = ["python", "-m", "pytest", "-x", "-q", "-p", "no:cacheprovider"]
+    targets = ["tests/test_x.py::test_a", "tests/test_y.py"]
+    composed = react_repair._compose_test_command(base, targets)
+    options = ["-p", "xdist.plugin", "-n", "4", "--dist=load", "--tx", "popen//id=gate-worker-0"]
+    extended = react_repair.add_pytest_options(composed, options)
+    separator = extended.index("--")
+    assert extended[separator + 1:] == tuple(targets)
+    assert extended[:separator] == (*base, *options)
+    # No option-shaped token may sit after the separator, and the separator is unique.
+    assert not any(item.startswith("-") for item in extended[separator + 1:])
+    assert extended.count("--") == 1
+
+
+def test_react_add_pytest_options_without_separator_appends_in_order():
+    assert react_repair.add_pytest_options(["python", "-m", "pytest"], ["-p", "xdist.plugin"]) == (
+        "python", "-m", "pytest", "-p", "xdist.plugin")
+
+
+def test_react_add_pytest_options_keeps_targets_after_separator():
+    # Targets are screened to never start with "-", so the last "--" is the separator.
+    composed = react_repair._compose_test_command(["python", "-m", "pytest"], ["tests/test_a.py"])
+    extended = react_repair.add_pytest_options(composed, ["-n", "2"])
+    assert extended == ("python", "-m", "pytest", "-n", "2", "--", "tests/test_a.py")

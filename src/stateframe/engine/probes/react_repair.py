@@ -5327,6 +5327,22 @@ def _compose_test_command(command: Sequence[object], targets: Sequence[object]) 
     return tuple(str(item) for item in (*command, "--", *targets))
 
 
+def add_pytest_options(command: Sequence[object], options: Sequence[object]) -> tuple[str, ...]:
+    """Insert pytest options before the ``--`` target separator.
+
+    Anything after ``--`` is read as a path by pytest, so an option appended to a
+    composed command (xdist, plugin loads, worker counts) must land before it.
+    Targets never start with "-" (``screen_resolved_targets``), so the last ``--``
+    is the separator; a command without one just gets the options appended.
+    """
+    argv = [str(item) for item in command]
+    extra = [str(item) for item in options]
+    if "--" not in argv:
+        return tuple(argv + extra)
+    split = len(argv) - 1 - argv[::-1].index("--")
+    return tuple(argv[:split] + extra + argv[split:])
+
+
 def _discover_test_targets(root: pathlib.Path, needle: str) -> list[str]:
     """Discover tests without executing a model-controlled grep command."""
     found: list[str] = []
