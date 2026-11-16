@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Fixed (Linux check sandbox, uv installs): a check no longer dies before it starts with `bwrap: execvp <venv>/bin/python: No such file or directory` when StateFrame itself runs from a uv-style virtual environment and the check program is not that same interpreter (`--test-python /usr/bin/python3`, a shell or `npm` `--check-cmd`, and every subframe check under those settings). The sandbox wraps each check in a process-limit launcher run by the engine's interpreter; only the check program's symlinked install directory was mounted, so the launcher's venv link dangled, each check returned exit 1 with empty output, and subframes spent their request budget on checks that never ran. The launcher's and the selected test interpreter's link hops are now mounted read-only as well. Runs whose check program is the engine's own interpreter build the same sandbox command as before. Tests: `tests/test_uv_venv_sandbox.py`.
+- Fixed (check sandbox): a `--check-cmd` check whose interpreter cannot start inside the sandbox (`bwrap: execvp <path>: No such file or directory`, or an exec permission refusal) is now reported as an environment error (`check command could not run`, exit 126) instead of a failing check. bwrap exits 1 in that case, so the check used to read as RED and a subframe could spend its whole request budget on checks that never ran. A real failure whose output merely mentions a missing file is still a failing check. Tests: `tests/test_sandbox_exec_missing_interpreter.py`.
 
 ## 0.7.10 (2026-11-16)
 

@@ -65,13 +65,19 @@ def check_result(root: Path, row: Mapping[str, object]) -> tuple[str, int]:
     memory_limit_mechanism = policy_memory_limit_mechanism(result)
     memory_limit_killed = bool(getattr(result, "memory_limit_killed", False))
     output = (result.completed.stdout + result.completed.stderr)[-OUTPUT_LIMIT:]
-    from kernel_check_receipts import sandbox_open_denial
+    from kernel_check_receipts import sandbox_exec_denial, sandbox_open_denial
     denial = sandbox_open_denial(result.completed.stderr + "\n" + result.completed.stdout,
                                  policy_read_grants(result))
+    # The sandbox's own launch failure ("bwrap: execvp <path>: ...") arrives on stderr
+    # with an ordinary exit (bwrap exits 1): no check ran, so it is never a RED check.
+    exec_denial = (sandbox_exec_denial(result.completed.stderr)
+                   if result.completed.returncode != 0 else None)
     if result.timed_out:
         code, outcome, label = 124, "RESOURCE_LIMIT", "check timed out"
     elif denial is not None:
         code, outcome, label = 126, "ENVIRONMENT", denial
+    elif exec_denial is not None:
+        code, outcome, label = 126, "ENVIRONMENT", f"check command could not run: {exec_denial}"
     else:
         code = result.completed.returncode
         if code == 0:
