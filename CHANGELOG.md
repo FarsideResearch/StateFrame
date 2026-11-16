@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fixed: a repository file whose text contains host markers (source-window framing lines, `[EVIDENCEPIN]` blocks, `[CONTINUATION LIMITS |` lines) no longer stops the run before its first request. Source-window bodies are now framed by each range header's declared line count instead of a marker search, and file, tool and source-window text is never read as a host evidence pin or continuation limit.
 ## 0.7.9 (2026-11-15)
 
 - Fixed: editing a file during a run no longer stops it with "allocation semantic site inventory changed" (source_revision_replan_exhausted); the site inventory now ignores per-request delivery annotations.
