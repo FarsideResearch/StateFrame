@@ -866,7 +866,7 @@
   {
    "file": "blame_channel.py",
    "substitutions": 1,
-   "why": "lab repository name"
+   "why": "private repository name"
   },
   {
    "file": "blame_channel.py",
@@ -887,7 +887,7 @@
   {
    "file": "blocks.py",
    "substitutions": 1,
-   "why": "lab repository name"
+   "why": "private repository name"
   },
   {
    "file": "capability_release_runner.py",
@@ -1508,7 +1508,7 @@
   {
    "file": "func_index.py",
    "substitutions": 1,
-   "why": "lab absolute path"
+   "why": "private absolute path"
   },
   {
    "file": "func_index.py",
@@ -1553,7 +1553,7 @@
   {
    "file": "graphs/corpus.py",
    "substitutions": 1,
-   "why": "lab absolute path"
+   "why": "private absolute path"
   },
   {
    "file": "gym_config.py",
@@ -2749,7 +2749,7 @@
    "new_sha256": "67a3e00ccfcda6eff8b5c0b3dcf7e50d50af76f17a64bd6e5d002b573d2a74f9",
    "old_sha256": "41707c6cd26bc35cd19facb6585590fb15478a7dd03ba471b150dbefe40d3496",
    "status": "already-scrubbed",
-   "why": "Remove private provenance (lab role and owner name) from the micrograph default comment (BM3/FM4 cuts)."
+   "why": "Remove private provenance (private role and owner name) from the micrograph default comment (BM3/FM4 cuts)."
   },
   {
    "file": "kernel_named_layer_repair.py",
@@ -2986,7 +2986,7 @@
    "new_sha256": "ef9eec8e22bba33fe1313ed90633eee09e0f4cd485a62239f070a88912761e61",
    "old_sha256": "c7caa881f4a2340f19f5d27f7eec456d42914edae7db4a5aead044575e10103f",
    "status": "already-scrubbed",
-   "why": "Private benchmark task table (lab task ids with per-task hints) must not ship; the reducer uses only an explicit runtime case."
+   "why": "Private benchmark task table (private task ids with per-task hints) must not ship; the reducer uses only an explicit runtime case."
   },
   {
    "file": "kernel_psgaps.py",
@@ -3101,12 +3101,12 @@
   {
    "file": "kernel_request_budget.py",
    "substitutions": 1,
-   "why": "lab relay port and box address in a comment"
+   "why": "private relay port and host address in a comment"
   },
   {
    "file": "kernel_request_budget.py",
    "substitutions": 1,
-   "why": "lab reviewer name before a review-item reference"
+   "why": "private reviewer name before a review-item reference"
   },
   {
    "file": "kernel_request_budget.py",
@@ -3119,12 +3119,12 @@
   {
    "file": "kernel_request_diet.py",
    "substitutions": 1,
-   "why": "lab box name in journaled evidence"
+   "why": "private host name in journaled evidence"
   },
   {
    "file": "kernel_request_diet.py",
    "substitutions": 1,
-   "why": "lab reviewer name before a review-item reference"
+   "why": "private reviewer name before a review-item reference"
   },
   {
    "file": "kernel_request_diet.py",
@@ -3143,7 +3143,7 @@
   {
    "file": "kernel_request_evidence_closure.py",
    "substitutions": 1,
-   "why": "lab run reference in prose"
+   "why": "private run reference in prose"
   },
   {
    "file": "kernel_request_source_window.py",
@@ -3280,7 +3280,7 @@
   {
    "file": "kernel_stateframe_headcarry.py",
    "substitutions": 1,
-   "why": "lab assistant tag in a comment"
+   "why": "private assistant tag in a comment"
   },
   {
    "file": "kernel_stateframe_hstate_plus.py",
@@ -4181,18 +4181,18 @@
    "file": "probes/react_repair.py",
    "new": "",
    "old_sha256": "21f9c69e922d4837ba5a2199194eda9ee64db4251c8cd443c23e2909a803ac70",
-   "why": "lab DSN default injected into the user's test environment"
+   "why": "private DSN default injected into the user's test environment"
   },
   {
    "file": "probes/react_repair.py",
    "new": "",
    "old_sha256": "f5090ca1f5191332706f1a55d673c65a91020570da20cf0f937a1d3e42b0d8a1",
-   "why": "lab DSN and JWT defaults injected into the user's test environment"
+   "why": "private DSN and JWT defaults injected into the user's test environment"
   },
   {
    "file": "probes/react_repair.py",
    "substitutions": 2,
-   "why": "lab repository name"
+   "why": "private repository name"
   },
   {
    "file": "probes/react_repair.py",
@@ -4678,12 +4678,12 @@
    "file": "probes/react_repair.py",
    "old_sha256": "e3dd3f7f9863115692cffc7d9b4b3efb778df504fbfdb63a16eef7d6e8954bac",
    "status": "already-scrubbed (reworded upstream)",
-   "why": "lab absolute paths"
+   "why": "private absolute paths"
   },
   {
    "file": "probes/real_repo_baseline.py",
    "substitutions": 1,
-   "why": "lab absolute path"
+   "why": "private absolute path"
   },
   {
    "file": "probes/real_repo_baseline_v2.py",
@@ -4735,9 +4735,9 @@
   },
   {
    "file": "task_runners.py",
-   "new": "        pass  # product: no lab database default\n",
+   "new": "        pass  # product: no local database default\n",
    "old_sha256": "4cdde261999bfc5e38eb99c3f13683533882ea47d89ec58903579c6288d0d723",
-   "why": "lab DSN default for database-backed lab suites"
+   "why": "private DSN default for database-backed internal suites"
   },
   {
    "file": "test_gen_oracle.py",
