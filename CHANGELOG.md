@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.7.16 (2026-11-16)
 
 - Changed: the engine no longer limits edit continuation turns by its own clock. The 1800 s edit budget and its `STATEFRAME_EDIT_NTURN_RUN_BUDGET_SECONDS` override (0.7.15) are removed; only a run deadline you set still applies.
