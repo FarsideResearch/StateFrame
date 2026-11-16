@@ -232,10 +232,6 @@ def checkpoint_replay(measurement: object) -> dict[str, object]:
                 "request_number": getattr(measurement, "_frame_budget_request_count", 0)}
     from kernel_read_exec import delivered_page_snapshot
     snapshot["pages"] = delivered_page_snapshot(measurement)
-    from kernel_read_lockout import checkpoint as lockout_checkpoint
-    lockout = lockout_checkpoint(measurement)
-    if lockout is not None:
-        snapshot["read_lockout"] = lockout
     restore_replay(_ReplayValidationTarget(), snapshot)
     return snapshot
 
@@ -329,9 +325,6 @@ def restore_replay(measurement: object, snapshot: object) -> None:
     measurement._read_page_delivery_replay = restored_pages
     if snapshot["schema"] == _REPLAY_SCHEMA:
         measurement._frame_budget_request_count = request_number
-    if "read_lockout" in snapshot:
-        from kernel_read_lockout import restore as restore_lockout
-        restore_lockout(measurement, snapshot["read_lockout"])
 
 
 def _complete_body(path: str, revision: object,

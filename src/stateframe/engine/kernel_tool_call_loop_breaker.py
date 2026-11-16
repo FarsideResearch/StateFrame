@@ -498,13 +498,6 @@ def stop_unbounded_no_progress(runtime: object, watch: UnboundedProgressWatch, *
         return False
     binding = runtime.binding()
     receipts = getattr(runtime.owner, "_receipts", [])
-    lock = getattr(runtime, "_read_lockout_state", None)
-    from kernel_read_lockout import enabled as lockout_enabled
-    locked = (lockout_enabled() and isinstance(lock, Mapping) and lock.get("remaining", 0) > 0
-              and getattr(runtime, "_read_lockout_notice", None))
-    # Observe the boundary and receipts while paused, but do not charge an
-    # idle turn caused by the host's own two-request restriction. Real new
-    # evidence still resets the watch under its ordinary rules.
     batch = getattr(runtime, "native_batch", None)
     batch_origin = (getattr(batch, "origin", None)
                     if getattr(batch, "index", 0) >= 1 else None)
@@ -513,10 +506,8 @@ def stop_unbounded_no_progress(runtime: object, watch: UnboundedProgressWatch, *
                       and not getattr(batch, "pending", ())
                       and getattr(batch, "inflight", None) is None)
     if not watch.observe(binding, receipts, boundary=boundary,
-                         charge_idle=not locked, batch_origin=batch_origin,
+                         charge_idle=True, batch_origin=batch_origin,
                          batch_complete=batch_complete):
-        return False
-    if locked:
         return False
     runtime.system_outcome = "stalled"
     runtime.journal.emit(

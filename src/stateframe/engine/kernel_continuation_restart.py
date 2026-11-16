@@ -676,7 +676,7 @@ DOCUMENTED_REJECT: dict[str, str] = {
         qgate_belief_falsified qgate_belief_opened qgate_check_observed qgate_check_opened qgate_check_settled
         qgate_cost_report qgate_dodged qgate_drift_reanchored qgate_error qgate_transition
         qualified_request_sealed question_answered r44_blocks_rendered raising_h_packet_rendered
-        read_budget_admitted read_contract_fired read_lockout_decision read_once_final_fired read_once_fired
+        read_budget_admitted read_contract_fired read_once_final_fired read_once_fired
         read_once_note_queued read_once_wire_note_reconciled read_pointer_edit_menu_armed
         read_pointer_edit_menu_fired read_pointer_fired read_pointer_inline_fired read_recovery_admitted read_repeat_assessed
         read_reuse_source_snapshot_reconciled read_reuse_visibility_checked readiness_decision
@@ -1651,17 +1651,16 @@ def checkpoint(runtime, messages, worker_state):
         "owner_restore": capture_owner_restore(runtime),
     }
     from kernel_code_bookmarks import enabled as bookmarks_enabled
-    from kernel_read_lockout import enabled as lockout_enabled
-    if bookmarks_enabled() or lockout_enabled():
+    if bookmarks_enabled():
         # This clock advances even when no read/bookmark state exists. Only the mechanisms that number
-        # repeated reads need it; with both switches off the checkpoint stays byte-identical to 0.2.1.
+        # repeated reads need it; with the bookmarks switch off the checkpoint
+        # stays byte-identical to 0.2.1.
         state["provider_request_count"] = getattr(runtime, "_frame_budget_request_count", 0)
     if bookmarks_enabled() and (
              getattr(runtime, "_code_bookmarks_active", False) is True
              or getattr(runtime, "_reread_result_truth", None)
              or getattr(runtime, "_read_contract_source_cache", None)
-             or getattr(runtime, "_read_page_delivery_replay", None)
-             or getattr(runtime, "_read_lockout_state", None)):
+             or getattr(runtime, "_read_page_delivery_replay", None)):
         from kernel_reread_result_truth import checkpoint_replay
         state["code_bookmark_replay"] = checkpoint_replay(runtime)
     policy = first_green_checkpoint_section(runtime)
