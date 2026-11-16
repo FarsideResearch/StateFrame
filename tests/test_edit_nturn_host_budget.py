@@ -106,3 +106,18 @@ def test_react_repair_wiring_uses_host_time_budget():
     assert text.count("_edit_nturn_provider_wait += time.monotonic() - _provider_t0") == 2
     assert any("nonlocal" in line and "_edit_nturn_provider_wait" in line
                for line in text.splitlines())
+
+
+def test_runner_forwards_the_override_to_the_engine():
+    import pytest
+    from stateframe import runner
+
+    assert runner.EDIT_NTURN_BUDGET_SETTING in runner.SHELL_SETTINGS
+    assert runner.resolve_edit_nturn_budget_env({}) == {}
+    assert runner.resolve_edit_nturn_budget_env({runner.EDIT_NTURN_BUDGET_SETTING: " 3600 "}) == {
+        runner.EDIT_NTURN_BUDGET_SETTING: "3600"}
+    assert runner.resolve_edit_nturn_budget_env({runner.EDIT_NTURN_BUDGET_SETTING: "OFF"}) == {
+        runner.EDIT_NTURN_BUDGET_SETTING: "off"}
+    for bad in ("0", "-1", "nan", "inf", "lots"):
+        with pytest.raises(runner.RunError):
+            runner.resolve_edit_nturn_budget_env({runner.EDIT_NTURN_BUDGET_SETTING: bad})
