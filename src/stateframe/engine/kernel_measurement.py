@@ -2837,6 +2837,8 @@ class RequestCapture:
         self._framefit5_newest_user_suffix = ()
         self._framefit5_owner_presentation_contract = None
         self._framefit5_task_message = None
+        # Reference to the step's host-authorship ledger; None unless host-row identity is on.
+        self._host_authorship = None
         self._qualified_adapter = None
         self._release_prefix_boundary = None
         self._replacement_allocation = None
