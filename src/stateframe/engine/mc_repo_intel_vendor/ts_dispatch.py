@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Mapping
 
-from .call_graph import DispatchBoundary
+from .call_graph import DispatchBoundary, _scan_failed_boundary
 
 logger = logging.getLogger(__name__)
 
@@ -208,9 +208,9 @@ def dispatch_boundaries_in_file(source: str, relpath: str) -> list[DispatchBound
                 result.extend(_scan_ts(body, relpath, line_offset=offset))
             return result
         return _scan_ts(source, relpath)
-    except Exception as exc:  # noqa: BLE001 - graph boundary is fail-open
-        logger.debug("ts_dispatch: boundary scan failed for %s: %s", relpath, exc)
-        return []
+    except Exception as exc:  # noqa: BLE001 - fail-open, but an unfinished scan is UNKNOWN, not "none"
+        # The marker logs a warning naming the file and the error type (never the message).
+        return [_scan_failed_boundary(relpath, type(exc).__name__)]
 
 
 # ── Language-neutral source outline ──────────────────────────────────────────
