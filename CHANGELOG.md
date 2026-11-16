@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.13 (2026-11-16)
 
 - Security: a `problems.jsonl` fault row, and its reason line on stderr, could contain a secret registered with the checkpoint guard when the caught error's message included it. Such messages (raw or JSON-escaped) are now replaced with a fixed "withheld" text, and an error whose `str()` raises is recorded without breaking the fault path.
 
