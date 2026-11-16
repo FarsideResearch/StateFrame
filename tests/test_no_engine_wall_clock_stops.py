@@ -215,3 +215,15 @@ def test_churn_saved_state_with_old_deadline_key_loads_and_admits():
     restored = churn.EditChurnBudget.from_snapshot(snapshot)
     assert restored.state.elapsed_seconds == 4000.0
     assert restored.admit("edit", {"settled": True}, {}) == churn.ALLOW
+
+
+def test_runner_forwards_a_user_plain_wall_to_the_engine():
+    from stateframe import runner
+
+    assert runner.PLAIN_WALL_SETTING in runner.SHELL_SETTINGS
+    assert runner.resolve_plain_wall_env({}) == {}
+    assert runner.resolve_plain_wall_env({runner.PLAIN_WALL_SETTING: " "}) == {}
+    assert runner.resolve_plain_wall_env({runner.PLAIN_WALL_SETTING: " 900 "}) == {runner.PLAIN_WALL_SETTING: "900"}
+    for bad in ("0", "-1", "nan", "inf", "soon"):
+        with pytest.raises(runner.RunError):
+            runner.resolve_plain_wall_env({runner.PLAIN_WALL_SETTING: bad})
