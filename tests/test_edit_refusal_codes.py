@@ -178,11 +178,13 @@ CATALOG_IMPORTERS = {
     "kernel_edit_handles.py",
     "kernel_edit_repair_request.py",
     "kernel_edit_source_tool.py",
+    "kernel_edit_repair_hook.py",  # builds repair requests from refusal codes
+    "kernel_legacy_safe_edit.py",  # maps legacy str_replace refusals onto the same codes
 }
 
 
 def test_only_edit_protocol_modules_import_the_catalog():
-    """Only the edit-protocol modules may depend on the catalog until executors are wired."""
+    """Only the edit-protocol modules (validator, authority, handles, repair, executors) may depend on the catalog."""
     for path in ENGINE.rglob("*.py"):
         if path.name in CATALOG_IMPORTERS or "__pycache__" in path.parts:
             continue
