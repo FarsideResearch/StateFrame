@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.7.8 (2026-11-15)
 
 - Tests: adds the `tests/enginecheck` harness library (scripted-session adapter, proof integrity, boundary inputs, wire prefix stability, feature composition, race-seed registry and CLI, resume equivalence). Known engine defects it finds are pinned as strict xfails.
