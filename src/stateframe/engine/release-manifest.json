@@ -366,7 +366,7 @@
   "kernel_latest_exchange.py": "f75dcf5c6aff54d02063e35db3f73beb388f68f1c85501e06bc6d7e037cd4b07",
   "kernel_launch_identity_cost.py": "41fd1a8c25c0ef00a27d74231f2ebfe577a76d869d5737d39488aa97f39e0bf6",
   "kernel_lean.py": "7380bebb0cfc629afb6360ca9dc1c898d71d329a699cdd591387e114a659e853",
-  "kernel_lean_presentation.py": "39edb5a76230bccc2dfe9d7c51ed4d81ef3c9f97fb0ea617731bcb5eac315903",
+  "kernel_lean_presentation.py": "814cabd4e91845733d9d2bf5f5df1afffa358a51b6136654bc4ac2dba432d8d0",
   "kernel_ledger_bindings.py": "1933dfe82ff41e2916987630175ff99abe98d0c1ba31f613ff12e98c8a0ae897",
   "kernel_ledger_schema.py": "a17b51c34af2eb4009c2415e7f89be157d1f1b50fe11c3399d15be99de7db5d0",
   "kernel_lifecycle_table.py": "f72b108bd0c511f174bc1e72abde974a1645c0a4e54f378db8b640fb1b0db13f",

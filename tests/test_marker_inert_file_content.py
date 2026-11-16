@@ -62,9 +62,6 @@ def _conversation() -> list[dict[str, object]]:
     ]
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "MARKER-INERT-1: kernel_lean_presentation.py:641 _normalize_final_messages collects the late-tail "
-    "evidence pin and continuation limits from tool rows and strips them from the file content"))
 def test_lean_presentation_late_tail_ignores_marker_text_in_tool_row():
     normalized, owned = _normalize_final_messages(_conversation())
     assert owned["evidence_pin"] == HOST_PIN
@@ -72,6 +69,25 @@ def test_lean_presentation_late_tail_ignores_marker_text_in_tool_row():
     tool_rows = [message for message in normalized if message.get("role") == "tool"]
     assert len(tool_rows) == 1
     assert tool_rows[0]["content"] == TOOL_ROW["content"]
+
+
+def test_lean_presentation_late_tail_still_extracts_genuine_host_block():
+    # Negative control: a later host-authored user row carrying fresh owned blocks still wins and
+    # is lifted out of that row, so the host path is unchanged by the tool-row guard.
+    later_pin = HOST_PIN.replace("freshness=stale", "freshness=fresh")
+    later_limits = "[CONTINUATION LIMITS | steps_left=2 | time_left=60s]"
+    messages = _conversation() + [
+        {"role": "assistant", "content": "Read the fixture. " + HOST_LIMITS},
+        {"role": "user", "content": "Continue.\n" + later_pin + "\n" + later_limits},
+    ]
+    normalized, owned = _normalize_final_messages(messages)
+    assert owned["evidence_pin"] == later_pin
+    assert owned["continuation_limits"] == later_limits
+    assert normalized[-1]["content"] == "Continue."
+    assert normalized[1]["content"] == "Task: inspect the test fixture."
+    # Assistant text is inert too: never harvested, never mutated.
+    assert normalized[-2]["content"] == "Read the fixture. " + HOST_LIMITS
+    assert normalized[3]["content"] == TOOL_ROW["content"]
 
 
 @pytest.mark.xfail(strict=True, reason=(

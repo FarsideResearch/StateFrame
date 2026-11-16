@@ -637,7 +637,13 @@ def _normalize_final_messages(
             if not is_source:
                 content, empty_count = _remove_empty_wrapper(content)
                 removed_empty += empty_count
-                if collect_owned and role not in {"system", "developer"}:
+                # Only host-authored user rows may supply the late owned
+                # blocks.  The host appends the evidence pin, continuation
+                # limits, and terminal line as user panels; assistant text and
+                # tool results are inert data (a read tool returning a file
+                # that quotes the markers must stay byte-for-byte intact and
+                # never replace the host's own block).
+                if collect_owned and role == "user":
                     content, evidence, limits, terminal, _ = _extract_owned_blocks(content)
                     for key, value in (
                             ("evidence_pin", evidence),
