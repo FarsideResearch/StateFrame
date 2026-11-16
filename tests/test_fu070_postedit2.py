@@ -41,8 +41,9 @@ def _read_call(call_id: str, arguments: dict[str, object], result: str) -> list[
     ]
 
 
-def test_max_chars_clipped_page_is_an_exact_site_at_its_effective_range() -> None:
+def test_max_chars_clipped_page_is_an_exact_site_at_its_effective_range(monkeypatch) -> None:
     # D1: the delivered bytes verify, so the clipped page is an exact window for lines 1-683.
+    monkeypatch.setenv("STATEFRAME_WORKING_SET_ALLOCATOR", "on")
     revision = _sha(_source(2100))
     result = _clipped_read(revision, 683, 2100)
     parsed = _read_site_window({"path": "owned_source.py", "start_line": 1, "end_line": 1000}, result)
@@ -53,15 +54,17 @@ def test_max_chars_clipped_page_is_an_exact_site_at_its_effective_range() -> Non
     assert content.count("\n") == 683
 
 
-def test_max_chars_clipped_page_with_wrong_declared_bytes_is_refused() -> None:
+def test_max_chars_clipped_page_with_wrong_declared_bytes_is_refused(monkeypatch) -> None:
     # D1 keeps refusing any clipped page whose bytes do not verify.
+    monkeypatch.setenv("STATEFRAME_WORKING_SET_ALLOCATOR", "on")
     revision = _sha(_source(2100))
     result = _clipped_read(revision, 683, 2100).replace("bytes=", "bytes=1", 1)
     assert _read_site_window({"path": "owned_source.py"}, result) is None
 
 
-def test_max_chars_clipped_read_yields_open_edit_site(tmp_path: Path) -> None:
+def test_max_chars_clipped_read_yields_open_edit_site(tmp_path: Path, monkeypatch) -> None:
     # D1 end-to-end: the ledger builds an exact current site from the clipped page.
+    monkeypatch.setenv("STATEFRAME_WORKING_SET_ALLOCATOR", "on")
     source = _source(2100)
     (tmp_path / "owned_source.py").write_bytes(source)
     revision = _sha(source)

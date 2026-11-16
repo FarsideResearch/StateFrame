@@ -6459,7 +6459,7 @@ def _admit_sent_edit(prepared: object, *, path: str, source: bytes) -> tuple[boo
 
     return admit_unit_edit(
         _sent_request_messages(prepared), path=path, source=source,
-        request_id=prepared.capture.request_id,
+        request_id=getattr(getattr(prepared, "capture", None), "request_id", "") or "",
         legacy_complete=_never_legacy_complete)
 
 
