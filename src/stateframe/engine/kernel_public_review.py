@@ -126,6 +126,9 @@ class PublicReview:
         capture = RequestCapture(
             runtime.journal, runtime.owner.current_step, runtime.snapshot_id,
             call_purpose=purpose)
+        # An auxiliary request never shares the parent step's host-authorship ledger.
+        from kernel_host_authorship import bind as bind_host_authorship, open_private
+        bind_host_authorship(capture, open_private(capture.step, capture.request_id))
         from kernel_request_kind import bind_auxiliary
         bind_auxiliary(capture, "public_review")
         native = getattr(runtime, 'native_batch', None)

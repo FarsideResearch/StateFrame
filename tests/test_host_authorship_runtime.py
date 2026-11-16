@@ -178,3 +178,33 @@ def test_pass_marks_are_recorded_in_shadow_only(tmp_path, monkeypatch):
     functions = _functions()
     assert len(_calls(functions["prepare"], "_mark_host_authorship")) >= 4
     assert len(_calls(functions["_prepare_lean_plain_loop"], "_mark_host_authorship")) >= 2
+
+
+@pytest.mark.parametrize("mode", ["off", "on"])
+def test_public_review_capture_gets_private_ledger(tmp_path, monkeypatch, mode):
+    import kernel_public_review
+    import kernel_request_kind
+    monkeypatch.setenv(authorship.MODE_ENV, mode)
+    runtime = _runtime(tmp_path, step=11)
+    parent = authorship.open_step(runtime, 11)
+    seen = []
+
+    def stop_at_bind(capture, purpose):
+        seen.append((capture, purpose))
+        raise _Stop
+
+    monkeypatch.setattr(kernel_request_kind, "bind_auxiliary", stop_at_bind)
+    review = kernel_public_review.PublicReview.__new__(kernel_public_review.PublicReview)
+    review.runtime = runtime
+    with pytest.raises(_Stop):
+        review._model([{"role": "user", "content": "review"}], "review", "http://endpoint", "key")
+    (capture, purpose), = seen
+    assert purpose == "public_review"
+    if mode == "off":
+        assert parent is None and capture._host_authorship is None
+        assert "_host_authorship" not in vars(runtime)
+        return
+    private = capture._host_authorship
+    assert isinstance(private, authorship.HostAuthorship) and private.private
+    assert private is not parent and authorship.ledger_of(runtime) is parent
+    assert private.step == 11 and private.request_id == capture.request_id
