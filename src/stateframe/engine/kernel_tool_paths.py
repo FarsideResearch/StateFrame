@@ -48,7 +48,7 @@ def recover_by_basename(root: Path, requested: str) -> list[Path]:
         return []
     return sorted(
         (candidate for candidate in root.rglob(glob.escape(name))
-         if candidate.name == name and _resolves_under(root, candidate)),
+         if _resolves_under(root, candidate)),
         key=str)
 
 
