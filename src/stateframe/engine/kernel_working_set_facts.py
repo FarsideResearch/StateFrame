@@ -153,6 +153,10 @@ def _update_frame(frame, snapshot, full):
                 or not any(value and value in s.payload and s.identity.path == path
                            and s.identity.revision == revision for s in full)):
             site["current_bytes"] = None
+            # Covered only across several captures: no single carrier holds the
+            # exact bytes, so the site is a re-read pointer, not a shown receipt.
+            if present and not isinstance(site.get("source_ref"), dict):
+                site["read_this_request"] = False
 
     # Capsule labels are delivery claims, while their journal history remains
     # immutable. Re-hash the copied capsule whenever its assignment label moves.
