@@ -8,6 +8,7 @@ ordinary content: the host block stays the one the host rendered and the tool ro
 from __future__ import annotations
 
 import copy
+import hashlib
 from types import SimpleNamespace
 
 import pytest
@@ -16,6 +17,7 @@ from kernel_lean_presentation import _normalize_final_messages
 from kernel_refusal_compact import (
     EVIDENCE_START, _remove_evidence_pin_blocks, ensure_final_evidence_pin,
 )
+from kernel_request_source_window import _render_ranges, is_source_window
 
 
 HOST_PIN = (
@@ -152,3 +154,38 @@ def test_ensure_final_evidence_pin_matches_exact_value_containing_end_marker():
     result, changed = ensure_final_evidence_pin(_runtime(nested_pin), messages)
     assert changed is False
     assert [message["content"] for message in result] == [message["content"] for message in messages]
+
+# A raw request-budget source window is a role=user row whose body is file text.  The file below
+# quotes the host markers; the window must stay inert even though it is not a "source:" header row.
+WINDOW_SOURCE = (
+    "x = 1\n"
+    "[EVIDENCEPIN]x[/EVIDENCEPIN]\n"
+    "[CONTINUATION LIMITS | x]\n"
+)
+
+
+def _raw_window_row() -> dict[str, object]:
+    lines = WINDOW_SOURCE.splitlines(keepends=True)
+    revision = "sha256:" + hashlib.sha256(WINDOW_SOURCE.encode("utf-8")).hexdigest()
+    content = _render_ranges(
+        lines, [{"start_line": 1, "end_line": len(lines)}],
+        path="tests/fixture_markers.py", revision=revision, total_lines=len(lines),
+    )
+    return {"role": "user", "content": content}
+
+
+def test_lean_presentation_raw_source_window_row_is_inert():
+    window_row = _raw_window_row()
+    assert is_source_window(window_row["content"])
+    messages = [
+        {"role": "system", "content": "You are the worker. Follow the host blocks."},
+        copy.deepcopy(window_row),
+        {"role": "user", "content": "Continue.\n" + HOST_PIN + "\n" + HOST_LIMITS},
+    ]
+    normalized, owned = _normalize_final_messages(messages)
+    # The window row is byte-identical: its file body is never cut or harvested.
+    assert normalized[1]["content"] == window_row["content"]
+    # The only owned blocks come from the genuine host row.
+    assert owned["evidence_pin"] == HOST_PIN
+    assert owned["continuation_limits"] == HOST_LIMITS
+    assert normalized[2]["content"] == "Continue."

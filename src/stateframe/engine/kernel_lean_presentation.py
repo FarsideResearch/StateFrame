@@ -610,6 +610,21 @@ def _extract_owned_blocks(content: str) -> tuple[str, str, str, str, int]:
     return result, evidence, limits, terminal, 0
 
 
+def _is_raw_source_window(content: str) -> bool:
+    """True for a raw request-budget source window row (role=user, file body).
+
+    Imported locally: the window module's dependency graph reaches this module,
+    so a top-level import would be circular.  The marker check mirrors the
+    parser's own search (marker within the first three lines), so a window
+    that fails full validation is still treated as inert source.
+    """
+    from kernel_request_source_window import WINDOW_MARKER, is_source_window
+
+    if is_source_window(content):
+        return True
+    return any(line.rstrip("\r\n") == WINDOW_MARKER for line in content.splitlines()[:3])
+
+
 def _normalize_final_messages(
         messages: Sequence[Mapping[str, object]],
         *,
@@ -629,10 +644,14 @@ def _normalize_final_messages(
             # Source messages are byte-bound evidence.  Their trailing
             # newline participates in the revision digest and must never be
             # normalized by presentation cleanup.
+            # Raw request-budget windows are role=user rows whose body is file
+            # text, so they carry no "source:" header and must be detected by
+            # their own envelope or they would be harvested like host panels.
             is_source = bool(
                 _SOURCE_HEADER.match(content)
                 or _LEGACY_SOURCE_HEADER.match(content)
                 or content.startswith("CURRENT_SOURCE ")
+                or _is_raw_source_window(content)
             )
             if not is_source:
                 content, empty_count = _remove_empty_wrapper(content)
