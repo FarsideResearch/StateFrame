@@ -71,6 +71,10 @@ def walk_commits_from(root: str, anchor: str, subtree: str,
     fix, per the doc's §3 "snapshot discipline" (never include the fix
     itself — callers anchor at ``<fix_sha>^``, one commit before the fix).
     """
+    if not anchor or anchor.startswith("-"):
+        # An option-like anchor would be parsed by ``git log`` as a flag; it
+        # is no history at all (same empty answer as a failed git call).
+        return []
     raw = git(root, "log", anchor, f"-n{window}", "--no-merges",
               "--name-only", "--pretty=format:%x01%H", "--", subtree)
     out: List[CommitRecord] = []
@@ -351,11 +355,17 @@ class CalibrationCase:
 def calibration_cases(subtree: str = "backend/app",
                        templates_path: Optional[str] = None,
                        repo_map: Optional[Mapping[str, str]] = None) -> List[CalibrationCase]:
+    from check_selection import is_commit_id  # lazy: keeps this module's import light
+
     rmap = dict(repo_map) if repo_map is not None else _repo_map()
     out = []
     for p in mined_fixes(templates_path):
         root = rmap.get(p["repo"])
         if root is None or not is_git_repo(root):
+            continue
+        if not is_commit_id(p.get("sha")):
+            # The mined sha is positional argv to ``git log`` (anchored at
+            # ``sha^``); only a hex commit id may get there.
             continue
         out.append(CalibrationCase(repo=p["repo"], root=root, sha=p["sha"],
                                     path=p["path"], subtree=subtree))

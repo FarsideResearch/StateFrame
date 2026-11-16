@@ -66,6 +66,11 @@ _HUNK_RE = re.compile(
 _FUNCTION_RE = re.compile(r"\b(?:async\s+)?def\s+(?P<name>[A-Za-z_]\w*)\b")
 _INSTANCE_ID_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 _SHA_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
+# ``repo_url`` becomes positional argv to ``git clone``: a URL scheme git
+# itself understands, or an scp-like ``user@host:path``.  Anything else
+# (``-c ...``, ``--upload-pack=...``, ``ext::`` helpers, bare paths) is refused.
+_REPO_URL_SCHEME_RE = re.compile(r"^(?:https?|ssh|git|file)://[^\s-]")
+_REPO_URL_SCP_RE = re.compile(r"^[A-Za-z0-9._-]+@[A-Za-z0-9._-]+:[^\s-]")
 
 
 class AdapterError(ValueError):
@@ -136,6 +141,11 @@ class SWEInstance:
             raise AdapterError(
                 f"{prefix}FAIL_TO_PASS must contain at least one selector"
             )
+        repo_url = _optional_string(_first_present(record, "repo_url", "repository_url"))
+        if repo_url is not None and not _is_safe_repo_url(repo_url):
+            raise AdapterError(
+                f"{prefix}repo_url must be an https/http/ssh/git/file URL or user@host:path: {repo_url!r}"
+            )
         return cls(
             instance_id=instance_id,
             repo=repo,
@@ -148,9 +158,7 @@ class SWEInstance:
             environment_setup_commit=_optional_string(
                 record.get("environment_setup_commit")
             ),
-            repo_url=_optional_string(
-                _first_present(record, "repo_url", "repository_url")
-            ),
+            repo_url=repo_url,
             test_patch=_optional_string(record.get("test_patch")),
             raw=dict(record),
         )
@@ -275,6 +283,13 @@ def _required_string(
 
 def _optional_string(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def _is_safe_repo_url(value: str) -> bool:
+    """True when ``value`` can be handed to ``git clone`` as a source, never as an option."""
+    if value.startswith("-") or any(ch.isspace() for ch in value):
+        return False
+    return bool(_REPO_URL_SCHEME_RE.match(value) or _REPO_URL_SCP_RE.match(value))
 
 
 def _decode_jsonish(value: object, *, field_name: str, prefix: str) -> object:

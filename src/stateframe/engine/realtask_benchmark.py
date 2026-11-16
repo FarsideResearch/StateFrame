@@ -558,6 +558,9 @@ def _ticket_for(tickets: Mapping[str, object], resolved: str) -> object | None:
 def _commit_details(
     repo: Path, revision: str, subtree: str = ""
 ) -> tuple[str, str, tuple[str, ...], str, str]:
+    if not revision or revision.startswith("-"):
+        # Positional argv to ``git rev-list``; an option-like value is not a candidate.
+        raise BenchmarkError("candidate revision must not look like an option")
     line = _git_text(repo, "rev-list", "--parents", "-n", "1", revision).strip()
     parts = line.split()
     if len(parts) != 2:
