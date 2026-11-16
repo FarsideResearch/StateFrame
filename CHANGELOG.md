@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.7.14 (2026-11-16)
 
 - Fixed (parallel subframes): subframes now commit their edits in live runs. A subframe that edited one of its files no longer fails allocation validation on every replan and ends the run; the validated frame and the live request now agree on the owner contract and on which read pins the request already delivers. When a replan is needed, the subframe replans instead of stopping.
