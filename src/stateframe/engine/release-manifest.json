@@ -257,7 +257,7 @@
   "kernel_fanout_continuation.py": "7660b0ea9ace00e992e83bd4013f985cbf82b893cd61f2df16cf4018aac087fc",
   "kernel_fanout_continuation_cli.py": "1488de947c408ed78767a70376b223a6cd3fbec8d3ed4503b6916c5e9b8d16fa",
   "kernel_fanout_pin.py": "09d74eddd27ebf70e26031711e9af7605531f35a0c35b836ec835a6e77417c37",
-  "kernel_fault_disposition.py": "e59188e2bd52076a1c8e00b8423c0a18639ef92e73767bcc952191efe53895d6",
+  "kernel_fault_disposition.py": "d8b7a90367484765ccd96c401b6bfcc961953c775520ca3588f46a3328e69fa3",
   "kernel_fault_registry.py": "4c8a460c23c02d5dcd528d9d645608911dc007049286aa3a8678f35cea33aae6",
   "kernel_figure_it_out.py": "8304ea5f42bf241e747175778f34edb3eafacc28f2944a801b0f9361e2dd7e00",
   "kernel_file_ops.py": "ef3de8fa2ba9c1f08be1515364f3eb1b9fadc4d319e2540ef8b8bec73f746818",

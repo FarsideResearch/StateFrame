@@ -11,7 +11,8 @@ Each row's fields form the fault record (persisted in problems.jsonl under "fiel
                      random input: the same inputs in the same call order give the same id.
   kind               registry taxonomy letter (A/B/C/D), or "unregistered".
   exception_class    type name of the caught error.
-  exception_message  whitespace-normalized, at most MAX_MESSAGE_CHARS; EMPTY_DETAIL when empty.
+  exception_message  whitespace-normalized, at most MAX_MESSAGE_CHARS; EMPTY_DETAIL when empty;
+                     SECRET_WITHHELD_DETAIL when it holds a registered secret.
   site_id            the handler id (the guarded site).
   required_work_id   HandlerSpec.required_work_id, or None.
   cause_chain        JSON text of the class names along __cause__/__context__, outermost first, at most
@@ -30,12 +31,16 @@ import asyncio
 import hashlib
 import json
 import re
+import sys
 
 import kernel_reason_log as rl
 from kernel_fault_registry import HandlerSpec, lookup_handler
 
 UNREGISTERED = "unregistered"
 EMPTY_DETAIL = "<empty message>"
+# Stored instead of a message that contains a registered secret or cannot be rendered.
+SECRET_WITHHELD_DETAIL = "<message withheld: contains a registered secret>"
+UNRENDERABLE_DETAIL = "<message withheld: str() failed>"
 MAX_MESSAGE_CHARS = 300
 MAX_CHAIN = 5
 FAULT_ID_CHARS = 16
@@ -164,8 +169,32 @@ def _expectation(spec: HandlerSpec | None, error_name: str) -> str:
 
 
 def _detail(error: BaseException) -> str:
-    text = " ".join(str(error).split())
+    """The row's message: never a registered secret, never an exception from a hostile __str__."""
+    try:
+        text = " ".join(str(error).split())
+    except Exception:  # noqa: BLE001 - an error's own __str__ must not break fault recording
+        return UNRENDERABLE_DETAIL
+    if text and _contains_registered_secret(text):
+        return SECRET_WITHHELD_DETAIL
     return text or EMPTY_DETAIL
+
+
+def _contains_registered_secret(text: str) -> bool:
+    """Check the text with the checkpoint byte guard (raw and escaped forms of every registered secret).
+
+    Only an already loaded checkpoint module can hold registered secrets, so this never imports it. When
+    the check itself fails the message is treated as secret-bearing (fail closed: withhold it).
+    """
+    module = sys.modules.get("kernel_checkpoint") or sys.modules.get("stateframe.engine.kernel_checkpoint")
+    if module is None or not getattr(module, "_SECRETS", None):
+        return False
+    try:
+        module._check_registered_secrets(text.encode("utf-8", "surrogatepass"))
+    except module.CheckpointError:
+        return True
+    except Exception:  # noqa: BLE001 - unknown guard failure: withhold rather than risk a leak
+        return True
+    return False
 
 
 def _bounded(text: str) -> str:
