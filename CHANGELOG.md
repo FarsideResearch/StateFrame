@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fixed (Linux check sandbox, uv installs): a check no longer dies before it starts with `bwrap: execvp <venv>/bin/python: No such file or directory` when StateFrame itself runs from a uv-style virtual environment and the check program is not that same interpreter (`--test-python /usr/bin/python3`, a shell or `npm` `--check-cmd`, and every subframe check under those settings). The sandbox wraps each check in a process-limit launcher run by the engine's interpreter; only the check program's symlinked install directory was mounted, so the launcher's venv link dangled, each check returned exit 1 with empty output, and subframes spent their request budget on checks that never ran. The launcher's and the selected test interpreter's link hops are now mounted read-only as well. Runs whose check program is the engine's own interpreter build the same sandbox command as before. Tests: `tests/test_uv_venv_sandbox.py`.
+
 ## 0.7.10 (2026-11-16)
 
 - Fixed: a repository file whose text contains host markers (source-window framing lines, `[EVIDENCEPIN]` blocks, `[CONTINUATION LIMITS |` lines) no longer stops the run before its first request. Source-window bodies are now framed by each range header's declared line count instead of a marker search, and file, tool and source-window text is never read as a host evidence pin or continuation limit.
