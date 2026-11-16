@@ -210,3 +210,84 @@ def test_restore_refuses_a_file_that_is_neither_pre_nor_postimage(tmp_path, inst
 
 def test_mutation_journal_is_live_run_data_never_checkpointed():
     assert "mutations" in kernel_checkpoint.SKIP_RUN_ENTRIES
+
+
+def _restore_with(saved: MutationRuntime, tmp_path: Path, restored: MutationRuntime) -> None:
+    kernel_mutate_runtime.install(_runtime(tmp_path, run_dir=saved.run_dir, repo=saved.repo))
+    kernel_mutate_runtime._active = restored
+    kernel_mutate_runtime.rebind_after_checkpoint()
+
+
+def test_roll_forward_is_all_or_nothing_when_a_later_row_conflicts(tmp_path, installed):
+    from kernel_mutate_edits import EditConflict
+
+    saved = _workspace_runtime(tmp_path)
+    restored = _round_trip(saved)
+    (saved.repo / "a.txt").write_bytes(b"A")
+    (saved.repo / "b.txt").write_bytes(b"unexpected")
+    _commit(saved.journal, "c1", "a.txt", b"A", b"B")
+    _commit(saved.journal, "c2", "b.txt", b"X", b"Y")
+    with pytest.raises(EditConflict):
+        _restore_with(saved, tmp_path, restored)
+    # The first row validated, but nothing is written unless every row does.
+    assert (saved.repo / "a.txt").read_bytes() == b"A"
+    assert (saved.repo / "b.txt").read_bytes() == b"unexpected"
+
+
+def test_roll_forward_chains_rows_that_touch_the_same_file(tmp_path, installed):
+    saved = _workspace_runtime(tmp_path)
+    restored = _round_trip(saved)
+    (saved.repo / "a.txt").write_bytes(b"A")
+    _commit(saved.journal, "c1", "a.txt", b"A", b"B")
+    _commit(saved.journal, "c2", "a.txt", b"B", b"C")  # its preimage is c1's postimage
+    _restore_with(saved, tmp_path, restored)
+    assert (saved.repo / "a.txt").read_bytes() == b"C"
+
+
+def test_roll_forward_checks_a_later_row_against_the_earlier_rows_postimage(tmp_path, installed):
+    from kernel_mutate_edits import EditConflict
+
+    saved = _workspace_runtime(tmp_path)
+    restored = _round_trip(saved)
+    (saved.repo / "a.txt").write_bytes(b"A")
+    _commit(saved.journal, "c1", "a.txt", b"A", b"B")
+    # Valid against the disk (A), but after c1 the file holds B: neither pre nor postimage.
+    _commit(saved.journal, "c2", "a.txt", b"A", b"C")
+    with pytest.raises(EditConflict):
+        _restore_with(saved, tmp_path, restored)
+    assert (saved.repo / "a.txt").read_bytes() == b"A"
+
+
+def test_roll_forward_chains_a_create_then_delete_of_one_file(tmp_path, installed):
+    saved = _workspace_runtime(tmp_path)
+    restored = _round_trip(saved)
+    _commit(saved.journal, "c1", "t.txt", None, b"T")
+    _commit(saved.journal, "c2", "t.txt", b"T", None)
+    _restore_with(saved, tmp_path, restored)
+    assert not (saved.repo / "t.txt").exists()
+
+
+def test_roll_forward_undoes_earlier_writes_when_a_later_write_fails(tmp_path, installed, monkeypatch):
+    import kernel_mutate_edits
+    from kernel_mutate_edits import EditConflict
+
+    saved = _workspace_runtime(tmp_path)
+    restored = _round_trip(saved)
+    (saved.repo / "a.txt").write_bytes(b"A")
+    (saved.repo / "b.txt").write_bytes(b"X")
+    _commit(saved.journal, "c1", "a.txt", b"A", b"B")
+    _commit(saved.journal, "c2", "b.txt", b"X", b"Y")
+    real_write, calls = kernel_mutate_edits._write_at, []
+
+    def failing_write(parent_fd, name, data, mode):
+        calls.append(name)
+        if len(calls) == 2:
+            raise OSError("injected write failure")
+        real_write(parent_fd, name, data, mode)
+
+    monkeypatch.setattr(kernel_mutate_edits, "_write_at", failing_write)
+    with pytest.raises(EditConflict):
+        _restore_with(saved, tmp_path, restored)
+    assert (saved.repo / "a.txt").read_bytes() == b"A"
+    assert (saved.repo / "b.txt").read_bytes() == b"X"
+    assert sorted(path.name for path in saved.repo.iterdir()) == ["a.txt", "b.txt"]
