@@ -515,12 +515,14 @@ class ContinuationLimits(ResponseBudget):
     continuation_limits_schema = "stateframe-continuation-limits/1"
     continuation_model_decisions_used: int = 0
     terminal_reserves_consumed: int = 0
+    terminal_tool_attempts_used: int = 0
 
     def __post_init__(self) -> None:
         super().__post_init__()
         for name, value in (
                 ("continuation_model_decisions_used", self.continuation_model_decisions_used),
-                ("terminal_reserves_consumed", self.terminal_reserves_consumed)):
+                ("terminal_reserves_consumed", self.terminal_reserves_consumed),
+                ("terminal_tool_attempts_used", self.terminal_tool_attempts_used)):
             if type(value) is not int or value < 0:
                 raise ValueError(f"{name} must be a non-negative integer")
 
@@ -532,11 +534,16 @@ class ContinuationLimits(ResponseBudget):
     def model_decisions_remaining(self) -> int | None:
         return remaining(self.limit, self.model_decisions_used)
 
+    @property
+    def _terminal_tool_attempt_available(self) -> bool:
+        """True while a funded terminal response has not yet spent its extra tool attempt."""
+        return self.terminal_reserves_consumed > self.terminal_tool_attempts_used
+
     def restore_usage(self, records: Iterable[Mapping[str, object]], *, tool_calls_used: int) -> None:
         """Fold durable charges without replenishing decisions, checks, or reserves."""
         if type(tool_calls_used) is not int or tool_calls_used < 0:
             raise ValueError("restored tool count must be a non-negative integer")
-        responses = decisions = checks = reserved = terminal = 0
+        responses = decisions = checks = reserved = terminal = terminal_tools = 0
         for record in records:
             if not isinstance(record, Mapping):
                 continue
@@ -549,12 +556,14 @@ class ContinuationLimits(ResponseBudget):
                 checks += int(unit == "automatic_check")
                 reserved += int(unit == "terminal_reserve")
                 terminal += int(unit == "terminal_response")
+                terminal_tools += int(unit == "terminal_tool_attempt")
         self.responses_used = responses
         self.continuation_model_decisions_used = decisions
         self.tool_calls_used = tool_calls_used
         self.automatic_checks_used = checks
         self.terminal_reserves_used = reserved
         self.terminal_reserves_consumed = terminal
+        self.terminal_tool_attempts_used = terminal_tools
 
     def can_start_response(self) -> bool:
         if self._sandbox_seconds_remaining() is not None and self._sandbox_seconds_remaining() <= 0:
@@ -591,6 +600,9 @@ class ContinuationLimits(ResponseBudget):
             return False
         if not reached(self.tool_attempt_limit, self.tool_calls_used):
             return True
+        # Cap reached: a funded terminal response still gets its one write (final answer etc.).
+        if self._terminal_tool_attempt_available:
+            return True
         self._emit("tool_attempt_cap_hit", reason="continuation_tool_attempt_limit")
         return False
 
@@ -598,13 +610,20 @@ class ContinuationLimits(ResponseBudget):
                            tool: str | None = None) -> bool:
         if not self.can_start_tool_call():
             return False
+        if not reached(self.tool_attempt_limit, self.tool_calls_used):
+            self.tool_calls_used += 1
+            self._emit("continuation_unit_charged", unit="tool_attempt", step=step, tool=tool)
+            return True
+        # Admitted only through the terminal reserve path (see can_start_tool_call).
+        self.terminal_tool_attempts_used += 1
         self.tool_calls_used += 1
-        self._emit("continuation_unit_charged", unit="tool_attempt", step=step, tool=tool)
+        self._emit("continuation_unit_charged", unit="terminal_tool_attempt", step=step, tool=tool)
         return True
 
     def continuation_snapshot(self) -> dict[str, object]:
         snapshot = super().continuation_snapshot()
         snapshot["terminal_reserves_consumed"] = self.terminal_reserves_consumed
+        snapshot["terminal_tool_attempts_used"] = self.terminal_tool_attempts_used
         snapshot["funded_terminal_responses_remaining"] = max(
             0, self.terminal_reserves_used - self.terminal_reserves_consumed)
         return snapshot

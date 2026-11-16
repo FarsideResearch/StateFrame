@@ -15,7 +15,6 @@ VERIFY_REQUIRED = "VERIFY_REQUIRED"
 RECOVERY_REQUIRED = "RECOVERY_REQUIRED"
 STOP_INCOMPLETE = "STOP_INCOMPLETE"
 MAX_REQUESTS = 150
-DEFAULT_DEADLINE_SECONDS = 3600.0
 DEFAULT_RESERVE_SLOTS = 3
 
 
@@ -57,7 +56,6 @@ class ChurnState:
     settled_effects: tuple[str, ...] = ()
     settled_transactions: tuple[str, ...] = ()
     last_decision: str = ALLOW
-    deadline_seconds: float = DEFAULT_DEADLINE_SECONDS
     configured_limit: int | None = MAX_REQUESTS
 
 
@@ -93,15 +91,13 @@ class EditChurnBudget:
     """State survives restart, checkpoint, and recovery by explicit snapshot."""
 
     def __init__(self, run_id: object, *, configured_limit: int | None = MAX_REQUESTS,
-                 deadline_seconds: float = DEFAULT_DEADLINE_SECONDS, reserve_slots: int = DEFAULT_RESERVE_SLOTS):
+                 reserve_slots: int = DEFAULT_RESERVE_SLOTS):
         limit = None if configured_limit is None else int(configured_limit)
         if limit is not None and limit < 0:
             raise ValueError("configured_limit must be non-negative")
-        if float(deadline_seconds) <= 0:
-            raise ValueError("deadline_seconds must be positive")
         self.reserve_slots = max(0, int(reserve_slots))
         self._state = ChurnState(
-            str(run_id or ""), deadline_seconds=float(deadline_seconds),
+            str(run_id or ""),
             configured_limit=None if limit is None else min(limit, MAX_REQUESTS),
         )
 
@@ -136,7 +132,6 @@ class EditChurnBudget:
             "settled_effects": self._state.settled_effects,
             "settled_transactions": self._state.settled_transactions,
             "last_decision": self._state.last_decision,
-            "deadline_seconds": self._state.deadline_seconds,
             "configured_limit": self._state.configured_limit,
         }
         values.update(changes)
@@ -189,21 +184,14 @@ class EditChurnBudget:
                              "CHARGED" if count_transaction or evidence_increased else "SETTLED")
 
     def _reserve_feasible(self, reserves: object) -> bool:
+        """Request-slot reserve only: the engine keeps no wall-clock reserve."""
         remaining = _field(reserves, "response_slots_remaining", _field(reserves, "remaining_requests", self.remaining_requests))
         try:
             remaining_slots = None if remaining is None and self.effective_limit is None else int(remaining)
         except (TypeError, ValueError):
             return False
         required_slots = int(_field(reserves, "required_response_reserve", self.reserve_slots))
-        remaining_seconds = _field(reserves, "remaining_seconds", None)
-        p95 = sum(float(_field(reserves, name, 0.0) or 0.0)
-                  for name in ("p95_verification_seconds", "p95_recovery_seconds", "p95_export_seconds"))
-        if remaining_seconds is None:
-            remaining_seconds = self._state.deadline_seconds - self._state.elapsed_seconds
-        try:
-            return (remaining_slots is None or remaining_slots >= required_slots) and float(remaining_seconds) >= p95
-        except (TypeError, ValueError):
-            return False
+        return remaining_slots is None or remaining_slots >= required_slots
 
     def admit(self, action: object, transaction: object, reserves: object) -> str:
         name = str(action or _field(transaction, "action", "")).strip().lower()
@@ -220,8 +208,6 @@ class EditChurnBudget:
         elif recovery_action:
             decision = ALLOW
         elif reached(self.effective_limit, self._state.requests_consumed):
-            decision = STOP_INCOMPLETE
-        elif self._state.elapsed_seconds >= self._state.deadline_seconds:
             decision = STOP_INCOMPLETE
         elif self._state.public_green_candidate and self._state.speculative_transactions >= 2 and not grounded:
             decision = VERIFY_REQUIRED
@@ -254,7 +240,6 @@ class EditChurnBudget:
                 "settled_effects": list(self._state.settled_effects),
                 "settled_transactions": list(self._state.settled_transactions),
                 "last_decision": self._state.last_decision,
-                "deadline_seconds": self._state.deadline_seconds,
                 "configured_limit": self._state.configured_limit,
             },
         }
@@ -264,10 +249,10 @@ class EditChurnBudget:
         state = snapshot.get("state") if isinstance(snapshot, Mapping) else None
         if not isinstance(state, Mapping):
             raise ValueError("churn snapshot is missing state")
+        # Legacy snapshots may still carry deadline_seconds; it is ignored on purpose.
         budget = cls(
             state.get("run_id", ""),
             configured_limit=state.get("configured_limit", MAX_REQUESTS),
-            deadline_seconds=float(state.get("deadline_seconds", DEFAULT_DEADLINE_SECONDS)),
             reserve_slots=int(snapshot.get("reserve_slots", DEFAULT_RESERVE_SLOTS)),
         )
         budget._state = ChurnState(
@@ -285,7 +270,6 @@ class EditChurnBudget:
             settled_effects=tuple(str(item) for item in state.get("settled_effects", ()) or ()),
             settled_transactions=tuple(str(item) for item in state.get("settled_transactions", ()) or ()),
             last_decision=str(state.get("last_decision", ALLOW)),
-            deadline_seconds=float(state.get("deadline_seconds", DEFAULT_DEADLINE_SECONDS)),
             configured_limit=budget.effective_limit,
         )
         return budget
@@ -351,7 +335,6 @@ def observe_settled_action(runtime: object, record: Mapping[str, object]) -> str
     )
     reserves = getattr(runtime, "edit_churn_reserves", None) or {
         "response_slots_remaining": budget.remaining_requests,
-        "remaining_seconds": budget.state.deadline_seconds - budget.state.elapsed_seconds,
     }
     decision = budget.admit(tool, transaction, reserves)
     setattr(runtime, "_edit_churn_last_charge", charge_receipt)

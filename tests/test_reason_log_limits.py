@@ -49,17 +49,6 @@ def test_plain_wall_limit_names_env(out):
     assert "STATEFRAME_PLAIN_WALL_S" in out.getvalue() and "plain_loop" in out.getvalue()
 
 
-def test_edit_nturn_budget_names_constant_and_override(out):
-    import kernel_step_contract as sc
-    journal = _Journal()
-    sc.emit_edit_nturn_skipped_budget(journal, n_sites=2, turns_used=1, remaining_seconds=3.0,
-                                      required_seconds=12.0)
-    text = out.getvalue()
-    assert ("EDIT_NTURN_RUN_BUDGET_SECONDS=1800s" in text and "STATEFRAME_EDIT_NTURN_RUN_BUDGET_SECONDS" in text
-            and "provider wait excluded" in text)
-    assert journal.events == ["edit_nturn_skipped_budget"]
-
-
 def test_git_query_timeout_is_logged_not_silent(out, tmp_path, monkeypatch):
     import kernel_git_view as gv
     import kernel_safe_probe as sp

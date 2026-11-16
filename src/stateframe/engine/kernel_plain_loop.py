@@ -3,7 +3,7 @@
 Selected only by STATEFRAME_AGENT_LOOP=plain. Same system prompt, the same seven
 tools and schemas, append-only history, every call of a response executed in
 order, a 12,000-character result cap, and no governors, gates, notices or menu
-changes. Stops only on done, wall clock, request cap, or a transport/context end.
+changes. Stops only on done, a user-set wall clock, request cap, or a transport/context end.
 
 Deliberate differences from the baseline (all host-side, none model-visible
 unless a hook is switched on):
@@ -23,6 +23,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 import hashlib
 import json
+import math
 import re
 import threading
 import time
@@ -114,10 +115,16 @@ class ProviderTransportError(Exception):
         self.timed_out = bool(timed_out)
 
 
+def _finite_positive(value: object) -> bool:
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value) and value > 0)
+
+
 @dataclass(frozen=True)
 class Limits:
     model: str
-    wall_s: float = 1800.0
+    # None = no engine wall limit. Set only by the user (STATEFRAME_PLAIN_WALL_S) or the supervisor deadline.
+    wall_s: float | None = None
     max_requests: int = 150
     request_timeout_s: float = 600.0
     temperature: float = 1.0
@@ -136,10 +143,10 @@ class Limits:
     def __post_init__(self) -> None:
         if not self.model:
             raise ValueError("plain loop requires a model id")
-        for name in ("wall_s", "request_timeout_s"):
-            value = getattr(self, name)
-            if not (isinstance(value, (int, float)) and value > 0 and value != float("inf")):
-                raise ValueError(f"{name} must be a positive finite number")
+        if self.wall_s is not None and not _finite_positive(self.wall_s):
+            raise ValueError("wall_s must be a positive finite number or None")
+        if not _finite_positive(self.request_timeout_s):
+            raise ValueError("request_timeout_s must be a positive finite number")
         if self.max_requests < 1 or self.max_tokens < 1:
             raise ValueError("max_requests and max_tokens must be positive")
 
@@ -244,11 +251,12 @@ def run_loop(task_text: str, *, provider: Provider, execute: Executor, limits: L
                   tools=[t["function"]["name"] for t in TOOLS], limits=limits.__dict__)
     try:
         while True:
-            if clock() - t0 > limits.wall_s:
+            if limits.wall_s is not None and clock() - t0 > limits.wall_s:
                 result.end = "time_limit"
                 emit_timeout("plain_loop", what="plain loop episode", journal=journal,
-                             why=f"episode wall limit {limits.wall_s:g}s reached; limit: STATEFRAME_PLAIN_WALL_S "
-                                 "(default 1800s, capped by the supervisor attempt deadline); override env STATEFRAME_PLAIN_WALL_S",
+                             why=f"episode wall limit {limits.wall_s:g}s reached; set by STATEFRAME_PLAIN_WALL_S "
+                                 "or the supervisor attempt deadline (CAPABILITY_ATTEMPT_DEADLINE_MONOTONIC); "
+                                 "unset means no wall limit",
                              deadline_s=limits.wall_s, elapsed_s=clock() - t0, cause_key="plain_wall")
                 break
             if result.requests >= limits.max_requests:
@@ -263,8 +271,11 @@ def run_loop(task_text: str, *, provider: Provider, execute: Executor, limits: L
             if callable(provider_prepare):
                 provider_prepare(body)
             encoded = json.dumps(body).encode()
-            remaining = int(limits.wall_s - (clock() - t0)) + 5
-            timeout = min(limits.request_timeout_s, max(remaining, 30))
+            if limits.wall_s is None:
+                timeout = limits.request_timeout_s
+            else:
+                remaining = int(limits.wall_s - (clock() - t0)) + 5
+                timeout = min(limits.request_timeout_s, max(remaining, 30))
             journal.write("request_submitted", request=result.requests + 1, body_sha256="sha256:"
                           + hashlib.sha256(encoded).hexdigest(), body_bytes=len(encoded),
                           messages=len(wire_messages), timeout_s=timeout,
@@ -373,7 +384,7 @@ def run_loop(task_text: str, *, provider: Provider, execute: Executor, limits: L
 def _may_retry(result: LoopResult, limits: Limits, elapsed: float, journal, reason: str) -> bool:
     allowed = (result.consecutive_transport_failures < limits.transport_retries
                and result.transport_retries < limits.max_total_transport_retries
-               and elapsed < limits.wall_s - 60)
+               and (limits.wall_s is None or elapsed < limits.wall_s - 60))
     if allowed:
         result.transport_retries += 1
         result.consecutive_transport_failures += 1
