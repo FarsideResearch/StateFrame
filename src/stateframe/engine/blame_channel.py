@@ -312,8 +312,8 @@ REPO_ROOT = os.path.dirname(ROOT)
 
 def _repo_map() -> Dict[str, str]:
     return {
-        "lab-repo": REPO_ROOT,
-        "mission-control": os.path.join(REPO_ROOT, "mission-control"),
+        "primary": REPO_ROOT,
+        "secondary": os.path.join(REPO_ROOT, "secondary"),
     }
 
 

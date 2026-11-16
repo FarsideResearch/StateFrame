@@ -9,9 +9,9 @@ from stateframe.engine import check_selection
 
 def test_repair_module_identity_and_repo_selector_overlay(monkeypatch, tmp_path: Path):
     assert check_selection.rr is react_repair
-    mc_root = tmp_path / "mc"
-    mc_root.mkdir()
-    monkeypatch.setitem(react_repair.REPOS, "mc", mc_root / "backend")
+    secondary_root = tmp_path / "secondary"
+    secondary_root.mkdir()
+    monkeypatch.setitem(react_repair.REPOS, "secondary", secondary_root / "backend")
     calls = []
 
     def fake_run(argv, **_kwargs):
@@ -26,12 +26,12 @@ def test_repair_module_identity_and_repo_selector_overlay(monkeypatch, tmp_path:
         return SimpleNamespace(returncode=0, stdout="def test_fixed_behavior(): assert True\n")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    row = {"repo": "mc", "sha": "abc123", "fn": "unique_mc_selector_case"}
+    row = {"repo": "secondary", "sha": "abc123", "fn": "unique_selector_case"}
     assert check_selection.fail_to_pass_ids(row) == ["tests/test_one.py::test_fixed_behavior"]
     assert check_selection.overlay_fix_tests(tmp_path / "grading", row) == 1
     assert (tmp_path / "grading/tests/test_one.py").read_text() == (
         "def test_fixed_behavior(): assert True\n")
-    assert all(str(mc_root) in str(argv) for argv in calls)
+    assert all(str(secondary_root) in str(argv) for argv in calls)
 
 
 def test_multifile_selectors_and_pristine_overlay(tmp_path: Path):

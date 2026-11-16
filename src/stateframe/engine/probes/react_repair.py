@@ -500,8 +500,8 @@ def _append_structure_fact_observation(measurement, bolt, observation: str,
 
 REPOS = {
     name: pathlib.Path(path)
-    for name, key in (("aha", "STATEFRAME_AHA_REPO"),
-                      ("mc", "STATEFRAME_MC_REPO"),
+    for name, key in (("primary", "STATEFRAME_SOURCE_REPO_PRIMARY"),
+                      ("secondary", "STATEFRAME_SOURCE_REPO_SECONDARY"),
                       ("build", "STATEFRAME_BUILD_REPO"))
     if (path := os.environ.get(key))
 }
@@ -541,9 +541,6 @@ it is the only real feedback available to you, and you cannot get it without act
   * `done` with no edit made is a wasted run: you will have submitted the original bug.
 
 ### Operating rules
-(Ported from Mission Control's production coding agent, `agent-runner/app/coding_executor.py`
-:DEFAULT_CODING_SYSTEM_PROMPT — these are battle-tested on a real fleet and this probe had
-none of them.)
 
   * Read the file you are about to edit. Never edit blind.
   * Do NOT re-read a file just to confirm an edit landed. The edit command tells you whether
@@ -2636,9 +2633,9 @@ def _render_multifile_list(fileset: FileSet, *, limit: int = 1400) -> str:
 # Native tool calls deliver structured arguments and avoid ambiguities in
 # free-form command parsing, including quoting and truncated code fences.
 #
-# Ported from sample project's agent-runner/app/openai_client.py: the DeepSeek DSML quirk — Flash
+# Ported from an upstream OpenAI-compatible client: the DeepSeek DSML quirk — Flash
 # occasionally emits tool calls as literal <｜DSML｜...> markup inside content with an empty
-# tool_calls array (known upstream bug). sample project's parser grammar is reproduced verbatim.
+# tool_calls array (known upstream bug). The client parser grammar is reproduced verbatim.
 
 
 def _list_files_command(args: Mapping[str, object]) -> str:
@@ -6943,9 +6940,9 @@ def work(d, *, resume=None):
     os.environ["REACT_DB_NAME"] = (
         f"stateframe_test_react_{os.environ['REACT_RUN_ID']}_{fn[:20].lower()}")
 
-    src_repo = REPOS.get(d.get("repo") or "aha")
+    src_repo = REPOS.get(d.get("repo") or "primary")
     if src_repo is None and d.get("repo") != "build" and not (d.get("source_dataset") and d.get("base_commit")):
-        raise RuntimeError("source repository is not configured; set STATEFRAME_AHA_REPO or STATEFRAME_MC_REPO")
+        raise RuntimeError("source repository is not configured; set STATEFRAME_SOURCE_REPO_PRIMARY or STATEFRAME_SOURCE_REPO_SECONDARY")
     continuation_workspace = None
     if continuation_active:
         from kernel_continuation_workspace import ContinuationWorkspace
@@ -7005,9 +7002,9 @@ def work(d, *, resume=None):
             # copy-current approach if the sha does not resolve (and for sample project, whose git root is
             # the whole sample repository tree).
             root = (sbox / "repo") if d.get("repo") == "build" else root
-            if (d.get("repo") == "mc") and d.get("sha") and \
+            if (d.get("repo") == "secondary") and d.get("sha") and \
                     os.environ.get("COHERENT_SNAPSHOT", "1") == "1":
-                mc_root = src_repo.parent                       # mission-control/ (the git root)
+                mc_root = src_repo.parent                       # parent of the backend/ subtree (the git root)
                 (sbox / "repo").mkdir()
                 sha = str(d["sha"])
                 if not re.fullmatch(r"[0-9a-fA-F]{7,64}", sha):
@@ -7050,7 +7047,7 @@ def work(d, *, resume=None):
             #
             # Measured: sample project tests collect fine in the real repo (20 tests) and FAIL in our copy with
             #   ImportError: plugin "test_support.guard_pytest": No module named 'test_support'
-            # because `test_support/` lives at mission-control/, one level ABOVE the backend/
+            # because `test_support/` lives at the git root, one level ABOVE the backend/
             # directory we copy. pytest loads it as a plugin before collecting anything, so every
             # test run in the sandbox died at plugin import — and the agent was told "TESTS FAILED"
             # or "suite cannot run" for a defect that was entirely ours.
@@ -7139,7 +7136,7 @@ def work(d, *, resume=None):
         if os.environ.get("GROUNDED_BRIEF", "1") == "1" and d.get("sha") \
                 and src_repo is not None and d.get("repo") != "build":
             # (build tasks have a synthetic sha and no git world — their brief IS the spec)
-            git_root = (src_repo.parent if d.get("repo") == "mc"
+            git_root = (src_repo.parent if d.get("repo") == "secondary"
                         else src_repo.parent)               # sample repository root for sample project
             gm = subprocess.run(["git", "-C", str(git_root), "log", "--format=%s",
                                  "-1", d["sha"]], capture_output=True, text=True, timeout=30)
@@ -15323,7 +15320,7 @@ def work(d, *, resume=None):
                 _sel = None
                 if d.get("runner_kind") == "generic" and not d.get("test_command"):
                     behaviour = "no_test_oracle"
-                elif ((d.get("repo") == "mc" and d.get("sha"))
+                elif ((d.get("repo") == "secondary" and d.get("sha"))
                         or d.get("repo") == "build"
                         or (d.get("source_dataset") and d.get("base_commit"))):
                     if d.get("repo") == "build" and not multifile:

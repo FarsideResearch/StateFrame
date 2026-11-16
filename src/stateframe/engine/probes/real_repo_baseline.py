@@ -26,7 +26,7 @@ URL = "http://127.0.0.1:8098/v1/chat/completions"
 
 
 POC = pathlib.Path(__file__).resolve().parents[1]
-REPO = pathlib.Path("/nonexistent/lab-repo/backend/app")
+REPO = pathlib.Path("/nonexistent/source-repo/backend/app")
 OUT = POC / "results" / "real_repo_baseline.jsonl"
 N_TASKS = 20
 MENU_K = 8

@@ -41,7 +41,7 @@ LEDGER_HEADER = (f"[Reasoning ledger | schema={SCHEMA} | RECEIPTS are host facts
                  "CLAIMS are your own earlier sentences, unverified candidates]")
 MAX_RENDER_TOKENS = 400
 # STATEFRAME_REASONING_LEDGER_MAX_TOKENS: the render budget as an integer env knob (default = the
-# constant above; 50..2000).  Read at every render so a lab variant can trim the block without a code fork.
+# constant above; 50..2000).  Read at every render so an experiment variant can trim the block without a code fork.
 MAX_TOKENS_ENV = "STATEFRAME_REASONING_LEDGER_MAX_TOKENS"
 
 

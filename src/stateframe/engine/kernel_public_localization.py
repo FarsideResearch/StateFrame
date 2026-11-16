@@ -48,7 +48,7 @@ _PRIVATE_MARKERS = re.compile(
 )
 _PRIVATE_PATH_PARTS = frozenset({
     ".git", ".stateframe",
-    "__pycache__", "node_modules", "dist", "build", "coverage", ".mission",
+    "__pycache__", "node_modules", "dist", "build", "coverage",
     "grader", "graders", "gold", "private", "hidden", "hidden_tests", "backups",
     "evaluator", "evaluators", "oracle", "sentinel", "reports",
 })

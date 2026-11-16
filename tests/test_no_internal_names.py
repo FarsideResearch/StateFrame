@@ -25,6 +25,13 @@ _PATTERNS = {
         + r"/home/" + "mi" + "ke" + r"/",
         re.IGNORECASE,
     ),
+    # Internal roles, ops paths, lab hosts and review-file names (fragments keep this file clean).
+    "internal_role": re.compile(r"\b" + "chi" + r"ef\b", re.IGNORECASE),
+    "internal_path": re.compile(r"\bcrew-(?:" + "ops|" + "lanes)", re.IGNORECASE),
+    "lab_host": re.compile(r"\b" + "ry" + "zen" + r"\b", re.IGNORECASE),
+    "review_file": re.compile(
+        r"\b(?:" + "fa" + "ble|" + "as" + "tra|" + "lu" + r"na)_[a-z0-9_]+\.md\b", re.IGNORECASE
+    ),
     "machine_label": re.compile(r"\bhost_tok" + r"28\b", re.IGNORECASE),
     "private_pattern": re.compile("item28" + r"\[bc\]", re.IGNORECASE),
     "run_label": re.compile(
@@ -52,7 +59,7 @@ class _Allow:
 
 _ALLOWLIST = {
     ("tests/test_allocation_replay_corpus.py", "personal_host"): _Allow(
-        4, "the corpus scrub test names local identities it must reject"
+        2, "the corpus scrub test names local identities it must reject"
     ),
     ("tests/test_allocation_replay_corpus.py", "machine_label"): _Allow(
         1, "the corpus scrub test rejects its known host marker"
@@ -60,26 +67,17 @@ _ALLOWLIST = {
     ("tests/test_allocation_replay_corpus.py", "private_pattern"): _Allow(
         1, "the corpus scrub test rejects both variants of a private marker"
     ),
+    ("tests/test_catalog_full_coverage.py", "project_alias"): _Allow(
+        1, "schema identifier of the vendored repo-intel outline format"
+    ),
     ("tests/test_engine_run.py", "synthetic_label"): _Allow(
         3, "stable subprocess label used by the permission-error regression"
-    ),
-    ("tests/test_check_selection.py", "project_alias"): _Allow(
-        3, "repository selector key and temporary path in an oracle fixture"
     ),
     ("tests/test_final_cache_layout.py", "run_label"): _Allow(
         1, "synthetic request identifier in a test fixture, unrelated to a measurement lane"
     ),
     ("tests/test_shell_policy.py", "run_label"): _Allow(
         1, "carriage-return progress bytes in a shell normalization fixture"
-    ),
-    ("tests/test_lab_batch_drivers.py", "lab_driver_path"): _Allow(
-        1, "the test loads extracted maintenance drivers from their shipped path"
-    ),
-    ("tests/test_lab_driver_bindings.py", "lab_driver_path"): _Allow(
-        1, "the test verifies extracted driver imports keep their shipped bindings"
-    ),
-    ("tests/test_lab_move_integrity.py", "lab_driver_path"): _Allow(
-        3, "the moved-driver regression checks the exact maintenance script paths"
     ),
 }
 
@@ -88,6 +86,7 @@ _CANDIDATE_HINTS = (
     "a" + "ha", "m" + "c", "rule #", "crew-", "su" + "san", "mi" + "ke", "found" + "ry",
     "mari" + "da", "farsi" + "de", "team" + " opus", "sf-" + "work",
     "sf-test" + "-runners", "host_tok" + "28", "item28" + "[bc]",
+    "chi" + "ef", "ry" + "zen", "fa" + "ble_", "as" + "tra_", "lu" + "na_",
     "ldev_", "frame" + "lab", "operator" + "2",
     "run" + "real", "bug" + "hunt", "token lab", "token-lab", "tokenlab v",
     "bench/" + "lab", "lab" + "-repo", "lab" + "-only", "permission" + "-control",
@@ -161,6 +160,8 @@ def _find_private_labels(contexts: list[_Context], *, enforce_allowlist: bool = 
     allowed_counts: dict[tuple[str, str], int] = {}
     for context in contexts:
         for name, pattern in _PATTERNS.items():
+            if context.kind == "fixture" and name not in _FIXTURE_PATTERNS:
+                continue
             matches = list(pattern.finditer(context.text))
             if not matches:
                 continue
@@ -186,8 +187,31 @@ def _find_private_labels(contexts: list[_Context], *, enforce_allowlist: bool = 
     return violations
 
 
-def _scan_tree(root: Path) -> list[_Context]:
+# Fixtures are data, not prose: only host/identity-style patterns apply to them.
+_FIXTURE_PATTERNS = frozenset({
+    "full_project_name", "personal_host", "internal_role", "internal_path", "lab_host",
+    "review_file", "machine_label", "private_pattern",
+})
+
+
+def _scan_fixtures(root: Path) -> list[_Context]:
+    """Line-level contexts for every text file under tests/fixtures (json, txt, ...)."""
     contexts: list[_Context] = []
+    for path in sorted((root / "tests" / "fixtures").rglob("*")):
+        if not path.is_file() or path.suffix == ".py":
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue  # binary fixture
+        relative = path.relative_to(root).as_posix()
+        for number, line in enumerate(text.splitlines(), 1):
+            contexts.append(_Context(relative, number, "fixture", line))
+    return contexts
+
+
+def _scan_tree(root: Path) -> list[_Context]:
+    contexts: list[_Context] = _scan_fixtures(root)
     for source_root in (root / "src", root / "tests"):
         for path in sorted(source_root.rglob("*.py")):
             source = path.read_text(encoding="utf-8")

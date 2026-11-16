@@ -1,6 +1,6 @@
 """EDITREADY never takes the slot of a host-authority panel (0.7.3/0.7.4 P0).
 
-crew-09 live runs (subframes OFF and --parallel 2) ended ENGINE_ERROR with
+live runs (subframes OFF and --parallel 2) ended ENGINE_ERROR with
 RequestSealError("owner presentation limits differ from admitted contract"):
 apply_editready_fact picked the standalone ``[CONTINUATION LIMITS | ...]``
 user message as its "safe panel" and overwrote it, so the sealed limits line
@@ -34,7 +34,7 @@ def _editready_on(monkeypatch):
 
 
 def _request_four_shape(limits_message: dict[str, object]) -> list[dict[str, object]]:
-    # Shape of crew-09's request 4: the limits panel is the last user message
+    # Shape of a live run request: the limits panel is the last user message
     # and no read-reuse or read-order panel exists, so it was candidates[-1].
     return [
         {"role": "system", "content": "system prompt"},

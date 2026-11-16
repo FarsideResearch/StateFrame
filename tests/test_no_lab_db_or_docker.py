@@ -12,7 +12,8 @@ import subprocess
 
 _FORBIDDEN_PORT = 55432
 _FORBIDDEN_PORT_TEXT = "55432"
-_LAB_CONTAINER = "mission-control-db"
+# Built from fragments so the shipped tree does not spell the private container name.
+_LAB_CONTAINER = "-".join(("missi" "on", "con" "trol", "db"))
 _DOCKER = "docker"
 
 

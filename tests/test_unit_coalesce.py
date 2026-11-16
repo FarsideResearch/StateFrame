@@ -761,7 +761,7 @@ def test_review_06_advisory_escalation_is_documented():
     import kernel_v46_mechanism_wiring as wiring
     text = Path("KNOWN_LIMITATIONS.md").read_text()
     assert "escalated but kept retrying" in text
-    assert 'kernel_v46_mechanism_wiring.enabled("escalation")' in text
+    assert "unit_coalesce_escalate" in text and "off-by-default profile switch" in text
     assert wiring.FLAGS["escalation"] == "STATEFRAME_KERNEL_ESCALATION"
 
 

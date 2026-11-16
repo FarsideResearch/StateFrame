@@ -1303,6 +1303,60 @@ def parse_model_source_window(content: object) -> dict[str, object] | None:
     return value if isinstance(value, dict) and value.get("schema") == MODEL_WINDOW_SCHEMA else None
 
 
+def _walk_window_body(
+        lines: Sequence[str], start: int,
+) -> tuple[list[tuple[dict[str, object], list[str]]], int] | None:
+    """Frame a window body by the line counts its range headers declare.
+
+    Each "--- source lines A-B ---" header owns exactly B-A+1 following lines,
+    whatever those lines say, so file text that looks like a header or like
+    the end marker stays inert.  Returns the segments and the index of the
+    end marker, or None when the declared framing does not fit the body.
+    """
+    segments: list[tuple[dict[str, object], list[str]]] = []
+    index = start
+    while index < len(lines):
+        text = lines[index].rstrip("\r\n")
+        if text == WINDOW_END_MARKER:
+            return segments, index
+        match = _RANGE.match(text)
+        if match is None:
+            return None
+        first, last = int(match.group(1)), int(match.group(2))
+        count = last - first + 1
+        if count < 1 or index + 1 + count > len(lines):
+            return None
+        segments.append(({"start_line": first, "end_line": last},
+                         list(lines[index + 1:index + 1 + count])))
+        index += 1 + count
+    return None
+
+
+def _scan_window_segments(
+        lines: Sequence[str], start: int,
+) -> list[tuple[dict[str, object], str]]:
+    """Segments of a window body, or [] when the declared framing does not fit.
+
+    There is deliberately no marker-search fallback: a body whose range
+    headers do not account for every line up to the end marker is malformed
+    (truncated, tampered with, or rendered from stale ranges), and every
+    caller treats an empty segment list as an unverifiable window.  Scanning
+    such a body for header or end-marker text would let file content shape
+    the parse again, which is the failure this framing exists to prevent.
+    """
+    framed = _walk_window_body(lines, start)
+    if framed is None:
+        return []
+    return [(row, "".join(body)) for row, body in framed[0]]
+
+
+def _window_body_envelope_ok(lines: Sequence[str], start: int) -> bool:
+    """The body parses by declared lengths and the end marker is the last line."""
+    framed = _walk_window_body(lines, start)
+    return (framed is not None and bool(framed[0])
+            and framed[1] == len(lines) - 1)
+
+
 def _model_window_segments(content: str, metadata: Mapping[str, object]) -> list[tuple[dict[str, object], str]]:
     lines = content.splitlines(keepends=True)
     try:
@@ -1310,23 +1364,7 @@ def _model_window_segments(content: str, metadata: Mapping[str, object]) -> list
                      if line.rstrip("\r\n") == WINDOW_CONTENT_MARKER) + 1
     except StopIteration:
         return []
-    segments: list[tuple[dict[str, object], str]] = []
-    current: dict[str, object] | None = None
-    buffer: list[str] = []
-    for line in lines[start:]:
-        match = _RANGE.match(line.rstrip("\r\n"))
-        if match:
-            if current is not None:
-                segments.append((current, "".join(buffer)))
-            current = {"start_line": int(match.group(1)), "end_line": int(match.group(2))}
-            buffer = []
-            continue
-        if line.rstrip("\r\n") == WINDOW_END_MARKER:
-            break
-        if current is not None:
-            buffer.append(line)
-    if current is not None:
-        segments.append((current, "".join(buffer)))
+    segments = _scan_window_segments(lines, start)
     declared = metadata.get("ranges")
     if not isinstance(declared, list) or len(declared) != len(segments):
         return []
@@ -1641,9 +1679,8 @@ def _standalone_raw_window_envelope(
         and lines[marker_index] == WINDOW_MARKER
         and lines[marker_index + 2] == WINDOW_CONTENT_MARKER
         and _RANGE.fullmatch(lines[marker_index + 3]) is not None
-        and lines[-1] == WINDOW_END_MARKER
+        and _window_body_envelope_ok(lines, marker_index + 3)
         and content.endswith(WINDOW_END_MARKER)
-        and sum(line == WINDOW_END_MARKER for line in lines) == 1
     )
 
 
@@ -1656,9 +1693,8 @@ def _standalone_window_envelope(content: str, path: str, marker: str,
         and lines[1] == marker
         and lines[3] == WINDOW_CONTENT_MARKER
         and _RANGE.fullmatch(lines[4]) is not None
-        and lines[-1] == WINDOW_END_MARKER
+        and _window_body_envelope_ok(lines, 4)
         and content.endswith(WINDOW_END_MARKER)
-        and sum(line == WINDOW_END_MARKER for line in lines) == 1
     )
 
 
@@ -1747,12 +1783,17 @@ def _generated_window_ranges(
                    or type(row.get("end_line")) is not int for row in ranges)):
         return None
     if model is not None or raw is not None:
-        rendered = [match for line in content.splitlines()
-                    if (match := _RANGE.fullmatch(line)) is not None]
+        body_lines = content.splitlines()
+        body_start = next((index + 1 for index, line in enumerate(body_lines)
+                           if line == WINDOW_CONTENT_MARKER), None)
+        framed = (_walk_window_body(body_lines, body_start)
+                  if body_start is not None else None)
+        # Headers are counted by declared lengths, never by scanning file text.
+        rendered = framed[0] if framed is not None else []
         if (len(rendered) != len(ranges)
                 or any((row["start_line"], row["end_line"]) !=
-                       (int(marker.group(1)), int(marker.group(2)))
-                       for row, marker in zip(ranges, rendered))):
+                       (seg["start_line"], seg["end_line"])
+                       for row, (seg, _body) in zip(ranges, rendered))):
             return None
     return ranges, owner
 
@@ -2299,26 +2340,7 @@ def _window_segments(content: str, metadata: Mapping[str, object]) -> list[tuple
         start = next(index for index, line in enumerate(lines) if line.rstrip("\r\n") == WINDOW_CONTENT_MARKER) + 1
     except StopIteration:
         return []
-    segments: list[tuple[dict[str, object], str]] = []
-    current: dict[str, object] | None = None
-    buffer: list[str] = []
-    for line in lines[start:]:
-        match = _RANGE.match(line.rstrip("\r\n"))
-        if match:
-            if current is not None:
-                segments.append((current, "".join(buffer)))
-            current = {
-                "start_line": int(match.group(1)),
-                "end_line": int(match.group(2)),
-            }
-            buffer = []
-            continue
-        if line.rstrip("\r\n") == WINDOW_END_MARKER:
-            break
-        if current is not None:
-            buffer.append(line)
-    if current is not None:
-        segments.append((current, "".join(buffer)))
+    segments = _scan_window_segments(lines, start)
     metadata_ranges = metadata.get("ranges")
     if not isinstance(metadata_ranges, list):
         return []

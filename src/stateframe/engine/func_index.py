@@ -606,7 +606,7 @@ def function_evidence_lines(task_text, cls, fidx: FuncIndex, path, names):
 
 
 # ---------------------------------------------------------------- shared repo reader
-REPO_DEFAULT = pathlib.Path("/nonexistent/lab-repo/backend/app")
+REPO_DEFAULT = pathlib.Path("/nonexistent/source-repo/backend/app")
 POOL_N = 32
 MENU_N = 8
 

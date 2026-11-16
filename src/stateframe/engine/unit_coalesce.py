@@ -31,7 +31,7 @@ from unit_planner import _bounded, _digest, render_plan_block
 from unit_planner_v2 import GateVerdict, PlannedUnitV2, UnitPlanV2
 
 MAX_MERGE_MEMBERS: Final = 4          # symbols per merged unit; above -> escalate
-MAX_COALESCE_EVENTS: Final = 2        # merges per plan (lab cap)
+MAX_COALESCE_EVENTS: Final = 2        # merges per plan (measured cap)
 DEFAULT_GATE_ATTEMPTS: Final = 2      # per-unit gate allowance when the unit carries none
 _GEN: Final = re.compile(r":g(\d+)$")
 _EXPOSES: Final = re.compile(r"^class (\w+) exposes ")

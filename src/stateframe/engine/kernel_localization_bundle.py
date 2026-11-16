@@ -34,7 +34,7 @@ MAX_DECLARED_PATHS = 64
 MAX_LARGE_SOURCE_BYTES = MAX_SOURCE_CHARS * 4
 _PRIVATE_PARTS = frozenset({
     ".git", ".stateframe",
-    "__pycache__", "node_modules", "dist", "build", "coverage", ".mission",
+    "__pycache__", "node_modules", "dist", "build", "coverage",
     "grader", "graders", "gold", "private", "hidden", "hidden_tests", "backups",
     "evaluator", "evaluators", "oracle", "sentinel", "reports",
 })

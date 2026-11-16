@@ -129,7 +129,7 @@ def mode() -> str:
 
 # GCFREEZE: once the long-lived engine structures exist, freeze them out of
 # generation-2 GC scans so every later collection stops re-walking the whole warm heap. Changes no object, value or byte.
-# Lab switch SF_LAB_GC_FREEZE: off (PC3G behaviour) | once (default: one freeze per process; a resumed run re-freezes in its new pid)
+# Experiment switch SF_LAB_GC_FREEZE: off (PC3G behaviour) | once (default: one freeze per process; a resumed run re-freezes in its new pid)
 # | periodic (collect + freeze again every GC_FREEZE_PERIOD steps so objects that became long-lived later also leave gen-2 scans).
 # Every freeze collects generation 2 FIRST, so only live objects are frozen (freezing uncollected cycles would leak them).
 GC_FREEZE_ENV = "SF_LAB_GC_FREEZE"

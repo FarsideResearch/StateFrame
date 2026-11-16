@@ -61,7 +61,7 @@ def test_legacy_full_contract_is_accepted_at_runtime_through_completion(tmp_path
 
 
 def test_unit_without_goal_or_outcome_is_refused_on_goal(tmp_path):
-    # Shape from the live Ryzen run: the model sent id, owns, check and model_class only.
+    # Shape from the live run: the model sent id, owns, check and model_class only.
     args = {"subframes": [
         {"id": "tax_fix", "owns": ["a.py"], "model_class": "default"},
         {"id": "b", "goal": "Change b", "owns": ["b.py"]},
@@ -97,7 +97,7 @@ def test_missing_id_is_still_refused_on_id():
     assert refusal.value.hint == 'add "id": "subframe_0"'
 
 
-# Exact call captured from the live Ryzen run: no goal and no outcome, only id/owns/check/model_class.
+# Exact call captured from the live run: no goal and no outcome, only id/owns/check/model_class.
 _CAPTURED_LIVE_CALL = {"subframes": [
     {"id": "tax_fix", "owns": ["pricing/tax.py", "pricing/checkout.py"],
      "check": ["tests/test_tax.py", "tests/test_checkout.py"], "model_class": "bug_fixer"},

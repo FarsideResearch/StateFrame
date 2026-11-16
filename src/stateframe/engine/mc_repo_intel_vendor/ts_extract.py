@@ -43,7 +43,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 # ── Tree-sitter availability probe (mirrors repo_intel/signatures.py) ─────────
-# The agent-runner image pins tree-sitter + tree_sitter_language_pack; a coding
+# The runtime image pins tree-sitter + tree_sitter_language_pack; a coding
 # task can nonetheless land in an env where the core/grammar versions disagree,
 # so we probe once and degrade to the Python-only graph rather than raise.
 

@@ -159,7 +159,7 @@ def test_empty_file_deleted_mid_run_forces_a_replan(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# End to end: the exact lab run that died on request 8, then more requests.
+# End to end: the exact recorded run that died on request 8, then more requests.
 # ---------------------------------------------------------------------------
 
 RUN_TIMEOUT_SECONDS = 1200

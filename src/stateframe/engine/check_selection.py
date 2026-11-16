@@ -118,12 +118,12 @@ def overlay_fix_tests(root: pathlib.Path, d) -> int:
         print(f"  [corpus-fix] overlay failed for {d.get('fn')}: {type(_e).__name__}",
               flush=True)
         _n = 0
-    if _n and d.get("repo") != "mc":
+    if _n and d.get("repo") != "secondary":
         return _n
-    if d.get("repo") != "mc" or not d.get("sha"):
+    if d.get("repo") != "secondary" or not d.get("sha"):
         return 0
     import subprocess
-    mc = rr.REPOS["mc"].parent
+    mc = rr.REPOS["secondary"].parent
     ls = subprocess.run(["git", "-C", str(mc), "show", "--name-only", "--format=",
                          d["sha"], "--", "backend/tests/"],
                         capture_output=True, text=True, timeout=60)
@@ -181,11 +181,11 @@ def fail_to_pass_ids(d) -> list[str]:
             return [_fix.selector]
     except Exception:                                                  # noqa: BLE001
         pass
-    if d.get("repo") != "mc" or not d.get("sha"):
+    if d.get("repo") != "secondary" or not d.get("sha"):
         return []
     import re as _re
     import subprocess
-    mc = rr.REPOS["mc"].parent
+    mc = rr.REPOS["secondary"].parent
     diff = subprocess.run(["git", "-C", str(mc), "diff", f"{d['sha']}^", d["sha"],
                            "--", "backend/tests/"],
                           capture_output=True, text=True, timeout=60)

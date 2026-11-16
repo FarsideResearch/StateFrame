@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.10 (2026-11-16)
+
+- Fixed: a repository file whose text contains host markers (source-window framing lines, `[EVIDENCEPIN]` blocks, `[CONTINUATION LIMITS |` lines) no longer stops the run before its first request. Source-window bodies are now framed by each range header's declared line count instead of a marker search, and file, tool and source-window text is never read as a host evidence pin or continuation limit.
+- Public tree: internal benchmark tooling removed and private project names dropped from code, comments and tests; two replay schema id families renamed (old ids still accepted on read); probe repo keys are now `primary`/`secondary`, and one private tool directory is no longer excluded by default.
+- Docs: corrected stale and contradictory statements and documented previously undocumented flags and switches (`--log-level`/`STATEFRAME_LOG_LEVEL`, `--quiet`, `--json`, `--session-dir`, transport retry, zero-progress nudge, catalog/crossfile switches, partial-pass reporting).
+- The repair probe's source-repo environment variables are renamed to `STATEFRAME_SOURCE_REPO_PRIMARY` and `STATEFRAME_SOURCE_REPO_SECONDARY`.
+- Test fixtures and comments no longer carry local paths or internal names; the internal-name test now also scans fixtures.
+- Fixed: a directory named `workspace` is no longer treated as a known root when the engine normalizes semantic paths. Absolute paths inside a run's working copy were being turned into repository paths, and repository paths containing such a directory were cut short; a recorded allocation replay stopped with a working-set closure proof refusal because of it.
+
 ## 0.7.9 (2026-11-15)
 
 - Fixed: editing a file during a run no longer stops it with "allocation semantic site inventory changed" (source_revision_replan_exhausted); the site inventory now ignores per-request delivery annotations.

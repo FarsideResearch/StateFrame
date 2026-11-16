@@ -14,11 +14,12 @@ from tools.sciledger.final_product import (
     FinalProductManifest,
     write_manifest,
 )
-from tools.sciledger.run_real_binding import select_candidate_boundary
-
-
-LIVE_SCHEMA = "aha-bug-replay-stage6-live/v1"
-CANDIDATE_SCHEMA = "aha-bug-replay-stage6-candidate-diff/v3"
+from tools.sciledger.run_real_binding import (
+    CANDIDATE_SCHEMA,
+    LIVE_SCHEMA,
+    schema_matches,
+    select_candidate_boundary,
+)
 
 
 class EventSink(Protocol):
@@ -38,7 +39,7 @@ def stage6_identity(live_manifest_path: Path, *, task_id: str,
         value = json.loads(live_manifest_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise FinalProductError("Stage 6 live identity manifest is unreadable") from exc
-    if not isinstance(value, Mapping) or value.get("schema") != LIVE_SCHEMA:
+    if not isinstance(value, Mapping) or not schema_matches(value.get("schema"), LIVE_SCHEMA):
         raise FinalProductError("Stage 6 live identity manifest has an unknown schema")
     tasks = value.get("tasks")
     if not isinstance(tasks, list):
@@ -116,7 +117,7 @@ def _candidate_document(path: Path) -> Mapping[str, object] | None:
     except (OSError, UnicodeError, json.JSONDecodeError):
         return None
     if (not isinstance(document, Mapping)
-            or document.get("schema") != CANDIDATE_SCHEMA
+            or not schema_matches(document.get("schema"), CANDIDATE_SCHEMA)
             or type(document.get("proposals")) is not int
             or document["proposals"] < 0
             or int(path.stem) != document["proposals"]):

@@ -151,7 +151,7 @@ def test_bookmarks_off_fitter_matches_recorded_baseline_bytes(monkeypatch):
     fitted = fit_recent_read_windows(body, [], fits=lambda _candidate: True)
     raw = json.dumps(fitted, sort_keys=True, separators=(",", ":"),
                      ensure_ascii=False).encode()
-    assert len(raw) == 76164
+    assert len(raw) == 76132
     assert hashlib.sha256(raw).hexdigest() == (
-        "a3c4ca85015c2726e8d46753d038646f7e7bb30fa2fd740ee12c6bec48432a92"
+        "3bf3a0419e21303a94afa362c91e6838694220db7955ff787d27fd5720bc6392"
     )

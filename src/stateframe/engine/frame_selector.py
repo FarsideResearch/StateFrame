@@ -4,7 +4,7 @@ The selector deliberately has no language-model or prose relevance path.  Its
 inputs are host-owned links, the projected invalidation graph, explicit
 version bindings, and (optionally) host decision predicates.  ``LedgerIndex``
 is the graph authority; the small adapter here keeps the scoring code usable by
-the offline frame lab without importing the runtime.
+the offline frame evaluator without importing the runtime.
 """
 
 from __future__ import annotations
@@ -743,7 +743,7 @@ def select_items(
 ) -> SelectorResult:
     """Select a bounded frame from typed host records.
 
-    ``historical`` and ``oracle`` exist only for the offline lab.  Production
+    ``historical`` and ``oracle`` exist only for offline evaluation.  Production
     callers should use ``hybrid``; ``hybrid_no_decision`` is its explicit
     ablation.  No score reads ``gist``, payload text, or model output.
     """

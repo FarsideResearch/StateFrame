@@ -5904,7 +5904,7 @@ def align_tools_to_completion_route(runtime: object, tools: Sequence[object]) ->
 
 
 def _route_surface_strict() -> bool:
-    """STATEFRAME_COMPLETION_ROUTE_STRICT=on makes a route/menu identity violation a hard contract error (tests, lab).
+    """STATEFRAME_COMPLETION_ROUTE_STRICT=on makes a route/menu identity violation a hard contract error (tests, experiments).
     Default OFF in live: earlier run 934/935 died at prepare() on it (green-lock menu authority advertised tools the final-wire
     composer strips). A run must never die on a host projection mismatch; it is journaled as a finding instead."""
     return os.environ.get("STATEFRAME_COMPLETION_ROUTE_STRICT", "off").strip().lower() == "on"

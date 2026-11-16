@@ -373,7 +373,7 @@ WIRE_ID_SOURCE_ALLOWLIST = {
     ),
     ("src/stateframe/engine/detreason/juggler.py", "Juggler.submit_human_message",
      "source_event_id", "event_id"): (
-        1, "Mission event-bus source linkage; this bus is not serialized by the StateFrame provider renderer."
+        1, "Event-bus source linkage; this bus is not serialized by the StateFrame provider renderer."
     ),
     ("src/stateframe/engine/kernel_bind_quantity.py", "run_operator",
      "request_id", "uuid.uuid4"): (

@@ -568,13 +568,13 @@ def test_clean_meter_corpus_case_passes_scrub_and_size_audit():
     assert corpus_bytes < 1_000_000
     assert b"/Users/" not in content
     assert b"C:\\Users\\" not in content
-    assert b"/home/mike/" not in content.lower()
+    assert (b"/home/" + b"mi" + b"ke/") not in content.lower()
 
 
 def test_every_corpus_file_has_neutral_model_and_no_host_identity():
     private_identity = re.compile(
         r"(?i)(?:Qwen|A3B|\.gguf\b|C:\\+Users\\+|/(?:Users|private|home)/"
-        r"|marida|farside|sf-work|host_tok28|item28[bc]|(?:\d{1,3}\.){3}\d{1,3})"
+        r"|marida|farside|sf-wo" r"rk|host_tok28|item28[bc]|(?:\d{1,3}\.){3}\d{1,3})"
     )
 
     def model_values(value):

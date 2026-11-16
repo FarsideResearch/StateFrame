@@ -70,7 +70,7 @@ except ImportError:  # pragma: no cover - exercised only in networkx-less envs
 _SKIP_DIRS = frozenset({
     ".git", "__pycache__", "node_modules", ".venv", "venv", "env",
     "dist", "build", ".tox", "migrations", ".next", ".nuxt",
-    "coverage", ".pytest_cache", ".mypy_cache", ".eggs", ".mission",
+    "coverage", ".pytest_cache", ".mypy_cache", ".eggs",
     "grader", "graders", "gold", "private", "hidden", "hidden_tests", "backups",
 })
 
@@ -2006,7 +2006,7 @@ class CodeGraph:
 # the boundary instead. We port only the Python-relevant forms.
 
 # Attribute-method names that route by a runtime STRING KEY (event/command bus,
-# Neuron emits, SQS publish → a consumer resolved elsewhere). A call to one of
+# service-bus emits, SQS publish → a consumer resolved elsewhere). A call to one of
 # these is a flow that "continues dynamically" at the matching handler/consumer.
 _STRING_KEYED_DISPATCH = frozenset({
     "emit", "dispatch", "send", "publish", "trigger", "fire",
@@ -2292,7 +2292,7 @@ def repo_cache_key(repo_path: str) -> str | None:
     cache and the warming is silently inert. (I wrote that version first.)
 
     The git remote is stable, but the URL embeds a per-session credential
-    (`http://git-service:<token>@host/path`), so the userinfo MUST be stripped or
+    (`http://gitsvc:<token>@host/path`), so the userinfo MUST be stripped or
     the key changes every session AND a token gets written into a filename.
     """
     try:

@@ -22,7 +22,7 @@ SHOWN = re.compile(r"lines (\d+)-(\d+) shown")
 
 
 def _wire_truth(wire):
-    """The chief's wire-truth predicate: one range is never both shown and not shown.
+    """The reviewer's wire-truth predicate: one range is never both shown and not shown.
 
     Returns the read facts found on the wire after asserting each one against
     the FULL carriers the same wire attaches.

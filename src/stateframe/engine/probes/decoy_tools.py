@@ -1,4 +1,4 @@
-"""Deterministic Mission-Control-shaped decoy tools for ReAct regime tests.
+"""Deterministic product-platform-shaped decoy tools for ReAct regime tests.
 
 Decoys are deliberately useful-looking schemas with no implementation in this
 repair sandbox.  Their response says that no change was made, so a model can
@@ -387,7 +387,7 @@ def decoy_response(
         "status": "unavailable",
         "tool": name,
         "request_id": f"sim-{digest}",
-        "message": "Mission Control data plane is unavailable in this repair sandbox; no change was made.",
+        "message": "The host data plane is unavailable in this repair sandbox; no change was made.",
         "decoy": True,
     }
     if decoy_kind(kind) == DECOY_KIND_NEAR_DUPLICATE:

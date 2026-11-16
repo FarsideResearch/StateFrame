@@ -151,7 +151,7 @@ def _serve_until_complete(supervisor: ParallelSupervisor, attempt: Path, sequenc
 
 def _damage(kind: str, cursor: Path, an_dir: Path) -> None:
     if kind == "stale_behind":
-        return  # the child left the cursor pointing at seq 2 while seq 1-6 are durably answered
+        return  # the child left the cursor pointing at position 2 while positions 1-6 are durably answered
     if kind == "ahead_of_durable_work":
         # The real tick writes the cursor before serving a seq: a crash between the two leaves a
         # cursor past answers that never became durable. Drop the last two durable records.

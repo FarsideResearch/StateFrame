@@ -1,4 +1,4 @@
-"""Disabled request and tape bytes stay pinned to the candidate before the chief port."""
+"""Disabled request and tape bytes stay pinned to the candidate before the port."""
 from __future__ import annotations
 
 import json
@@ -13,7 +13,7 @@ from tools.pinned_tree import pinned_tree
 
 
 @pytest.mark.parametrize("final_layout", ["on", "off"])
-def test_chief_port_disabled_request_and_tape_bytes_match_candidate(
+def test_ported_disabled_request_and_tape_bytes_match_candidate(
         tmp_path, tmp_path_factory, final_layout):
     baseline = pinned_tree("37f0ac81a33eeee8e57747cfacdfdf64c4c48752", tmp_path_factory)
     root = Path(__file__).resolve().parents[1]

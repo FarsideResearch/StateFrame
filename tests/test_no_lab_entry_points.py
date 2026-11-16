@@ -28,7 +28,7 @@ LAB_ONLY = {
     },
 }
 
-# These are the only public CLI entry modules, and neither runs a lab corpus.
+# These are the only public CLI entry modules, and neither runs a benchmark corpus.
 ALLOWED_CLI_MAINS = {"cli.py", "__main__.py"}
 LAB_CALLS = {"harvest_tasks", "shadow_compare", "project_file"}
 
@@ -57,7 +57,7 @@ def _check_sources(sources: dict[str, bytes], artifact: str) -> None:
             if not _is_main(node):
                 continue
             if rel in LAB_ONLY:
-                raise AssertionError((artifact, rel, "lab module retains __main__"))
+                raise AssertionError((artifact, rel, "internal-only module retains __main__"))
             if rel in ALLOWED_CLI_MAINS:
                 continue
             calls = {call.func.id for call in ast.walk(node)

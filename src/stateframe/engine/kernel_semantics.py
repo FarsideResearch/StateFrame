@@ -192,7 +192,7 @@ def _safe_path(value: object, root: str | None = None) -> str:
 
     # Strip known workspace roots when absolute paths arrive from a local probe.
     known_root = False
-    for marker in ("local-swarm-poc/", "mission-control/"):
+    for marker in ("local-swarm-poc/",):
         if marker in text:
             text = text.split(marker, 1)[1]
             known_root = True

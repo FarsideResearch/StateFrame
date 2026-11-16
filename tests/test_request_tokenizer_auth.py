@@ -516,8 +516,8 @@ def test_restored_request_capture_without_recorded_provenance_refuses_probe_by_n
     from kernel_checkpoint import DROP_ATTRS, _Unpickler
     from probes import react_repair
 
-    monkeypatch.setenv("STATEFRAME_PRIMARY_API_KEY_ENV", "LAB_KEY")
-    monkeypatch.setenv("LAB_KEY", registered_checkpoint_key)
+    monkeypatch.setenv("STATEFRAME_PRIMARY_API_KEY_ENV", "CUSTOM_KEY")
+    monkeypatch.setenv("CUSTOM_KEY", registered_checkpoint_key)
     monkeypatch.setenv("OTHER_KEY", "other-run-key")
     capture = _request_capture_with_key(registered_checkpoint_key)
     dumped = _checkpoint_dump({"capture": capture})
@@ -964,7 +964,7 @@ def _restore_request_capture(capture):
 def _custom_primary_capture(key, monkeypatch, endpoint):
     from kernel_checkpoint import _Unpickler
 
-    monkeypatch.setenv("STATEFRAME_PRIMARY_API_KEY_ENV", "LAB_KEY")
+    monkeypatch.setenv("STATEFRAME_PRIMARY_API_KEY_ENV", "CUSTOM_KEY")
     capture = _request_capture_with_key(key)
     _prepare_capture_with_model_router(
         capture, _inherited_primary_router_config(), mode="off",
@@ -979,11 +979,11 @@ def _custom_primary_capture(key, monkeypatch, endpoint):
 def test_child_carries_primary_api_key_env_name_without_value(monkeypatch):
     from stateframe import _child
 
-    monkeypatch.setenv("LAB_KEY", "child-primary-secret")
+    monkeypatch.setenv("CUSTOM_KEY", "child-primary-secret")
     monkeypatch.setenv("STATEFRAME_PRIMARY_API_KEY_ENV", "stale-name")
 
-    _child._install_primary_api_key_env({"api_key_env": "LAB_KEY"})
-    assert os.environ["STATEFRAME_PRIMARY_API_KEY_ENV"] == "LAB_KEY"
+    _child._install_primary_api_key_env({"api_key_env": "CUSTOM_KEY"})
+    assert os.environ["STATEFRAME_PRIMARY_API_KEY_ENV"] == "CUSTOM_KEY"
     assert "child-primary-secret" not in os.environ["STATEFRAME_PRIMARY_API_KEY_ENV"]
 
     _child._install_primary_api_key_env({})
@@ -994,33 +994,33 @@ def test_restored_primary_probe_uses_custom_env_name_and_rotated_live_key(
         registered_checkpoint_key, monkeypatch):
     from probes import react_repair
 
-    monkeypatch.setenv("LAB_KEY", registered_checkpoint_key)
+    monkeypatch.setenv("CUSTOM_KEY", registered_checkpoint_key)
     monkeypatch.setenv("DEEPINFRA_API_KEY", "wrong-primary-provider-key")
     endpoint = "http://127.0.0.1:8111/v1"
     restored, dumped = _custom_primary_capture(
         registered_checkpoint_key, monkeypatch, endpoint,
     )
-    monkeypatch.setenv("LAB_KEY", "rotated-lab-primary-key")
+    monkeypatch.setenv("CUSTOM_KEY", "rotated-custom-primary-key")
     monkeypatch.setenv("DEEPINFRA_API_KEY", "rotated-wrong-primary-key")
     monkeypatch.setattr(react_repair, "API", "http://127.0.0.1:8991/v1")
     monkeypatch.setattr(react_repair, "KEY", "stale-module-key")
 
-    assert restored._provider_probe_provenance["credential_env"] == "LAB_KEY"
+    assert restored._provider_probe_provenance["credential_env"] == "CUSTOM_KEY"
     assert registered_checkpoint_key.encode() not in dumped
     assert react_repair._failed_request_destination(restored) == (
-        endpoint, "rotated-lab-primary-key")
+        endpoint, "rotated-custom-primary-key")
 
 
 def test_restored_primary_probe_skips_unset_custom_env_even_with_default_key_present(
         registered_checkpoint_key, monkeypatch):
     from probes import react_repair
 
-    monkeypatch.setenv("LAB_KEY", registered_checkpoint_key)
+    monkeypatch.setenv("CUSTOM_KEY", registered_checkpoint_key)
     monkeypatch.setenv("DEEPINFRA_API_KEY", "wrong-primary-provider-key")
     restored, _dumped = _custom_primary_capture(
         registered_checkpoint_key, monkeypatch, "http://127.0.0.1:8112/v1",
     )
-    monkeypatch.delenv("LAB_KEY", raising=False)
+    monkeypatch.delenv("CUSTOM_KEY", raising=False)
     probe_calls = []
     monkeypatch.setattr(
         react_repair, "_await_endpoint",
@@ -1037,7 +1037,7 @@ def test_restored_primary_probe_refuses_name_mismatched_to_current_run(
         registered_checkpoint_key, monkeypatch):
     from probes import react_repair
 
-    monkeypatch.setenv("LAB_KEY", registered_checkpoint_key)
+    monkeypatch.setenv("CUSTOM_KEY", registered_checkpoint_key)
     monkeypatch.setenv("OTHER_KEY", "other-run-key")
     monkeypatch.setenv("DEEPINFRA_API_KEY", "wrong-primary-provider-key")
     restored, _dumped = _custom_primary_capture(
@@ -1060,7 +1060,7 @@ def test_restored_primary_probe_refuses_when_run_env_name_is_unavailable(
         registered_checkpoint_key, monkeypatch):
     from probes import react_repair
 
-    monkeypatch.setenv("LAB_KEY", registered_checkpoint_key)
+    monkeypatch.setenv("CUSTOM_KEY", registered_checkpoint_key)
     monkeypatch.setenv("DEEPINFRA_API_KEY", "wrong-primary-provider-key")
     restored, _dumped = _custom_primary_capture(
         registered_checkpoint_key, monkeypatch, "http://127.0.0.1:8115/v1",
@@ -1083,12 +1083,12 @@ def test_restored_primary_probe_refuses_invalid_recorded_env_name(
         registered_checkpoint_key, monkeypatch):
     from probes import react_repair
 
-    monkeypatch.setenv("LAB_KEY", registered_checkpoint_key)
+    monkeypatch.setenv("CUSTOM_KEY", registered_checkpoint_key)
     monkeypatch.setenv("DEEPINFRA_API_KEY", "wrong-primary-provider-key")
     restored, _dumped = _custom_primary_capture(
         registered_checkpoint_key, monkeypatch, "http://127.0.0.1:8114/v1",
     )
-    restored._provider_probe_provenance["credential_env"] = "LAB-KEY"
+    restored._provider_probe_provenance["credential_env"] = "CUSTOM-KEY"
     probe_calls = []
     monkeypatch.setattr(
         react_repair, "_await_endpoint",
@@ -1105,7 +1105,7 @@ def test_restored_primary_probe_refuses_missing_recorded_env_name(
         registered_checkpoint_key, monkeypatch):
     from probes import react_repair
 
-    monkeypatch.setenv("LAB_KEY", registered_checkpoint_key)
+    monkeypatch.setenv("CUSTOM_KEY", registered_checkpoint_key)
     monkeypatch.setenv("DEEPINFRA_API_KEY", "wrong-primary-provider-key")
     restored, _dumped = _custom_primary_capture(
         registered_checkpoint_key, monkeypatch, "http://127.0.0.1:8116/v1",
@@ -1128,8 +1128,8 @@ def test_restored_inherited_router_probe_without_recorded_provenance_refuses(
     from kernel_checkpoint import _Unpickler
     from probes import react_repair
 
-    monkeypatch.setenv("STATEFRAME_PRIMARY_API_KEY_ENV", "LAB_KEY")
-    monkeypatch.setenv("LAB_KEY", registered_checkpoint_key)
+    monkeypatch.setenv("STATEFRAME_PRIMARY_API_KEY_ENV", "CUSTOM_KEY")
+    monkeypatch.setenv("CUSTOM_KEY", registered_checkpoint_key)
     monkeypatch.setenv("OTHER_KEY", "other-run-key")
     capture = _request_capture_with_key(registered_checkpoint_key)
     _prepare_capture_with_inherited_router(capture, registered_checkpoint_key)
@@ -1176,19 +1176,19 @@ def test_restored_inherited_router_probe_uses_recorded_custom_primary_env_and_ro
         registered_checkpoint_key, monkeypatch):
     from probes import react_repair
 
-    monkeypatch.setenv("STATEFRAME_PRIMARY_API_KEY_ENV", "LAB_KEY")
-    monkeypatch.setenv("LAB_KEY", registered_checkpoint_key)
+    monkeypatch.setenv("STATEFRAME_PRIMARY_API_KEY_ENV", "CUSTOM_KEY")
+    monkeypatch.setenv("CUSTOM_KEY", registered_checkpoint_key)
     monkeypatch.setenv("DEEPINFRA_API_KEY", "wrong-primary-provider-key")
     capture = _request_capture_with_key(registered_checkpoint_key)
     prepared = _prepare_capture_with_inherited_router(capture, registered_checkpoint_key)
     restored, dumped = _restore_request_capture(capture)
-    monkeypatch.setenv("LAB_KEY", "rotated-inherited-primary-key")
+    monkeypatch.setenv("CUSTOM_KEY", "rotated-inherited-primary-key")
     monkeypatch.setenv("DEEPINFRA_API_KEY", "rotated-wrong-primary-key")
     monkeypatch.setattr(react_repair, "API", "http://127.0.0.1:8992/v1")
     monkeypatch.setattr(react_repair, "KEY", "stale-module-key")
 
-    assert capture._provider_probe_provenance["credential_env"] == "LAB_KEY"
-    assert restored._provider_probe_provenance["credential_env"] == "LAB_KEY"
+    assert capture._provider_probe_provenance["credential_env"] == "CUSTOM_KEY"
+    assert restored._provider_probe_provenance["credential_env"] == "CUSTOM_KEY"
     assert registered_checkpoint_key.encode() not in dumped
     assert react_repair._failed_request_destination(restored) == (
         prepared.endpoint, "rotated-inherited-primary-key")
@@ -1198,12 +1198,12 @@ def test_restored_inherited_router_probe_refuses_unset_recorded_primary_key(
         registered_checkpoint_key, monkeypatch):
     from probes import react_repair
 
-    monkeypatch.setenv("STATEFRAME_PRIMARY_API_KEY_ENV", "LAB_KEY")
-    monkeypatch.setenv("LAB_KEY", registered_checkpoint_key)
+    monkeypatch.setenv("STATEFRAME_PRIMARY_API_KEY_ENV", "CUSTOM_KEY")
+    monkeypatch.setenv("CUSTOM_KEY", registered_checkpoint_key)
     capture = _request_capture_with_key(registered_checkpoint_key)
     _prepare_capture_with_inherited_router(capture, registered_checkpoint_key)
     restored, _dumped = _restore_request_capture(capture)
-    monkeypatch.delenv("LAB_KEY", raising=False)
+    monkeypatch.delenv("CUSTOM_KEY", raising=False)
     probe_calls = []
     monkeypatch.setattr(
         react_repair, "_await_endpoint",
@@ -1220,8 +1220,8 @@ def test_restored_inherited_router_probe_refuses_primary_env_name_mismatch(
         registered_checkpoint_key, monkeypatch):
     from probes import react_repair
 
-    monkeypatch.setenv("STATEFRAME_PRIMARY_API_KEY_ENV", "LAB_KEY")
-    monkeypatch.setenv("LAB_KEY", registered_checkpoint_key)
+    monkeypatch.setenv("STATEFRAME_PRIMARY_API_KEY_ENV", "CUSTOM_KEY")
+    monkeypatch.setenv("CUSTOM_KEY", registered_checkpoint_key)
     monkeypatch.setenv("OTHER_KEY", "other-run-key")
     capture = _request_capture_with_key(registered_checkpoint_key)
     _prepare_capture_with_inherited_router(capture, registered_checkpoint_key)

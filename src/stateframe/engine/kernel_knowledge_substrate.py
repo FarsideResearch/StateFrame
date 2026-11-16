@@ -86,7 +86,7 @@ _SUPPORTED_SUFFIXES = frozenset({
 _SOURCE_FILENAMES = frozenset({"Dockerfile", "Makefile", "CMakeLists.txt", "go.mod", "Cargo.toml"})
 _SKIP_DIRS = frozenset({
     ".git", ".hg", ".svn", "__pycache__", "node_modules", ".venv", "venv", "env", "dist",
-    "build", ".tox", "coverage", ".pytest_cache", ".mypy_cache", ".eggs", ".mission",
+    "build", ".tox", "coverage", ".pytest_cache", ".mypy_cache", ".eggs",
     ".stateframe", "grader", "graders", "gold", "private", "hidden", "hidden_tests", "backups",
 })
 _DOC_FORMATS = frozenset({"markdown", "text", "json"})
