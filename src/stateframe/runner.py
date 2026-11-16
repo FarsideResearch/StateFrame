@@ -670,6 +670,7 @@ OPT_IN_SWITCHES = {
     "STATEFRAME_FINAL_CACHE_LAYOUT": ("on", "off"),  # cacheable final request layout: volatile authority last; on by default
     "STATEFRAME_PROVIDER": ("llama.cpp",),  # operator-confirmed llama.cpp dialect override
     "STATEFRAME_STABLE_WIRE": ("on", "off"),  # append-only source windows and a split stable frame
+    "STATEFRAME_HOST_ROW_IDENTITY": ("off", "shadow", "on"),  # host-authored rows tracked out of band; off by default
     "STATEFRAME_STABLE_WIRE_HEADROOM": (),  # retained, not-current source window tokens per epoch
     "STATEFRAME_STABLE_WIRE_RETAIN_PREFIX": ("on", "off"),  # relayouts may keep not-current windows in the prefix
     "STATEFRAME_ZERO_PROGRESS_NUDGE_STEP": (),  # positive int step for the one no-edit/no-check nudge; default 35

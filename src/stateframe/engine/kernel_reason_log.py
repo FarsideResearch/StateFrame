@@ -9,6 +9,7 @@ journal event (journal positions are identity-bearing there).
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -33,7 +34,8 @@ _STATE: dict = {}
 
 def _fresh() -> dict:
     return {"level": None, "invalid_level": None, "journal": None, "path": None, "stream": None,
-            "causes": {}, "self_errors": 0, "summarized": False, "configured": False}
+            "causes": {}, "self_errors": 0, "summarized": False, "configured": False,
+            "journal_reserved": None}
 
 
 _STATE.update(_fresh())
@@ -102,8 +104,10 @@ def bind_journal(journal: object | None) -> None:
     try:
         with _LOCK:
             _STATE["journal"] = journal
+    except (KeyboardInterrupt, SystemExit):
+        raise
     except BaseException:
-        pass
+        _bump_self_error()
 
 
 def _bump_self_error() -> None:
@@ -128,13 +132,60 @@ def _journal_write(journal: object | None, kind: str, payload: dict) -> None:
         _bump_self_error()
 
 
-def _safe_keys(fields: dict) -> dict:
+_JOURNAL_MODULE = "kernel_continuation_journal"
+
+
+def _parse_journal_reserved(source: str) -> frozenset[str]:
+    """The literal `RESERVED = frozenset({...})` assignment in the journal module's source."""
+    for node in ast.parse(source).body:
+        if not (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "RESERVED"):
+            continue
+        value = node.value
+        if (isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id == "frozenset"
+                and len(value.args) == 1 and not value.keywords):
+            value = value.args[0]
+        names = ast.literal_eval(value)
+        if isinstance(names, (set, frozenset, tuple, list)) and names and all(isinstance(n, str) for n in names):
+            return frozenset(names)
+        break
+    raise LookupError(f"{_JOURNAL_MODULE}.RESERVED is not a literal set of field names")
+
+
+def _journal_reserved_from_source() -> frozenset[str] | None:
+    """RESERVED read from the journal's source file without importing it; cached per run. None if unreadable."""
+    cached = _STATE.get("journal_reserved")
+    if cached is None:
+        try:
+            source = Path(__file__).with_name(f"{_JOURNAL_MODULE}.py").read_text(encoding="utf-8")
+            cached = _parse_journal_reserved(source)
+        except (OSError, SyntaxError, ValueError, TypeError, LookupError):
+            return None
+        _STATE["journal_reserved"] = cached
+    return cached
+
+
+def _journal_reserved() -> frozenset[str] | None:
+    """Field names journal.emit reserves for itself (kernel_continuation_journal.RESERVED).
+
+    The rename set is always the journal's own: when the module cannot be imported (a circular import
+    while the engine starts, a broken dependency) it is read from the journal's source instead of a local
+    copy that could drift. None means it could not be determined at all.
+    """
     try:
-        from kernel_continuation_journal import journal_safe_fields
-        return journal_safe_fields(fields)
-    except Exception:
-        return {(f"receipt_{k}" if k in {"schema", "task_id", "kind", "seq", "sequence", "ts"} else k): v
-                for k, v in fields.items()}
+        from kernel_continuation_journal import RESERVED
+    except ImportError:
+        return _journal_reserved_from_source()
+    return frozenset(RESERVED)
+
+
+def _safe_keys(fields: dict) -> dict | None:
+    """`fields` with journal-reserved names renamed to `receipt_<name>` (kernel_continuation_journal's
+    journal_safe_fields rule). None when the reserved names are unknown."""
+    reserved = _journal_reserved()
+    if reserved is None:
+        return None
+    return {(f"receipt_{k}" if k in reserved else k): v for k, v in fields.items()}
 
 
 def _line(level: str, component: str, what: str, why: str, fields: dict) -> str:
@@ -206,10 +257,17 @@ def _emit(category, cause_key, component, what, why, level, journal, fields) -> 
         _bump_self_error()
     # journal=False is the request-path sentinel: stderr + problems file only, never a journal event,
     # so identity-bearing journal positions cannot shift.
-    _journal_write(None if journal is False else (journal if journal is not None else bound), "reason_logged", {
-        "producer": "kernel_reason_log", "dispatch": False, "category": key[0], "cause_key": key[1],
-        "component": row["component"], "level": level, "what": row["what"], "why": row["why"],
-        **_safe_keys(clean)})
+    target = None if journal is False else (journal if journal is not None else bound)
+    if target is not None:
+        safe = _safe_keys(clean)
+        if safe is None:
+            # Reserved names unknown: withhold the event rather than hand journal.emit a key it owns.
+            _bump_self_error()
+        else:
+            _journal_write(target, "reason_logged", {
+                "producer": "kernel_reason_log", "dispatch": False, "category": key[0], "cause_key": key[1],
+                "component": row["component"], "level": level, "what": row["what"], "why": row["why"],
+                **safe})
     return True
 
 
@@ -280,8 +338,15 @@ def run_summary() -> dict:
             if _STATE["self_errors"]:
                 result["self_errors"] = _STATE["self_errors"]
             return result
-    except BaseException:
-        return {"total": 0, "by_cause": {}}
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException as exc:
+        # Never an empty, clean-looking summary: readers (record_fault) diff self_errors, so the failure
+        # is counted and the count is carried along with the error class.
+        _bump_self_error()
+        count = _STATE.get("self_errors")
+        return {"total": 0, "by_cause": {}, "self_errors": count if isinstance(count, int) and count > 0 else 1,
+                "summary_error": type(exc).__name__}
 
 
 def flush_summary(journal: object | None = None) -> dict | None:
@@ -304,7 +369,7 @@ def flush_summary(journal: object | None = None) -> dict | None:
         warns = sum(1 for c in summary["by_cause"].values() if c["level"] == "WARN")
         try:
             _append_row(path, {"summary": True, "ts": round(time.time(), 3), "pid": os.getpid(),
-                               "by_cause": summary["by_cause"]})
+                               "by_cause": summary["by_cause"], "self_errors": int(summary.get("self_errors") or 0)})
         except Exception:
             _bump_self_error()
         _journal_write(journal if journal is not None else bound, "reason_log_summary", {

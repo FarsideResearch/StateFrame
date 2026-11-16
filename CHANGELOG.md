@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.19 (2026-11-16)
+
+- Added (off by default): `STATEFRAME_HOST_ROW_IDENTITY` (`off`, `shadow`, `on`). The engine can now record, outside the request, which rows and spans of a request it wrote itself, so later checks can tell host text from file, tool and user text that merely contains the same markers. This release adds the foundation only: the per-step record, its hand-off to every request of the step, and (with `on`) a `host_authorship_manifest` journal event beside each final request. No reader uses the record yet, so request bytes are the same in every mode. With the switch off nothing is created. Tests: `tests/test_host_authorship*.py`, and `tests/test_host_marker_sniff_guard.py`, which fails on any new engine function that decides authorship by searching for marker text.
+- Fixed: a JavaScript/TypeScript dispatch scan that fails now returns the file-level "scan failed" marker (dynamic dispatch unknown) with a warning instead of an empty list, and localization keeps that marker even when the task names search terms, so an unknown is no longer read as "no dynamic bindings".
+- Fixed: the reason log no longer hides its own failures. When the journal module could not be imported, journal events were renamed with a stale hardcoded key list, so `run_id`, `event_id`, `timestamp_ns`, `journal_format`, `previous_hash` and `record_hash` reached the journal unrenamed. The rename set now always comes from the journal's own `RESERVED` (read from its source when the import fails); if it cannot be determined the event is withheld and counted as a self-error. A failed `run_summary` now counts itself and returns `self_errors` and `summary_error` instead of an empty summary, so `record_fault` no longer reports an unverified record as written. `bind_journal` lets KeyboardInterrupt/SystemExit through and counts other failures, and the problems.jsonl summary row records `self_errors`. Tests: `tests/test_t8_failloud_telemetry_paths.py`.
+
 ## 0.7.18 (2026-11-16)
 
 - A request waiting in a healthy server's queue is no longer failed after 30 minutes. Queue wait is only capped if you set STATEFRAME_QUEUE_WAIT_MAX_S; a server that stops answering is still detected by the 90 second liveness probe.

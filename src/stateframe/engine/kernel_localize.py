@@ -762,7 +762,7 @@ def _dynamic_bindings(inventory: SourceInventory, graph: object, anchors: Mappin
     terms = tuple(anchors.get("terms", ()))
     rows: list[dict[str, object]] = []
     try:
-        from mc_repo_intel_vendor.call_graph import dispatch_boundaries_in_file
+        from mc_repo_intel_vendor.call_graph import SCAN_FAILED_KIND, dispatch_boundaries_in_file
     except ImportError:
         return rows
     for source in inventory.files:
@@ -770,7 +770,10 @@ def _dynamic_bindings(inventory: SourceInventory, graph: object, anchors: Mappin
         for boundary in boundaries:
             line = int(getattr(boundary, "lineno", 0) or 0)
             text = f"{getattr(boundary, 'key_expr', '')} {getattr(boundary, 'note', '')}".casefold()
-            if terms and not any(term in text for term in terms):
+            # A scan_failed marker means the file's dispatch is unknown; it never names task terms,
+            # so it must survive the term filter or the unknown silently reads as "no bindings".
+            scan_failed = getattr(boundary, "kind", "") == SCAN_FAILED_KIND
+            if terms and not scan_failed and not any(term in text for term in terms):
                 continue
             symbol = _symbol_for_line(graph, source.path, line)
             rows.append(_candidate(
