@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Changed: the engine no longer stops work on its own clock in three more places. The plain loop has no time limit unless you set `STATEFRAME_PLAIN_WALL_S` (a supervisor deadline still applies); the job watch no longer refuses new jobs after 900 s of total job time; the edit churn budget no longer stops at a 3600 s deadline or a time reserve.
 - Changed: the engine no longer limits edit continuation turns by its own clock. The 1800 s edit budget and its `STATEFRAME_EDIT_NTURN_RUN_BUDGET_SECONDS` override (0.7.15) are removed; only a run deadline you set still applies.
 ## 0.7.15 (2026-11-16)
 
