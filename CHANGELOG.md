@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fixed: a directory named `workspace` is no longer treated as a known root when the engine normalizes semantic paths. Absolute paths inside a run's working copy were being turned into repository paths, and repository paths containing such a directory were cut short; a recorded allocation replay stopped with a working-set closure proof refusal because of it.
 - Public tree: internal benchmark tooling removed and private project names dropped from code, comments and tests; two replay schema id families renamed (old ids still accepted on read); probe repo keys are now `primary`/`secondary`, and one private tool directory is no longer excluded by default.
 - Docs: corrected stale and contradictory statements and documented previously undocumented flags and switches (`--log-level`/`STATEFRAME_LOG_LEVEL`, `--quiet`, `--json`, `--session-dir`, transport retry, zero-progress nudge, catalog/crossfile switches, partial-pass reporting).
 - The repair probe's source-repo environment variables are renamed to `STATEFRAME_SOURCE_REPO_PRIMARY` and `STATEFRAME_SOURCE_REPO_SECONDARY`.
