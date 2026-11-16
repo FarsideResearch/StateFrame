@@ -396,7 +396,7 @@
   "kernel_measurement.py": "03b723b0e9ad885cc3235bb62aefa3e00d232c7f2d03b528fd7093ace9201d12",
   "kernel_mechanism_admission.py": "f8fcbf4afb8775a2cebadccbe43f337c6eddb8835145551b9ae59433b85beb0c",
   "kernel_memfix_history.py": "e953ac3b6b7c74b053564dcc48d61071d0f9a39c1c0c3126145209a3139a131a",
-  "kernel_memory_isolation.py": "f91869a1c0c1500a5970f7254588c3ba6c6eb06fa8c4d6b05f04288058f169f2",
+  "kernel_memory_isolation.py": "6464f723898e44fd6d1b3350a7ee6c50f6a7db5a1c8617e0a98f79495042cfac",
   "kernel_menu_composer.py": "371cd4e8ebbdff97873dc9fb20a18fe1961f6dd599d83a4dd1d5245cb0c41b0c",
   "kernel_micrograph_wire.py": "9c9a038fd9bf4a27c2c14ad529c8832e754a03fc151f5dcbdd64e1978b0bf72c",
   "kernel_model_hopping_comparison.py": "9764882f794cf4b8743fd0042747b704e1e8ff4bb8d1c545683b2d62e0e87ee4",

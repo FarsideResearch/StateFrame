@@ -32,6 +32,7 @@ MAX_CAPSULE_CHARS = 6000
 CAPSULE_KINDS = frozenset({"explicit", "prior_attempt"})
 CARRY_SCHEMA = "stateframe-memory-carry-envelope/1"
 UNIDENTIFIED_PREFIX = "unidentified:"
+DEFAULT_WORKER_ID = "worker:local"  # run- and process-independent fallback worker identity
 CAPSULE_HEADER = "[Memory isolation capsule"
 BLOCKED_NOTICE = "[Memory isolation] blocked"
 # Rendered carry text that did not come from THIS boundary is removed in
@@ -420,9 +421,12 @@ def worker_identity_from_row(row: Mapping[str, object] | None = None, owner: obj
     configured = os.environ.get("STATEFRAME_WORKER_ID", "").strip()
     if configured:
         return _identifier(configured, "worker_id")
-    # Thread identity is the safe fallback for the existing concurrent runner:
-    # two tasks in different worker threads must not accidentally share a holder.
-    return f"process:{os.getpid()}:thread:{threading.get_ident()}"
+    # Fixed fallback.  The worker identity is part of the task namespace whose
+    # label is rendered into every admitted carry, so process or thread identity
+    # here made identical runs send different request bytes.  Isolation does not
+    # need it: separate engine processes own separate registries, and tasks that
+    # share a process are already distinct by their task and run identity.
+    return DEFAULT_WORKER_ID
 
 
 def explicit_task_identity(row: Mapping[str, object] | None) -> str | None:
@@ -710,7 +714,8 @@ def build_prior_carry_envelope(artifact_root: str, task_fn: str, task_sha: str,
 
 
 __all__ = [
-    "CAPSULE_FIELD", "CARRY_SCHEMA", "CapsuleValidationError", "MemoryIsolationBoundary",
+    "CAPSULE_FIELD", "CARRY_SCHEMA", "CapsuleValidationError", "DEFAULT_WORKER_ID",
+    "MemoryIsolationBoundary",
     "MemoryIsolationError", "MemoryRecord", "NamespaceViolation", "RECORD_SCHEMA",
     "SCHEMA", "TaskNamespace", "TypedCarryCapsule", "WorkerMemoryRegistry",
     "build_prior_carry_envelope", "eligible_prior_records", "enabled", "explicit_task_identity",
