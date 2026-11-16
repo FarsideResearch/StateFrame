@@ -945,28 +945,6 @@ def resolve_parallel_timing_env(*, parallel_enabled: bool) -> dict[str, str]:
     return chosen
 
 
-EDIT_NTURN_BUDGET_SETTING = "STATEFRAME_EDIT_NTURN_RUN_BUDGET_SECONDS"
-
-
-def resolve_edit_nturn_budget_env(environ=None) -> dict[str, str]:
-    """Pass an explicit edit continuation budget (host seconds, or off) to the engine child."""
-    source = os.environ if environ is None else environ
-    raw = source.get(EDIT_NTURN_BUDGET_SETTING)
-    if raw is None or not raw.strip():
-        return {}
-    value = raw.strip()
-    if value.lower() == "off":
-        return {EDIT_NTURN_BUDGET_SETTING: "off"}
-    try:
-        seconds = float(value)
-    except ValueError:
-        seconds = 0.0
-    if not math.isfinite(seconds) or seconds <= 0:
-        raise RunError(f"{EDIT_NTURN_BUDGET_SETTING}={raw!r} must be a positive number of seconds or off; "
-                       "set it or unset it")
-    return {EDIT_NTURN_BUDGET_SETTING: value}
-
-
 def resolve_exec_rpc_env() -> dict[str, str]:
     """Pass an explicitly configured supervisor timeout to the isolated engine child."""
     name = "STATEFRAME_EXEC_RPC_SECONDS"
@@ -988,7 +966,7 @@ def resolve_exec_rpc_env() -> dict[str, str]:
 SHELL_SETTINGS = frozenset({
     "STATEFRAME_ENDPOINT", "STATEFRAME_MODEL", "STATEFRAME_ALLOW_REMOTE_ENDPOINT", "STATEFRAME_KEEP_CHECKPOINTS",
     "STATEFRAME_CONTEXT_TOKENS", "STATEFRAME_PROMPT_BUDGET", "STATEFRAME_ROUTES",
-    "STATEFRAME_EXEC_RPC_SECONDS", "STATEFRAME_STARTUP_PROBE_SECONDS", EDIT_NTURN_BUDGET_SETTING,
+    "STATEFRAME_EXEC_RPC_SECONDS", "STATEFRAME_STARTUP_PROBE_SECONDS",
     *PARALLEL_TIMING_SETTINGS,
     *CHECKPOINT_ENV, *OPT_IN_SWITCHES,
 })
@@ -1593,7 +1571,6 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
     _write_json_atomic(skills_file, skills_record, mode=0o600)
     environment.update(options._context_env)
     environment.update(resolve_exec_rpc_env())
-    environment.update(resolve_edit_nturn_budget_env())
     environment.update(resolve_parallel_timing_env(parallel_enabled=mode != "off"))
     environment.update(opt_in)
     environment.update(options.extra_env)

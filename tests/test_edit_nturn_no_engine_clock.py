@@ -51,6 +51,8 @@ def test_no_engine_clock_budget_exists():
                 continue
             text = path.read_text(encoding="utf-8", errors="ignore")
             assert RETIRED_NAME not in text, f"retired override still named in {path.relative_to(ROOT)}"
+    for doc in [*(ROOT / "docs" / "guide").glob("*.md"), ROOT / "README.md"]:
+        assert RETIRED_NAME not in doc.read_text(encoding="utf-8"), doc.name
 
 
 def test_long_run_without_user_deadline_still_admits_edit_turns():

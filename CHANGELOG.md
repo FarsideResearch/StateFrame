@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Changed: the engine no longer limits edit continuation turns by its own clock. The 1800 s edit budget and its `STATEFRAME_EDIT_NTURN_RUN_BUDGET_SECONDS` override (0.7.15) are removed; only a run deadline you set still applies.
 ## 0.7.15 (2026-11-16)
 
 - Fixed: the edit continuation budget (`EDIT_NTURN_RUN_BUDGET_SECONDS`, 1800 s) now counts host time only; time spent waiting on the model is excluded, so slow model hosts no longer lose planned edit turns after 30 minutes of wall clock. The sandbox deadline still applies as before. New override `STATEFRAME_EDIT_NTURN_RUN_BUDGET_SECONDS=<seconds>|off`.

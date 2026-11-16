@@ -41,6 +41,8 @@ PROFILE_ONLY = {
 EXAMPLES = {"STATEFRAME_MY_SWITCH"}
 # Test-fixture variables named in the CHANGELOG: read only by the test suite, never by the product.
 TEST_FIXTURE_ONLY = {"STATEFRAME_RECORDED_WIRE"}
+# Switches removed from the product; older CHANGELOG entries still name them.
+RETIRED = {"STATEFRAME_EDIT_NTURN_RUN_BUDGET_SECONDS"}
 PREFIXES = {"STATEFRAME_ROUTE_"}
 NAME = re.compile(r"STATEFRAME_[A-Z0-9_]+")
 
@@ -68,7 +70,7 @@ def unsupported(documented: dict[str, list[str]], allowlist, product: set[str]) 
     """Documented names a user could export to no effect, with the reason."""
     problems = []
     for name, sentences in sorted(documented.items()):
-        if name in EXAMPLES or name in PREFIXES or name in allowlist or name in TEST_FIXTURE_ONLY:
+        if name in EXAMPLES or name in PREFIXES or name in allowlist or name in TEST_FIXTURE_ONLY or name in RETIRED:
             continue
         if name in PROFILE_ONLY:
             if not any("profile" in sentence.lower() for sentence in sentences):

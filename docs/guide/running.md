@@ -163,20 +163,6 @@ Watch for:
 
 Only the default 65,536-token slot is measured on long runs; other sizes are tested on short scripted runs.
 
-## Edit continuation budget
-
-After the first edit of a task, the engine can give the model a few more turns to edit the other planned sites. Those turns stop when the run has used 1,800 seconds of host time. Time spent waiting on the model is not counted, so a slow model server does not use up the budget.
-
-| Variable | Default | What it does |
-|---|---|---|
-| `STATEFRAME_EDIT_NTURN_RUN_BUDGET_SECONDS` | 1800 | Host seconds per run for the extra edit turns, or `off` for no limit. |
-
-```bash
-STATEFRAME_EDIT_NTURN_RUN_BUDGET_SECONDS=3600 stateframe run --repo ... --task "..."
-```
-
-A run deadline you set (for example `STATEFRAME_RUN_WALL_SECONDS`) still applies in real time. When a turn is withheld, the log line names the budget and this variable.
-
 ## Per-step models
 
 By default one endpoint and one model handle every request, and requests are byte-identical to a build without routing. You can instead send each kind of step to its own model: a small local model for reading, a stronger one for writing code. Each request is still built from the typed state frame, so switching models mid-run loses nothing; the frame is the handoff.
