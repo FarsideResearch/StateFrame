@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fixed: the edit continuation budget (`EDIT_NTURN_RUN_BUDGET_SECONDS`, 1800 s) now counts host time only; time spent waiting on the model is excluded, so slow model hosts no longer lose planned edit turns after 30 minutes of wall clock. The sandbox deadline still applies as before. New override `STATEFRAME_EDIT_NTURN_RUN_BUDGET_SECONDS=<seconds>|off`.
 ## 0.7.14 (2026-11-16)
 
 - Fixed (parallel subframes): subframes now commit their edits in live runs. A subframe that edited one of its files no longer fails allocation validation on every replan and ends the run; the validated frame and the live request now agree on the owner contract and on which read pins the request already delivers. When a replan is needed, the subframe replans instead of stopping.
