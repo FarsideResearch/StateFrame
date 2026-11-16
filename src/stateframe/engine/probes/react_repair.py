@@ -5319,8 +5319,12 @@ def _effect_test_subprocess(command, *, root: pathlib.Path, targets, env, runner
 
 
 def _compose_test_command(command: Sequence[object], targets: Sequence[object]) -> tuple[str, ...]:
-    """Append selected test targets without depending on list/tuple command shape."""
-    return tuple(str(item) for item in (*command, *targets))
+    """Append selected test targets without depending on list/tuple command shape.
+
+    ``--`` keeps every target positional for argparse; option-shaped targets are
+    already refused before dispatch (``screen_resolved_targets``).
+    """
+    return tuple(str(item) for item in (*command, "--", *targets))
 
 
 def _discover_test_targets(root: pathlib.Path, needle: str) -> list[str]:
@@ -5715,6 +5719,15 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
                 targets = [str(selected) + suffix]
     if _profile:
         _profile.end_span(_target_span)
+    # Same final-argv screen as the task runners: resolution can leave a target whose
+    # first path part starts with "-", and pytest pre-scans "-pNAME" even after "--".
+    from task_runners import screen_resolved_targets
+    targets, _option_shaped = screen_resolved_targets(targets)
+    if _option_shaped:
+        shown = ", ".join(repr(item[:80]) for item in _option_shaped[:5])
+        return ("[selector] REFUSED_PREDISPATCH — option-shaped test target rejected: "
+                f"{shown}; provide file paths or selectors, not options.")
+    targets = list(targets)
     _config_span = _profile.start_span("config_command_preparation") if _profile else None
     _check_termination: dict = {}  # kill evidence of the latest check run
     try:

@@ -190,9 +190,12 @@ def _run_pytest(
     if gate is not None:
         return gate
 
-    targets, kexpr, resolve_error = _resolve_pytest_targets(
+    resolved, kexpr, resolve_error = _resolve_pytest_targets(
         root, fn, requested, subprocess_run
     )
+    # Resolution rewrites selectors (``./-x`` -> ``-x``), so the FINAL argv entries
+    # are screened again; the raw screen in ``run_pytest`` cannot see that form.
+    targets, dropped = screen_resolved_targets(resolved)
     selected = tuple(requested or targets)
     if resolve_error:
         return _result(
@@ -201,6 +204,10 @@ def _run_pytest(
             None,
             selected,
             resolve_error,
+        )
+    if dropped and not targets:
+        return _result(
+            "pytest", "HARNESS_ERROR", None, selected, _rejected_message(dropped)
         )
     if not targets:
         return _result(
@@ -215,8 +222,8 @@ def _run_pytest(
     command = [selected_test_python(), "-m", "pytest", "-x", "-q", "--no-header"]
     if kexpr:
         command.extend(["-k", kexpr])
-    # "--" makes argparse treat targets as positional (pytest still pre-scans -p, so
-    # option-like selectors are also rejected upstream by _screen_selectors).
+    # "--" makes argparse treat targets as positional; pytest still pre-scans -p after
+    # it, so option-shaped targets are rejected by screen_resolved_targets above.
     command.extend(["-p", "no:cacheprovider", "--", *targets])
     process_env = _process_env(env, requires_db)
     try:
@@ -231,33 +238,37 @@ def _run_pytest(
     except subprocess.TimeoutExpired:
         emit_timeout("task_runners", what="pytest task", why=f"pytest timed out after {timeout}s; limit: task runner timeout argument (no env override)",
                      deadline_s=timeout, cause_key="pytest:timeout")
-        return _result(
+        result = _result(
             "pytest", "TIMEOUT", None, selected, f"pytest timed out after {timeout}s"
         )
+        return _note_dropped(result, dropped)
     except (FileNotFoundError, OSError) as exc:
-        return _result(
+        result = _result(
             "pytest",
             "INFRA_ERROR",
             None,
             selected,
             f"pytest executable unavailable: {type(exc).__name__}",
         )
+        return _note_dropped(result, dropped)
     except Exception as exc:  # noqa: BLE001 - runner boundary must fail closed
-        return _result(
+        result = _result(
             "pytest",
             "INFRA_ERROR",
             None,
             selected,
             f"pytest subprocess failed: {type(exc).__name__}",
         )
+        return _note_dropped(result, dropped)
 
-    return parse_pytest_output(
+    result = parse_pytest_output(
         completed.stdout or "",
         completed.stderr or "",
         completed.returncode,
         selected=selected,
         rel_hint=rel_hint,
     )
+    return _note_dropped(result, dropped)
 
 
 def run_vitest(
@@ -612,7 +623,8 @@ def _resolve_pytest_targets(
     if not requested:
         try:
             found = run(
-                ["grep", "-rl", "--include=test_*.py", fn, str(root)],
+                # "-e" and "--" keep a corpus fn such as "-V" a pattern, never an option.
+                ["grep", "-rl", "--include=test_*.py", "-e", fn, "--", str(root)],
                 capture_output=True,
                 text=True,
                 timeout=60,
@@ -666,7 +678,10 @@ def _resolve_pytest_targets(
             matches = recover_by_basename(root, base)
             if len(matches) == 1:
                 suffix = selector[len(selector.split("::", 1)[0]) :]
-                targets.append(str(matches[0].relative_to(root.resolve())) + suffix)
+                relative = _relative_to_root(root, matches[0])
+                if relative is None:
+                    return [], kexpr, f"test selector escapes sandbox: `{base}`"
+                targets.append(relative + suffix)
             elif len(matches) > 1:
                 return (
                     [],
@@ -677,9 +692,50 @@ def _resolve_pytest_targets(
                 return [], kexpr, f"test path does not exist: `{base}`"
         else:
             suffix = selector[len(selector.split("::", 1)[0]) :]
-            target_text = str(candidate.relative_to(root.resolve())) + suffix
-            targets.append(target_text)
+            relative = _relative_to_root(root, candidate)
+            if relative is None:
+                return [], kexpr, f"test selector escapes sandbox: `{base}`"
+            targets.append(relative + suffix)
     return targets, kexpr, None
+
+
+def _relative_to_root(root: Path, candidate: Path) -> str | None:
+    """Root-relative text for ``candidate``, or None when it does not sit under root.
+
+    ``rglob`` yields paths under the unresolved root (a symlinked or relative
+    directory), so both sides are resolved before ``relative_to``; a symlink that
+    leaves the repository is reported as an escape instead of raising ValueError.
+    """
+
+    try:
+        return str(candidate.resolve().relative_to(root.resolve()))
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def screen_resolved_targets(
+    targets: Sequence[str],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Split FINAL runner argv targets into (kept, dropped).
+
+    Resolution turns ``./-pevil``, ``tests/../-pevil``, a basename match or an
+    absolute path into the bare ``-pevil``, which pytest's plugin pre-scan still
+    honours after ``--`` (``-pNAME`` imports NAME).  A target whose first path
+    part starts with ``-`` is therefore dropped here, after resolution, by every
+    runner that hands model- or corpus-derived targets to pytest.
+    """
+
+    kept: list[str] = []
+    dropped: list[str] = []
+    for target in targets:
+        text = str(target)
+        path_part = text.split("::", 1)[0]
+        parts = Path(path_part).parts
+        option_like = text.lstrip().startswith("-") or bool(
+            parts and parts[0].startswith("-")
+        )
+        (dropped if option_like else kept).append(text)
+    return tuple(kept), tuple(dropped)
 
 
 def _safe_selector_path(root: Path, base: str) -> Path | None:
