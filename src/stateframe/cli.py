@@ -114,7 +114,7 @@ def _add_task_arguments(command: argparse.ArgumentParser, *, for_run: bool = Fal
     command.add_argument("--protected-test-glob", action="append", default=[], metavar="GLOB",
                           help="also protect existing generic-runner test files matching this relative glob")
     command.add_argument("--protect-tests", choices=("task", "all", "off"),
-                         help="which existing tests to lock (default: profile setting)")
+                         help="which existing tests to lock (default: the profile's STATEFRAME_PROTECT_TESTS, off in the shipped profile)")
     command.add_argument("--check", action="append", default=[], metavar="PATH",
                          help="pytest file the engine runs as its public check, or an additional "
                               "protected file for a generic command (repeatable)")

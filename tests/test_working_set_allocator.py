@@ -340,7 +340,7 @@ def test_admission_property_never_exceeds_allowance_and_preserves_order(seed=3):
 
 
 # ---------------------------------------------------------------------------
-# Round-2 review (fable_core_r2.md): F1 FIFO, F2 no post-break promotion, F3 tier coercion, F4 line admission
+# Round-2 review (design review): F1 FIFO, F2 no post-break promotion, F3 tier coercion, F4 line admission
 
 
 def test_fresh_is_fifo_within_a_kind_like_admission():

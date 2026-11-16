@@ -2,7 +2,7 @@
 
 The real index must satisfy the same assertions as the fake before it is
 swapped in: point INDEX_FACTORY at it. Names, signatures and dataclass fields are
-taken from crew-ops/plans/build_specs/crossfile_index_api.md.
+taken from the crossfile index API design spec.
 """
 from __future__ import annotations
 

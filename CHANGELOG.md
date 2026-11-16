@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Docs: corrected stale and contradictory statements and documented previously undocumented flags and switches (`--log-level`/`STATEFRAME_LOG_LEVEL`, `--quiet`, `--json`, `--session-dir`, transport retry, zero-progress nudge, catalog/crossfile switches, partial-pass reporting).
+- The repair probe's source-repo environment variables are renamed to `STATEFRAME_SOURCE_REPO_PRIMARY` and `STATEFRAME_SOURCE_REPO_SECONDARY`.
+- Test fixtures and comments no longer carry local paths or internal names; the internal-name test now also scans fixtures.
 - Fixed: a repository file whose text contains host markers (source-window framing lines, `[EVIDENCEPIN]` blocks, `[CONTINUATION LIMITS |` lines) no longer stops the run before its first request. Source-window bodies are now framed by each range header's declared line count instead of a marker search, and file, tool and source-window text is never read as a host evidence pin or continuation limit.
 ## 0.7.9 (2026-11-15)
 

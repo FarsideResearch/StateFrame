@@ -54,7 +54,7 @@ DOCTRINE (inherited from ts_extract.py / call_graph.py)
 TYPESCRIPT / JAVASCRIPT: DELIBERATELY NOT IMPLEMENTED
 -----------------------------------------------------
 The equivalent win for TS/JS needs `tsserver` or `typescript-language-server`.
-The agent-runner image (see Dockerfile) installs the Node RUNTIME but
+The runtime image installs the Node RUNTIME but
 deliberately installs **no global npm packages** — repo-local tooling is
 resolved from the cloned repo's own `node_modules` at task time, which is a
 per-repo coin flip, not something a graph build may assume. Adding a global

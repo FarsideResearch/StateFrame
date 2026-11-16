@@ -44,7 +44,7 @@ def pad_system_prompt(system_prompt: str, target_tokens: int) -> str:
     preamble = render_neutral_preamble(target_tokens)
     if not preamble:
         return system_prompt
-    return system_prompt + "\n\n[Mission Control context furniture]\n" + preamble
+    return system_prompt + "\n\n[Host context furniture]\n" + preamble
 
 
 def nonnegative_env_int(name: str) -> int:

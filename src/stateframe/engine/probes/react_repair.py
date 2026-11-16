@@ -500,8 +500,8 @@ def _append_structure_fact_observation(measurement, bolt, observation: str,
 
 REPOS = {
     name: pathlib.Path(path)
-    for name, key in (("aha", "STATEFRAME_AHA_REPO"),
-                      ("mc", "STATEFRAME_MC_REPO"),
+    for name, key in (("aha", "STATEFRAME_SOURCE_REPO_PRIMARY"),
+                      ("mc", "STATEFRAME_SOURCE_REPO_SECONDARY"),
                       ("build", "STATEFRAME_BUILD_REPO"))
     if (path := os.environ.get(key))
 }
@@ -541,9 +541,6 @@ it is the only real feedback available to you, and you cannot get it without act
   * `done` with no edit made is a wasted run: you will have submitted the original bug.
 
 ### Operating rules
-(Ported from Mission Control's production coding agent, `agent-runner/app/coding_executor.py`
-:DEFAULT_CODING_SYSTEM_PROMPT — these are battle-tested on a real fleet and this probe had
-none of them.)
 
   * Read the file you are about to edit. Never edit blind.
   * Do NOT re-read a file just to confirm an edit landed. The edit command tells you whether
@@ -2636,9 +2633,9 @@ def _render_multifile_list(fileset: FileSet, *, limit: int = 1400) -> str:
 # Native tool calls deliver structured arguments and avoid ambiguities in
 # free-form command parsing, including quoting and truncated code fences.
 #
-# Ported from sample project's agent-runner/app/openai_client.py: the DeepSeek DSML quirk — Flash
+# Ported from an upstream OpenAI-compatible client: the DeepSeek DSML quirk — Flash
 # occasionally emits tool calls as literal <｜DSML｜...> markup inside content with an empty
-# tool_calls array (known upstream bug). sample project's parser grammar is reproduced verbatim.
+# tool_calls array (known upstream bug). The client parser grammar is reproduced verbatim.
 
 
 def _list_files_command(args: Mapping[str, object]) -> str:
@@ -6945,7 +6942,7 @@ def work(d, *, resume=None):
 
     src_repo = REPOS.get(d.get("repo") or "aha")
     if src_repo is None and d.get("repo") != "build" and not (d.get("source_dataset") and d.get("base_commit")):
-        raise RuntimeError("source repository is not configured; set STATEFRAME_AHA_REPO or STATEFRAME_MC_REPO")
+        raise RuntimeError("source repository is not configured; set STATEFRAME_SOURCE_REPO_PRIMARY or STATEFRAME_SOURCE_REPO_SECONDARY")
     continuation_workspace = None
     if continuation_active:
         from kernel_continuation_workspace import ContinuationWorkspace

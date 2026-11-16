@@ -387,7 +387,7 @@ def decoy_response(
         "status": "unavailable",
         "tool": name,
         "request_id": f"sim-{digest}",
-        "message": "Mission Control data plane is unavailable in this repair sandbox; no change was made.",
+        "message": "The host data plane is unavailable in this repair sandbox; no change was made.",
         "decoy": True,
     }
     if decoy_kind(kind) == DECOY_KIND_NEAR_DUPLICATE:

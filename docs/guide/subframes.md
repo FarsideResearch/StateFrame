@@ -65,7 +65,7 @@ The model-facing fields are:
 | Field | Meaning |
 |---|---|
 | `id` | Unique identifier, up to 24 lowercase letters, digits, or underscores, starting with a letter. |
-| `goal` or `outcome` | A short description of the work, up to 300 characters. |
+| `goal` | A short description of the work, up to 300 characters. Required; `outcome` is accepted as an older spelling. |
 | `owns` | Existing files this subframe may change. |
 | `creates` | New files it must create. |
 | `exports` | Interfaces it promises, with an id, path, symbol, and optional signature. Existing Python signatures can be inferred from source. |
@@ -182,6 +182,8 @@ These shell settings accept positive finite seconds and are recorded for enabled
 | `STATEFRAME_PARALLEL_PREPARE_SECONDS` | 120 | Snapshot clone subprocess; preparation thread joins allow preparation plus cleanup time, at least 130 seconds |
 | `STATEFRAME_PARALLEL_WATCHDOG_GRACE_SECONDS` | 60 | Extra host allowance beyond an explicitly configured worker run-wall budget |
 | `STATEFRAME_PARALLEL_HOST_RESPONSE_SECONDS` | 300 | Maximum wait for a host answer, including an asynchronous seal result |
+
+A subframe worker with no run wall in its spec is capped at four hours, counted from the moment it holds its model slot.
 
 Each base allowance is multiplied by the one-minute host load divided by logical CPU count, bounded from
 1 through 8, with each resulting wait capped below the platform polling limit of 2,147,483 seconds.

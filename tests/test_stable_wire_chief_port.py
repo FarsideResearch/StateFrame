@@ -1,4 +1,4 @@
-"""Chief 6673c58e/a44966cf regressions adapted to captured ownership and epoch APIs."""
+"""Reference regressions adapted to captured ownership and epoch APIs."""
 from __future__ import annotations
 
 import copy
@@ -31,7 +31,7 @@ def _recordings(monkeypatch):
     return windows, bodies, sends, layouts
 
 
-def test_chief_marker_rows_in_the_exchange_are_ordinary_content(monkeypatch):
+def test_ported_marker_rows_in_the_exchange_are_ordinary_content(monkeypatch):
     window = _window()
     echo = "[Current source: pkg/a.py] quoted by the model"
     probes = [
@@ -58,7 +58,7 @@ def test_chief_marker_rows_in_the_exchange_are_ordinary_content(monkeypatch):
 
 
 @pytest.mark.parametrize("position", ["before_window", "after_window"])
-def test_chief_malformed_marker_before_frame_is_ordinary_content(monkeypatch, position):
+def test_ported_malformed_marker_before_frame_is_ordinary_content(monkeypatch, position):
     window = _window()
     probe = {"role": "user", "content": "[Current source: pkg/b.py] not a window"}
     rows = [probe, window] if position == "before_window" else [window, probe]
@@ -78,7 +78,7 @@ def test_chief_malformed_marker_before_frame_is_ordinary_content(monkeypatch, po
     assert len(runtime._stable_wire_state["delivered"]) == 1
 
 
-def test_chief_window_entries_ignore_window_shaped_rows_after_frame():
+def test_ported_window_entries_ignore_window_shaped_rows_after_frame():
     window, second = _window(), _window(path="pkg/b.py")
     body = _body([window])
     body["messages"].append(second)
@@ -93,7 +93,7 @@ def test_chief_window_entries_ignore_window_shaped_rows_after_frame():
 
 @pytest.mark.parametrize("metadata", [{"name": "native-user"}, {"tool_call_id": "call-0"}])
 @pytest.mark.parametrize("position", ["after_first_window", "before_frame"])
-def test_chief_metadata_row_before_frame_keeps_its_position(monkeypatch, metadata, position):
+def test_ported_metadata_row_before_frame_keeps_its_position(monkeypatch, metadata, position):
     # Captured provenance now preserves these rows instead of guessing ownership
     # from their names and failing open. Existing named host-panel tests require it.
     body = _final_cache_shaped_body()
@@ -124,7 +124,7 @@ def _misfile_last_panel(projected):
 
 
 @pytest.mark.parametrize("metadata", [{"name": "native-user"}, {"tool_call_id": "call-0"}])
-def test_chief_order_proof_rejects_misfiled_pre_frame_row(monkeypatch, metadata):
+def test_ported_order_proof_rejects_misfiled_pre_frame_row(monkeypatch, metadata):
     monkeypatch.setenv("STATEFRAME_STABLE_WIRE", "on")
     body = _final_cache_shaped_body()
     rows = body["messages"]
@@ -156,7 +156,7 @@ def test_chief_order_proof_rejects_misfiled_pre_frame_row(monkeypatch, metadata)
     assert runtime._stable_wire_state is None
 
 
-def test_chief_plain_newest_turn_before_frame_is_accepted(monkeypatch):
+def test_ported_plain_newest_turn_before_frame_is_accepted(monkeypatch):
     body = _final_cache_shaped_body()
     rows = copy.deepcopy(body["messages"])
     result, _, journal = _invoke(monkeypatch, body, SimpleNamespace(_stable_wire_state=None))
@@ -168,7 +168,7 @@ def test_chief_plain_newest_turn_before_frame_is_accepted(monkeypatch):
     assert canonical[frame - 2]["content"] == SUMMARY
 
 
-def test_chief_order_proof_sees_frame_cross_native_row(monkeypatch):
+def test_ported_order_proof_sees_frame_cross_native_row(monkeypatch):
     monkeypatch.setenv("STATEFRAME_STABLE_WIRE", "on")
     body = _final_cache_shaped_body()
     rows = body["messages"]
@@ -183,7 +183,7 @@ def test_chief_order_proof_sees_frame_cross_native_row(monkeypatch):
     assert not stable._order_preserved(rows, swapped)
 
 
-def test_chief_replay_without_windows_fails_open_on_every_send(monkeypatch):
+def test_ported_replay_without_windows_fails_open_on_every_send(monkeypatch):
     _, bodies, _, _ = _recordings(monkeypatch)
     _replay_with(monkeypatch, lambda: None)
     runtime = SimpleNamespace(_stable_wire_state=None)
@@ -198,7 +198,7 @@ def test_chief_replay_without_windows_fails_open_on_every_send(monkeypatch):
     assert runtime._stable_wire_state is None
 
 
-def test_chief_recorded_layout_carries_epoch(monkeypatch):
+def test_ported_recorded_layout_carries_epoch(monkeypatch):
     windows, _, _, layouts = _recordings(monkeypatch)
     first, second = layouts
     assert first[1] == 1 and second[1] == 2
@@ -206,7 +206,7 @@ def test_chief_recorded_layout_carries_epoch(monkeypatch):
     assert stable.recorded_window_layout([{"role": "user", "content": "plain"}]) is None
 
 
-def test_chief_unparseable_status_has_no_recorded_layout(monkeypatch):
+def test_ported_unparseable_status_has_no_recorded_layout(monkeypatch):
     _, _, recorded, _ = _recordings(monkeypatch)
     messages = copy.deepcopy(recorded[0][0]["messages"])
     frame = stable._frame_index(messages)
@@ -216,7 +216,7 @@ def test_chief_unparseable_status_has_no_recorded_layout(monkeypatch):
     assert stable.recorded_window_layout(messages) is None
 
 
-def test_chief_identical_windows_at_another_epoch_fail_open(monkeypatch):
+def test_ported_identical_windows_at_another_epoch_fail_open(monkeypatch):
     _, bodies, _, layouts = _recordings(monkeypatch)
     _replay_with(monkeypatch, lambda: (layouts[0][0], layouts[0][1] + 1))
     runtime = SimpleNamespace(_stable_wire_state=None)
@@ -233,7 +233,7 @@ def test_chief_identical_windows_at_another_epoch_fail_open(monkeypatch):
     assert runtime._stable_wire_state is None
 
 
-def test_chief_legacy_window_list_obeys_current_epoch_requirement(monkeypatch):
+def test_ported_legacy_window_list_obeys_current_epoch_requirement(monkeypatch):
     _, bodies, _, layouts = _recordings(monkeypatch)
     _replay_with(monkeypatch, lambda: layouts[0][0])
     runtime = SimpleNamespace(_stable_wire_state=None)
@@ -248,14 +248,14 @@ def test_chief_legacy_window_list_obeys_current_epoch_requirement(monkeypatch):
 @pytest.mark.parametrize("bad", [
     ["ok", 3], (["ok", 3], 1), (["ok"], "1"), (["ok"], True),
 ])
-def test_chief_provider_rejects_malformed_recording(monkeypatch, bad):
+def test_ported_provider_rejects_malformed_recording(monkeypatch, bad):
     monkeypatch.setattr(candidate, "_REPLAY_STABLE_WIRE_WINDOWS_PROVIDER", None)
     candidate.install_replay_stable_wire_windows_provider(lambda: bad)
     with pytest.raises(ValueError):
         candidate.replay_stable_wire_windows()
 
 
-def test_chief_unreproducible_recorded_order_fails_open(monkeypatch):
+def test_ported_unreproducible_recorded_order_fails_open(monkeypatch):
     _, bodies, _, layouts = _recordings(monkeypatch)
     rows, epoch = layouts[1]
     layouts[1] = ([rows[2], rows[3], rows[0], rows[1]], epoch)
@@ -276,7 +276,7 @@ def test_chief_unreproducible_recorded_order_fails_open(monkeypatch):
 
 
 @pytest.mark.parametrize("mismatch_after_trim", [1, 2])
-def test_chief_replay_rechecks_window_counts_after_trims(monkeypatch, mismatch_after_trim):
+def test_ported_replay_rechecks_window_counts_after_trims(monkeypatch, mismatch_after_trim):
     live_body = _layout_body(6)
     live_trim = UnderTrimmer(live_body, rows_per_reserve=0.05)
     live, live_capture = _render(
@@ -310,7 +310,7 @@ def test_chief_replay_rechecks_window_counts_after_trims(monkeypatch, mismatch_a
     assert runtime._stable_wire_state is None
 
 
-def test_chief_missing_recording_fails_open_before_trim(monkeypatch):
+def test_ported_missing_recording_fails_open_before_trim(monkeypatch):
     _replay_with(monkeypatch, lambda: None)
     body = _layout_body(6)
     before = copy.deepcopy(body)

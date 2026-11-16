@@ -99,7 +99,7 @@ def _run_degenerating_case(work: Path) -> Case:
              "--test-cmd", "python3 -m pytest -q tests/test_app.py",
              "--runner-kind", "pytest", "--test-python", test_python,
              "--target", "app.py", "--edit", "app.py", "--shell", "off",
-             "--no-project-hooks", "--no-instructions", "--timeout", "180",  # declared re-freeze (chief 13:04): at load ~100 on 32 CPUs the no-retry control took 106 s and the retry 117 s; 45 s failed the control too
+             "--no-project-hooks", "--no-instructions", "--timeout", "180",  # declared re-freeze (reviewed): at load ~100 on 32 CPUs the no-retry control took 106 s and the retry 117 s; 45 s failed the control too
              "--quiet", "--json"],
             cwd=ROOT, env=environment, capture_output=True, text=True,
             expected_seconds=55, run_dir=run, check=False,
