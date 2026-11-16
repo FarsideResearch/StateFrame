@@ -42,6 +42,7 @@ from kernel_tool_reply import Outcome, tool_reply
 from kernel_v30_token_contracts import install_telemetry_patch, sanitize_final_advice
 from kernel_pilot import ACTIVE_PARENT, ACTIVE_RUNTIME, ActionJournal, ParentMeter
 from kernel_sidekick import Sidekick
+import kernel_host_authorship as _host_authorship
 from kernel_stateframe_envelope import normalize_stateframe_messages
 from kernel_evictfix_mode import enabled as evictfix_enabled, journal_mode as journal_evictfix_mode
 from kernel_verdict import (
@@ -2845,7 +2846,7 @@ def _prepare_request_capture(runtime: object) -> RequestCapture:
     """Keep normal and early-stop request identities on the same authority."""
     origin = getattr(runtime, "_source_replan_origin_request_id", None)
     journal = runtime.journal
-    return RequestCapture(
+    capture = RequestCapture(
         journal, getattr(runtime.owner, "current_step", 0), runtime.snapshot_id,
         endpoint_profile=runtime.endpoint_profile,
         identity_content=({
@@ -2853,6 +2854,29 @@ def _prepare_request_capture(runtime: object) -> RequestCapture:
             "source_replan_of": origin,
         } if origin is not None else None),
     )
+    # The main request capture refers to the step's ledger (None when host-row identity is off).
+    _host_authorship.bind(capture, _host_authorship.open_step(runtime, capture.step))
+    return capture
+
+
+def _bind_host_authorship(runtime: object, capture: RequestCapture) -> RequestCapture:
+    """Give a capture of this step the runtime's host-authorship ledger, if one is open."""
+    _host_authorship.bind(capture, _host_authorship.ledger_of(runtime))
+    return capture
+
+
+def _private_host_authorship(capture: RequestCapture) -> RequestCapture:
+    """An auxiliary capture gets its own ledger and never sees the parent step's."""
+    _host_authorship.bind(capture, _host_authorship.open_private(capture.step, capture.request_id))
+    return capture
+
+
+def _mark_host_authorship(runtime: object, tag: str, messages: Sequence[object]) -> None:
+    """Record a pass boundary for the shadow report; nothing unless a ledger is open."""
+    ledger = _host_authorship.ledger_of(runtime)
+    if ledger is not None:
+        from kernel_host_authorship_shadow import mark
+        mark(ledger, tag, messages)
 
 
 def _unavailable_frame_request(runtime: object, reason_code: str) -> PreparedRequest:
@@ -16136,9 +16160,9 @@ class StateFrameRuntime:
                     result = {"status": "DEGRADED",
                               "reason": "BIND_QUANTITY live slot unavailable; measurement skipped"}
                 else:
-                    sender = make_capture_sender(lambda: RequestCapture(
+                    sender = make_capture_sender(lambda: _private_host_authorship(RequestCapture(
                         self.journal, getattr(self.owner, "current_step", 0), self.snapshot_id,
-                        endpoint_profile=self.endpoint_profile))
+                        endpoint_profile=self.endpoint_profile)))
             if callable(sender):
                 result = run_operator(
                     packet,
@@ -21690,6 +21714,7 @@ class StateFrameRuntime:
             self, messages: Sequence[dict], uncapped: Sequence[dict],
             tools: object, *, provider_request: bool) -> PreparedRequest:
         """Prepare append-only plain history with only truthful source safeguards."""
+        _host_authorship.open_step(self, getattr(getattr(self, "owner", None), "current_step", 0))
         from kernel_lean import (
             MAX_TOOL_RESULT_BYTES, MAX_TOOL_RESULT_CHARS, PLAIN_SYSTEM_PROMPT, append_stack_notice,
             finalize_wire_body, plain_loop_messages, plain_tool_surface,
@@ -21740,6 +21765,7 @@ class StateFrameRuntime:
         )
         if not prepared or prepared[0].get("role") != "system":
             raise ValueError("LEAN request requires the original system message")
+        _mark_host_authorship(self, "lean.history", prepared)
         prepared[0]["content"] = PLAIN_SYSTEM_PROMPT
         continuation_budget = getattr(self, "continuation_limits", None)
         if continuation_budget is None:
@@ -21868,6 +21894,7 @@ class StateFrameRuntime:
                             **source_delivery, dispatch=False,
                         )
 
+        _mark_host_authorship(self, "lean.source", prepared)
         stack_blocks = stack_tail_blocks(self, include_restate_requirement=False)
         if stack_blocks:
             prepared = append_stack_notice(prepared, stack_blocks)
@@ -21875,10 +21902,12 @@ class StateFrameRuntime:
         prepared, rewritten_tool_refs = sanitize_tool_references(prepared, selected_tools)
         validate_deferred_reads(prepared, selected_tools)
 
+        _mark_host_authorship(self, "lean.final", prepared)
         capture = RequestCapture(
             self.journal, getattr(self.owner, "current_step", 0), self.snapshot_id,
             endpoint_profile=self.endpoint_profile,
         )
+        _bind_host_authorship(self, capture)
         capture.completion_owner_runtime = self
         capture.presentation = "lean-plain-loop"
         capture.stateframe_f4_mode = "off"
@@ -22119,6 +22148,7 @@ class StateFrameRuntime:
     def _prepare_continuation_boundary(
             self, uncapped: Sequence[dict]) -> PreparedRequest | None:
         """Advance continuation state before rendering or sending its next frame."""
+        _host_authorship.open_step(self, getattr(getattr(self, "owner", None), "current_step", 0))
         if self.continuation is None:
             return None
         # Source replans may re-enter preparation without sending a request.
@@ -22152,18 +22182,18 @@ class StateFrameRuntime:
         if intrinsic_block:
             self.continuation.terminal_blocked = True
             self.system_outcome = "continuation_blocked"
-            capture = RequestCapture(
+            capture = _bind_host_authorship(self, RequestCapture(
                 self.journal, getattr(self.owner, "current_step", 0), self.snapshot_id,
-                endpoint_profile=self.endpoint_profile)
+                endpoint_profile=self.endpoint_profile))
             return PreparedRequest((), capture, {
                 "kind": "CONTINUATION_BLOCKED",
                 "finding": self.continuation.completion_finding(),
             })
         if self.continuation.completed:
             self.continuation_terminal = True
-            capture = RequestCapture(
+            capture = _bind_host_authorship(self, RequestCapture(
                 self.journal, getattr(self.owner, "current_step", 0), self.snapshot_id,
-                endpoint_profile=self.endpoint_profile)
+                endpoint_profile=self.endpoint_profile))
             return PreparedRequest((), capture, {"kind": "CONTINUATION_COMPLETE"})
         return None
 
@@ -22319,6 +22349,7 @@ class StateFrameRuntime:
                  request_host_text_preparer: Callable[..., object] | None = None,
                  forced_route: str | None = None,
                  frozen_route_capture: object | None = None) -> PreparedRequest:
+        _host_authorship.open_step(self, getattr(getattr(self, "owner", None), "current_step", 0))
         # Retain the caller's inputs before any host projection or source closure
         # is frozen. A single unsent source replan can then run normal preparation
         # against the current workspace instead of relabeling stale proof bytes.
@@ -22418,9 +22449,9 @@ class StateFrameRuntime:
             if receipt is not None and not receipt.can_start_model:
                 self.system_outcome = "env_broken"
                 from kernel_env_preflight import ENV_BROKEN
-                capture = RequestCapture(
+                capture = _bind_host_authorship(self, RequestCapture(
                     self.journal, getattr(self.owner, "current_step", 0), self.snapshot_id,
-                    endpoint_profile=self.endpoint_profile)
+                    endpoint_profile=self.endpoint_profile))
                 return PreparedRequest(
                     (), capture, {"kind": ENV_BROKEN, "receipt": receipt.as_dict()})
         # Native queued actions prepare frames without a provider response. Keep
@@ -22505,9 +22536,9 @@ class StateFrameRuntime:
             from kernel_greenlock_menu_authority import empty_menu_outcome
             empty = empty_menu_outcome(self)
             if empty is not None:
-                capture = RequestCapture(
+                capture = _bind_host_authorship(self, RequestCapture(
                     self.journal, getattr(self.owner, "current_step", 0), self.snapshot_id,
-                    endpoint_profile=self.endpoint_profile)
+                    endpoint_profile=self.endpoint_profile))
                 return PreparedRequest((), capture, empty)
         # The frame batch arm used to discard a failed prefix and leave the
         # model with no account of the sibling calls.  Integrity receipts are
@@ -22722,6 +22753,7 @@ class StateFrameRuntime:
         history = cap_history(copy.deepcopy(history_uncapped), cap_tokens=self.history_cap,
                               protected_prefix_count=2, mode=self.modes["history_cap"])
         prepared = list(history.messages) if history.applied else baseline
+        _mark_host_authorship(self, "prepare.history", prepared)
         observation_mask_history = (
             provider_request
             and getattr(self, "observation_masker", None) is not None
@@ -23540,6 +23572,7 @@ class StateFrameRuntime:
                                 else M3_SOURCE_BUDGET_TOKENS
                             ),
                         }
+        _mark_host_authorship(self, "prepare.projection", prepared)
         estimate = token_estimate({"messages": prepared, "tools": tools})
         framefit_on = getattr(self, "stateframe_framefit_mode", "off") == "on"
         task_row = getattr(self.owner, "task_row", None)
@@ -24343,6 +24376,7 @@ class StateFrameRuntime:
                     tools[:] = copy.deepcopy(
                         request_action_contract.get("admitted_tool_schemas", tools))
             estimate = token_estimate({"messages": prepared, "tools": tools})
+        _mark_host_authorship(self, "prepare.fit", prepared)
         self.owner.current_prompt_hash = digest({"messages": prepared, "tools": tools})
         if (provider_request
                 and getattr(self, "stateframe_completion_diagnosis_mode", "off") == "on"):
@@ -25328,6 +25362,7 @@ class StateFrameRuntime:
                 final_hash = digest({"messages": prepared, "tools": tools})
                 self.owner.current_prompt_hash = final_hash
                 capture.final_submitted_bytes_hash = final_hash
+        _mark_host_authorship(self, "prepare.contract", prepared)
         prepared_event = None if framefit_on else emit_request_prepared_event()
         from kernel_tokens_row6_projection import audit_owned_blocks
         tokens_row6_delivery = audit_owned_blocks(prepared)
@@ -25592,6 +25627,7 @@ class StateFrameRuntime:
                 self.continuation.source_prepared(
                     prepared_event, capture, source_delivery,
                 )
+        _mark_host_authorship(self, "prepare.final", prepared)
         return PreparedRequest(tuple(prepared), capture, overflow, prepared_tools)
 
     def _tokenlab_cache_stable(self, prepared: list, tools: object, capture: object) -> tuple[list, int]:
