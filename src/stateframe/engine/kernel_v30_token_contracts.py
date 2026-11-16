@@ -252,6 +252,12 @@ def verification_selector_is_executable(runtime: object, selector: object) -> bo
     """Use an explicit host witness when one exists; never invent authorization."""
     if selector in (None, "", (), [], {}):
         return True
+    # Line breaks are rejected on the raw input before any normalization or
+    # comparison: _text/_selector_list collapse them to spaces, so "true\nrm"
+    # would otherwise match an approved "true rm".
+    raw_items = selector if isinstance(selector, (list, tuple, set, frozenset)) else (selector,)
+    if any("\n" in str(item) or "\r" in str(item) for item in raw_items):
+        return False
     for name in ("can_run_verification", "can_run_test", "verification_selector_allowed"):
         checker = getattr(runtime, name, None)
         if callable(checker):
@@ -267,12 +273,7 @@ def verification_selector_is_executable(runtime: object, selector: object) -> bo
         allowed = set(_selector_list(values))
         return bool(set(_selector_list(selector)) <= allowed)
     # The fallback preserves ordinary named targets but never turns a shell
-    # fragment into a check selector. Line breaks are rejected on the raw
-    # input: _text/_selector_list collapse them to spaces, which would hide
-    # a line-joined command from the marker check below.
-    raw_items = selector if isinstance(selector, (list, tuple, set, frozenset)) else (selector,)
-    if any("\n" in str(item) or "\r" in str(item) for item in raw_items):
-        return False
+    # fragment into a check selector.
     shell_prefixes = ("-", "/bin/", "sh ", "bash ", "rm ", "python ", "python3 ",
                       "pytest ", "pip ", "git ", "curl ", "wget ", "sudo ",
                       "chmod ", "echo ")
