@@ -545,7 +545,7 @@
   "kernel_repro_first_runtime.py": "e49a54296bfc4a6cb6e2b3a5661fd3d80c8ce56f6d1d9ee6f20cdee604ffcb56",
   "kernel_reprospec.py": "08f76f5d5fd6f0fc83abf8554c51f8c9f77daf70586f1766a5f0aa816b049374",
   "kernel_request_auth_identity.py": "500a3a7a97855a4770b68d81c44b57eddf306e4889c31de7508e31dbf7b2f571",
-  "kernel_request_budget.py": "068f729781fdec78bf13290cd2fdab6fd7fed4101fa3996b68a8587655ea1ba9",
+  "kernel_request_budget.py": "7065175c6719447444a0c702c9e25402cc9f5829c26fa660f1eb1a7fa07105be",
   "kernel_request_candidate.py": "1156dfe51eed0b5a38fe98dbb621df0333428970e3e083999c3c97ed27f38ff7",
   "kernel_request_diet.py": "2f173755d92b627e3f5bc4c4d160b70d0c016de796953c43fbb6eb8d5045eec1",
   "kernel_request_evidence_closure.py": "5ff5b21207daa58266b2849ac19243b05d54a036b71faa498d7f85d2c2043086",

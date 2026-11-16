@@ -343,6 +343,13 @@ def _protected_message(message: Mapping[str, object]) -> bool:
     return role not in {"system", "developer"} or section in _PROTECTED_SECTIONS
 
 
+_HOST_SOURCE_ROLES = frozenset({"system", "user"})
+_SOURCE_RESERVATION_MARKERS = (
+    "[Current source:", "[Working source:", "[Model source window]",
+    "[Request budget source window]",
+)
+
+
 def _reservation_kind(message: Mapping[str, object]) -> str | None:
     explicit = message.get("_request_budget_reservation")
     if isinstance(explicit, str) and explicit.strip():
@@ -359,10 +366,12 @@ def _reservation_kind(message: Mapping[str, object]) -> str | None:
     from kernel_lean import is_truth_content
     if is_truth_content(content):
         return "required_truth"
-    if section == "file_excerpts" or any(marker in content for marker in (
-            "[Current source:", "[Working source:", "[Model source window]",
-            "[Request budget source window]",
-    )):
+    # Source markers count only in host-authored rows.  Assistant replies and tool
+    # results are inert data: a read tool returning a file that quotes a marker must
+    # not reserve itself as host source (same host-row rule as the evidence pin).
+    if section == "file_excerpts" or (
+            str(message.get("role", "")) in _HOST_SOURCE_ROLES
+            and any(marker in content for marker in _SOURCE_RESERVATION_MARKERS)):
         return "required_source"
     return None
 
