@@ -121,6 +121,8 @@
   "kernel_run_vitals.py::_wire_summary",
   "kernel_serve_reads.py::files_in_frame_notice",
   "kernel_skills.py::note_budget_omission",
+  "kernel_source_view.py::parse_source_map",
+  "kernel_source_view.py::render_source_map",
   "kernel_stable_wire.py::_is_current_window",
   "kernel_stable_wire.py::_parse_frame",
   "kernel_stable_wire.py::_project_body",
@@ -147,6 +149,7 @@
   "kernel_stateframe_framefit5.py::_raise_specific_framefit5_errors_before_shape",
   "kernel_stateframe_framefit5.py::_reconcile_framefit5_source_notices",
   "kernel_stateframe_framefit5.py::_refresh_framefit5_sources",
+  "kernel_stateframe_framefit5.py::_request_carries_whole_source",
   "kernel_stateframe_framefit5.py::_state_payload",
   "kernel_stateframe_framefit5.py::assemble_framefit5_request",
   "kernel_stateframe_framefit5.py::attach_owner_protocol",
@@ -202,6 +205,7 @@
   "kernel_working_set_snapshot.py::_canonical_truth_indexes",
   "kernel_working_set_snapshot.py::freeze_preparation",
   "kernel_working_set_snapshot_compat.py::snapshot_semantic_messages",
-  "kernel_working_set_windows.py::frozen_embedded_windows"
+  "kernel_working_set_windows.py::frozen_embedded_windows",
+  "probes/react_repair.py::_enforce_unit_first_request"
  ]
 }
