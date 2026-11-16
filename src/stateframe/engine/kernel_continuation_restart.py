@@ -382,6 +382,8 @@ SAFE_TAIL = frozenset({
     # Opt-in check-truth failure records (audit only): the fallback they describe is re-derived on replay.
     "check_execution_binding_register_failed", "check_truth_vacuity_journal_failed",
     "check_execution_binding_scope_failed",
+    # Opt-in host-row identity records (audit only, dispatch=False): they describe the authorship comparison and carry no resume state.
+    "host_identity_shadow", "host_identity_missing", "host_authorship_manifest",
     # SHADOW state is replayed with its reads/primary requests, without effects.
     "working_set_capture", "working_set_submission", "working_set_response", "working_set_blocked",
     "read_admission",  # audit only; the delivered page already carries its cursor
