@@ -19,7 +19,7 @@ from typing import Literal, TypeAlias, cast
 
 from task_manifest import RunnerName, TaskManifest, load_task_manifest
 from kernel_reason_log import emit_timeout
-from kernel_tool_paths import AmbiguousToolPath, unique_tool_match
+from kernel_tool_paths import AmbiguousToolPath, recover_by_basename, unique_tool_match
 
 
 RunnerStatus: TypeAlias = Literal[
@@ -594,7 +594,7 @@ def _resolve_pytest_targets(
         if candidate is None:
             return [], kexpr, f"test selector escapes sandbox: `{base}`"
         if not candidate.exists():
-            matches = list(root.rglob(Path(base).name))
+            matches = recover_by_basename(root, base)
             if len(matches) == 1:
                 suffix = selector[len(selector.split("::", 1)[0]) :]
                 targets.append(str(matches[0].relative_to(root.resolve())) + suffix)

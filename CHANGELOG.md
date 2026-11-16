@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Security: recovering a missing tool path by its basename now applies the same workspace containment as an exact path. A candidate that is, or sits under, a symlink resolving outside the repository is skipped, so a repository-provided link can no longer turn a read, edit or pytest selector into access outside the root. The basename is matched literally (no glob metacharacters), and `.`/`..` never trigger recovery. Legitimate recovery, including in-repository symlinks, is unchanged.
 - Fixed: SWE-bench workspace lookup rejects a task-row cache_key that is not a hex digest or that resolves outside the cache's instances directory, and skips cached instances whose directories are symlinks out of the cache (ENV_WORKSPACE_CACHE_KEY_*).
 ## 0.7.16 (2026-11-16)
 
