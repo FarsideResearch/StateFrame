@@ -508,8 +508,8 @@ class _PlainHTTPProvider:
             assert_openai_chat_body, enforce_provider_body, reasoning_profile,
         )
         from kernel_provider_dialect import (
-            capabilities_for, origin_of, reasoning_controls_summary,
-            require_selected_request_features,
+            PROBE_DEGRADED_EVENT, capabilities_for, origin_of, probe_degradation_event,
+            reasoning_controls_summary, require_selected_request_features,
         )
 
         capabilities = capabilities_for(
@@ -528,6 +528,9 @@ class _PlainHTTPProvider:
                     capabilities.dialect, reasoning_off=profile.off, environ=self.environ,
                 ),
             )
+            degraded = probe_degradation_event(capabilities, origin)
+            if degraded is not None:
+                self.journal.write(PROBE_DEGRADED_EVENT, dispatch=False, **degraded)
         require_selected_request_features(capabilities, body, environ=self.environ)
         if capabilities.dialect == "openai-strict":
             strict_body = enforce_provider_body(

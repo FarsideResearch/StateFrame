@@ -423,6 +423,10 @@ SAFE_TAIL = frozenset({
     # records the refusal reason and marks the probe unavailable on the in-memory
     # capture; no continuation state, request bytes or dispatch decision changes.
     "provider_probe_skipped",
+    # /props stayed unreachable after bounded retries and the run fell back to
+    # openai-strict. Audit only (dispatch=False): the fallback is re-derived by the
+    # same probe on resume, and no request bytes are changed by this record.
+    "provider_probe_degraded",
 }) | _CAPACITY_SAFE_TAIL
 CHALLENGE_BUDGET_SAFE_TAIL = frozenset({
     "challenge_budget_state", "done_challenge_once", "done_challenge_overridden",

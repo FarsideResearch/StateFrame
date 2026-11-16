@@ -5595,8 +5595,8 @@ class RequestCapture:
             from kernel_capacity_retry import apply_learned_limit
             apply_learned_limit(self, body, endpoint, key)
         from kernel_provider_dialect import (
-            RUN_CAPABILITY_CACHE, ProviderCapabilityError, capabilities_for,
-            mark_dialect_journaled, origin_of,
+            PROBE_DEGRADED_EVENT, RUN_CAPABILITY_CACHE, ProviderCapabilityError,
+            capabilities_for, mark_dialect_journaled, origin_of, probe_degradation_event,
             reasoning_controls_summary, require_selected_request_features,
         )
         provider_capabilities = capabilities_for(endpoint, key, cache=RUN_CAPABILITY_CACHE)
@@ -5617,6 +5617,11 @@ class RequestCapture:
                     provider_capabilities.dialect,
                     reasoning_off=final_profile.off),
                 dispatch=False)
+            degraded = probe_degradation_event(provider_capabilities, provider_origin)
+            if degraded is not None:
+                self.journal.emit(
+                    PROBE_DEGRADED_EVENT, producer="kernel_provider_dialect",
+                    dispatch=False, **degraded)
 
         route = getattr(self, "frame_route", None)
         route_slot = (route.settings.get("slot") if route is not None
