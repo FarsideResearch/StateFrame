@@ -432,6 +432,15 @@ SAFE_TAIL = frozenset({
     # openai-strict. Audit only (dispatch=False): the fallback is re-derived by the
     # same probe on resume, and no request bytes are changed by this record.
     "provider_probe_degraded",
+    # Run-start notice for retired STATEFRAME_* switches (dispatch=False, never refuses).
+    # The runtime constructor re-runs the registry check on every start, including a
+    # resume, so this row lands after the checkpoint. REJECT here would refuse every
+    # resume of a run that still has a retired switch set.
+    "retired_switch_ignored",
+    # Check-receipt execution-binding scope could not be resolved; the receipt falls back
+    # to the unpinned scope. Audit only (dispatch=False), re-derived from the same pinned
+    # inputs on replay, so the tail row carries no authority.
+    "check_execution_binding_scope_failed",
 }) | _CAPACITY_SAFE_TAIL
 CHALLENGE_BUDGET_SAFE_TAIL = frozenset({
     "challenge_budget_state", "done_challenge_once", "done_challenge_overridden",
