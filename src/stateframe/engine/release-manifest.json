@@ -328,6 +328,8 @@
   "kernel_hook_exec.py": "949bf5c2cb42718198eea9e613983eb1c095e2e90ef2f678e054184ce60da688",
   "kernel_hook_wiring.py": "4016a15714ff1be61b9dad9b132ffb37c10ded9849faa703116ad9740983461f",
   "kernel_hooks.py": "5e9938ea60e83b43ee7ea9bdc318e35e2a7b6a458b5e37a957f15246a56fc63a",
+  "kernel_host_authorship.py": "89a16840d2a5c64066d8b0e8d0e19a4467e865f50e2e8873d4057c3b159cfed9",
+  "kernel_host_authorship_shadow.py": "b5f8e736b6268a1e58e2eb858f6527ce01eb4ef6c0875da15f2c3fb64d0ef250",
   "kernel_host_autopilot.py": "7d0f9c7f3975360a18ecd9e743483d2a366862a3e348fe64113d1cf99237cde9",
   "kernel_host_cache.py": "b4b03b3cd4609feb5cc0368453f364fb50ab2ae28442614212e29dd9066d6d22",
   "kernel_host_closure_render_degrade.py": "b9a5b57681031495c6ff41e220c751d48cd41856ad78dfc0359fbf4e52d1071c",

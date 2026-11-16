@@ -800,7 +800,7 @@
   "protected_tree_guard.py": "bd5bec6033b7f4e0bfaaf108e40a4686c36e0d5e5f4a9429aa33975c0af17846",
   "realtask_benchmark.py": "06f9c437a4f0258d4b0e40721bca9cd2ee13e7fac26bc4513b422ca8a5d3b5a9",
   "realtask_worker_receipts.py": "7f358362d2b839957f2541961ce11b6e65bcb26fa60e5f3d28de22144d47421f",
-  "release-manifest.json": "0f8cb06a5bfd24a8e503542659bb270de9a9ca0d054a34d7593c431202d965f7",
+  "release-manifest.json": "7a27b3c469bf831a93bc8ebc0bfbd25c0de33b1c1a4ac516610095cabdbb7c24",
   "sampler_config.py": "1549b3a60e0ebc8fbbad8ed5256f52477cd1bb2491a8da350c64c01e01c81b2d",
   "sf_launch.py": "0e0d792f923a3cbcb68cd22cbb06c7f14dcfc470c8b7c24ed78eacd79990ea5c",
   "sf_mutate_boot.py": "a213bba08b5171f830ba8c1afbcfbcf66b7768ab15961e167a9bcba368d97786",
@@ -810,7 +810,7 @@
   "spec_exec.py": "0a80d5488bc812718b4608e086c12c1b8999604cd075f01217eb9bf172424768",
   "swarm/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "swarm/client2.py": "fa141060de5346b46678660fe770c8adcef6b30f579417a52c013d3219d08c70",
-  "switch-registry.json": "c1bd135a9eaa5fcec7df182f1f811eb3275bb31bf64f00873c1dc528902b0c77",
+  "switch-registry.json": "ef376a54950151bf5944339fa44c1f36018b58f851f8cd1808f96d7425496fc8",
   "symbol_registry.py": "28986ae33ad691dd89c201130e1982334d56542c2e162d7fc9ff5b59073ea15f",
   "sys1/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "sys1/adapter.py": "633e61b3fcd43dc6a07d628a3c8eb4d4d1e54e53de078cbe9dd74ed677847ab1",
@@ -4772,7 +4772,7 @@
  "release_listed_but_absent_in_source": [],
  "release_manifest": "37f11a29d4ceccbc5ea3aa95d1e60249e41b93974fe1da74e347ccfad28f1374",
  "schema": "stateframe-engine-source/1",
- "shipped_hash": "d5d3b7182f31ecf9275f956814fa127daeddc1581d7cfafe2deea532bb8b311d",
+ "shipped_hash": "562a1d03a31ced8e3589732ed34a54b0efd27c008c63a945ccf87a4d7d1e5eac",
  "source_hash": "1a75f27c6197deed9df5acd441902846aced5fd358729dab308577e184a077c4",
  "source_tree": "37f11a29d4ceccbc5ea3aa95d1e60249e41b93974fe1da74e347ccfad28f1374"
 }
