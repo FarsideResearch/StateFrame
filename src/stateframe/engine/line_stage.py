@@ -948,7 +948,7 @@ def run_line_stage(file_lines: Sequence[str],
                    enabled: bool = True) -> LineStageResult:
     """Prune, optionally ask, and return the full anchor universe + a cert.
 
-    RETRY POLICY (the one place the design and the mission brief have to be
+    RETRY POLICY (the one place the design and the design brief have to be
     reconciled, so it is written down rather than inferred):
 
       * A MALFORMED, TRUNCATED, TIMED-OUT or UNAVAILABLE call is NEVER retried.

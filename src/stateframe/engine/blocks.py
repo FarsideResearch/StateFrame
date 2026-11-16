@@ -24,7 +24,7 @@ assumptions do not hold here, and pretending otherwise would produce a library
 whose numbers mean nothing:
 
 1. "approximately 40k general commits". MEASURED: `sample repository` carries 245
-   commits (9 touching `backend/`) and `mission-control` carries 1720. The
+   commits (9 touching `backend/`) and the second sample repository carries 1720. The
    mining envelope is therefore ~1.9k commits, not 40k, and the yield bands in
    the design (300..900 promotable clusters) are off by more than an order of
    magnitude. `probes/block_miner.py` reports its own coverage rather than

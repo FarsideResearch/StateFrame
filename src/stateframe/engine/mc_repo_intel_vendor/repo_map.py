@@ -57,7 +57,7 @@ _MAX_FILE_READ_BYTES = 200_000  # skip files larger than this
 _SKIP_DIRS = frozenset({
     ".git", "__pycache__", "node_modules", ".venv", "venv", "env",
     "dist", "build", ".tox", "migrations", ".next", ".nuxt",
-    "coverage", ".pytest_cache", ".mypy_cache", ".eggs", ".mission",
+    "coverage", ".pytest_cache", ".mypy_cache", ".eggs",
     "grader", "graders", "gold", "private", "hidden", "hidden_tests", "backups",
 })
 

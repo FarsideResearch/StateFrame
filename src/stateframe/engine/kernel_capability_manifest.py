@@ -183,7 +183,7 @@ def _journal_projection(runtime: object | None) -> tuple[
 
     cache = getattr(runtime, "_capability_manifest_journal_projection", None)
     if isinstance(cache, dict) and isinstance(cache.get("records"), JournalPrefix) == legacy():
-        cache = None  # Re-read when changing the lab arm, including checkpoint restore.
+        cache = None  # Re-read when changing the experiment arm, including checkpoint restore.
     if not isinstance(cache, dict) or cache.get("path") != signature[0]:
         cache = {"path": signature[0], "inode": signature[1], "size": 0,
                  "mtime_ns": 0, "records": ([] if legacy() else JournalPrefix(str(path))), "menu": [], "menu_refs": history(directory=path.parent),

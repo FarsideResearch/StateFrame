@@ -2,7 +2,7 @@
 
 The v19 terminal paths can see a public green receipt without seeing every
 ticket clause.  This module provides one conservative, duck-typed check for
-both post-green quieting and the token-lab no-progress owner.  It does not
+both post-green quieting and the token-budget no-progress owner.  It does not
 cap reasoning or change an off arm.
 """
 from __future__ import annotations

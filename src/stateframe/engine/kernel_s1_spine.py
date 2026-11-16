@@ -836,7 +836,7 @@ def frame_lab_compile_check(tasks: Sequence[Mapping[str, object]]) -> dict[str, 
         batch = compile_repro_templates(ledger, bindings)
         results.append({"task_id": task_id, "ready_count": batch["ready_count"], "gap_count": batch["gap_count"], "complete": batch["complete"]})
     return {
-        "schema": "frame-lab-s1-compile/1",
+        "schema": "frame-s1-compile/1",
         "task_count": len(results),
         "tasks": results,
         "all_rows_compile": all(bool(item["complete"]) for item in results),

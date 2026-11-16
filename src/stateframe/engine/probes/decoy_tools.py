@@ -1,4 +1,4 @@
-"""Deterministic Mission-Control-shaped decoy tools for ReAct regime tests.
+"""Deterministic product-platform-shaped decoy tools for ReAct regime tests.
 
 Decoys are deliberately useful-looking schemas with no implementation in this
 repair sandbox.  Their response says that no change was made, so a model can

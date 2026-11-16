@@ -46,7 +46,7 @@ def journal_directory(journal):
 
 
 def history(directory=None):
-    """Set the lab arm once, before constructing/restoring a run."""
+    """Set the experiment arm once, before constructing/restoring a run."""
     return [] if legacy() else HistorySpool(directory=directory)
 
 

@@ -3,7 +3,7 @@
 Started by ``stateframe run`` as ``<python> -B _child.py <run-dir>``. It uses
 stdlib-only package helpers and the vendored engine directory named in the spec.
 
-What it adds around the engine, mirroring the lab release runner's ``checked_ask``:
+What it adds around the engine, mirroring the reference runner's ``checked_ask``:
 * the declared environment (product profile + run settings) is installed before any
   engine import, after purging inherited engine keys;
 * every provider-bound request goes through the frame-only presentation preflight; a frame
@@ -715,7 +715,7 @@ def install_checked_ask(rr, spec: dict, run: Path, hook_wiring=None, *,
                         live_slot: int | None = None,
                         replayer: Replayer | None = None,
                         managed_slot: bool = False) -> None:
-    """The release runner's provider callback contract, minus the lab release fences."""
+    """The reference runner's provider callback contract, minus its release fences."""
     original_ask = rr.ask_tools
     requests_dir = run / "requests"
     requests_dir.mkdir(exist_ok=True)
@@ -808,7 +808,7 @@ def install_checked_ask(rr, spec: dict, run: Path, hook_wiring=None, *,
     from capability_request_preflight import preflight_presentation_or_degrade as _preflight
     preflight_parameters = set(inspect.signature(_preflight).parameters)
     # The engine asks the wrapper for its input preparation before runtime.prepare qualifies
-    # source locations. The lab runner's only input step is the host-capacity notice, which the
+    # source locations. The reference runner's only input step is the host-capacity notice, which the
     # product never enables, so preparation is the identity.
     def prepare_request_host_text(messages, *, runtime, tools,
                                    frame_request_allocation=None, framefit5_inputs=None):

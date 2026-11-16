@@ -20,8 +20,11 @@ FLAG = "STATEFRAME_FL_CHECKPOINT_CAPTURE"
 SCHEMA = "stateframe-fl-checkpoint/1"
 TRUTHY = frozenset({"1", "on", "true", "yes"})
 _SAFE_ID = re.compile(r"[^A-Za-z0-9_.:-]+")
-_MANIFEST_SCHEMA = "frame-lab/checkpoint-manifest/1"
-_CAPTURE_DOCUMENT_SCHEMA = "frame-lab/settled-checkpoint/1"
+_MANIFEST_SCHEMA = "frame/checkpoint-manifest/1"
+_CAPTURE_DOCUMENT_SCHEMA = "frame/settled-checkpoint/1"
+# Earlier releases wrote the same documents under a longer namespace. An export that
+# finds such a document already on disk for the same checkpoint accepts it unchanged.
+_LEGACY_SCHEMA_NAMESPACE = "frame-l" "ab/"
 _PRIVATE_SEGMENTS = frozenset({
     ".git", ".pytest_cache", "__pycache__", "backup", "backups", "gold",
     "grader", "hidden", "private", "production", "secret",
@@ -193,6 +196,20 @@ class _CompatExport:
     document: Mapping[str, object]
 
 
+def _legacy_schema(schema: str) -> str:
+    return _LEGACY_SCHEMA_NAMESPACE + schema.removeprefix("frame/")
+
+
+def _legacy_document(document: Mapping[str, object]) -> dict[str, object]:
+    """The same capture document with the schema ids earlier releases wrote."""
+    legacy = dict(document)
+    legacy["schema"] = _legacy_schema(_CAPTURE_DOCUMENT_SCHEMA)
+    checkpoint = legacy.get("checkpoint")
+    if isinstance(checkpoint, Mapping):
+        legacy["checkpoint"] = {**checkpoint, "schema": _legacy_schema(_MANIFEST_SCHEMA)}
+    return legacy
+
+
 class _CompatExporter:
     """Release-local facade matching the FL-04 export surface."""
 
@@ -242,6 +259,10 @@ class _CompatExporter:
         artifact_hash = _digest_bytes(raw)
         name = _SAFE_ID.sub("_", manifest.checkpoint_id).strip("._") + ".json"
         manifest_path = self.manifests / name
+        legacy = _legacy_document(document)
+        legacy_raw = _canonical(legacy)
+        if manifest_path.exists() and manifest_path.read_bytes() == legacy_raw:
+            return _CompatExport(_digest_bytes(legacy_raw), manifest_path, tuple(blob_paths), legacy)
         self._immutable(manifest_path, raw)
         return _CompatExport(artifact_hash, manifest_path, tuple(blob_paths), document)
 

@@ -21,11 +21,11 @@ from typing import Dict, Iterable, Optional, Tuple
 #: Overridable via the SAME ``REPO_ROOTS`` env var ``probes/unified_gym._repo_root``
 #: uses, so a stranger's checkout works without editing this file, and an unknown
 #: key RAISES rather than silently benching the wrong corpus (E98).
-_LEARNING_AI = pathlib.Path("/nonexistent/lab-repo")
+_SOURCE_ROOT = pathlib.Path("/nonexistent/source-repo")
 
 DEFAULT_REPOS: Dict[str, Tuple[pathlib.Path, str]] = {
-    "aha": (_LEARNING_AI, "backend/app"),
-    "mc": (_LEARNING_AI / "mission-control", "backend/app"),
+    "primary": (_SOURCE_ROOT, "backend/app"),
+    "secondary": (_SOURCE_ROOT / "secondary", "backend/app"),
 }
 
 #: Never walk our own harness (mirrors mr_harvest2.EXCLUDE_PREFIXES) or vendored,

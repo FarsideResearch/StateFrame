@@ -683,7 +683,7 @@ class LedgerIndex:
         self._projected_nodes: dict[str, Mapping[str, object]] = {}
         self._projected_edges: set[Edge] = set()
         self._hypothesis_postures: dict[str, object] = {}
-        # DecisionGraph is attached lazily by the runtime or a lab caller.  It
+        # DecisionGraph is attached lazily by the runtime or an experiment caller.  It
         # is a projection on this graph, never a sibling invalidation authority.
         self._decision_graph: object | None = None
 

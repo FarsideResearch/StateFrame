@@ -1,7 +1,7 @@
 """Per-site calibration and cost-aware thresholding for System One decisions.
 
 This module is deliberately standalone: it uses only the Python standard
-library and does not import Frame Lab, runtime, or evaluator code.  A labelled
+library and does not import the frame evaluator, runtime, or evaluator code.  A labelled
 record may contain a full probability distribution (the preferred form) or a
 scalar ``raw_p`` plus ``correct`` for compact replays.
 
@@ -368,7 +368,7 @@ def export_trends(
     min_labels: int = MIN_LABELS,
     window: int = DEFAULT_TREND_WINDOW,
 ) -> dict[str, object]:
-    """Build deterministic per-site metrics for the Frame Lab UI."""
+    """Build deterministic per-site metrics for the frame evaluator UI."""
 
     if type(min_labels) is not int or min_labels <= 0:
         raise ValueError("min_labels must be a positive integer")

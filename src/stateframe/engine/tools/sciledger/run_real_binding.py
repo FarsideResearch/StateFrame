@@ -9,6 +9,18 @@ from pathlib import Path
 from .final_product import FinalProductError, read_manifest
 
 
+LIVE_SCHEMA = "bug-replay-stage6-live/v1"
+CANDIDATE_SCHEMA = "bug-replay-stage6-candidate-diff/v3"
+# Artifacts stored by earlier releases carry a project prefix on the same ids.
+# They stay readable; new artifacts use the unprefixed ids above.
+_LEGACY_SCHEMA_PREFIX = "a" "ha-"
+
+
+def schema_matches(value: object, current: str) -> bool:
+    """True for the current schema id or its legacy-prefixed form (read-side only)."""
+    return isinstance(value, str) and value in (current, _LEGACY_SCHEMA_PREFIX + current)
+
+
 def select_candidate_boundary(run_dir: Path) -> Path:
     """Select the manifest-named candidate; proposal index and mtime are not authority."""
 
@@ -29,7 +41,7 @@ def select_candidate_boundary(run_dir: Path) -> Path:
         document = json.loads(candidate.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise FinalProductError("manifest candidate boundary is not valid JSON") from exc
-    if not isinstance(document, Mapping) or document.get("schema") != "aha-bug-replay-stage6-candidate-diff/v3":
+    if not isinstance(document, Mapping) or not schema_matches(document.get("schema"), CANDIDATE_SCHEMA):
         raise FinalProductError("manifest candidate boundary has an obsolete schema")
     proposal = document.get("proposals")
     if type(proposal) is not int or proposal < 0 or candidate.stem != str(proposal):
@@ -37,4 +49,4 @@ def select_candidate_boundary(run_dir: Path) -> Path:
     return candidate
 
 
-__all__ = ["select_candidate_boundary"]
+__all__ = ["CANDIDATE_SCHEMA", "LIVE_SCHEMA", "schema_matches", "select_candidate_boundary"]

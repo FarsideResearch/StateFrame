@@ -955,7 +955,7 @@ def encode_request(wire: bytes, *, gzip_enabled: bool) -> tuple[bytes, dict[str,
     """Identity wire -> (HTTP body, extra headers).
 
     10-13: the container -> socat sidecar -> host path truncates request bodies at ~149,326 bytes,
-    and the relay -> provider leg zero-fills random bytes. Large bodies are gzipped (the lab relay
+    and the relay -> provider leg zero-fills random bytes. Large bodies are gzipped (the reference relay
     inflates them) and every body carries X-Request-Body-SHA256 over the IDENTITY bytes so the relay
     can refuse a corrupted upload. The wire identity used by proofs is unchanged.
     """

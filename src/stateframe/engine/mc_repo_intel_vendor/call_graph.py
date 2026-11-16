@@ -70,7 +70,7 @@ except ImportError:  # pragma: no cover - exercised only in networkx-less envs
 _SKIP_DIRS = frozenset({
     ".git", "__pycache__", "node_modules", ".venv", "venv", "env",
     "dist", "build", ".tox", "migrations", ".next", ".nuxt",
-    "coverage", ".pytest_cache", ".mypy_cache", ".eggs", ".mission",
+    "coverage", ".pytest_cache", ".mypy_cache", ".eggs",
     "grader", "graders", "gold", "private", "hidden", "hidden_tests", "backups",
 })
 

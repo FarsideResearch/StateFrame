@@ -481,7 +481,7 @@ def encode_request_body(body: dict, environ: Mapping[str, str] | None = None) ->
     mode = str((environ if environ is not None else os.environ).get(GZIP_ENV, "off")).strip().lower()
     if mode not in {"on", "off"}:
         raise ValueError(f"{GZIP_ENV} must be 'on' or 'off'")
-    # End-to-end integrity header over the IDENTITY body: the lab relay verifies it after any
+    # End-to-end integrity header over the IDENTITY body: the reference relay verifies it after any
     # inflate and refuses a mismatch, localizing byte corruption (10-13 benchmark 1076: a NUL inside
     # our own "tool_call_id" key reached llama-server at byte ~161 KB). Other servers ignore it.
     integrity = {"X-Request-Body-SHA256": hashlib.sha256(raw).hexdigest()}

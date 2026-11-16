@@ -37,7 +37,7 @@ MOVES = {
 }
 MAX_PRESSURES_PER_STAGE_EPOCH = 1
 FRAME_LAB_REFERENCE = {
-    "schema": "frame-lab-adversary-s3-s5-s6/v1",
+    "schema": "frame-adversary-s3-s5-s6/v1",
     "parent_cases": 6,
     "candidate_cases": 8,
     "viable_control_families": 3,

@@ -24,7 +24,7 @@ are MEANT to collide — they are the same component named two ways). It is wron
 for a code entity, where ``_get_audience`` and ``get_audience`` are two different
 functions that both slug to ``get-audience``.
 
-This is not hypothetical. The first full build of ``mission-control/backend/app``
+This is not hypothetical. The first full build of a sample ``backend/app`` tree
 produced **92 collisions**, every one of them a private/public pair in the same
 module (``routers/audiences.py::_get_audience`` vs ``::get_audience``,
 ``routers/canvas.py::_get_canvas`` vs ``::get_canvas``, ...). w65/a_wave2_prep is

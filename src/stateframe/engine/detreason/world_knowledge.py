@@ -1,6 +1,6 @@
 """Per-sandbox deterministic world-knowledge projection.
 
-The mission event stream remains authoritative.  ``WorldKnowledgeStore`` is a
+The event stream remains authoritative.  ``WorldKnowledgeStore`` is a
 rebuildable projection: source observations and invalidations can be emitted to
 an existing receipt/event adapter, replayed after process death, and rendered as
 small, provenance-bearing answers.  No model call is made in this slice.

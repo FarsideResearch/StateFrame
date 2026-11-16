@@ -26,7 +26,8 @@ CAUSAL_LOCALIZE_TOOL_NAME = "localization_frontier"
 TESTWRITER_TOOL_NAME = "typed_test_writer"
 S2_FORCE_ALTERNATIVE_ACTION = "localization_alternative"
 S3_FORCE_SCHEMA = "stateframe-s3force/1"
-FRAMEBUILD_RECEIPT_SCHEMA = "frame-lab/framebuild-owner-receipt/1"
+FRAMEBUILD_RECEIPT_SCHEMA = "frame/framebuild-owner-receipt/1"
+# Receipts restored from earlier snapshots may carry the previous id; restore keeps them as-is.
 DEFAULT_STAGE_EXIT_BUDGET = 3
 STAGES = ("S1", "S2", "S3", "S4", "S5", "S6", "S7")
 STAGE_EXIT_ACTIONS = {

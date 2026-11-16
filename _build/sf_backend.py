@@ -59,8 +59,6 @@ def _is_prebuilt_fixture(relative: Path) -> bool:
 
 
 def _sdist_includes(relative: Path) -> bool:
-    if relative.parts[:2] == ("bench", "lab"):
-        return False
     if SKIP_PARTS & set(relative.parts):
         return False
     name = relative.as_posix()

@@ -51,7 +51,7 @@ def test_switch_is_registered_and_not_in_profile():
 
 
 def test_public_surface_contract(tmp_path):
-    """Pins the shared API (names, fields, kinds). Changing it breaks other crews' code."""
+    """Pins the shared API (names, fields, kinds). Changing it breaks downstream callers."""
     import dataclasses
     assert [f.name for f in dataclasses.fields(xf.Def)] == [
         "path", "qualname", "kind", "lineno", "end_lineno", "signature", "returns", "fields", "bases"]

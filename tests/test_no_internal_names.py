@@ -73,23 +73,11 @@ _ALLOWLIST = {
     ("tests/test_engine_run.py", "synthetic_label"): _Allow(
         3, "stable subprocess label used by the permission-error regression"
     ),
-    ("tests/test_check_selection.py", "project_alias"): _Allow(
-        3, "repository selector key and temporary path in an oracle fixture"
-    ),
     ("tests/test_final_cache_layout.py", "run_label"): _Allow(
         1, "synthetic request identifier in a test fixture, unrelated to a measurement lane"
     ),
     ("tests/test_shell_policy.py", "run_label"): _Allow(
         1, "carriage-return progress bytes in a shell normalization fixture"
-    ),
-    ("tests/test_lab_batch_drivers.py", "lab_driver_path"): _Allow(
-        1, "the test loads extracted maintenance drivers from their shipped path"
-    ),
-    ("tests/test_lab_driver_bindings.py", "lab_driver_path"): _Allow(
-        1, "the test verifies extracted driver imports keep their shipped bindings"
-    ),
-    ("tests/test_lab_move_integrity.py", "lab_driver_path"): _Allow(
-        3, "the moved-driver regression checks the exact maintenance script paths"
     ),
 }
 

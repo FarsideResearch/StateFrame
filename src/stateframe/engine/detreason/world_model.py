@@ -578,7 +578,7 @@ class CalibrationLedger:
 
         `trusted` is the whole point: below `min_n` observations the numbers
         are reported but MUST NOT gate anything. A Brier of 0.02 over four
-        rows is noise wearing a lab coat.
+        rows is noise dressed up as signal.
         """
         rows = self.rows()
         n = len(rows)
