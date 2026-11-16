@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Fixed: the reason log no longer hides its own failures. When the journal module could not be imported, journal events were renamed with a stale hardcoded key list, so `run_id`, `event_id`, `timestamp_ns`, `journal_format`, `previous_hash` and `record_hash` reached the journal unrenamed. The rename set now always comes from the journal's own `RESERVED` (read from its source when the import fails); if it cannot be determined the event is withheld and counted as a self-error. A failed `run_summary` now counts itself and returns `self_errors` and `summary_error` instead of an empty summary, so `record_fault` no longer reports an unverified record as written. `bind_journal` lets KeyboardInterrupt/SystemExit through and counts other failures, and the problems.jsonl summary row records `self_errors`. Tests: `tests/test_t8_failloud_telemetry_paths.py`.
+- Fixed: a slow or briefly unreachable llama.cpp server is no longer silently treated as a plain OpenAI endpoint. A transient `/props` (or `/slots`) failure (timeout, connection reset or refused, broken pipe, 5xx) is retried with 0.25/0.5/1.0 s pauses inside the existing probe deadline. If it stays unreachable the run still falls back to openai-strict, but journals one `provider_probe_degraded` event per origin (code `props_probe_unreachable`, attempts, error class name, elapsed ms) and prints a stderr warning. Definite answers (404/405/400, non-llama JSON) are not retried and are unchanged. Tests: `tests/test_props_probe_fallback.py`.
+
 ## 0.7.18 (2026-11-16)
 
 - A request waiting in a healthy server's queue is no longer failed after 30 minutes. Queue wait is only capped if you set STATEFRAME_QUEUE_WAIT_MAX_S; a server that stops answering is still detected by the 90 second liveness probe.
