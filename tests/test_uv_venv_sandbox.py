@@ -246,3 +246,78 @@ def test_live_uv_venv_runs_under_the_check_sandbox(tmp_path):
                                 timeout=scaled(60), check=False)
         assert (result.returncode, result.stdout.strip()) == (0, "ok"), result.stderr
     assert isolation.check_sandbox_exec_denial(str(python)) is None
+
+
+def _engine_venv_layout(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """venv/bin/python -> store/cpython-x (a symlinked directory) -> this interpreter's install.
+
+    The engine's own interpreter in a uv install: the venv link passes through a version-alias
+    directory outside the repository, the workspace and the resolved install prefix.
+    """
+    real = Path(sys.executable).resolve()
+    install = real.parent.parent
+    if real.parent.name != "bin" or not (install / "lib").is_dir():
+        pytest.skip("interpreter is not laid out as <prefix>/bin/python")
+    alias = tmp_path / "store" / "cpython-x"
+    alias.parent.mkdir()
+    alias.symlink_to(install)
+    venv = tmp_path / "engine-venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "pyvenv.cfg").write_text(f"home = {alias / 'bin'}\n")
+    (venv / "bin" / "python").symlink_to(alias / "bin" / real.name)
+    return venv, alias, install
+
+
+def _as_engine_interpreter(monkeypatch, venv: Path) -> None:
+    monkeypatch.setattr(sys, "executable", str(venv / "bin" / "python"))
+    monkeypatch.setattr(sys, "prefix", str(venv))
+
+
+@pytest.mark.host_sandbox
+@needs_bwrap
+@pytest.mark.skipif(platform.system() != "Linux", reason="requires Linux bwrap behavior")
+def test_linux_binds_the_launcher_interpreter_link_hop(monkeypatch, tmp_path):
+    venv, alias, install = _engine_venv_layout(tmp_path)
+    _as_engine_interpreter(monkeypatch, venv)
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.setattr(isolation, "backend", lambda: BWRAP)
+    command, _ = isolation.isolated_command(["/bin/sh", "-c", "true"], project, {}, nproc_budget=64)
+    head = command[:command.index("--")]
+    binds = [head[i:i + 3] for i, part in enumerate(head) if part == "--ro-bind"]
+    assert command[command.index("--") + 1] == str(venv / "bin" / "python")
+    assert ["--ro-bind", str(install), str(alias)] in binds
+    # The same interpreter as the check program adds no second bind for the hop.
+    command, _ = isolation.isolated_command([str(venv / "bin" / "python"), "-c", "pass"], project, {},
+                                            nproc_budget=64)
+    head = command[:command.index("--")]
+    assert sum(head[i:i + 3] == ["--ro-bind", str(install), str(alias)]
+               for i in range(len(head))) == 1
+
+
+@pytest.mark.host_sandbox
+@needs_bwrap
+@pytest.mark.skipif(platform.system() != "Linux", reason="requires Linux bwrap behavior")
+@pytest.mark.parametrize("style", ["subframe_pytest", "main_check_command"])
+def test_linux_check_runs_when_the_engine_interpreter_links_outside_the_repo(monkeypatch, tmp_path, style):
+    """Every check died with "bwrap: execvp <engine venv>/bin/python: No such file or directory"
+    when the configured test interpreter (or check program) was not the engine's own venv python."""
+    import kernel_execution_policy as policy
+    venv, _alias, _install = _engine_venv_layout(tmp_path)
+    _as_engine_interpreter(monkeypatch, venv)
+    project = tmp_path / "project"
+    project.mkdir()
+    test_python = str(Path(sys.base_prefix).resolve() / "bin" / Path(os.path.realpath(sys.executable)).name)
+    if not os.access(test_python, os.X_OK):
+        pytest.skip("no interpreter under the base prefix")
+    if style == "subframe_pytest":  # kernel_parallel._check: the configured test interpreter, private pid
+        token = "t" * 32
+        result = policy.run_sandboxed([test_python, "-c", "print('ran')"], project, timeout=scaled(60),
+                                      internal_env={"STATEFRAME_CHECK_TOKEN": token})
+    else:  # a main-run --check-cmd program
+        result = policy.run_sandboxed(["/bin/sh", "-c", "echo ran"], project, timeout=scaled(60),
+                                      generic_check=True)
+    completed = result.completed
+    assert "execvp" not in completed.stderr, completed.stderr
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "ran"

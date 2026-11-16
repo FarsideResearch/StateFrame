@@ -377,11 +377,26 @@ def isolated_command(command: list[str], root: Path, env: dict[str, str], *,
                  if "/" in program and not Path(program).is_absolute()
                  else Path(program) if Path(program).is_absolute() else None)
     link_binds: list[tuple[str, str]] = []
+
+    def bind_directory_hops(path: Path) -> None:
+        for hop in _link_chain(path):
+            bind = (str(hop.resolve()), str(hop))
+            if (hop.is_symlink() and hop.resolve().is_dir() and not hop.is_relative_to(root)
+                    and bind not in link_binds):
+                link_binds.append(bind)
+
     if exec_path is not None and exec_path.is_file() and os.access(exec_path, os.X_OK):
         prefixes.update(_interpreter_roots(exec_path.resolve(), env))
-        for hop in _link_chain(exec_path):
-            if hop.is_symlink() and hop.resolve().is_dir() and not hop.is_relative_to(root):
-                link_binds.append((str(hop.resolve()), str(hop)))
+        bind_directory_hops(exec_path)
+    # The check program is not the only interpreter the sandbox execs: the process-limit
+    # launcher below runs under the engine's own interpreter, and a selected test interpreter
+    # can differ from the program. Either can be a venv link through a symlinked install
+    # directory (uv's cpython-3.x-<platform> alias); without that hop every check exits 1 with
+    # "bwrap: execvp <venv>/bin/python: No such file or directory" before the program starts.
+    if nproc_budget is not None:
+        bind_directory_hops(Path(sys.executable))
+    if selected != Path(sys.executable) and selected.is_file() and os.access(selected, os.X_OK):
+        bind_directory_hops(selected)
     mounted: list[Path] = []
     for value in sorted(prefixes):
         if value.startswith("/usr") or value in {"/", "/home", "/root"}:
