@@ -1,13 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.7.16 (2026-11-16)
 
-- Changed: the engine no longer stops work on its own clock in three more places. The plain loop has no time limit unless you set `STATEFRAME_PLAIN_WALL_S` (a supervisor deadline still applies); the job watch no longer refuses new jobs after 900 s of total job time; the edit churn budget no longer stops at a 3600 s deadline or a time reserve.
 - Changed: the engine no longer limits edit continuation turns by its own clock. The 1800 s edit budget and its `STATEFRAME_EDIT_NTURN_RUN_BUDGET_SECONDS` override (0.7.15) are removed; only a run deadline you set still applies.
+- Changed: the engine no longer stops work on its own clock in three more places. The plain loop has no time limit unless you set `STATEFRAME_PLAIN_WALL_S` (a supervisor deadline still applies); the job watch no longer refuses new jobs after 900 s of total job time; the edit churn budget no longer stops at a 3600 s deadline or a time reserve.
+- Fixed: when the decision budget is spent, a response paid for by a terminal reserve can now make its one tool call (for example writing the final answer) even if the tool-attempt limit is reached; before, the reserve was charged and the write was refused.
+
 ## 0.7.15 (2026-11-16)
 
 - Fixed: the edit continuation budget (`EDIT_NTURN_RUN_BUDGET_SECONDS`, 1800 s) now counts host time only; time spent waiting on the model is excluded, so slow model hosts no longer lose planned edit turns after 30 minutes of wall clock. The sandbox deadline still applies as before. New override `STATEFRAME_EDIT_NTURN_RUN_BUDGET_SECONDS=<seconds>|off`.
-- Fixed: when the decision budget is spent, a response paid for by a terminal reserve can now make its one tool call (for example writing the final answer) even if the tool-attempt limit is reached; before, the reserve was charged and the write was refused.
 
 ## 0.7.14 (2026-11-16)
 
