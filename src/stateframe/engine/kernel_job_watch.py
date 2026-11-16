@@ -25,7 +25,6 @@ from kernel_reason_log import emit_kill, emit_refusal, emit_timeout
 
 MODE_ENV = "STATEFRAME_JOB_WATCH"
 MAX_CONCURRENT_JOBS = 2
-DEFAULT_MAX_TOTAL_JOB_WALL_S = 900.0
 DEFAULT_TAIL_LINES = 40
 MAX_TAIL_LINES = 500
 MAX_COMMAND_CHARS = 16_384
@@ -58,24 +57,12 @@ def enabled() -> bool:
         return False
 
 
-def _max_total_wall_from_env() -> float:
-    raw = os.environ.get("STATEFRAME_JOB_WATCH_MAX_WALL_S", str(DEFAULT_MAX_TOTAL_JOB_WALL_S))
-    try:
-        value = float(raw)
-    except (TypeError, ValueError) as error:
-        raise ValueError("STATEFRAME_JOB_WATCH_MAX_WALL_S must be finite and positive") from error
-    if not math.isfinite(value) or value <= 0:
-        raise ValueError("STATEFRAME_JOB_WATCH_MAX_WALL_S must be finite and positive")
-    return value
-
-
 def configuration() -> dict[str, object]:
     """Return the public limits for the active organ configuration."""
     from kernel_execution_policy import capability_report
     return {
         "schema": "stateframe-job-watch-config/1",
         "max_concurrent_jobs": MAX_CONCURRENT_JOBS,
-        "max_total_job_wall_s": _max_total_wall_from_env(),
         "host_kills_automatically": False,
         "execution_policy": capability_report().as_dict(),
     }
@@ -308,15 +295,11 @@ class JobWatch:
     """Manage background subprocesses without making liveness decisions for the model."""
 
     def __init__(self, root: str | os.PathLike[str], *, journal: object = None,
-                 max_total_wall_s: float | None = None,
                  clock: Callable[[], float] | None = None,
                  wall_clock: Callable[[], float] | None = None,
                  popen_factory: Callable[..., subprocess.Popen] | None = None):
         self.root = Path(root).resolve()
         self.journal = journal
-        self.max_total_wall_s = (_max_total_wall_from_env()
-                                 if max_total_wall_s is None else
-                                 _finite_positive(max_total_wall_s, "max_total_wall_s"))
         self.clock = clock or time.monotonic
         self.wall_clock = wall_clock or time.time
         # The optional factory is a deterministic test seam only; production
@@ -326,7 +309,6 @@ class JobWatch:
         self._lock = threading.RLock()
         self._jobs: dict[str, _ManagedJob] = {}
         self._next_id = 1
-        self._wall_cap_hit = False
 
     def _emit(self, kind: str, **fields: object) -> dict[str, object] | None:
         emit = getattr(self.journal, "emit", None)
@@ -339,26 +321,9 @@ class JobWatch:
         self._next_id += 1
         return job_id
 
-    def _total_wall_locked(self) -> float:
-        return sum(max(0.0, float(job.record.elapsed)) for job in self._jobs.values())
-
     def _active_ids_locked(self) -> list[str]:
         return [job.record.job_id for job in self._jobs.values()
                 if job.record.state == "running"]
-
-    def _check_wall_cap_locked(self) -> None:
-        total = self._total_wall_locked()
-        if total < self.max_total_wall_s or self._wall_cap_hit:
-            return
-        self._wall_cap_hit = True
-        self._emit(
-            "job_wall_cap_hit",
-            total_job_wall_s=total,
-            max_total_job_wall_s=self.max_total_wall_s,
-            active_job_ids=self._active_ids_locked(),
-            host_killed=False,
-            dispatch=False,
-        )
 
     def _status_locked(self, managed: _ManagedJob) -> dict[str, object]:
         row = managed.record.to_dict()
@@ -452,7 +417,6 @@ class JobWatch:
                 record.stalled = quiet_for >= quiet_limit
             else:
                 record.stalled = False
-            self._check_wall_cap_locked()
 
     def _reader_loop(self, job_id: str, process: subprocess.Popen[bytes]) -> None:
         stream = process.stdout
@@ -547,16 +511,6 @@ class JobWatch:
                 raise JobWatchError(
                     f"concurrent job cap reached ({MAX_CONCURRENT_JOBS}); inspect or kill a job",
                     code="CONCURRENT_CAP")
-            self._check_wall_cap_locked()
-            if self._wall_cap_hit:
-                self._emit("job_wall_cap_rejected", active_job_ids=active,
-                           total_job_wall_s=self._total_wall_locked(),
-                           max_total_job_wall_s=self.max_total_wall_s,
-                           requested_expected_s=expected, host_killed=False,
-                           dispatch=False)
-                raise JobWatchError(
-                    "total job wall cap reached; inspect or kill an existing job",
-                    code="WALL_CAP")
             job_id = self._new_id()
             started_mono = float(self.clock())
             started = float(self.wall_clock())
@@ -592,7 +546,6 @@ class JobWatch:
             self._emit("job_started", job_id=job_id, command=command,
                        expected_s=expected, done_signal=signal,
                        max_concurrent_jobs=MAX_CONCURRENT_JOBS,
-                       max_total_job_wall_s=self.max_total_wall_s,
                        dispatch=True)
             reader = threading.Thread(
                 target=self._reader_loop, args=(job_id, process),
@@ -732,21 +685,13 @@ class JobWatch:
 
     def frame(self) -> dict[str, object]:
         rows = self.refresh()
-        with self._lock:
-            total = self._total_wall_locked()
-            remaining = max(0.0, self.max_total_wall_s - total)
-            cap_hit = self._wall_cap_hit
         return {
             "schema": "stateframe-jobs/1",
             "jobs": rows,
             "limits": {
                 "max_concurrent_jobs": MAX_CONCURRENT_JOBS,
-                "max_total_job_wall_s": self.max_total_wall_s,
                 "host_kills_automatically": False,
             },
-            "total_job_wall_s": total,
-            "total_job_wall_remaining_s": remaining,
-            "total_job_wall_cap_hit": cap_hit,
             "block": render_jobs_block(rows),
         }
 
@@ -768,7 +713,7 @@ class JobWatch:
 
 
 __all__ = [
-    "DEFAULT_MAX_TOTAL_JOB_WALL_S", "DEFAULT_TAIL_LINES", "JobRecord", "JobWatch",
+    "DEFAULT_TAIL_LINES", "JobRecord", "JobWatch",
     "JobWatchError", "MAX_CONCURRENT_JOBS", "MAX_TAIL_LINES", "MODE_ENV",
     "configuration", "enabled", "mode", "render_jobs_block", "tool_surface",
 ]

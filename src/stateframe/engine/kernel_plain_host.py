@@ -621,10 +621,12 @@ def limits_from_env(environ: Mapping[str, str]) -> Limits:
                              ("REACT_MIN_P", "min_p", float)):
         if environ.get(key) not in (None, ""):
             sampler[field] = number(key, "0", kind)
-    wall = number("STATEFRAME_PLAIN_WALL_S", "1800")
+    # No engine default: the wall limit exists only when the user sets STATEFRAME_PLAIN_WALL_S.
+    wall = number("STATEFRAME_PLAIN_WALL_S", "") if environ.get("STATEFRAME_PLAIN_WALL_S") else None
     deadline = environ.get("CAPABILITY_ATTEMPT_DEADLINE_MONOTONIC")
     if deadline:  # never outlive the supervisor; leave a minute to export
-        wall = max(1.0, min(wall, float(deadline) - time.monotonic() - 60))
+        cap = float(deadline) - time.monotonic() - 60
+        wall = max(1.0, cap if wall is None else min(wall, cap))
     return Limits(model=str(environ.get("DS_MODEL", "")), wall_s=wall,
                   max_requests=number("STATEFRAME_PLAIN_MAX_REQUESTS", "150", int),
                   request_timeout_s=number("REACT_REQUEST_TIMEOUT_S", "600"),

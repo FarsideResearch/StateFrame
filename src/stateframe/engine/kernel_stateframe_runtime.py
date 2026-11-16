@@ -5193,7 +5193,6 @@ class StateFrameRuntime:
             from kernel_job_watch import JobWatch
             self.job_watch = JobWatch(
                 Path(owner.root), journal=self.journal,
-                max_total_wall_s=self.job_watch_config["max_total_job_wall_s"],
             )
         from kernel_environment_state import mode as environment_state_mode
         self.stateframe_environment_state_mode = environment_state_mode()
