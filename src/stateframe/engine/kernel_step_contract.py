@@ -1290,6 +1290,7 @@ EDIT_NTURN_SITE_SOURCES = frozenset({
     "model_action_targets", "fixed_horizon",
 })
 EDIT_NTURN_RUN_BUDGET_SECONDS = 1800.0
+EDIT_NTURN_RUN_BUDGET_ENV = "STATEFRAME_EDIT_NTURN_RUN_BUDGET_SECONDS"
 EDIT_NTURN_EDIT_TURN_SECONDS = 12.0
 EDIT_NTURN_DEFAULT_VERIFICATION_RESERVE_SECONDS = 300.0
 
@@ -1813,20 +1814,64 @@ def edit_nturn_required_seconds(
     return (turn * 2.0) + reserve
 
 
+def edit_nturn_run_budget_seconds(environ: Mapping[str, str] | None = None) -> float | None:
+    """Resolve the per-run edit n-turn host-time budget; None means no budget.
+
+    Unset or empty uses EDIT_NTURN_RUN_BUDGET_SECONDS. "off" disables the budget.
+    Anything else must be a finite positive number of seconds.
+    """
+    source = os.environ if environ is None else environ
+    raw = str(source.get(EDIT_NTURN_RUN_BUDGET_ENV, "")).strip()
+    if not raw:
+        return EDIT_NTURN_RUN_BUDGET_SECONDS
+    if raw.lower() == "off":
+        return None
+    try:
+        seconds = float(raw)
+    except ValueError:
+        seconds = math.nan
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise ValueError(f"{EDIT_NTURN_RUN_BUDGET_ENV} must be a positive number of seconds or off")
+    return seconds
+
+
+def edit_nturn_remaining_seconds(
+    *,
+    run_started: float,
+    now: float,
+    provider_wait_seconds: float,
+    budget_seconds: float | None,
+    sandbox_deadline: float | None,
+) -> float:
+    """Seconds left for further edit turns.
+
+    The run budget counts host time only: time spent waiting on the provider is excluded.
+    The sandbox deadline is a real external deadline and stays wall clock.
+    """
+    host_elapsed = max(0.0, (now - run_started) - max(0.0, provider_wait_seconds))
+    remaining = math.inf if budget_seconds is None else max(0.0, budget_seconds - host_elapsed)
+    if sandbox_deadline is not None:
+        remaining = min(remaining, max(0.0, sandbox_deadline - now))
+    return remaining
+
+
 def edit_nturn_budget_allows(
     remaining_seconds: float | None,
     verification_reserve_seconds: float,
     *,
     edit_turn_seconds: float = EDIT_NTURN_EDIT_TURN_SECONDS,
 ) -> bool:
-    """Fail closed unless the next turn and verification reserve fit before the cap."""
+    """Fail closed unless the next turn and verification reserve fit before the cap.
+
+    Infinite remaining (no budget) is admitted; NaN is refused.
+    """
     if remaining_seconds is None:
         return False
     try:
         remaining = float(remaining_seconds)
     except (TypeError, ValueError):
         return False
-    return (math.isfinite(remaining) and remaining >= edit_nturn_required_seconds(
+    return (not math.isnan(remaining) and remaining >= edit_nturn_required_seconds(
         verification_reserve_seconds, edit_turn_seconds=edit_turn_seconds))
 
 
@@ -2128,7 +2173,7 @@ def emit_edit_nturn_skipped_budget(
     from kernel_reason_log import emit_timeout
     emit_timeout("edit_nturn", what="planned edit turn withheld", level="WARN", journal=False,
                  why=f"{max(0.0, float(remaining_seconds)):.0f}s left, {float(required_seconds):.0f}s needed ({reason}); "
-                     f"limit: EDIT_NTURN_RUN_BUDGET_SECONDS={EDIT_NTURN_RUN_BUDGET_SECONDS:g}s per run, no override",
+                     f"limit: EDIT_NTURN_RUN_BUDGET_SECONDS={EDIT_NTURN_RUN_BUDGET_SECONDS:g}s of host time per run (provider wait excluded), override {EDIT_NTURN_RUN_BUDGET_ENV}=<seconds>|off",
                  deadline_s=EDIT_NTURN_RUN_BUDGET_SECONDS, cause_key="edit_nturn_budget")
     emitter("edit_nturn_skipped_budget", n_sites=n_sites, turns_used=turns_used,
             remaining_seconds=max(0.0, float(remaining_seconds)),

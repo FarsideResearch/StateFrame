@@ -6932,6 +6932,7 @@ def work(d, *, resume=None):
         return run_arbitrary_repo(d, resume=resume)
     run_limitations: list[str] = []
     _edit_nturn_run_started = time.monotonic()
+    _edit_nturn_provider_wait = 0.0
     _entry_ticket_text = str(d.get("msg") or "")
     from kernel_native_tools import NativeToolBatch, validate_configuration
     from kernel_step_contract import (
@@ -6950,7 +6951,8 @@ def work(d, *, resume=None):
         start_edit_nturn_episode,
         is_edit_nturn_no_change_reply,
         is_edit_action_line,
-        EDIT_NTURN_RUN_BUDGET_SECONDS,
+        edit_nturn_remaining_seconds,
+        edit_nturn_run_budget_seconds,
         prompt_guidance,
         render_blank_entry_template,
         render_claim_rule_first_turn,
@@ -8358,12 +8360,11 @@ def work(d, *, resume=None):
         _edit_nturn_model_plan_record_id = ""
         _edit_nturn_verification_reserve = 0.0
         _edit_nturn_deadline = None
+        _edit_nturn_budget_seconds = None
         if _edit_nturn_enabled:
             _edit_nturn_verification_reserve = edit_nturn_verification_reserve_seconds(d)
-            _edit_nturn_deadline = (
-                _edit_nturn_run_started + EDIT_NTURN_RUN_BUDGET_SECONDS)
-            if _sandbox_deadline is not None:
-                _edit_nturn_deadline = min(_edit_nturn_deadline, _sandbox_deadline)
+            _edit_nturn_budget_seconds = edit_nturn_run_budget_seconds()
+            _edit_nturn_deadline = _sandbox_deadline
         if _claim_rule_rendered:
             emit_claim_rule_rendered(measurement.journal)
         _budget.journal = measurement.journal
@@ -8967,7 +8968,13 @@ def work(d, *, resume=None):
             if _edit_nturn_session.turns_remaining <= 0:
                 _finish_edit_nturn()
                 return
-            remaining = max(0.0, float(_edit_nturn_deadline) - time.monotonic())
+            remaining = edit_nturn_remaining_seconds(
+                run_started=_edit_nturn_run_started,
+                now=time.monotonic(),
+                provider_wait_seconds=_edit_nturn_provider_wait,
+                budget_seconds=_edit_nturn_budget_seconds,
+                sandbox_deadline=_edit_nturn_deadline,
+            )
             required = edit_nturn_required_seconds(_edit_nturn_verification_reserve)
             reason = None
             if remaining < required:
@@ -8983,7 +8990,7 @@ def work(d, *, resume=None):
                     measurement.journal,
                     n_sites=_edit_nturn_session.n_sites,
                     turns_used=_edit_nturn_session.turns_used,
-                    remaining_seconds=remaining,
+                    remaining_seconds=min(remaining, 1e12),
                     required_seconds=required,
                     reason=reason,
                 )
@@ -9802,10 +9809,11 @@ def work(d, *, resume=None):
             _capture_token = measurement.activate(_prepared)
 
             def _provider_request_once():
-                nonlocal _prepared, _capture_token, _request_tools, _action_known_refs
+                nonlocal _prepared, _capture_token, _request_tools, _action_known_refs, _edit_nturn_provider_wait
                 rerouted = False
                 reroute_action = None
                 while True:
+                    _provider_t0 = None
                     try:
                         if _unit is not None and _provider_request and not getattr(
                                 measurement, "_unit_first_request_sent", False) and (
@@ -9813,6 +9821,7 @@ def work(d, *, resume=None):
                             _enforce_unit_first_request(
                                 measurement, _prepared, _request_tools, _unit, root,
                                 pathlib.Path(POC).parent)
+                        _provider_t0 = time.monotonic()
                         if toolcall_mode:
                             if native_batch is not None:
                                 route = (getattr(_prepared.capture, "frame_route", None)
@@ -9838,10 +9847,15 @@ def work(d, *, resume=None):
                                     tools=_request_tools, known_refs=_action_known_refs)
                         else:
                             response = ask(list(_prepared.messages), temp=run_temp)
+                        _edit_nturn_provider_wait += time.monotonic() - _provider_t0
+                        _provider_t0 = None
                         if _unit is not None and _provider_request:
                             measurement._unit_first_request_sent = True
                         return response
                     except Exception as error:                       # noqa: BLE001
+                        if _provider_t0 is not None:
+                            # A failed or timed-out provider call is model wait too.
+                            _edit_nturn_provider_wait += time.monotonic() - _provider_t0
                         from capability_capacity_preflight import CapacityRefusal
                         if (not isinstance(error, CapacityRefusal)
                                 or not getattr(error, "long_horizon_reroutable", False)):
