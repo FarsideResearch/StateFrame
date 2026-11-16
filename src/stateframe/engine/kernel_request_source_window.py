@@ -1335,28 +1335,19 @@ def _walk_window_body(
 def _scan_window_segments(
         lines: Sequence[str], start: int,
 ) -> list[tuple[dict[str, object], str]]:
+    """Segments of a window body, or [] when the declared framing does not fit.
+
+    There is deliberately no marker-search fallback: a body whose range
+    headers do not account for every line up to the end marker is malformed
+    (truncated, tampered with, or rendered from stale ranges), and every
+    caller treats an empty segment list as an unverifiable window.  Scanning
+    such a body for header or end-marker text would let file content shape
+    the parse again, which is the failure this framing exists to prevent.
+    """
     framed = _walk_window_body(lines, start)
-    if framed is not None:
-        return [(row, "".join(body)) for row, body in framed[0]]
-    # Legacy marker scan for bodies whose declared framing does not fit.
-    segments: list[tuple[dict[str, object], str]] = []
-    current: dict[str, object] | None = None
-    buffer: list[str] = []
-    for line in lines[start:]:
-        match = _RANGE.match(line.rstrip("\r\n"))
-        if match:
-            if current is not None:
-                segments.append((current, "".join(buffer)))
-            current = {"start_line": int(match.group(1)), "end_line": int(match.group(2))}
-            buffer = []
-            continue
-        if line.rstrip("\r\n") == WINDOW_END_MARKER:
-            break
-        if current is not None:
-            buffer.append(line)
-    if current is not None:
-        segments.append((current, "".join(buffer)))
-    return segments
+    if framed is None:
+        return []
+    return [(row, "".join(body)) for row, body in framed[0]]
 
 
 def _window_body_envelope_ok(lines: Sequence[str], start: int) -> bool:
