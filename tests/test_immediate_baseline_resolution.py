@@ -117,6 +117,27 @@ def test_release_head_resolves_to_previous_release_in_every_layout(
     assert _resolve(monkeypatch, detached) == commits["r020"]
 
 
+def test_release_merge_head_resolves_to_previous_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commits = _origin(tmp_path)
+    origin = tmp_path / "origin"
+    # Release 0.3.0 lands through a merge; its tag sits on the merged commit, which has
+    # HEAD's tree. HEAD is still the 0.3.0 release, so the base is 0.2.0.
+    _git(origin, "checkout", "-q", "-b", "release/v0.3.0")
+    tagged = _commit(origin, "Release 0.3.0",
+                     _changelog("0.3.0 (2026-01-03)", "0.2.0 (2026-01-02)", "0.1.0 (2026-01-01)"))
+    _git(origin, "tag", "v0.3.0", tagged)
+    _git(origin, "checkout", "-q", "main")
+    _git(origin, "merge", "-q", "--no-ff", "-m",
+         "Merge pull request #7 from example/release/v0.3.0", "release/v0.3.0")
+    merge = _git(origin, "rev-parse", "HEAD")
+    full, detached = _layouts(tmp_path, merge, misleading=tagged)
+
+    assert _resolve(monkeypatch, full) == commits["r020"]
+    assert _resolve(monkeypatch, detached) == commits["r020"]
+
+
 def test_untagged_release_head_resolves_to_previous_tagged_release(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

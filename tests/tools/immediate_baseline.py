@@ -86,7 +86,12 @@ def _immediate_base_release(root: Path | None = None) -> str:
     if not versions:
         pytest.skip("CHANGELOG.md at HEAD names no released version to use as the parity "
                     "baseline; set SF_TEST_BASELINE_IMMEDIATE")
+    head_subject = _git_text("log", "-1", "--format=%s", head, root=root) or ""
     for version in versions[:2]:
+        # HEAD is this version's release when it is the release commit itself or a release
+        # merge for it (whose tag may sit on the merged commit with the same tree).
+        if _release_subject(version).fullmatch(head_subject):
+            continue
         commit = _release_commit(version, head, root)
         if commit is None:
             pytest.skip(f"pinned base release {version} (CHANGELOG.md at HEAD) has no tag "
