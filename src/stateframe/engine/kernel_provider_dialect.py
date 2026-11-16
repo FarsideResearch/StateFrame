@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import threading
 import time
 import urllib.parse
@@ -9,13 +10,13 @@ from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass
 
 try:  # Host runner imports the helper as a package; the engine loads it top-level.
-    from .kernel_bounded_http import bounded_json_probe
+    from .kernel_bounded_http import bounded_json_probe, last_probe_error
     from .kernel_launch_identity_cost import (
         OPENAI_REASONING_EFFORTS, ProviderBoundaryContractError,
         require_strict_side_call_reasoning_off,
     )
 except ImportError:
-    from kernel_bounded_http import bounded_json_probe
+    from kernel_bounded_http import bounded_json_probe, last_probe_error
     from kernel_launch_identity_cost import (
         OPENAI_REASONING_EFFORTS, ProviderBoundaryContractError,
         require_strict_side_call_reasoning_off,
@@ -25,11 +26,44 @@ except ImportError:
 LLAMA_CPP = "llama.cpp"
 OPENAI_STRICT = "openai-strict"
 PROVIDER_OVERRIDE_ENV = "STATEFRAME_PROVIDER"
+# Transient probe failures (no answer, or a 5xx) are retried with these pauses.
+# A definite answer (2xx/4xx other than a transient fault) is never retried.
+PROBE_RETRY_DELAYS = (0.25, 0.5, 1.0)
+PROBE_DEGRADED_EVENT = "provider_probe_degraded"
+PROBE_DEGRADED_CODE = "props_probe_unreachable"
+PROBE_FAULT_HANDLER = "kernel_provider_dialect.props_probe"
+PROBE_FALLBACK_ID = "openai_strict_without_props"
 RUN_CAPABILITY_CACHE: dict[str, "ProviderCapabilities"] = {}
 RUN_DIALECT_JOURNALED: set[str] = set()
 _ORIGIN_LOCKS: dict[str, threading.Lock] = {}
 _ORIGIN_LOCKS_GUARD = threading.Lock()
 _JOURNAL_GUARD = threading.Lock()
+
+
+@dataclass(frozen=True)
+class ProbeDegradation:
+    """Why an unreachable /props forced the openai-strict fallback (no message text)."""
+
+    attempts: int
+    last_error_type: str
+    elapsed_ms: int
+
+
+class ProbePropsUnreachable(RuntimeError):
+    """Fault-record carrier for a transient /props failure. Built for record_fault, never raised.
+
+    The text names only the transport exception class, attempt count and elapsed time: no origin,
+    no key, no errno text.
+    """
+
+    fault_code = PROBE_DEGRADED_CODE
+
+    def __init__(self, degradation: ProbeDegradation) -> None:
+        super().__init__(
+            f"{degradation.last_error_type} after {degradation.attempts} attempt(s) "
+            f"in {degradation.elapsed_ms} ms"
+        )
+        self.degradation = degradation
 
 
 @dataclass(frozen=True)
@@ -40,6 +74,7 @@ class ProviderCapabilities:
     reason: str = "openai-strict because /props was unreachable"
     props_status: int | None = None
     slots_status: int | None = None
+    probe_degradation: ProbeDegradation | None = None
 
     @property
     def continuation(self) -> bool:
@@ -53,7 +88,29 @@ class ProviderCapabilities:
             "reason": self.reason,
             "props_status": self.props_status,
             "slots_status": self.slots_status,
+            "probe_degradation": (
+                None if self.probe_degradation is None else {
+                    "attempts": self.probe_degradation.attempts,
+                    "last_error_type": self.probe_degradation.last_error_type,
+                    "elapsed_ms": self.probe_degradation.elapsed_ms,
+                }
+            ),
         }
+
+
+def _probe_degradation_from_record(value: object) -> ProbeDegradation | None:
+    """Rebuild a host-proven degradation; anything unknown or malformed is dropped."""
+    if not isinstance(value, Mapping):
+        return None
+    attempts = value.get("attempts")
+    last_error_type = value.get("last_error_type")
+    elapsed_ms = value.get("elapsed_ms")
+    if (type(attempts) is not int or attempts < 1
+            or type(elapsed_ms) is not int or elapsed_ms < 0
+            or not isinstance(last_error_type, str) or not last_error_type.isidentifier()
+            or len(last_error_type) > 64):
+        return None
+    return ProbeDegradation(attempts=attempts, last_error_type=last_error_type, elapsed_ms=elapsed_ms)
 
 
 def seed_run_capability_cache(records: object) -> None:
@@ -82,6 +139,7 @@ def seed_run_capability_cache(records: object) -> None:
         RUN_CAPABILITY_CACHE[origin] = ProviderCapabilities(
             dialect=dialect, slots=slots, slot_ids=frozenset(slot_ids), reason=reason,
             props_status=props_status, slots_status=slots_status,
+            probe_degradation=_probe_degradation_from_record(value.get("probe_degradation")),
         )
 
 
@@ -168,6 +226,57 @@ def _slots_proof(
     return True, frozenset(slot_ids), status
 
 
+def _transient_probe(result: tuple[int, object] | None) -> bool:
+    """No usable answer or a server fault: worth another attempt. 4xx and bodies are definite."""
+    return result is None or result[0] >= 500
+
+
+def probe_degradation_warning(capabilities: ProviderCapabilities, origin: str) -> str | None:
+    """One operator-facing line for a transient-failure fallback, or None."""
+    degradation = capabilities.probe_degradation
+    if degradation is None:
+        return None
+    return (
+        f"WARNING: /props probe to {origin} gave no usable answer after "
+        f"{degradation.attempts} attempt(s) ({degradation.last_error_type}); running as "
+        "openai-strict with no tokenizer and no llama.cpp request shape"
+    )
+
+
+def probe_degradation_event(
+    capabilities: ProviderCapabilities, origin: str,
+) -> dict[str, object] | None:
+    """Return the fields of the once-per-run degradation event, and warn on stderr.
+
+    Callers journal the result under PROBE_DEGRADED_EVENT, gated by the same
+    once-per-origin guard that journals provider_dialect. Returns None when the
+    dialect was not a transient fallback.
+    """
+    degradation = capabilities.probe_degradation
+    warning = probe_degradation_warning(capabilities, origin)
+    if degradation is None or warning is None:
+        return None
+    # Standalone adapters have no host preflight, so the child prints its own line.
+    print(warning, file=sys.stderr, flush=True)
+    # Typed fault row in problems.jsonl (logging only; never raises, never changes the fallback).
+    # Lazy top-level import: this function runs only in the engine process, where the engine dir is on
+    # sys.path; the host runner uses probe_degradation_warning and must not import the reason log.
+    from kernel_fault_disposition import record_fault
+
+    record_fault(PROBE_FAULT_HANDLER, ProbePropsUnreachable(degradation), disposition="degraded",
+                 observed_at=PROBE_FAULT_HANDLER, origin=origin, fallback_id=PROBE_FALLBACK_ID,
+                 journal=False)
+    return {
+        "code": PROBE_DEGRADED_CODE,
+        "endpoint_origin": origin,
+        "attempts": degradation.attempts,
+        "last_error_type": degradation.last_error_type,
+        "elapsed_ms": degradation.elapsed_ms,
+        "dialect": OPENAI_STRICT,
+        "tokenizer": False,
+    }
+
+
 def capabilities_for(
     endpoint: str,
     key: str,
@@ -213,22 +322,44 @@ def capabilities_for(
         source = os.environ if environ is None else environ
         override = str(source.get(PROVIDER_OVERRIDE_ENV, "")).strip().casefold() == LLAMA_CPP
 
-        def probe(path: str) -> tuple[tuple[int, object] | None, bool]:
-            if deadline is None:
-                return bounded_json_probe(origin, key, path), False
-            if deadline <= time.monotonic():
-                return None, True
-            result = bounded_json_probe(origin, key, path, deadline=deadline)
-            return result, result is None and time.monotonic() >= deadline
+        started = time.monotonic()
+
+        def probe(path: str, *, retry: bool = True) -> tuple[tuple[int, object] | None, bool, int, str]:
+            """Return (result, cut_short, attempts, last_error_type).
+
+            Only transient failures (no answer, or 5xx) are retried, and never past
+            the deadline. A definite answer returns on its first attempt.
+            """
+            attempts = 0
+            last_error = "TimeoutError"
+            result: tuple[int, object] | None = None
+            # An operator override or an already-proven dialect never waits on retries.
+            retries = PROBE_RETRY_DELAYS if retry and not override else ()
+            for delay in (0.0, *retries):
+                if delay:
+                    if deadline is not None and deadline - time.monotonic() <= delay:
+                        break
+                    time.sleep(delay)
+                if deadline is not None and deadline <= time.monotonic():
+                    break
+                attempts += 1
+                deadline_kw: dict[str, float] = {} if deadline is None else {"deadline": deadline}
+                result = bounded_json_probe(origin, key, path, **deadline_kw)
+                if not _transient_probe(result):
+                    return result, False, attempts, last_error
+                last_error = "HTTPServerError" if result is not None else (
+                    last_probe_error() or "TimeoutError")
+            cut_short = result is None and deadline is not None and time.monotonic() >= deadline
+            return result, cut_short, attempts, last_error
 
         if cached_llama_proof is not None:
             # A later slot request upgrades the cached dialect proof without
             # redetecting it through an endpoint whose /props may now be absent.
-            props, props_cut_short = None, False
+            props, props_cut_short, props_attempts, props_error = None, False, 0, None
             props_status = cached_llama_proof.props_status
             props_is_llama = True
         else:
-            props, props_cut_short = probe("/props")
+            props, props_cut_short, props_attempts, props_error = probe("/props")
             props_status = props[0] if props is not None else None
             props_is_llama = props is not None and props[0] == 200 and _llama_props(props[1])
 
@@ -237,7 +368,8 @@ def capabilities_for(
         if slots_probe_skipped:
             slots_result, slots_cut_short = None, False
         else:
-            slots_result, slots_cut_short = probe("/slots")
+            slots_result, slots_cut_short, _slots_attempts, _slots_error = probe(
+                "/slots", retry=cached_llama_proof is None)
         slots, slot_ids, slots_status = _slots_proof(
             slots_result,
             require_llama_shape=not (override or props_is_llama),
@@ -276,6 +408,16 @@ def capabilities_for(
             dialect = OPENAI_STRICT
             reason = "openai-strict because /props was not llama.cpp and /slots was unproven"
 
+        # A fallback caused by a transient /props failure is recorded so the caller
+        # can journal and announce it. Operator overrides and definite answers are not.
+        probe_degradation = None
+        if (dialect == OPENAI_STRICT and not override and cached_llama_proof is None
+                and (props is None or props[0] >= 500)):
+            probe_degradation = ProbeDegradation(
+                attempts=props_attempts,
+                last_error_type=props_error or "TimeoutError",
+                elapsed_ms=int((time.monotonic() - started) * 1000),
+            )
         result = ProviderCapabilities(
             dialect=dialect,
             slots=slots,
@@ -283,6 +425,7 @@ def capabilities_for(
             reason=reason,
             props_status=props_status,
             slots_status=slots_status,
+            probe_degradation=probe_degradation,
         )
         if cached_llama_proof is not None:
             if not slots_cut_short:

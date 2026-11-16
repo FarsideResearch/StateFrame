@@ -379,6 +379,9 @@ _CAPACITY_SAFE_TAIL = frozenset(
 SAFE_TAIL = frozenset({
     "read_attempt", "read_result",  # audit only; never source/selection authority
     "read_capture_skipped", "read_capture_failed",  # audit only; delivery is unchanged
+    # Opt-in check-truth failure records (audit only): the fallback they describe is re-derived on replay.
+    "check_execution_binding_register_failed", "check_truth_vacuity_journal_failed",
+    "check_execution_binding_scope_failed",
     # SHADOW state is replayed with its reads/primary requests, without effects.
     "working_set_capture", "working_set_submission", "working_set_response", "working_set_blocked",
     "read_admission",  # audit only; the delivered page already carries its cursor
@@ -423,6 +426,10 @@ SAFE_TAIL = frozenset({
     # records the refusal reason and marks the probe unavailable on the in-memory
     # capture; no continuation state, request bytes or dispatch decision changes.
     "provider_probe_skipped",
+    # /props stayed unreachable after bounded retries and the run fell back to
+    # openai-strict. Audit only (dispatch=False): the fallback is re-derived by the
+    # same probe on resume, and no request bytes are changed by this record.
+    "provider_probe_degraded",
 }) | _CAPACITY_SAFE_TAIL
 CHALLENGE_BUDGET_SAFE_TAIL = frozenset({
     "challenge_budget_state", "done_challenge_once", "done_challenge_overridden",

@@ -319,6 +319,9 @@ def _provider_probe_status(origin: tuple[str, str, int | None], path: str,
         _close_probe_connection(connection)
 
 
+_PROBE_CHILD_FAILURE: dict[str, str] = {}
+
+
 def _provider_probe_json_response(origin: tuple[str, str, int | None], path: str,
                                   key: str, timeout: float) -> list[object] | None:
     """Read one small JSON probe response without redirecting or leaking credentials."""
@@ -345,7 +348,10 @@ def _provider_probe_json_response(origin: tuple[str, str, int | None], path: str
         except (UnicodeDecodeError, ValueError):
             # The endpoint answered, but its payload cannot prove a dialect.
             return [status, None]
-    except (OSError, http.client.HTTPException):
+    except (OSError, http.client.HTTPException) as error:
+        # Only the exception class is kept, so the probe child can name the
+        # failure (refused, reset, timed out) without any message text.
+        _PROBE_CHILD_FAILURE["error"] = type(error).__name__
         return None
     finally:
         _close_probe_connection(connection)
@@ -393,10 +399,23 @@ def _close_probe(process: subprocess.Popen[bytes]) -> None:
                     pass
 
 
+_PROBE_STATE = threading.local()
+
+
+def last_probe_error() -> str | None:
+    """Exception class name of this thread's most recent failed bounded_json_probe."""
+    return getattr(_PROBE_STATE, "error", None)
+
+
 def bounded_json_probe(endpoint: str, key: str, path: str, *,
                        timeout: float = 2.0,
                        deadline: float | None = None) -> tuple[int, object] | None:
-    """Probe the request origin in the existing killable child with a hard deadline."""
+    """Probe the request origin in the existing killable child with a hard deadline.
+
+    A None return means no usable HTTP answer; the failure's exception class name
+    (never its message) is then readable from ``last_probe_error()`` on this thread.
+    """
+    _PROBE_STATE.error = None
     origin = _provider_probe_origin(endpoint)
     if origin is None or path not in {"/props", "/slots"}:
         return None
@@ -404,28 +423,44 @@ def bounded_json_probe(endpoint: str, key: str, path: str, *,
     if deadline is not None:
         stop_at = min(stop_at, deadline)
     if stop_at <= time.monotonic():
+        _PROBE_STATE.error = "TimeoutError"
         return None
     try:
         process = subprocess.Popen(
             [sys.executable, "-I", "-B", str(Path(__file__).resolve()), "--probe-child"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    except OSError:
+    except OSError as error:
+        _PROBE_STATE.error = type(error).__name__
         return None
     packet = json.dumps({"origin": origin, "paths": [path], "key": key,
                          "stop_at": stop_at, "json_body": True}).encode()
     try:
         remaining = stop_at - time.monotonic()
         if remaining <= 0:
+            _PROBE_STATE.error = "TimeoutError"
             return None
         output = _probe_output(process, packet, remaining)
-        if output:
+        if not output:
+            _PROBE_STATE.error = "ProbeNoResponse"
+        else:
             result = json.loads(output)
             if isinstance(result, list) and len(result) == 2 and type(result[0]) is int:
                 return result[0], result[1]
-    except (OSError, subprocess.TimeoutExpired, ValueError):
-        pass
+            _PROBE_STATE.error = _reported_probe_error(result) or "ProbeMalformed"
+    except (OSError, subprocess.TimeoutExpired, ValueError) as error:
+        _PROBE_STATE.error = type(error).__name__
     finally:
         _close_probe(process)
+    return None
+
+
+def _reported_probe_error(result: object) -> str | None:
+    """Accept the child's failure report only when it is a bare class name."""
+    if not isinstance(result, dict) or set(result) != {"error"}:
+        return None
+    name = result["error"]
+    if isinstance(name, str) and name.isidentifier() and len(name) <= 64:
+        return name
     return None
 
 
@@ -1454,6 +1489,10 @@ def _probe_child() -> None:
             sys.stdout.write(json.dumps(result))
             sys.stdout.flush()
             return
+    if _PROBE_CHILD_FAILURE:
+        # No path answered: report the last transport failure's class name only.
+        sys.stdout.write(json.dumps({"error": _PROBE_CHILD_FAILURE["error"]}))
+        sys.stdout.flush()
 
 
 if __name__ == "__main__":

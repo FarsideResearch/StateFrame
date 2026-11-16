@@ -1727,6 +1727,43 @@ class WorkspaceLookupError(RuntimeError):
     """The existing materialized cache cannot be mapped to one row safely."""
 
 
+# The adapter names instance dirs with a truncated sha256 hex digest.
+_CACHE_KEY_RE = re.compile(r"\A[0-9a-f]{8,64}\Z")
+
+
+def _confined_instance_dir(cache: Path, cache_key: str) -> Path:
+    """Return ``cache/instances/<cache_key>`` or raise when the key escapes it.
+
+    ``cache_key`` comes from a task row, so it is untrusted: an absolute path
+    or ``..`` would otherwise redirect the lookup, and a planted symlink would
+    point the sandbox copy at an arbitrary directory.
+    """
+    if not _CACHE_KEY_RE.fullmatch(cache_key):
+        raise WorkspaceLookupError(
+            f"ENV_WORKSPACE_CACHE_KEY_INVALID: cache_key is not a hex digest: {cache_key!r}"
+        )
+    instances = (cache / "instances").resolve()
+    candidate = instances / cache_key
+    if not _resolves_in_place(candidate):
+        raise WorkspaceLookupError(
+            f"ENV_WORKSPACE_CACHE_KEY_ESCAPE: cache_key resolves outside {instances}"
+        )
+    return candidate
+
+
+def _resolves_in_place(path: Path) -> bool:
+    """True when ``path`` (under a resolved parent) is not a symlink hop elsewhere."""
+    return path.resolve() == path.parent.resolve() / path.name
+
+
+def _instance_is_confined(instance: Path) -> bool:
+    """An instance dir and its ``base``/``gold`` must all be real, in-place paths."""
+    return all(
+        _resolves_in_place(path)
+        for path in (instance, instance / "base", instance / "gold")
+    )
+
+
 def _candidate_workspace(value: object) -> Path | None:
     if isinstance(value, (str, Path)):
         path = safe_expanduser(Path(value)).resolve()
@@ -1772,7 +1809,11 @@ def find_workspace(cache_dir: Path | str, row: Mapping[str, object]) -> Path:
     cache = safe_expanduser(Path(cache_dir)).resolve()
     cache_key = row.get("cache_key")
     if isinstance(cache_key, str) and cache_key:
-        candidate = _candidate_workspace(cache / "instances" / cache_key)
+        candidate = _candidate_workspace(_confined_instance_dir(cache, cache_key))
+        if candidate is not None and not _instance_is_confined(candidate):
+            raise WorkspaceLookupError(
+                f"ENV_WORKSPACE_CACHE_KEY_ESCAPE: base/gold of {candidate} resolve outside it"
+            )
         if candidate is not None:
             return candidate
 
@@ -1787,6 +1828,8 @@ def find_workspace(cache_dir: Path | str, row: Mapping[str, object]) -> Path:
     matches: list[Path] = []
     for candidate in sorted(instances_dir.iterdir()):
         if not candidate.is_dir() or not (candidate / "base").is_dir():
+            continue
+        if not _instance_is_confined(candidate):
             continue
         if not (candidate / "gold").is_dir():
             continue

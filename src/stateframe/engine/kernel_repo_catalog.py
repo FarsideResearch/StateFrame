@@ -846,18 +846,27 @@ def _graph_dependencies(root: Path, modules: Sequence[ModuleRecord], coverage: M
         logger.debug("structural dependency graph unavailable: %s", type(exc).__name__)
         return ()
     records: list[DependencyRecord] = []
+    failed: dict[str, str] = {}
     for source_id in sorted(getattr(graph, "defs", {})):
-        try:
-            refs = graph.find_callees(source_id)
-        except Exception:  # noqa: BLE001 - one malformed edge cannot drop index records
-            continue
         source_path = source_id.split("::", 1)[0]
         source_coverage = coverage.get(source_path)
         if source_coverage is None:
             continue
+        try:
+            refs = graph.find_callees(source_id)
+        except Exception as exc:  # noqa: BLE001 - one bad source keeps the rest; its loss is reported below
+            failed[source_id] = type(exc).__name__
+            continue
         for ref in list(refs)[:MAX_NEIGHBORS]:
             target_id = str(getattr(ref, "symbol", ref))
             records.append(DependencyRecord(source_id, target_id, "CALLS", 1, source_coverage))
+    if failed:
+        # Their CALLS edges are unknown, not absent: one WARNING per build names them.
+        sample = ", ".join(f"{source_id} ({error})" for source_id, error in list(failed.items())[:5])
+        logger.warning(
+            "structural dependency index is missing CALLS edges for %d source(s) whose callee lookup failed: %s",
+            len(failed), sample,
+        )
     return tuple(records)
 
 

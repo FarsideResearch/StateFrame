@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import glob
 from pathlib import Path
 from typing import Iterable
 
@@ -27,22 +28,44 @@ def unique_tool_match(root: Path, requested: str, candidates: Iterable[Path]) ->
     return matches[0] if matches else None
 
 
+def _resolves_under(root: Path, path: Path) -> bool:
+    """True when ``path`` (after following every symlink) stays inside ``root``."""
+    try:
+        return path.resolve().is_relative_to(root.resolve())
+    except (OSError, RuntimeError):
+        return False
+
+
+def recover_by_basename(root: Path, requested: str) -> list[Path]:
+    """Every path under ``root`` named like ``requested``'s basename that stays inside root.
+
+    The basename is matched literally (no glob metacharacters), and a candidate that
+    is, or sits under, a symlink resolving outside the workspace is skipped, so a
+    repository-provided link can never become a recovered read/edit target.
+    """
+    name = Path(requested).name
+    if name in ("", ".", ".."):
+        return []
+    return sorted(
+        (candidate for candidate in root.rglob(glob.escape(name))
+         if _resolves_under(root, candidate)),
+        key=str)
+
+
 def resolve_tool_path(root: Path, requested: str) -> Path:
     """Preserve exact paths; recover a missing path only when its basename is unique.
 
-    Access-policy checks remain the caller's responsibility. A missing result is
-    returned unchanged so each tool can report its own missing-resource outcome.
+    Exact and recovered paths share one containment rule: they must resolve inside
+    the workspace root. Access-policy checks remain the caller's responsibility. A
+    missing result is returned unchanged so each tool can report its own
+    missing-resource outcome.
     """
     exact = root / requested
-    try:
-        contained = exact.resolve().is_relative_to(root.resolve())
-    except (OSError, RuntimeError):
-        contained = False
-    if not contained:
+    if not _resolves_under(root, exact):
         raise ToolPathEscape(f"Path {requested!r} is outside the workspace. Use a repository-relative path.")
     if exact.exists():
         return exact
-    return unique_tool_match(root, requested, root.rglob(Path(requested).name)) or exact
+    return unique_tool_match(root, requested, recover_by_basename(root, requested)) or exact
 
 
 def receipt_target_path(root: Path, executed_path: Path) -> str | None:
