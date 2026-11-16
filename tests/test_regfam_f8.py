@@ -27,48 +27,29 @@ ROOT = Path(__file__).resolve().parents[1]
 
 # OWED TO THE RELEASE MATRIX: files whose parity tests (node id or marker contains off_wire / byte_identical /
 # parity) tests/must_run.json does not select, with the per-file count of such tests (parametrized cases
-# folded). This is not a review that they are fine: whether each gets a must_run cell is the release owner's
-# decision. The check passes only while the uncovered set equals this list exactly, so a new uncovered parity
-# test, a removed one, or one newly selected by the matrix all fail until the list is updated deliberately.
+# folded). The release owner made every listed parity test mandatory except the ones below, which were red,
+# skipping, or unwitnessable on this tree; a mandatory set must never start red. The check passes only while
+# the uncovered set equals this list exactly, so a new uncovered parity test, a removed one, or one newly
+# selected by the matrix all fail until the list is updated deliberately.
 PENDING_RELEASE_SELECTION: dict[str, int] = {
-    "tests/acceptance/test_resume_completion.py": 1,
-    "tests/acceptance/test_routes_host.py": 1,
-    "tests/e2e/test_e2e_parallel_f4_receipt.py": 1,
-    "tests/e2e/test_e2e_parallel_recovery.py": 2,
-    "tests/test_checkpoint_save_cost.py": 1,
-    "tests/test_code_bookmarks.py": 1,
-    "tests/test_edit_scope_compact.py": 1,
-    "tests/test_editready_authority_panels.py": 1,
-    "tests/test_enginecheck_adapter.py": 1,
-    "tests/test_env_seed_request_parity.py": 1,
-    "tests/test_f4_handoff_staleness.py": 1,
-    "tests/test_f4_state_marker_echo.py": 1,
-    "tests/test_finish_on_green_receipt_json.py": 2,
-    "tests/test_git_show_ancestry.py": 2,
-    "tests/test_history_digest_ids.py": 1,
-    "tests/test_hook_diet_parity.py": 2,
-    "tests/test_hook_wiring_parity.py": 4,
-    "tests/test_journal_replay_publication.py": 3,
-    "tests/test_llama_wire_seal_parity.py": 5,
-    "tests/test_mutate_parity.py": 5,
-    "tests/test_mutation_adversarial_parity.py": 2,
-    "tests/test_native_prefix_whole_file_edit.py": 1,
-    "tests/test_no_mcp_release_comparison.py": 1,
-    "tests/test_offmode_compatibility.py": 1,
-    "tests/test_parallel_shell_parity.py": 1,
-    "tests/test_parallel_worker_prep.py": 4,
-    "tests/test_powerups_parity.py": 1,
-    "tests/test_provider_body.py": 1,
-    "tests/test_read_receipts_admission.py": 1,
-    "tests/test_shell_e2e.py": 1,
-    "tests/test_stable_wire_chief_parity.py": 1,
-    "tests/test_stable_wire_tail.py": 1,
-    "tests/test_timing_sweep_parity.py": 7,
-    "tests/test_unit_coalesce.py": 7,
-    "tests/test_unit_planner_v2.py": 1,
-    "tests/test_view_ladder_integration.py": 1,
-    "tests/test_working_set_off_parity_base.py": 2,
-    "tests/test_working_set_render_off_parity.py": 1,
+    # failed on the release-owner selection run
+    "tests/acceptance/test_routes_host.py": 1,  # test_inactive_routes_keep_requests_byte_identical
+    "tests/e2e/test_e2e_parallel_f4_receipt.py": 1,  # [partial] and [paged_refusal] failed
+    "tests/e2e/test_e2e_parallel_recovery.py": 2,  # both tests failed (5 of 5 crash points, checkpoint case)
+    "tests/test_env_seed_request_parity.py": 1,  # all 3 example cases failed
+    "tests/test_hook_wiring_parity.py": 1,  # test_no_hooks_real_shaped_llama_keeps_automatic_pin_and_release_bytes
+    "tests/test_parallel_worker_prep.py": 1,  # test_default_parallel_off_wire_and_public_artifacts_match_merged_main
+    "tests/test_working_set_off_parity_base.py": 1,  # test_off_provider_bytes_match_cutover_base, both bases
+    "tests/test_working_set_render_off_parity.py": 1,  # test_off_wire_bytes_match_1de34aa4, both bases
+    # always skip in a gate run
+    "tests/test_mutate_parity.py": 1,  # needs SF_TEST_PARITY_BASELINE, which the must-run gate rejects as retired
+    "tests/test_mutation_adversarial_parity.py": 2,  # needs SF_TEST_PARITY_BASELINE (retired, rejected by the gate)
+    "tests/test_stable_wire_chief_parity.py": 1,  # pinned commit 37f0ac81 is not in this repository's objects
+    # pass only through pytest.raises: no passing assert statement for an assertion_match witness
+    "tests/test_journal_replay_publication.py": 2,  # external_effect / parent_meter refusal type change controls
+    "tests/test_llama_wire_seal_parity.py": 1,  # test_wire_guard_rejects_planted_changes
+    "tests/test_native_prefix_whole_file_edit.py": 1,  # test_whole_file_executor_proof_parity
+    "tests/test_unit_coalesce.py": 3,  # missing addition history, history errors, rejects pinned oracles
 }
 
 # Reviewed shell-lint findings: (path, rule, statement text) -> why it is not a false pass.

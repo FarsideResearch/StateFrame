@@ -101,6 +101,58 @@ EXPECTED_ENTRIES = (
     ("tests/test_uv_venv_sandbox.py::test_linux_binds_the_uv_install_and_its_link_hop", "linux_requires:bwrap"),
     ("tests/test_uv_venv_sandbox.py::test_linux_check_command_with_home_removed_under_unknown_uid", "linux_requires:unknown_uid_bwrap"),
     ("tests/test_uv_venv_sandbox.py::test_live_uv_venv_runs_under_the_check_sandbox", "darwin_requires:uv_sandbox"),
+    ("tests/acceptance/test_resume_completion.py::test_e19_volatile_shell_observation_is_byte_identical_on_resume", "requires:host_sandbox"),
+    ("tests/test_checkpoint_save_cost.py::test_sigkill_then_resume_is_byte_identical_to_no_kill_run", "all"),
+    ("tests/test_code_bookmarks.py::test_activation_boundary_and_kill_switch_are_byte_identical", "all"),
+    ("tests/test_edit_scope_compact.py::test_small_whole_repo_surface_is_byte_identical_to_71739465", "all"),
+    ("tests/test_editready_authority_panels.py::test_off_is_byte_identical", "all"),
+    ("tests/test_enginecheck_adapter.py::test_same_scenario_twice_gives_byte_identical_requests", "all"),
+    ("tests/test_f4_handoff_staleness.py::test_handoff_without_model_basis_is_byte_identical_to_v0_5_9", "all"),
+    ("tests/test_f4_state_marker_echo.py::test_middle_marker_stays_byte_identical_and_only_leading_marker_counts", "all"),
+    ("tests/test_finish_on_green_receipt_json.py::test_gate_evidence_identity_is_byte_identical_for_json_native_rows", "all"),
+    ("tests/test_finish_on_green_receipt_json.py::test_gate_evidence_identity_keeps_json_native_mapping_keys_byte_identical", "all"),
+    ("tests/test_git_show_ancestry.py::test_ancestry_guard_rejects_even_present_nonancestor_objects", "all"),
+    ("tests/test_git_show_ancestry.py::test_literal_parity_reference_discovery", "all"),
+    ("tests/test_history_digest_ids.py::test_ids_on_or_unset_keeps_the_legacy_digest_byte_identical", "all"),
+    ("tests/test_hook_diet_parity.py::test_no_hooks_diet_breakdown_keeps_021_sections_and_allowlist", "all"),
+    ("tests/test_hook_diet_parity.py::test_wired_diet_admits_typed_hook_panel", "all"),
+    ("tests/test_hook_wiring_parity.py::test_journal_kind_parity_rejects_unexpected_extra_kind", "requires:host_sandbox"),
+    ("tests/test_hook_wiring_parity.py::test_release_diet_counts_allow_only_verified_schema_effects", "requires:host_sandbox"),
+    ("tests/test_hook_wiring_parity.py::test_spec_key_parity_rejects_unexpected_extra_key", "requires:host_sandbox"),
+    ("tests/test_journal_replay_publication.py::test_parity_control_skipped_live_handoff_fails", "all"),
+    ("tests/test_llama_wire_seal_parity.py::test_bundled_llama_wire_matches_normalization_input_and_its_seal", "requires:host_sandbox"),
+    ("tests/test_llama_wire_seal_parity.py::test_ready_seals_require_a_wire_hash_and_ready_status", "all"),
+    ("tests/test_llama_wire_seal_parity.py::test_scripted_path_excludes_ambient_temporary_interpreters", "all"),
+    ("tests/test_llama_wire_seal_parity.py::test_wire_guard_accepts_unchanged_sealed_request", "all"),
+    ("tests/test_mutate_parity.py::test_ambient_level_reaches_run_spec_not_just_tool_menu", "requires:host_sandbox"),
+    ("tests/test_mutate_parity.py::test_default_level_is_off_and_omits_spec_key", "all"),
+    ("tests/test_mutate_parity.py::test_explicit_off_overrides_ambient_and_profile", "all"),
+    ("tests/test_mutate_parity.py::test_opt_in_switch_accepts_only_literal_levels", "all"),
+    ("tests/test_no_mcp_release_comparison.py::test_nested_sandbox_refusal_is_infrastructure_not_parity", "all"),
+    ("tests/test_offmode_compatibility.py::test_parity_command_compares_raw_bytes_and_exercises_resume", "all"),
+    ("tests/test_parallel_shell_parity.py::test_off_mode_shell_directory_is_not_tracked_as_created_file", "all"),
+    ("tests/test_parallel_worker_prep.py::test_engine_venv_installs_bypass_shared_pip_cache", "all"),
+    ("tests/test_parallel_worker_prep.py::test_release_parity_checks_wire_before_summary", "all"),
+    ("tests/test_parallel_worker_prep.py::test_wire_parity_reports_first_send_byte_and_component", "all"),
+    ("tests/test_powerups_parity.py::test_feature_off_raw_request_parity", "requires:host_sandbox"),
+    ("tests/test_provider_body.py::test_shipped_profile_llama_body_is_byte_identical_to_unmodified_parent_code", "all"),
+    ("tests/test_read_receipts_admission.py::test_off_is_byte_identical_and_emits_nothing", "all"),
+    ("tests/test_shell_e2e.py::test_kill_resume_serves_byte_identical_next_request", "requires:host_sandbox"),
+    ("tests/test_stable_wire_tail.py::test_relayout_keeps_windows_before_the_first_changed_one_byte_identical", "all"),
+    ("tests/test_timing_sweep_parity.py::test_host_span_bounded_buffers_keep_oldest_to_newest_order", "all"),
+    ("tests/test_timing_sweep_parity.py::test_host_span_finish_preserves_stack_and_trace", "all"),
+    ("tests/test_timing_sweep_parity.py::test_host_span_serialization_has_exact_fields_and_order", "all"),
+    ("tests/test_timing_sweep_parity.py::test_host_span_serialization_uses_elapsed_property", "all"),
+    ("tests/test_timing_sweep_parity.py::test_timing_5000_overlapping_spans_finishes_under_50_ms", "all"),
+    ("tests/test_timing_sweep_parity.py::test_timing_sweep_matches_interval_scan_and_all_fields", "all"),
+    ("tests/test_timing_sweep_parity.py::test_timing_zero_gap_and_disabled", "all"),
+    ("tests/test_unit_coalesce.py::test_off_byte_parity", "all"),
+    ("tests/test_unit_coalesce.py::test_parity_base_is_parent_of_feature_addition", "all"),
+    ("tests/test_unit_coalesce.py::test_parity_sha_guard_accepts_runtime_parent_and_golden_bytes", "all"),
+    ("tests/test_unit_coalesce.py::test_r2_n8_parity_and_contract_pins_are_identified", "all"),
+    ("tests/test_unit_planner_v2.py::test_switch_off_is_byte_identical_to_v059_planner", "all"),
+    ("tests/test_view_ladder_integration.py::test_frozen_selection_re_renders_byte_identically_across_requests", "all"),
+    ("tests/test_working_set_off_parity_base.py::test_off_parity_direct_callers_share_trace_results", "all"),
     ("tests/test_must_run_gate.py::test_must_run_manifest_matches_reviewed_inventory", "all"),
     ("tests/test_must_run_gate.py::test_planted_controls_reject_unqualified_runs", "all"),
     ("tests/test_must_run_gate.py::test_optional_dependency_present_absent_and_touch_controls", "all"),
@@ -344,6 +396,110 @@ EXPECTED_ASSERTIONS = {
         "assert result.returncode == 0",
     "tests/test_uv_venv_sandbox.py::test_live_uv_venv_runs_under_the_check_sandbox":
         'assert (result.returncode, result.stdout.strip()) == (0, "ok")',
+    "tests/acceptance/test_resume_completion.py::test_e19_volatile_shell_observation_is_byte_identical_on_resume":
+        'assert actual["messages"] == expected["messages"]',
+    "tests/test_checkpoint_save_cost.py::test_sigkill_then_resume_is_byte_identical_to_no_kill_run":
+        "assert resumed.stdout.strip() == control_digest",
+    "tests/test_code_bookmarks.py::test_activation_boundary_and_kill_switch_are_byte_identical":
+        "assert collect(runtime, frame) == []",
+    "tests/test_edit_scope_compact.py::test_small_whole_repo_surface_is_byte_identical_to_71739465":
+        "assert parity.digest(result) == PARITY_DIGEST_50",
+    "tests/test_editready_authority_panels.py::test_off_is_byte_identical":
+        "assert json.dumps(out, sort_keys=True) == json.dumps(messages, sort_keys=True)",
+    "tests/test_enginecheck_adapter.py::test_same_scenario_twice_gives_byte_identical_requests":
+        "assert first.requests == second.requests",
+    "tests/test_f4_handoff_staleness.py::test_handoff_without_model_basis_is_byte_identical_to_v0_5_9":
+        "assert _handoff_text(slots, host, 'drops tokens', limits=(240, 300, 220, 220, 220)) == _V059_GOLDEN",
+    "tests/test_f4_state_marker_echo.py::test_middle_marker_stays_byte_identical_and_only_leading_marker_counts":
+        "assert sum((item['content'].startswith(STATE_HEADER) for item in messages)) == 1",
+    "tests/test_finish_on_green_receipt_json.py::test_gate_evidence_identity_is_byte_identical_for_json_native_rows":
+        "assert canonical_bytes(gate_evidence_identity(native)) == canonical_bytes(native)",
+    "tests/test_finish_on_green_receipt_json.py::test_gate_evidence_identity_keeps_json_native_mapping_keys_byte_identical":
+        "assert canonical_bytes(gate_evidence_identity(row)) == canonical_bytes(row)",
+    "tests/test_git_show_ancestry.py::test_ancestry_guard_rejects_even_present_nonancestor_objects":
+        "assert references",
+    "tests/test_git_show_ancestry.py::test_literal_parity_reference_discovery":
+        "assert literal_parity_references(source) == expected",
+    "tests/test_history_digest_ids.py::test_ids_on_or_unset_keeps_the_legacy_digest_byte_identical":
+        "assert json.dumps(attached, sort_keys=True) == json.dumps(recorded, sort_keys=True)",
+    "tests/test_hook_diet_parity.py::test_no_hooks_diet_breakdown_keeps_021_sections_and_allowlist":
+        "assert 'user_hooks' not in result['allowlist']",
+    "tests/test_hook_diet_parity.py::test_wired_diet_admits_typed_hook_panel":
+        "assert result['sections']['user_hooks']['messages'] == 1",
+    "tests/test_hook_wiring_parity.py::test_journal_kind_parity_rejects_unexpected_extra_kind":
+        "assert trimmed == baseline_kinds",
+    "tests/test_hook_wiring_parity.py::test_release_diet_counts_allow_only_verified_schema_effects":
+        "assert len(baseline_payloads) == len(current_payloads)",
+    "tests/test_hook_wiring_parity.py::test_spec_key_parity_rejects_unexpected_extra_key":
+        "assert current_keys == expected",
+    "tests/test_journal_replay_publication.py::test_parity_control_skipped_live_handoff_fails":
+        'assert skipped["sequence"] + 1 == third["sequence"]',
+    "tests/test_llama_wire_seal_parity.py::test_bundled_llama_wire_matches_normalization_input_and_its_seal":
+        "assert wires == inputs",
+    "tests/test_llama_wire_seal_parity.py::test_ready_seals_require_a_wire_hash_and_ready_status":
+        "assert _ready_seal_hashes(rows) == {digest}",
+    "tests/test_llama_wire_seal_parity.py::test_scripted_path_excludes_ambient_temporary_interpreters":
+        "assert environment[PROVIDER_OVERRIDE_ENV] == LLAMA_CPP",
+    "tests/test_llama_wire_seal_parity.py::test_wire_guard_accepts_unchanged_sealed_request":
+        "assert wires == inputs",
+    "tests/test_mutate_parity.py::test_ambient_level_reaches_run_spec_not_just_tool_menu":
+        "assert spec['environment']['STATEFRAME_MUTATIONS'] == 'authored'",
+    "tests/test_mutate_parity.py::test_default_level_is_off_and_omits_spec_key":
+        "assert {name for name in sys.modules if name.startswith('kernel_mutate')} == before",
+    "tests/test_mutate_parity.py::test_explicit_off_overrides_ambient_and_profile":
+        "assert 'STATEFRAME_MUTATIONS' not in runner.profiles.load('r2hc3')",
+    "tests/test_mutate_parity.py::test_opt_in_switch_accepts_only_literal_levels":
+        "assert runner.resolve_opt_in_switches()['STATEFRAME_MUTATIONS'] == 'prebuilt'",
+    "tests/test_no_mcp_release_comparison.py::test_nested_sandbox_refusal_is_infrastructure_not_parity":
+        "assert not _nested_sandbox_refusal(b'request byte mismatch')",
+    "tests/test_offmode_compatibility.py::test_parity_command_compares_raw_bytes_and_exercises_resume":
+        "assert calls == [(tree, example, resume) for example, resume in [(name, False) for name in parity.EXAMPLES] + [('discount_bug', True)] for tree in (baseline, candidate)]",
+    "tests/test_parallel_shell_parity.py::test_off_mode_shell_directory_is_not_tracked_as_created_file":
+        "assert receipts[0][1]['effects'] == ({'path': 'new-directory', 'change': 'created'}, {'path': 'new-file.py', 'change': 'created'})",
+    "tests/test_parallel_worker_prep.py::test_engine_venv_installs_bypass_shared_pip_cache":
+        "assert len(installs) == 2",
+    "tests/test_parallel_worker_prep.py::test_release_parity_checks_wire_before_summary":
+        "assert source.index('_assert_wire_parity(') < source.index('old_summary_a =')",
+    "tests/test_parallel_worker_prep.py::test_wire_parity_reports_first_send_byte_and_component":
+        "assert f'byte {offset}' in message",
+    "tests/test_powerups_parity.py::test_feature_off_raw_request_parity":
+        "assert ordinary[1] == disabled[1]",
+    "tests/test_provider_body.py::test_shipped_profile_llama_body_is_byte_identical_to_unmodified_parent_code":
+        "assert json.dumps(llama_body).encode('utf-8') == json.dumps(baseline_body).encode('utf-8')",
+    "tests/test_read_receipts_admission.py::test_off_is_byte_identical_and_emits_nothing":
+        "assert not [e for e in rt.journal.events if e['kind'] == 'read_admission']",
+    "tests/test_shell_e2e.py::test_kill_resume_serves_byte_identical_next_request":
+        "assert rebuilt[name] == body",
+    "tests/test_stable_wire_tail.py::test_relayout_keeps_windows_before_the_first_changed_one_byte_identical":
+        "assert reasons == [trigger]",
+    "tests/test_timing_sweep_parity.py::test_host_span_bounded_buffers_keep_oldest_to_newest_order":
+        "assert [row['name'] for row in recorder.trace_snapshot()] == ['third', 'fourth']",
+    "tests/test_timing_sweep_parity.py::test_host_span_finish_preserves_stack_and_trace":
+        "assert [row['elapsed_ns'] for row in recorder.trace_snapshot()] == [20, 30]",
+    "tests/test_timing_sweep_parity.py::test_host_span_serialization_has_exact_fields_and_order":
+        'assert json.dumps(span.to_dict(), separators=(\',\', \':\')) == \'{"name":"sample","started_ns":10,"ended_ns":17,"elapsed_ns":7,"boundary":"request_preparation","sequence":4,"action_id":"action","attributes":{"z":"last","a":"first"},"parent_span":"root","cpu_ns":6,"cache_hits":1,"cache_misses":2,"bytes_scanned":3,"records_folded":4,"files_read":5,"fsyncs":6}\'',
+    "tests/test_timing_sweep_parity.py::test_host_span_serialization_uses_elapsed_property":
+        "assert span.to_dict()['elapsed_ns'] == 99",
+    "tests/test_timing_sweep_parity.py::test_timing_5000_overlapping_spans_finishes_under_50_ms":
+        "assert actual['step_breakdown_ns'] == expected_breakdown",
+    "tests/test_timing_sweep_parity.py::test_timing_sweep_matches_interval_scan_and_all_fields":
+        "assert json.dumps(actual) == json.dumps(expected)",
+    "tests/test_timing_sweep_parity.py::test_timing_zero_gap_and_disabled":
+        "assert actual['step_breakdown_ns'] == {}",
+    "tests/test_unit_coalesce.py::test_off_byte_parity":
+        "assert unset.unit_plan.plan_digest == off.unit_plan.plan_digest",
+    "tests/test_unit_coalesce.py::test_parity_base_is_parent_of_feature_addition":
+        "assert calls == [['git', 'log', '--diff-filter=A', '--format=%H', '-1', '--', 'src/stateframe/engine/unit_coalesce.py'], ['git', 'rev-parse', '--verify', added + '^']]",
+    "tests/test_unit_coalesce.py::test_parity_sha_guard_accepts_runtime_parent_and_golden_bytes":
+        "assert not pinned_show.findall(source)",
+    "tests/test_unit_coalesce.py::test_r2_n8_parity_and_contract_pins_are_identified":
+        "assert 'parity pin' in (test_review_11_off_matches_baseline_recorded_request.__doc__ or '')",
+    "tests/test_unit_planner_v2.py::test_switch_off_is_byte_identical_to_v059_planner":
+        "assert hashlib.sha256(text.encode()).hexdigest() == text_sha",
+    "tests/test_view_ladder_integration.py::test_frozen_selection_re_renders_byte_identically_across_requests":
+        "assert render_a.text.encode() == render_b.text.encode()",
+    "tests/test_working_set_off_parity_base.py::test_off_parity_direct_callers_share_trace_results":
+        "assert calls == [reference, current]",
     "tests/test_must_run_gate.py::test_must_run_manifest_matches_reviewed_inventory":
         "assert expected_cells and len(expected_cells) == len(actual_cells) and cell_violated == 0",
     "tests/test_must_run_gate.py::test_planted_controls_reject_unqualified_runs":
@@ -379,6 +535,28 @@ PARAMETERIZED_ITEM_SUFFIXES = {
     "tests/test_process_signal_liveness.py::test_live_pid_with_different_identity_remains_mismatch":
         ("record", "signal"),
     "tests/test_process_signal_liveness.py::test_zombie_pid_is_gone": ("record", "inspect"),
+    "tests/test_checkpoint_save_cost.py::test_sigkill_then_resume_is_byte_identical_to_no_kill_run":
+        ("mid:3", "mid:1", "prepublish:4", "between:2", "between:5",),
+    "tests/test_code_bookmarks.py::test_activation_boundary_and_kill_switch_are_byte_identical":
+        ("False", "True",),
+    "tests/test_git_show_ancestry.py::test_ancestry_guard_rejects_even_present_nonancestor_objects":
+        ("parent-False-git_show", "parent-False-pinned_tree", "parent-False-parity_helper", "parent-False-parameter", "sibling-True-git_show", "sibling-True-pinned_tree", "sibling-True-parity_helper", "sibling-True-parameter", "missing-True-git_show", "missing-True-pinned_tree", "missing-True-parity_helper", "missing-True-parameter", "malformed-True-git_show", "malformed-True-pinned_tree", "malformed-True-parity_helper", "malformed-True-parameter",),
+    "tests/test_git_show_ancestry.py::test_literal_parity_reference_discovery":
+        ("pinned_tree(\"abc1234\", factory)-expected0", "pinned_tree(commit=\"abc1234\", tmp_path_factory=factory)-expected1", "test_off_provider_bytes_match_cutover_base(tmp, factory, \"abc1234\")-expected2", "test_off_provider_bytes_match_cutover_base(tmp, factory, reference=\"abc1234\")-expected3", "@pytest.mark.parametrize(\"reference\", [\"abc1234\", pytest.param(\"def5678\", id=\"base\")])\\ndef test_parity(reference): pass-expected4", "pinned_tree(\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", factory)-expected5", "pinned_tree(reference, factory)-expected6", "# pinned_tree(\"abc1234\", factory)\\nvalue = \"def5678\"-expected7",),
+    "tests/test_history_digest_ids.py::test_ids_on_or_unset_keeps_the_legacy_digest_byte_identical":
+        ("environ0", "environ1",),
+    "tests/test_llama_wire_seal_parity.py::test_bundled_llama_wire_matches_normalization_input_and_its_seal":
+        ("discount_bug-Fix the pricing code so the tests pass.", "tiny_site-Build the small static shop site described in the README.", "brief_to_report-Write the report the brief asks for.",),
+    "tests/test_offmode_compatibility.py::test_parity_command_compares_raw_bytes_and_exercises_resume":
+        ("{\"a\":1,\"b\":2}-0", "{\"b\":2,\"a\":1}-1",),
+    "tests/test_parallel_worker_prep.py::test_engine_venv_installs_bypass_shared_pip_cache":
+        ("parallel-e2e", "release-parity",),
+    "tests/test_parallel_worker_prep.py::test_wire_parity_reports_first_send_byte_and_component":
+        ("content-messages[0].content", "description-tools[0].function.description",),
+    "tests/test_stable_wire_tail.py::test_relayout_keeps_windows_before_the_first_changed_one_byte_identical":
+        ("rerender", "headroom",),
+    "tests/test_unit_planner_v2.py::test_switch_off_is_byte_identical_to_v059_planner":
+        ("False-sha256:61e7d39e826af02cbf7538fec1e78462dff90598790e229e7857814dd9e2a9e5-8a0c367becbb11333fc2e739a86110d2c3927fa5fe583352f2bb46e2473e82ac", "True-sha256:9b69a57efe8eb515474414d23757c0383e9e2688aef83a1baca4050adc875847-24dfb3237af7eb13e41df508d4b5d321838a31ac68f03fca5ae6167fa1b3b683",),
 }
 
 
@@ -414,11 +592,13 @@ def _expected_cell(nodeid: str, scope: str) -> dict[str, object]:
         }
     ]
     baseline = None
-    if (nodeid.startswith("tests/test_hook_wiring_parity.py::")
-            or nodeid in {
-                "tests/test_no_mcp_release_comparison.py::test_no_mcp_requests_match_immediate_base",
-                "tests/acceptance/test_no_skills_wire_compat.py::test_no_skills_wire_matches_immediate_base",
-            }):
+    if nodeid in {
+        "tests/test_hook_wiring_parity.py::test_no_hooks_raw_requests_and_journal_match_release",
+        "tests/test_hook_wiring_parity.py::test_no_hooks_regular_stateframe_file_matches_release",
+        "tests/test_hook_wiring_parity.py::test_no_hooks_resume_rebuilt_requests_match_release",
+        "tests/test_no_mcp_release_comparison.py::test_no_mcp_requests_match_immediate_base",
+        "tests/acceptance/test_no_skills_wire_compat.py::test_no_skills_wire_matches_immediate_base",
+    }:
         baseline = "immediate"
     item_nodeids = [nodeid]
     if nodeid in PARAMETERIZED_ITEM_SUFFIXES:
