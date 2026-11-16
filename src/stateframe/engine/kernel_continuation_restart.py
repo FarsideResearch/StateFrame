@@ -1006,6 +1006,9 @@ DOCUMENTED_REJECT.update({
     "parallel_txn": (
         "Parallel transactions record subframe state changes that only the parallel host reconciles."
     ),
+    "parallel_unit_salvaged": (
+        "A salvaged subframe candidate is parent-call evidence that only the parallel host reconciles."
+    ),
     "parallel_unit_started": (
         "A started subframe unit is a live child whose state only the parallel host reconciles."
     ),
