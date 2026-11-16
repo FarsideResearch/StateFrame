@@ -1,9 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.7.18 (2026-11-16)
 
-- Fixed: request budgeting no longer reserves an assistant reply or tool result as required source just because its text quotes a source header such as `[Current source: ...]`. Only host-authored source rows are reserved; file and model text is inert.
 - A request waiting in a healthy server's queue is no longer failed after 30 minutes. Queue wait is only capped if you set STATEFRAME_QUEUE_WAIT_MAX_S; a server that stops answering is still detected by the 90 second liveness probe.
+- Fixed: request budgeting no longer reserves an assistant reply or tool result as required source just because its text quotes a source header such as `[Current source: ...]`. Only host-authored source rows are reserved; file and model text is inert.
 
 ## 0.7.17 (2026-11-16)
 
