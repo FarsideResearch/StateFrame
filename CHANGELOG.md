@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Security: test-selector arguments could be parsed as options; now separated with --
+
 ## 0.7.22 (2026-11-16)
 
 - Edit protocol: with STATEFRAME_EDIT_PROTOCOL=handles, each request now carries a current-source handle map in its final user message, minted from the source the request delivers, so the first edit_source resolves; nothing changes under legacy_safe. The run binds its edit state and workspace for the transport, so the map is minted on the real send path (sends from a worker thread with no active runtime included). Open sites are read only from the host frame row, located by its position in the request, so text from the model, a tool or a file that starts with the state header is never read as frame state.

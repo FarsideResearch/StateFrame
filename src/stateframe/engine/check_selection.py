@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import re
 import sys
 import tempfile
 from collections.abc import Mapping
@@ -122,6 +123,8 @@ def overlay_fix_tests(root: pathlib.Path, d) -> int:
         return _n
     if d.get("repo") != "secondary" or not d.get("sha"):
         return 0
+    if not is_commit_id(d["sha"]):
+        return 0                      # corpus data must not reach git argv as an option
     import subprocess
     mc = rr.REPOS["secondary"].parent
     ls = subprocess.run(["git", "-C", str(mc), "show", "--name-only", "--format=",
@@ -141,6 +144,14 @@ def overlay_fix_tests(root: pathlib.Path, d) -> int:
         dest.write_text(show.stdout)
         n += 1
     return n
+
+_COMMIT_ID_RE = re.compile(r"[0-9a-fA-F]{7,64}")
+
+
+def is_commit_id(value: object) -> bool:
+    """True only for a hex commit id, so a corpus ``sha`` can never be parsed by git as a flag."""
+    return isinstance(value, str) and _COMMIT_ID_RE.fullmatch(value) is not None
+
 
 def fail_to_pass_ids(d) -> list[str]:
     """The EXACT tests the fix commit added or modified — the true fail-to-pass set.
@@ -183,6 +194,8 @@ def fail_to_pass_ids(d) -> list[str]:
         pass
     if d.get("repo") != "secondary" or not d.get("sha"):
         return []
+    if not is_commit_id(d["sha"]):
+        return []                     # corpus data must not reach git argv as an option
     import re as _re
     import subprocess
     mc = rr.REPOS["secondary"].parent

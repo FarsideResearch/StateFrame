@@ -8,12 +8,13 @@ dependencies or executes a task-provided command string.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import subprocess
 import uuid
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal, TypeAlias, cast
 
@@ -35,6 +36,8 @@ RunnerStatus: TypeAlias = Literal[
 DbGuard: TypeAlias = Callable[[], bool]
 SubprocessRun: TypeAlias = Callable[..., subprocess.CompletedProcess[str]]
 MAX_OUTPUT_TAIL = 4_000
+
+logger = logging.getLogger(__name__)
 VITEST_BINARY = "node_modules/.bin/vitest"
 
 
@@ -135,6 +138,43 @@ def run_pytest(
     timeout: float = 300,
     env: Mapping[str, str] | None = None,
 ) -> TestResult:
+    """Screen model-supplied selectors, then run pytest (see ``_run_pytest``)."""
+
+    requested = _selector_tuple(selectors) or _selector_tuple(
+        (explicit,) if explicit else ()
+    )
+    if not requested:
+        return _run_pytest(
+            root, fn, explicit, rel_hint, selectors=selectors,
+            requires_db=requires_db, db_guard=db_guard, run=run,
+            timeout=timeout, env=env,
+        )
+    kept, dropped = _screen_selectors(root, requested)
+    if not kept:
+        return _result(
+            "pytest", "HARNESS_ERROR", None, (), _rejected_message(dropped)
+        )
+    result = _run_pytest(
+        root, fn, None, rel_hint, selectors=kept,
+        requires_db=requires_db, db_guard=db_guard, run=run,
+        timeout=timeout, env=env,
+    )
+    return _note_dropped(result, dropped)
+
+
+def _run_pytest(
+    root: Path,
+    fn: str,
+    explicit: str | None = None,
+    rel_hint: str | None = None,
+    *,
+    selectors: Sequence[str] = (),
+    requires_db: bool = True,
+    db_guard: DbGuard | None = None,
+    run: SubprocessRun | None = None,
+    timeout: float = 300,
+    env: Mapping[str, str] | None = None,
+) -> TestResult:
     """Run the current pytest contract and return a typed result.
 
     ``explicit`` and ``rel_hint`` retain the positional API used by the existing
@@ -175,7 +215,9 @@ def run_pytest(
     command = [selected_test_python(), "-m", "pytest", "-x", "-q", "--no-header"]
     if kexpr:
         command.extend(["-k", kexpr])
-    command.extend(["-p", "no:cacheprovider", *targets])
+    # "--" makes argparse treat targets as positional (pytest still pre-scans -p, so
+    # option-like selectors are also rejected upstream by _screen_selectors).
+    command.extend(["-p", "no:cacheprovider", "--", *targets])
     process_env = _process_env(env, requires_db)
     try:
         completed = subprocess_run(
@@ -228,13 +270,40 @@ def run_vitest(
     timeout: float = 300,
     env: Mapping[str, str] | None = None,
 ) -> TestResult:
+    """Screen model-supplied selectors, then run vitest (see ``_run_vitest``)."""
+
+    requested = _selector_tuple(selectors)
+    kept, dropped = _screen_selectors(root, requested)
+    if requested and not kept:
+        return _result(
+            "vitest", "HARNESS_ERROR", None, (), _rejected_message(dropped)
+        )
+    result = _run_vitest(
+        root, kept, requires_db=requires_db, db_guard=db_guard, run=run,
+        timeout=timeout, env=env,
+    )
+    return _note_dropped(result, dropped)
+
+
+def _run_vitest(
+    root: Path,
+    selectors: Sequence[str] = (),
+    *,
+    requires_db: bool = True,
+    db_guard: DbGuard | None = None,
+    run: SubprocessRun | None = None,
+    timeout: float = 300,
+    env: Mapping[str, str] | None = None,
+) -> TestResult:
     """Run the pinned local Vitest binary with the JSON reporter enabled."""
 
     selected = _selector_tuple(selectors)
     gate = _database_gate("vitest", requires_db, db_guard, selected)
     if gate is not None:
         return gate
-    command = [VITEST_BINARY, "run", "--reporter=json", *selected]
+    command = [VITEST_BINARY, "run", "--reporter=json"]
+    if selected:
+        command.extend(["--", *selected])  # verified on vitest 2.x: "--" ends option parsing
     process_env = _process_env(env, requires_db)
     subprocess_run = run or subprocess.run
     try:
@@ -1028,6 +1097,46 @@ def _primary_failure(text: str, failed_nodes: Sequence[str]) -> str | None:
         ):
             return stripped[:MAX_OUTPUT_TAIL]
     return None
+
+
+def _screen_selectors(
+    root: Path, values: Sequence[str]
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Split selectors into (kept, dropped).
+
+    A selector that starts with ``-`` would be parsed as a runner option, and one
+    whose path part resolves outside ``root`` would read outside the repository.
+    Both are dropped; everything else passes through unchanged.
+    """
+
+    kept: list[str] = []
+    dropped: list[str] = []
+    for value in values:
+        path_part = value.split("::", 1)[0].strip("`'\"")
+        if (
+            value.lstrip().startswith("-")
+            or "\x00" in value
+            or _safe_selector_path(root, path_part) is None
+        ):
+            dropped.append(value)
+        else:
+            kept.append(value)
+    return tuple(kept), tuple(dropped)
+
+
+def _rejected_message(dropped: Sequence[str]) -> str:
+    shown = ", ".join(repr(item[:80]) for item in dropped[:5])
+    return f"unsafe test selectors rejected (option-like or outside repo): {shown}"
+
+
+def _note_dropped(result: TestResult, dropped: Sequence[str]) -> TestResult:
+    """Record dropped selectors in the log and the result's output tail."""
+
+    if not dropped:
+        return result
+    note = _rejected_message(dropped)
+    logger.warning("%s", note)
+    return replace(result, output_tail=_tail(note + "\n" + result.output_tail))
 
 
 def _selector_tuple(values: Sequence[str] | None) -> tuple[str, ...]:

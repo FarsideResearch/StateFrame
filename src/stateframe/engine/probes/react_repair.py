@@ -7284,6 +7284,7 @@ def work(d, *, resume=None):
         # masking it" — which is exactly the task brief autopilot receives. Subject only; the
         # body is excluded because it can narrate the patch itself.
         if os.environ.get("GROUNDED_BRIEF", "1") == "1" and d.get("sha") \
+                and re.fullmatch(r"[0-9a-fA-F]{7,64}", str(d["sha"])) \
                 and src_repo is not None and d.get("repo") != "build":
             # (build tasks have a synthetic sha and no git world — their brief IS the spec)
             git_root = (src_repo.parent if d.get("repo") == "secondary"
