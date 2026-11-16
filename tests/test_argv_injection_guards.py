@@ -205,9 +205,8 @@ def test_pytest_symlinked_root_basename_fallback_does_not_raise(repo, tmp_path):
     assert _tail(calls) == ["tests/test_a.py"]
 
 
-def test_pytest_symlink_escaping_root_is_dropped(repo, tmp_path):
-    outside = tmp_path / "outside"
-    outside.mkdir()
+def test_pytest_symlink_escaping_root_is_dropped(repo, tmp_path_factory):
+    outside = tmp_path_factory.mktemp("outside")  # a sibling of the repo, never under it
     (outside / "test_far.py").write_text("def test_y(): pass\n")
     (repo / "tests" / "escape").symlink_to(outside, target_is_directory=True)
     calls: list = []
