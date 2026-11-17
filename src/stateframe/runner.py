@@ -2458,11 +2458,16 @@ def drive(run: Path, options: RunOptions, printer=print) -> int:
         else:
             environment.pop(TEST_PYTHON_ENV, None)
             sources.pop(TEST_PYTHON_ENV, None)
-        # Keep request limits within the run budget. The engine separately bounds
-        # silent, responsive-provider queue waits by STATEFRAME_QUEUE_WAIT_MAX_S.
-        for key, default in (("REACT_REQUEST_TIMEOUT_S", 1800),
-                             ("STATEFRAME_PER_REQUEST_TIMEOUT_S", 600)):
-            limit = float(environment.get(key, default))
+        # Keep the user's request limits within the run budget. Only a knob the user set
+        # reaches the engine: the engine reads a present knob as a user deadline, so the
+        # wrapper must never invent one. The engine separately bounds silent, responsive-provider
+        # queue waits by STATEFRAME_QUEUE_WAIT_MAX_S.
+        for key in ("REACT_REQUEST_TIMEOUT_S", "STATEFRAME_PER_REQUEST_TIMEOUT_S"):
+            if key not in environment:
+                environment.pop(key, None)
+                sources.pop(key, None)
+                continue
+            limit = float(environment[key])
             _validate_timeout(limit)
             environment[key] = str(min(limit, engine_budget))
             if math.isfinite(remaining):
