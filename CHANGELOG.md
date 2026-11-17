@@ -1,5 +1,8 @@
 # Changelog
 
+## Unreleased
+
+
 ## 0.7.41 (2026-11-17)
 
 - Fixed: after a parallel fan-out, the continuation now reads the recorded unit results and the owned paths and check selectors that pins need, so repair continuations and pins are no longer dropped. A fan-out whose children all finished but whose parent final check failed now shows FAILED instead of PASS or VERIFIED, and the next step tells the model to resolve the final check rather than finish.
