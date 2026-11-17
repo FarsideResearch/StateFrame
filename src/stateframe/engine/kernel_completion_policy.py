@@ -231,6 +231,7 @@ def _merge(rows: list[ClauseAssessment], row: ClauseAssessment | None) -> None:
 
 _PRODUCT_EDIT_TOOLS = frozenset({
     "edit", "str_replace", "write", "file_create", "replace", "replace_module",
+    *PROTOCOL_EDIT_TOOL_NAMES,
 })
 _NON_PRODUCT_PATH_PARTS = frozenset({
     ".git", ".pytest_cache", "__pycache__", "tests", "test", "probes",

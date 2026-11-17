@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, TypeAlias, TypeVar
 
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 from .attempt_capsule import capsule_digest, render_capsule, render_prior_attempts
 
 
@@ -97,6 +98,7 @@ _EDIT_TOOLS = frozenset(
         "replace",
         "str_replace",
         "write_file",
+        *PROTOCOL_EDIT_TOOL_NAMES,
     }
 )
 _TEST_TOOLS = frozenset({"run_tests", "test", "pytest", "run_test", "check"})

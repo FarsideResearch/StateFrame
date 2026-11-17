@@ -16,6 +16,7 @@ from kernel_completion_authority import refusal_reason_codes as _authority_refus
 from kernel_evidence_pin import typed_pin_is_sole_wire_block, well_formed_pin_blocks
 from kernel_harden8 import record_failure
 from kernel_done_acceptance import done_accepted
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 
 
 MODE_ENV = "STATEFRAME_COMPLETION_OWNER"
@@ -50,7 +51,7 @@ NO_HOST_CHECKS_TERMINAL_LINE = (
 )
 _STALL_RULE_TRUTHY = frozenset({"1", "on", "true", "yes"})
 _STALL_RULE_TOOLS = ("edit", "str_replace", "read")
-_STALL_RULE_EDIT_TOOLS = frozenset({"edit", "str_replace"})
+_STALL_RULE_EDIT_TOOLS = frozenset({"edit", "str_replace", *PROTOCOL_EDIT_TOOL_NAMES})
 _DECLARED_REPAIR_TOOLS = ("edit", "str_replace", "read")
 _CHURN_DECISIONS = frozenset({"ALLOW", "VERIFY_REQUIRED", "RECOVERY_REQUIRED", "STOP_INCOMPLETE"})
 MAX_DECLARED_REPAIR_RESPONSES = 3
@@ -913,7 +914,7 @@ def _progress_key(record: object) -> tuple[str, str] | None:
             for item in changes
             if isinstance(item, Mapping) and item.get("role", "product") == "product"
         ]
-    if tool in {"edit", "str_replace", "file_create", "file_delete", "file_move", "shell", "replace_module", "write", "replace"}:
+    if tool in {"edit", "str_replace", "file_create", "file_delete", "file_move", "shell", "replace_module", "write", "replace", *PROTOCOL_EDIT_TOOL_NAMES}:
         explicit_byte_change = any(
             record.get(name) is True for name in ("byte_changed", "file_changed", "artifact_change")
         )

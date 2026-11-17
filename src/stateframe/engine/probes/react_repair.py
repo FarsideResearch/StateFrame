@@ -461,6 +461,7 @@ def _task_public_brief(row: object) -> str:
 _LOOP_BREAKING_COMMANDS = frozenset({
     "edit", "str_replace", "file_create", "insert_before", "replace_module", "write",
     "test", "run_tests", "authored_check", "done", "work", "abstain",
+    *PROTOCOL_EDIT_TOOL_NAMES,
 })
 
 
@@ -2617,7 +2618,7 @@ def _render_contract_rejection(tool_name: str, errors: Sequence[str], *, binding
     rendered = "[step-contract] REJECTED before dispatch: " + "; ".join(details)
     # Soak C4 anchor recovery (default off): edits refused before dispatch (bad/ungrounded
     # refs, unoffered edit tool) are the LAB10 failure shape; the executor tail never sees them.
-    if tool_name in {"edit", "str_replace", "file_create", "insert_before"}:
+    if tool_name in {"edit", "str_replace", "file_create", "insert_before", *PROTOCOL_EDIT_TOOL_NAMES}:
         from kernel_anchor_recovery import annotate_rejection
         rendered = annotate_rejection(rendered, rejected=True)
     return rendered
@@ -10258,7 +10259,7 @@ def work(d, *, resume=None):
                         start_turn_timing_step("tool_execution")
                         if (_edit_nturn_request_active
                                 and _name not in {"edit", "file_create", "file_delete", "file_move", "shell", "str_replace",
-                                                  "insert_before", "replace_module"}):
+                                                  "insert_before", "replace_module", *PROTOCOL_EDIT_TOOL_NAMES}):
                             _finish_edit_nturn()
                         try:
                             _args = json.loads(_fn.get("arguments") or "{}")
@@ -15321,7 +15322,7 @@ def work(d, *, resume=None):
                 if _typed_observation is not None:
                     obs = _typed_observation
             # Soak C4 anchor recovery (default off): note on a rejected edit result.
-            if _edit_verb in {"edit", "str_replace", "file_create", "insert_before"}:
+            if _edit_verb in {"edit", "str_replace", "file_create", "insert_before", *PROTOCOL_EDIT_TOOL_NAMES}:
                 from kernel_anchor_recovery import annotate_rejection as _anchor_note
                 obs = _anchor_note(obs, rejected=(
                     _edit_observation_is_rejection(obs)
