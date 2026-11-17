@@ -129,11 +129,9 @@ class MutationReceipt:
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, object]) -> "MutationReceipt":
-        variant = value.get("variant")
-        variant_id = variant.get("variant_id", "") if isinstance(variant, Mapping) else ""
         return cls(
             check_identity=str(value.get("check_identity", "")),
-            variant_id=str(variant_id),
+            variant_id=_receipt_variant_id(value),
             result=str(value.get("result", "")),
             reason=str(value.get("reason", "")),
             authored_receipt_id=str(value.get("authored_receipt_id", "")),
@@ -145,6 +143,17 @@ class MutationReceipt:
             "variant_id": self.variant_id, "result": self.result,
             "reason": self.reason, "authored_receipt_id": self.authored_receipt_id,
         }
+
+
+def _receipt_variant_id(value: Mapping[str, object]) -> str:
+    """Flat `variant_id` (shape MutationReceipt.as_dict writes) wins when non-empty;
+    otherwise the nested `variant.variant_id` written by execute_mutation. Non-str yields ""."""
+    flat = value.get("variant_id")
+    if isinstance(flat, str) and flat:
+        return flat
+    variant = value.get("variant")
+    nested = variant.get("variant_id") if isinstance(variant, Mapping) else None
+    return nested if isinstance(nested, str) else ""
 
 
 def _region_list(edit_receipt: Mapping[str, object]) -> tuple[Mapping[str, object], ...]:
