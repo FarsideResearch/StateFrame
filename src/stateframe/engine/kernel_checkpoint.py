@@ -259,7 +259,9 @@ def _is_static(value: object) -> bool:
 
 
 # Reviewed exclusions: module globals a restore keeps from the NEW process (never saved).
-# Each is a pure cache or a lazily rebuilt holder; dropping it can change only speed.
+# Each is a pure cache, a lazily rebuilt holder, or per-thread runtime state (threading.local), which
+# cannot be pickled at all. Dropping a cache changes only speed; the thread-local entries keep their
+# import-time (empty) state in the new process, and their readers fall back to defaults.
 DROP_GLOBALS = {
     ("kernel_fl_checkpoint_capture", "_API"):
         "lazy import holder of checkpoint helper classes; re-created on first use",
@@ -283,6 +285,44 @@ DROP_GLOBALS = {
         "fallback binding salt is process-local and regenerated after restore",
     ("stateframe.engine.kernel_request_auth_identity", "_AUTH_BINDING_SECRET_LOCK"):
         "process-local lock protecting auth binding secret cache",
+    # threading.local objects cannot be pickled. Each is per-thread runtime state that the new
+    # process rebuilds from its own import; the readers below tolerate it being unset.
+    ("kernel_bounded_http", "_PROBE_STATE"):
+        "per-thread /props probe outcome; each probe resets it before use",
+    ("engine.kernel_bounded_http", "_PROBE_STATE"):
+        "per-thread /props probe outcome; each probe resets it before use",
+    ("stateframe.engine.kernel_bounded_http", "_PROBE_STATE"):
+        "per-thread /props probe outcome; each probe resets it before use",
+    ("fixer", "_TRACE"):
+        "per-thread last trace ref; each captured call resets it before use",
+    ("engine.fixer", "_TRACE"):
+        "per-thread last trace ref; each captured call resets it before use",
+    ("stateframe.engine.fixer", "_TRACE"):
+        "per-thread last trace ref; each captured call resets it before use",
+    ("fixer", "_CALL_META"):
+        "per-thread metadata of the current model call; read through getattr defaults",
+    ("engine.fixer", "_CALL_META"):
+        "per-thread metadata of the current model call; read through getattr defaults",
+    ("stateframe.engine.fixer", "_CALL_META"):
+        "per-thread metadata of the current model call; read through getattr defaults",
+    ("fixer", "_USAGE_SINK"):
+        "per-thread usage accumulator installed by set_usage_sink; read through getattr defaults",
+    ("engine.fixer", "_USAGE_SINK"):
+        "per-thread usage accumulator installed by set_usage_sink; read through getattr defaults",
+    ("stateframe.engine.fixer", "_USAGE_SINK"):
+        "per-thread usage accumulator installed by set_usage_sink; read through getattr defaults",
+    ("fixer", "_TRUNCATION_SINK"):
+        "per-thread truncation telemetry installed by set_truncation_sink; read through getattr defaults",
+    ("engine.fixer", "_TRUNCATION_SINK"):
+        "per-thread truncation telemetry installed by set_truncation_sink; read through getattr defaults",
+    ("stateframe.engine.fixer", "_TRUNCATION_SINK"):
+        "per-thread truncation telemetry installed by set_truncation_sink; read through getattr defaults",
+    ("prompt_ledger", "_CONTEXT"):
+        "per-thread run/task labels for prompt capture; set by fixer.run via set_context",
+    ("engine.prompt_ledger", "_CONTEXT"):
+        "per-thread run/task labels for prompt capture; set by fixer.run via set_context",
+    ("stateframe.engine.prompt_ledger", "_CONTEXT"):
+        "per-thread run/task labels for prompt capture; set by fixer.run via set_context",
 }
 # Host configuration the product child sets on the engine before work() runs. The new process's
 # host sets them again (possibly to new values: a raised --max-turns), and KEY is a credential that

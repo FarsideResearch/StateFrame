@@ -711,6 +711,22 @@ class TickProcessTable(ProcessTable):
         self._result_started_ns = 0
         self.scans = 0  # full-table enumerations performed; read by tests
 
+    def __getstate__(self) -> dict:
+        # Per-thread tick views belong to the thread that opened them; a thread-local cannot be
+        # pickled, so it is dropped and rebuilt empty on the other side.
+        state = dict(self.__dict__)
+        state.pop("_tick_state", None)
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        self.__dict__.update(state)
+        self._tick_state = threading.local()
+        # A scan in flight in the saving process has no thread here: never wait on it, and never
+        # reuse the result it left, which describes that process's table.
+        self._running = False
+        self._result = None
+        self._result_error = None
+
     def _scan(self) -> dict[int, ProcessIdentity]:
         """One full enumeration, shared by every caller that arrived before it began."""
         with self._flight:
