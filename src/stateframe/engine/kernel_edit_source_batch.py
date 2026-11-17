@@ -164,6 +164,8 @@ def _digest(raw: bytes) -> str:
 
 def display_marker_in(old_text: str, source: bytes) -> bool:
     """True when ``old_text`` carries renderer or omission marker text that is not in the file."""
+    # Validates a proposed tool argument against file bytes; no request row is classified,
+    # so the authorship ledger has nothing to answer here (listed in the sniff baseline).
     for marker in RENDERER_MARKERS:
         if marker in old_text and marker.encode("utf-8") not in source:
             return True

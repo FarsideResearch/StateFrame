@@ -402,8 +402,14 @@ def _clean_path(raw: str) -> str | None:
 
 
 def _frame_open_sites(messages: Sequence[Mapping[str, object]]) -> list[Mapping[str, object]]:
+    # Only the host frame row is read: authorship comes from its position in the request,
+    # so model, file or tool text that starts with the state header is never parsed.
+    from kernel_host_authorship import structural_class
+
     sites: list[Mapping[str, object]] = []
-    for message in messages:
+    for index, message in enumerate(messages):
+        if structural_class(messages, index) != "frame":
+            continue
         content = message.get("content") if isinstance(message, Mapping) else None
         if not isinstance(content, str) or not content.startswith(_STATE_HEADER):
             continue
