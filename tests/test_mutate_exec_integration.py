@@ -49,7 +49,9 @@ def test_two_real_broker_fetches_reuse_boot_and_leave_no_stage(tmp_path, monkeyp
     engine = Path(module.__file__).parent
     copied = tmp_path / "engine-copy"
     copied.mkdir()
-    for name in ("sf_mutate_boot.py", "sf_mutate_sdk.py", "sf_launch.py"):
+    # The broker boot set also stages the fetch shim's engine imports; a missing one refuses the launch.
+    for name in ("sf_mutate_boot.py", "sf_mutate_sdk.py", "sf_launch.py",
+                 "kernel_web_fetch.py", "kernel_reason_log.py"):
         (copied / name).write_bytes((engine / name).read_bytes())
     (copied / "sf_mutate_fetch.py").write_text("import sys\nsys.stdin.buffer.read()\nsys.stdout.buffer.write(b'OK')\n")
     monkeypatch.setattr(module, "_ENGINE", copied)
@@ -258,7 +260,9 @@ def test_broker_starts_only_after_registration(tmp_path, monkeypatch):
     engine = Path(module.__file__).parent
     mocked = tmp_path / "engine-copy"
     mocked.mkdir()
-    for name in ("sf_mutate_boot.py", "sf_mutate_sdk.py", "sf_launch.py"):
+    # The broker boot set also stages the fetch shim's engine imports; a missing one refuses the launch.
+    for name in ("sf_mutate_boot.py", "sf_mutate_sdk.py", "sf_launch.py",
+                 "kernel_web_fetch.py", "kernel_reason_log.py"):
         (mocked / name).write_bytes((engine / name).read_bytes())
     (mocked / "sf_mutate_fetch.py").write_text(
         "import sys\n"

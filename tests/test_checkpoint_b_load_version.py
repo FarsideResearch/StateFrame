@@ -8,6 +8,7 @@ import select
 import shutil
 import signal
 import subprocess
+import site
 import sys
 import time
 from pathlib import Path
@@ -45,6 +46,39 @@ def _archive_tree(parent: Path, revision: str) -> Path:
     )
     shutil.unpack_archive(str(archive), str(parent), "tar")
     return parent
+
+
+def _sandboxed_test_python(parent: Path) -> Path:
+    """Build a one-link virtualenv the pinned producers' check sandbox can exec.
+
+    The producers bind only resolved interpreter prefixes read-only. A package manager's
+    virtualenv usually reaches its interpreter through an unversioned alias link (uv:
+    ~/.local/share/uv/python/cpython-3.X-... -> cpython-3.X.Y-...) that lies outside those
+    mounts, so exec fails with ENOENT and the run stops at "check command not found".
+    This shim links straight to the resolved binary and re-exports this interpreter's
+    site directories (pytest included) through a .pth file; they sit under the runner's
+    own prefix or /usr, which every producer release mounts.
+    """
+    resolved = Path(os.path.realpath(sys.executable))
+    shim = parent / "test-python"
+    (shim / "bin").mkdir(parents=True)
+    (shim / "pyvenv.cfg").write_text(
+        f"home = {resolved.parent}\ninclude-system-site-packages = false\n"
+        f"version = {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}\n",
+        encoding="utf-8")
+    site_packages = (shim / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}"
+                     / "site-packages")
+    site_packages.mkdir(parents=True)
+    # Debian-style layouts split site dirs (dist-packages) away from sysconfig's purelib,
+    # so list the runner's site directories and pytest's own location, not one guess.
+    exported = [Path(pytest.__file__).resolve().parents[1],
+                *(Path(entry) for entry in site.getsitepackages())]
+    lines = sorted({str(entry) for entry in exported if entry.is_dir()})
+    (site_packages / "runner-site.pth").write_text("".join(f"{line}\n" for line in lines),
+                                                   encoding="utf-8")
+    python = shim / "bin" / "python"
+    python.symlink_to(resolved)
+    return python
 
 
 def _environment(tree: Path, home: Path, *, checkpoint_every: int = 1) -> dict[str, str]:
@@ -128,6 +162,7 @@ def _wait_for_checkpoint(marker: Path, run_dir: Path, process: subprocess.Popen[
 def _interrupted_checkpoint(tmp_path: Path, producer: str):
     revision, expected_codec = _PINNED_TREES[producer]
     tree = _archive_tree(tmp_path / "producer-tree", revision)
+    test_python = _sandboxed_test_python(tmp_path)
 
     home = tmp_path / "home"
     home.mkdir(mode=0o700)
@@ -145,7 +180,7 @@ def _interrupted_checkpoint(tmp_path: Path, producer: str):
         runner = subprocess.Popen(
             [PYTHON, "-m", "stateframe", "run", "--repo", str(repo), "--task", TASK,
              "--endpoint", url, "--model", "scripted", "--run-dir", str(run_dir),
-             "--test-python", PYTHON, "--max-turns", "32", "--shell", "off", "--quiet",
+             "--test-python", str(test_python), "--max-turns", "32", "--shell", "off", "--quiet",
              "--keep-checkpoints"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             env=_environment(tree, home, checkpoint_every=1), start_new_session=True,

@@ -262,6 +262,34 @@ def test_raising_authored_handler_diagnostic_reaches_reply(tmp_path):
     assert not root.exists()
 
 
+def test_broker_boot_directory_is_import_complete(tmp_path):
+    """The staged boot copies must import under the child's isolated interpreter.
+
+    The broker child runs ``python -I -S`` with only the boot directory on
+    ``sys.path``; a trusted module that reaches outside that directory boots
+    the child into a BootError instead of a broker reply.
+    """
+    import subprocess
+
+    from kernel_mutate_exec import stage_boot_files
+
+    boot = tmp_path / "boot"
+    boot.mkdir(mode=0o700)
+    staged = stage_boot_files(boot, "full")
+    assert {"sf_mutate_boot.py", "sf_mutate_sdk.py", "sf_launch.py",
+            "sf_mutate_fetch.py", "kernel_web_fetch.py", "kernel_reason_log.py"} <= set(staged)
+    assert sorted(path.name for path in boot.iterdir()) == sorted(staged)
+    probe = ("import sys; sys.path.insert(0, sys.argv[1]); "
+             "import sf_mutate_boot, sf_mutate_sdk, sf_launch, sf_mutate_fetch")
+    result = subprocess.run([sys.executable, "-I", "-S", "-B", "-c", probe, str(boot)],
+                            capture_output=True, text=True, timeout=60,
+                            env={"LC_ALL": "C.UTF-8", "HOME": str(tmp_path)})
+    assert result.returncode == 0, result.stderr[-1200:]
+    sealed = tmp_path / "sealed"
+    sealed.mkdir(mode=0o700)
+    assert "sf_mutate_fetch.py" not in stage_boot_files(sealed, "none")
+
+
 @pytest.mark.host_sandbox
 @pytest.mark.skipif(
     sys.platform != "linux",

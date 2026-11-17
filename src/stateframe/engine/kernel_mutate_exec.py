@@ -59,6 +59,11 @@ def _fixed_env_capability(name: str, unit_root: Path, read_roots: tuple[Path, ..
     """Give every mutation child the same fixed environment."""
     return ExecCapability(name, unit_root, False, read_roots, (), network, _ENV, limits)
 
+def _exclusive_private(path: str, flags: int) -> int:
+    """open() opener: create the launch ledger exclusively with owner-only permissions."""
+    return os.open(path, flags | os.O_EXCL, 0o600)
+
+
 
 @dataclass(frozen=True)
 class MutationLimits:
@@ -127,6 +132,28 @@ def _fsync_dir(path: Path) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+# Trusted modules copied into every mutation boot directory. The child runs
+# ``python -I -S`` with only this directory on sys.path, so each entry must
+# resolve every sibling import it makes from this list alone.
+_BOOT_FILES = ("sf_mutate_boot.py", "sf_mutate_sdk.py", "sf_launch.py")
+# The broker (network_envelope="full") additionally boots sf_mutate_fetch, which
+# imports kernel_web_fetch, which imports kernel_reason_log.
+_BROKER_BOOT_FILES = ("sf_mutate_fetch.py", "kernel_web_fetch.py", "kernel_reason_log.py")
+
+
+def stage_boot_files(boot: Path, network_envelope: Literal["none", "full"]) -> tuple[str, ...]:
+    """Copy the import-complete trusted boot set into ``boot``; return the staged names."""
+    names = list(_BOOT_FILES)
+    if network_envelope == "full":
+        for name in _BROKER_BOOT_FILES:
+            if not (_ENGINE / name).is_file():
+                raise MutationPlatformError("broker boot is unavailable")
+        names.extend(_BROKER_BOOT_FILES)
+    for name in names:
+        _copy_regular(_ENGINE / name, boot / name)
+    return tuple(names)
 
 
 def _copy_regular(source: Path, target: Path) -> None:
@@ -371,23 +398,14 @@ class MutationExecutor:
             self._broker_roots = _broker_config_roots() if network_envelope == "full" else ()
             for path in (self._boot, self._stage, self._session_dir):
                 path.mkdir(mode=0o700)
-            for name in ("sf_mutate_boot.py", "sf_mutate_sdk.py", "sf_launch.py"):
-                _copy_regular(_ENGINE / name, self._boot / name)
-            if network_envelope == "full":
-                fetch = _ENGINE / "sf_mutate_fetch.py"
-                if not fetch.is_file():
-                    raise MutationPlatformError("broker boot is unavailable")
-                _copy_regular(fetch, self._boot / fetch.name)
-                web_fetch = _ENGINE / "kernel_web_fetch.py"
-                if web_fetch.is_file():
-                    _copy_regular(web_fetch, self._boot / web_fetch.name)
+            stage_boot_files(self._boot, network_envelope)
             self._session = ExecSession(self._session_dir)
             envelope = _fixed_env_capability(
                 "mutation", self.root, (*self._roots, *self._broker_roots, self.root),
                 network_envelope, ExecLimits())
             self._session.configure(envelope)
-            ledger_fd = os.open(self.root / "launches.jsonl", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            self._ledger = os.fdopen(ledger_fd, "ab", buffering=0)
+            # Opened by path (not fdopen) so the checkpoint pickler can reopen it on resume.
+            self._ledger = open(self.root / "launches.jsonl", "ab", buffering=0, opener=_exclusive_private)
             self._session._start(envelope)
             # Popen is not a readiness signal. Await the supervisor's first reply
             # before a hook is allowed to start its one-second budget.
@@ -411,6 +429,8 @@ class MutationExecutor:
                "call": spec.call, "role": spec.role, "state": state,
                "t": time.monotonic_ns(), "identity": identity}
         self._ledger.write(json.dumps(row, separators=(",", ":")).encode() + b"\n")
+        # A ledger reopened after a checkpoint resume is buffered; flush before the fsync.
+        self._ledger.flush()
         os.fsync(self._ledger.fileno())
         if self._launch_stage_hook is not None:
             self._launch_stage_hook(state)

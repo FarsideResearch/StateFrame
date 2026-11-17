@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.28 (2026-11-17)
+
+- Fixed: mutation runs can checkpoint and resume; the launch ledger reopens on restore. Before, the ledger handle could not be pickled, so a mutation run never wrote a checkpoint.
+- Fixed: full-network mutation brokers start again. The broker boot directory now carries `kernel_reason_log.py`, which `kernel_web_fetch.py` imports, and refuses to start when any broker file is missing.
+- Tests: the pinned 0.3.30 checkpoint producer gets a test interpreter its check sandbox can execute, so the old-checkpoint refusal test no longer fails on uv-managed Pythons.
+
 ## 0.7.27 (2026-11-17)
 
 - Added: `STATEFRAME_SEND_INDEX_HEADER=on` (default `off`) labels every recorded chat POST with `X-SF-Send-Index` and `X-SF-Send-Attempt` request headers, so a recording server can tell a transport retry from a new send. The request body and recorded hashes do not change.
