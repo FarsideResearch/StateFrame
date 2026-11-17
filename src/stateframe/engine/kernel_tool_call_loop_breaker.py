@@ -38,6 +38,10 @@ _LOOP_TOOLS = frozenset({
     "dispute", "work", *PROTOCOL_EDIT_TOOL_NAMES,
 })
 _IGNORED_ARGUMENTS = frozenset({"why", "reason"})
+# Kinds whose receipts count as fresh evidence. Output-bearing kinds (shell, web) are
+# judged by their output digest, so new output is progress and identical output charges.
+_OUTPUT_KINDS = frozenset({"shell", "web", "web_fetch", "web_search", "fetch"})
+_PROGRESS_KINDS = frozenset({"read", "grep", "search", "test", "probe"}) | _OUTPUT_KINDS
 _REJECTION_MARKERS = (
     "rejected", "refused", "denied", "no-op", "no op", "error", "failed",
     "not applied", "not executed", "not changed", "unchanged", "no change",
@@ -125,9 +129,14 @@ def _test_is_green(observation: str) -> bool:
 
 
 def terminal_preemption_allowed(runtime: object) -> bool:
-    """Let the green-then-exhaust owner win its shared terminal boundary."""
-    return (bool(getattr(runtime, "_tool_call_loop_breaker_ready", False))
-            and not bool(getattr(runtime, "_green_then_exhaust_boundary_active", False)))
+    """Always False: the loop breaker is warn-only and never ends a run.
+
+    It only renders a notice at the next request boundary. Terminal ownership
+    stays with the green-then-exhaust owner, so this must not preempt it. The
+    runtime argument is kept so existing callers keep the same signature.
+    """
+    del runtime
+    return False
 
 
 @dataclass(frozen=True)
@@ -170,6 +179,9 @@ class ToolCallLoopBreaker:
     ) -> LoopDecision:
         name = _tool_name(tool)
         fingerprint = action_fingerprint(name, arguments)
+        # Repeats need the same action AND the same observation. Novel results
+        # from an identical call are progress-like and must not trip the breaker.
+        repeat_key = f"{fingerprint}:{hashlib.sha256(str(observation or '').encode('utf-8')).hexdigest()[:16]}"
         self.actions_seen += 1
         edit_progress = _edit_is_productive(name, observation)
         productive = edit_progress or (
@@ -186,12 +198,12 @@ class ToolCallLoopBreaker:
             self._edit_progress_pending = False
         else:
             self._edit_progress_pending = False
-            if fingerprint == self._previous_fingerprint:
+            if repeat_key == self._previous_fingerprint:
                 self._streak += 1
                 self.repeated_actions += 1
             else:
                 self._streak = 1
-            self._previous_fingerprint = fingerprint
+            self._previous_fingerprint = repeat_key
             self.max_streak = max(self.max_streak, self._streak)
 
         notice = None
@@ -232,6 +244,10 @@ class ToolCallLoopBreaker:
                   "stop with a concrete blocker.")
         self._pending_notice = notice
         return notice
+
+
+def _digest(value: object) -> str:
+    return hashlib.sha256(str(value).encode("utf-8")).hexdigest()
 
 
 class UnboundedProgressWatch:
@@ -411,15 +427,21 @@ class UnboundedProgressWatch:
             kind = str(receipt.get("kind", "")).lower()
             result = str(receipt.get("result_class", "")).upper()
             # A refused attempt or a changing explanation is not fresh evidence.
-            if kind not in {"read", "grep", "search", "test", "probe"} or result not in {
+            if kind not in _PROGRESS_KINDS or result not in {
                     "OK", "READ", "FOUND", "PASS", "FAIL", "GREEN", "RED",
                     "PASSED", "FAILED", "READ_COMPLETE", "READ_PARTIAL",
-                    "HITS", "NO_HITS", "PARTIAL", "FAIL_WITH_WITNESS"}:
+                    "HITS", "NO_HITS", "PARTIAL", "FAIL_WITH_WITNESS",
+                    "NO_OP", "HOST_OBSERVED"}:
                 continue
             if kind in {"read", "grep", "search"} and result in {"FAIL", "FAILED", "RED"}:
                 continue
             identity = self._identity(binding, receipt, kind, result, revision)
             if identity is not None and self._new(identity):
+                progress = True
+                # Remember the first delivered range so its identical re-read still charges.
+                if kind == "read":
+                    self._range_progress(binding, receipt, revision)
+            elif kind == "read" and self._range_progress(binding, receipt, revision):
                 progress = True
         charge = 1
         if bookmarks_on and isinstance(batch_origin, str):
@@ -441,9 +463,46 @@ class UnboundedProgressWatch:
             self.streak += charge
         return self.streak >= self.threshold
 
+    def _range_progress(self, binding: Mapping[str, object], receipt: Mapping[str, object],
+                        revision: object) -> bool:
+        """Fresh line range of an already-seen read path is progress; identical re-reads still charge."""
+        key = self._range_identity(binding, receipt, revision)
+        return key is not None and self._new(key)
+
+    @staticmethod
+    def _range_identity(binding: Mapping[str, object], receipt: Mapping[str, object],
+                        revision: object) -> object:
+        """Identity of a real (non-repeat) delivery's effective range, or None when not applicable."""
+        delivery = receipt.get("delivery")
+        delivery = delivery if isinstance(delivery, Mapping) else {}
+        if (delivery.get("unchanged_since_request") is True
+                or delivery.get("working_set_repeat_capture") is True):
+            return None
+        effective_range = delivery.get("effective_range")
+        if not isinstance(effective_range, Mapping):
+            return None
+        path = receipt.get("target_path") or delivery.get("path")
+        if not path:
+            return None
+        source_revision = delivery.get("revision") or receipt.get("source_revision")
+        if source_revision is None:
+            files = binding.get("product_files") or binding.get("harness_files")
+            if isinstance(files, Mapping):
+                source_revision = files.get(path)
+        if source_revision is None:
+            source_revision = revision
+        rng = tuple(sorted((str(k), str(v)) for k, v in effective_range.items()))
+        return ("read-range", path, source_revision, rng)
+
     @staticmethod
     def _identity(binding: Mapping[str, object], receipt: Mapping[str, object],
                   kind: str, result: str, revision: object) -> object:
+        if kind in _OUTPUT_KINDS:
+            return (kind, revision, receipt.get("fingerprint"), receipt.get("target"),
+                    _digest(receipt.get("detail", "")))
+        if kind == "read" and result == "HOST_OBSERVED":
+            # Host-observed reads carry no target_path; identity is the observed target and its output.
+            return ("read-observed", receipt.get("target"), _digest(receipt.get("detail", "")))
         if kind == "read":
             delivery = receipt.get("delivery")
             delivery = delivery if isinstance(delivery, Mapping) else {}

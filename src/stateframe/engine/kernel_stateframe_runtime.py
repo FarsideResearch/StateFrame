@@ -24167,7 +24167,6 @@ class StateFrameRuntime:
             prepared = [dict(message) for message in prepared]
             prepared.insert(_insert_at, {"role": "user", "content": _tool_call_loop_notice})
             estimate = token_estimate({"messages": prepared, "tools": tools})
-            self.system_outcome = "tool_call_loop_breaker"
             deliver_pending_advisories(self, prepared)
             self._tool_call_loop_breaker_ready = True
             self.journal.emit(
