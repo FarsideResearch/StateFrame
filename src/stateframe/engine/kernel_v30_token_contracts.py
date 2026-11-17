@@ -252,6 +252,13 @@ def verification_selector_is_executable(runtime: object, selector: object) -> bo
     """Use an explicit host witness when one exists; never invent authorization."""
     if selector in (None, "", (), [], {}):
         return True
+    # Line breaks are rejected on the raw input before any normalization or
+    # comparison: _text/_selector_list collapse them to spaces, so "true\nrm"
+    # would otherwise match an approved "true rm".
+    raw_items = selector if isinstance(selector, (list, tuple, set, frozenset)) else (selector,)
+    # Only a line break between selector text counts; surrounding blank lines name nothing.
+    if any("\n" in str(item).strip() or "\r" in str(item).strip() for item in raw_items):
+        return False
     for name in ("can_run_verification", "can_run_test", "verification_selector_allowed"):
         checker = getattr(runtime, name, None)
         if callable(checker):

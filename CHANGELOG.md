@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.26 (2026-11-17)
+
+- Security: verification selectors containing a line break are now refused before matching
+
 ## 0.7.25 (2026-11-17)
 
 - Fixed: a mutation sensitivity receipt reloaded from its own saved form keeps its `variant_id` (the loader reads the flat field it writes, and still accepts the nested shape).
