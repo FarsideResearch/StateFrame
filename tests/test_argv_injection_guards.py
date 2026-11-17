@@ -107,10 +107,10 @@ def _git_recorder(calls):
 
 @pytest.mark.parametrize("bad", BAD_SHAS)
 def test_bad_sha_never_reaches_git_argv(monkeypatch, tmp_path, bad):
-    monkeypatch.setitem(react_repair.REPOS, "mc", tmp_path / "backend")
+    monkeypatch.setitem(react_repair.REPOS, "secondary", tmp_path / "backend")
     calls: list = []
     monkeypatch.setattr(subprocess, "run", _git_recorder(calls))
-    row = {"repo": "mc", "sha": bad, "fn": "argv_guard_unique_fn"}
+    row = {"repo": "secondary", "sha": bad, "fn": "argv_guard_unique_fn"}
     assert check_selection.fail_to_pass_ids(row) == []
     assert check_selection.overlay_fix_tests(tmp_path / "g", row) == 0
     git_calls = [argv for argv in calls if argv[:1] == ["git"]]
@@ -118,10 +118,10 @@ def test_bad_sha_never_reaches_git_argv(monkeypatch, tmp_path, bad):
 
 
 def test_good_sha_still_reaches_git(monkeypatch, tmp_path):
-    monkeypatch.setitem(react_repair.REPOS, "mc", tmp_path / "backend")
+    monkeypatch.setitem(react_repair.REPOS, "secondary", tmp_path / "backend")
     calls: list = []
     monkeypatch.setattr(subprocess, "run", _git_recorder(calls))
-    row = {"repo": "mc", "sha": "abc1234", "fn": "argv_guard_unique_fn"}
+    row = {"repo": "secondary", "sha": "abc1234", "fn": "argv_guard_unique_fn"}
     check_selection.fail_to_pass_ids(row)
     assert any("abc1234^" in argv for argv in calls)
 

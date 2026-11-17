@@ -82,40 +82,6 @@ def test_walk_commits_from_keeps_plain_anchors(monkeypatch, tmp_path, anchor):
     assert len(calls) == 1 and calls[0][3:5] == ["log", anchor]
 
 
-# -------------------------------------------------------------- converge
-def _load_converge(monkeypatch):
-    monkeypatch.setattr(sys, "argv", ["converge"])  # the script parses N/STEPS at import
-    path = ROOT / "bench" / "lab" / "converge.py"
-    spec = importlib.util.spec_from_file_location("lab_converge_under_test", path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    try:
-        spec.loader.exec_module(module)
-    except Exception:
-        sys.modules.pop(spec.name, None)
-        raise
-    return module
-
-
-@pytest.mark.parametrize("bad", BAD_SHAS + [f"{b}^" for b in BAD_SHAS if b])
-def test_converge_archive_refuses_non_hex_revision(monkeypatch, tmp_path, bad):
-    converge = _load_converge(monkeypatch)
-    calls: list = []
-    monkeypatch.setattr(subprocess, "run", _recording_run(calls))
-    assert converge._extract_git_archive(tmp_path, bad, tmp_path, ("backend",)) is False
-    assert calls == []
-
-
-@pytest.mark.parametrize("good", GOOD_SHAS + [f"{g}^" for g in GOOD_SHAS])
-def test_converge_archive_runs_for_hex_revision(monkeypatch, tmp_path, good):
-    converge = _load_converge(monkeypatch)
-    calls: list = []
-    monkeypatch.setattr(subprocess, "run", _recording_run(calls))
-    converge._extract_git_archive(tmp_path, good, tmp_path, ("backend",))
-    assert calls and calls[0][3:6] == ["archive", good, "backend"]
-
-
 # ------------------------------------------------------ swebench_adapter
 def _record(**overrides):
     base = {

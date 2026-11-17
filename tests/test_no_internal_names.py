@@ -73,12 +73,6 @@ _ALLOWLIST = {
     ("tests/test_engine_run.py", "synthetic_label"): _Allow(
         3, "stable subprocess label used by the permission-error regression"
     ),
-    ("tests/test_check_selection.py", "project_alias"): _Allow(
-        3, "repository selector key and temporary path in an oracle fixture"
-    ),
-    ("tests/test_argv_injection_guards.py", "project_alias"): _Allow(
-        4, "repository selector key in a sha-guard fixture"
-    ),
     ("tests/test_final_cache_layout.py", "run_label"): _Allow(
         1, "synthetic request identifier in a test fixture, unrelated to a measurement lane"
     ),
