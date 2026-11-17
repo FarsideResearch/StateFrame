@@ -1,8 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.7.24 (2026-11-17)
 
 - Fixed: with memory isolation on, identical runs now send identical request bytes when a typed carry is admitted. The rendered capsule label no longer includes the per-run journal id; the run id still scopes the namespace, so cross-run reads and carries are still refused. Tests: `tests/test_capsule_label_run_identity.py`.
+
 ## 0.7.23 (2026-11-17)
 
 - Security: test-selector arguments could be parsed as options; now separated with --
