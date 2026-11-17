@@ -147,7 +147,7 @@
   "kernel_check_permits.py": "56e6cc5335c2a13190751f38ed99d681c6fd3106cc809b69dcd277af55986bf6",
   "kernel_check_receipts.py": "2ed50f9cc342bd54762923c1e48e8dff5ec610bbdee3da991ab5fad152996fe5",
   "kernel_check_truth_adapter.py": "4884a7f6261c38d09abc5b0ca2753bec42fb76cbf39a792ec6263a05e37d0788",
-  "kernel_checkpoint.py": "c3bbb67199f5117edbcaba0034e49204d3bd189462ed26b09aeaafbc5e08bf8c",
+  "kernel_checkpoint.py": "102caed36950d670a14b5ffab8ca69d1f5bfa3db90c5be9acc2350755195946c",
   "kernel_claim_grounding.py": "d1f45732040df42fb09c04e09efa4a5d0322008f7f6fb61bf022d2e71447ebb4",
   "kernel_clause_discriminator.py": "2e7db1d1c06a80f63c47d858600c1ebeb50f20252d7d421a08b3ce49397c5739",
   "kernel_clause_review.py": "37f9e2baf980c152d69638b87b0d6d123429e05d57fd4498792a8c105ede43e3",

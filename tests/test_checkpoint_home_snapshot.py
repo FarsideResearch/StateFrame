@@ -619,6 +619,8 @@ def test_artifact_publication_rescans_bytes_after_inode_mutation(
 
     def mutate(path):
         before = path.stat()
+        # Pooled files are read-only by design; this tamperer bypasses that with chmod.
+        path.chmod(0o600)
         path.write_bytes(unsafe if mutation == "escaped-secret" else b"x" * len(unsafe))
         os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
         mutations.append(path)

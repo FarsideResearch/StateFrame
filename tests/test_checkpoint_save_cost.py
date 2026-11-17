@@ -23,6 +23,9 @@ def test_unchanged_snapshot_costs_one_lstat_per_file(tmp_path, monkeypatch):
     run = tmp_path / "env"
     _tree(run)
     first, second = tmp_path / "first", tmp_path / "second"
+    # ctime cannot be aged in a test, so the racy-timestamp window is lifted here; that guard has its
+    # own test in test_checkpoint_disk_reuse.py.
+    monkeypatch.setattr(checkpoint, "_RACY_WINDOW_NS", 0)
     checkpoint._copy_tree(run, first, None, set())
     calls = []
     real = os.lstat
@@ -38,21 +41,23 @@ def test_changed_file_is_stored_once_in_the_object_store(tmp_path):
     _tree(run)
     first, second = tmp_path / "first", tmp_path / "second"
     checkpoint._copy_tree(run, first, None, set(), objects=objects)
-    assert not objects.exists()  # a first snapshot has nothing to dedup against
+    # The first snapshot fills the store: every distinct file content is stored once.
+    assert len(list(objects.iterdir())) == 20
     target = run / "d0" / "f0.py"
     target.write_bytes(b"changed\n" * 10)
     counts = checkpoint._copy_tree(run, second, first, set(), objects=objects)
     assert counts["copied"] == 1 and counts["linked"] == 19
     stored = list(objects.iterdir())
-    assert len(stored) == 1
-    assert (second / "d0" / "f0.py").stat().st_ino == stored[0].stat().st_ino
+    assert len(stored) == 21
+    assert (second / "d0" / "f0.py").stat().st_ino == next(
+        item for item in stored if item.stat().st_size == len(b"changed\n" * 10)).stat().st_ino
     assert (second / "d0" / "f0.py").read_bytes() == b"changed\n" * 10
     assert (second / "d0" / "f0.py").stat().st_mtime_ns == target.stat().st_mtime_ns
 
 
 @posix_only
-def test_object_key_covers_content_mode_and_mtime(tmp_path):
-    """Stale-value guard: a file differing in any of bytes, mode or mtime never reuses an object."""
+def test_object_key_covers_content_and_mode_not_mtime(tmp_path):
+    """Stale-value guard: a file differing in bytes or mode never reuses an object; an mtime-only change does."""
     run, objects = tmp_path / "env", tmp_path / "objects"
     run.mkdir()
     base = tmp_path / "base"
@@ -69,17 +74,12 @@ def test_object_key_covers_content_mode_and_mtime(tmp_path):
         checkpoint._copy_tree(run, out, base, set(), objects=objects)
         copy = (out / "a.txt").stat()
         assert (out / "a.txt").read_bytes() == data
-        assert copy.st_mtime_ns == mtime and (copy.st_mode & 0o777) == mode
+        assert (copy.st_mode & 0o777) == mode & ~0o222  # stored read-only
         seen.append(copy.st_ino)
-    assert len(set(seen)) == 4
-    # the identical triple again reuses the first object
-    target.write_bytes(b"aaaa")
-    target.chmod(0o644)
-    os.utime(target, ns=(1_000_000_000, 1_000_000_000))
-    again = tmp_path / "again"
-    checkpoint._copy_tree(run, again, base, set(), objects=objects)
-    assert (again / "a.txt").stat().st_ino == seen[0]
-    assert len(list(objects.iterdir())) == 4
+    # the mtime-only change (index 3) shares the object of the first capture of these bytes and mode
+    assert seen[3] == seen[0]
+    assert len(set(seen)) == 3
+    assert len(list(objects.iterdir())) == 3
 
 
 @posix_only
@@ -225,6 +225,8 @@ def test_copy_tree_unchanged_file_is_rescanned_only_after_a_new_secret(tmp_path,
     monkeypatch.setattr(checkpoint, "_SECRETS", [])
     monkeypatch.setattr(checkpoint, "_SECRET_GENERATION", 0)
     monkeypatch.setattr(checkpoint, "_VERIFIED_POOL_IDENTITIES", set())
+    monkeypatch.setattr(checkpoint, "_DIGEST_MEMO", {})
+    monkeypatch.setattr(checkpoint, "_RACY_WINDOW_NS", 0)  # ctime of a fresh file cannot be aged here
     run = tmp_path / "env"
     _tree(run, directories=1, files=2)
     first, second, third = tmp_path / "first", tmp_path / "second", tmp_path / "third"
