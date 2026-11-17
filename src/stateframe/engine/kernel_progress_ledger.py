@@ -13,6 +13,7 @@ import json
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 
 
 MODE_ENV = "STATEFRAME_PROGRESS_LEDGER"
@@ -38,7 +39,7 @@ _EVENT_KINDS = frozenset({
     "snapshot_committed",
     "request_submitted",
 })
-_EDIT_KINDS = frozenset({"edit", "str_replace", "file_create", "replace_module", "write", "replace", "patch"})
+_EDIT_KINDS = frozenset({"edit", "str_replace", "file_create", "replace_module", "write", "replace", "patch", *PROTOCOL_EDIT_TOOL_NAMES})
 _READ_KINDS = frozenset({"read", "file_read", "cat", "open", "search", "grep", "find", "ripgrep", "rg"})
 _CHECK_KINDS = frozenset({"check", "test", "run_tests", "pytest", "unittest", "verification", "probe"})
 _PASS_WORDS = frozenset({"PASS", "PASSED", "GREEN", "SUCCESS", "OK", "CURRENT", "VERIFIED"})

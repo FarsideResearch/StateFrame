@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import os
 from collections.abc import Mapping, Sequence
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 
 
 MODE_ENV = "STATEFRAME_WORK_CARRY"
@@ -27,6 +28,7 @@ _TERMINAL_CHECK_STATES = frozenset({
 })
 _EDIT_TOOLS = frozenset({
     "edit", "str_replace", "file_create", "replace_module", "write", "replace",
+    *PROTOCOL_EDIT_TOOL_NAMES,
 })
 _APPLICABILITY = frozenset({"current", "stale", "unknown"})
 _ACTION_DISPOSITIONS = frozenset({

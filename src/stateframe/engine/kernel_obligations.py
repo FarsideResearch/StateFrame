@@ -27,6 +27,7 @@ from enum import Enum
 from pathlib import Path
 from typing import TypeAlias
 
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 from kernel_liveness import Evidence, OrganCensusSpec, TriState, run_census as _run_liveness_census
 from unit_planner import UnitPlan, derive_unit_plan
 
@@ -1897,6 +1898,7 @@ _EDIT_KINDS = frozenset(
         "replace",
         "str_replace",
         "write",
+        *PROTOCOL_EDIT_TOOL_NAMES,
     }
 )
 _EDIT_FAILURE_RESULTS = frozenset(

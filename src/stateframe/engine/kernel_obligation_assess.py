@@ -26,6 +26,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NoReturn
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 from kernel_reason_log import emit_timeout
 from kernel_test_python import selected_test_python
 
@@ -2894,7 +2895,8 @@ def repair_episode(payload: Mapping[str, object] | None, *, last_action: object 
     action_tool = (last_action.get("tool", last_action.get("kind"))
                    if isinstance(last_action, Mapping) else None)
     edit_proposal = str(action_tool or "") in {
-        "edit", "str_replace", "file_create", "replace_module", "write", "replace"
+        "edit", "str_replace", "file_create", "replace_module", "write", "replace",
+        *PROTOCOL_EDIT_TOOL_NAMES,
     }
     current_failure = payload.get("counterexample_ref") or {
         "observed": payload.get("observed"), "expected": payload.get("expected"),

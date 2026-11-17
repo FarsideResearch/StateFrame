@@ -9,6 +9,7 @@ from collections.abc import Mapping, Sequence, Set
 from dataclasses import asdict, dataclass, is_dataclass
 import os
 from pathlib import PurePosixPath
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 
 
 MODE_ENV = "STATEFRAME_HOST_TRUTH_PROGRESS"
@@ -19,6 +20,7 @@ _EDIT_KINDS = frozenset({
     "edit", "str_replace", "insert_before", "replace_module", "file_create",
     "write", "replace", "batch_edit", "edit_file", "create_file",
     "delete_file", "rename_file",
+    *PROTOCOL_EDIT_TOOL_NAMES,
 })
 _CHECK_KINDS = frozenset({
     "test", "tests", "run_tests", "authored_check", "test_run", "check",

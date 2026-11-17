@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 from kernel_measurement import digest
 
 SCHEMA = "retained-worker-checkpoint/1"
@@ -142,7 +143,7 @@ def restore(holder, saved: dict, records: list[dict], boundary: int) -> None:
             record = closed_steps.get(event.get("step_record_id"), {})
             path, revision = event["path"], event["revision"]
             value = archive.revisions.get(event["reference"])
-            if (record.get("tool") not in {"edit", "str_replace", "file_create"}
+            if (record.get("tool") not in {"edit", "str_replace", "file_create", *PROTOCOL_EDIT_TOOL_NAMES}
                     or record.get("result") != "APPLIED"
                     or record.get("after_binding", {}).get("product_files", {}).get(path) != revision
                     or record.get("before_binding", {}).get("product_files", {}).get(path) == revision
