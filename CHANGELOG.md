@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.23 (2026-11-17)
 
 - Security: test-selector arguments could be parsed as options; now separated with --
 
