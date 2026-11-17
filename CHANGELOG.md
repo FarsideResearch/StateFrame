@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.7.34 (2026-11-17)
 
 - Routing schema 2 also: the plan role keeps the turn while it is only reading; a role change no longer throws away a finished edit or finish proposal (reads in the same batch still run, and the withheld proposal is carried into the next request, marked stale if the code changed); a smaller-context specialist route no longer has to fit the main frame, only its own; token estimates use the exact counter when the endpoint offers one; and an applied edit that tests later reject no longer clears the router's failure memory (only a passing check or a finished task does). Tests: `tests/test_frame_routes_plan_lease.py`, `tests/test_route_proposal_preservation.py`, `tests/test_mr6_route_context_fit.py`, `tests/test_mr6_token_estimate.py`, `tests/test_routing_v2_failure_memory.py`.
