@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Continuation: a source-read detour now keeps its own read range as its completion check. Before, the child inherited the suspended parent's acceptance, so the returned source could be judged against the wrong check.
+
 ## 0.7.39 (2026-11-17)
 
 - Checkpoints: a file rewritten with the same size and modification time is now captured instead of reusing the previous snapshot's copy.

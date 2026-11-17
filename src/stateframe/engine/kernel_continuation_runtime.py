@@ -1478,7 +1478,9 @@ class LiveContinuation:
             )
             parent_item = state.intentions.get(parent) if parent is not None else None
             if parent_item is not None:
-                acceptance = getattr(parent_item, "acceptance", {})
+                # Parent acceptance has its own name: ``acceptance`` stays the
+                # child's and is the value the detour ``apply`` below stores.
+                parent_acceptance = getattr(parent_item, "acceptance", {})
                 self.engine.capture_resumption_cue(
                     parent, interrupted_by=child,
                     focus=getattr(parent_item, "pending_decision", "")
@@ -1487,8 +1489,8 @@ class LiveContinuation:
                     return_target=parent,
                     trigger="continuation detour completes",
                     owed_items=(getattr(parent_item, "pending_decision", ""),),
-                    waiting_checks=tuple(acceptance.get("selectors", ()))
-                    if isinstance(acceptance, dict) else (),
+                    waiting_checks=tuple(parent_acceptance.get("selectors", ()))
+                    if isinstance(parent_acceptance, dict) else (),
                     priority=1 if getattr(parent_item, "return_pending", False) else 0,
                     affinity=1, now=self.engine.clock_us(),
                     proposed_next_action="reconcile the returned source against the current binding",
