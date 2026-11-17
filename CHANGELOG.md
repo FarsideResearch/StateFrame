@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.7.30 (2026-11-17)
 
-- Tests: the cross-version parity baseline is now the last release named by CHANGELOG.md at HEAD (tag `v<version>` in HEAD's history, else that release commit), or the release before it when HEAD is itself a release. It no longer depends on clone layout (origin/main, remote refs, first parent); an unresolvable release skips unless `SF_TEST_BASELINE_IMMEDIATE` is set.
+- Tests: the parity baseline is pinned to the last release named in the tree, including when HEAD is a release merge
 
 ## 0.7.29 (2026-11-17)
 
