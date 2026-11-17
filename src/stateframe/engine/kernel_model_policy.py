@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+
+from kernel_routing_schema import routing_v2
 
 _ON = frozenset({"1", "on", "true", "yes", "enabled"})
 CONCISE_ACTION_GUIDANCE = "concise_action"
@@ -106,6 +108,13 @@ def resolve_model_policy(model_name: str | None = None,
 
 def policy_for_runtime(runtime: object | None = None) -> ModelPolicy:
     execution = getattr(runtime, "execution_model_policy", None) if runtime else None
+    if routing_v2():
+        # v2: the cached policy must follow the router's current selection (MR-3).
+        selected = getattr(runtime, "selected_model", None) if runtime else None
+        if isinstance(selected, str) and selected.strip():
+            if isinstance(execution, ModelPolicy) and execution.model_name == selected.strip():
+                return execution
+            return execution_policy_for(runtime, selected.strip())
     if isinstance(execution, ModelPolicy):
         return execution
     source = dict(os.environ)
@@ -119,8 +128,14 @@ def policy_for_runtime(runtime: object | None = None) -> ModelPolicy:
 
 
 def execution_policy_for(runtime: object | None, model_name: object, *,
-                         provider: str | None = None) -> ModelPolicy:
-    """Resolve one selected endpoint policy without changing launch defaults."""
+                         provider: str | None = None,
+                         served_model: str | None = None) -> ModelPolicy:
+    """Resolve one selected endpoint policy without changing launch defaults.
+
+    Schema 2: identity is the selected model. The launch served identity is stripped
+    from the source so it cannot override the selection; only the selected deployment's
+    own ``served_model`` (when the caller passes it) becomes the served name.
+    """
     identity = str(model_name or "").strip() or "unknown"
     allowed = getattr(runtime, "model_router_allowed_models", ()) if runtime is not None else ()
     if allowed and identity not in set(allowed):
@@ -128,12 +143,21 @@ def execution_policy_for(runtime: object | None, model_name: object, *,
     source = dict(os.environ)
     source["STATEFRAME_MODEL_NAME"] = identity
     source["DS_MODEL"] = identity
-    served = _served_model(runtime=runtime)
-    if served:
-        source["DS_SERVED_MODEL"] = served
+    selected_served = ""
+    if routing_v2():
+        # Served identity never feeds identity resolution under v2 (it would win over the selection).
+        for key in _SERVED_MODEL_KEYS:
+            source.pop(key, None)
+        selected_served = str(served_model or "").strip()
+    else:
+        served = _served_model(runtime=runtime)
+        if served:
+            source["DS_SERVED_MODEL"] = served
     if provider:
         source["STATEFRAME_PROVIDER"] = str(provider).strip().lower()
     policy = resolve_model_policy(identity, environ=source)
+    if routing_v2():
+        policy = replace(policy, served_model_name=selected_served)
     if runtime is not None:
         setattr(runtime, "execution_model_policy", policy)
     return policy

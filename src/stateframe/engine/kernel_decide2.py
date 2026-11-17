@@ -19,6 +19,8 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
+from kernel_model_ids import resolve_model_id
+
 
 SCHEMA = "stateframe-decide2/1"
 PROCEDURE_VERSION = "decide2-procedure/v1"
@@ -752,7 +754,7 @@ def build_micro_request(
         },
     }
     body: dict[str, object] = {
-        "model": "decision-tier",
+        "model": resolve_model_id("decision-tier"),
         "messages": [
             {
                 "role": "user",
@@ -791,7 +793,7 @@ def build_work_request(
 ) -> dict[str, object]:
     """Build a reasoning-on work frame after micro routing is exhausted."""
     body: dict[str, object] = {
-        "model": "work-frame",
+        "model": resolve_model_id("work-frame"),
         "messages": [
             {
                 "role": "user",
