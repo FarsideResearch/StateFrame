@@ -660,7 +660,7 @@
   "kernel_stateframe_marker.py": "7dd70b9609ebfc2208f9f998312ae28c4749615ba31a402ac0c8ec9fa0e89243",
   "kernel_stateframe_memory_capsule.py": "5cc4542d7a4bc82c31309971f6caebcb33249299e0ebd66cab094dd02a38c51f",
   "kernel_stateframe_message_layout.py": "d2de82cc462b590e636ab3a58b4f00d5bc68a89509582267a40e6604e105be33",
-  "kernel_stateframe_model_router.py": "5d4ee42c5b0dfe78ffdb887368a8e8f05660b16ec05a121c5240cee2f5d9f75b",
+  "kernel_stateframe_model_router.py": "878924de4c730977326462a7f5cc4011808313d06f77418ef32aa379d37d91b3",
   "kernel_stateframe_model_router_replay.py": "e208dbe77ac4b204b10ecda5c79de450baaa5fa7770170d9c4c7852d7d7e113a",
   "kernel_stateframe_notice_dedup.py": "3933dec2208fbca167f58917a9832e5ed3851dea8c883d33ec8f637d344743c4",
   "kernel_stateframe_page_log.py": "bde01d724cf300f130bc8b1c181479532cb38cdef11206e9e967ed6e1914b6b8",
