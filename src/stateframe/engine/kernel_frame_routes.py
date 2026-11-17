@@ -4,6 +4,8 @@ The last closed action is a checkpoint participant owned by the child.  A plan
 request is selected only before any action, or after the latest action was a
 run_tests call with an aggregate FAIL and *all* canonical check receipts bound
 to the current workspace revision.  Other actions always replace the record.
+Under routing schema 2 a plan lease also stays open through read-kind actions
+(see PLAN_LEASE); schema 1 never consults it.
 """
 from __future__ import annotations
 
@@ -14,6 +16,8 @@ import os
 from dataclasses import dataclass
 from typing import Mapping
 from urllib.parse import urlsplit, urlunsplit
+
+from kernel_routing_schema import routing_v2
 
 SCHEMA = "stateframe-routes/1"
 SPEC_READERS = ("STATEFRAME_ROUTE_SCOPE", "STATEFRAME_ROUTE_UNIT_CLASS", "STATEFRAME_ROUTE_SLOT")
@@ -81,6 +85,23 @@ _overrides: dict[str, tuple[str, ...]] = {}
 _baseline: dict[str, object] | None = None
 LAST_CLOSED_ACTION: dict[str, object] = {}
 ACCOUNTING: dict[str, int] = {"physical": 0, "accepted": 0, "discarded": 0}
+# MR-4 (routing schema 2 only). Read-kind frame tools that keep a plan lease open. These are the
+# router's _READ_ACTIONS lowercased; tests/test_frame_routes_plan_lease.py pins the match.
+LEASE_READ_ACTIONS = frozenset({
+    "read", "read_file", "read_requested_file", "refresh_read", "recall_evidence",
+    "mechanical_read", "grep",
+})
+# open: True from start and after a qualifying FAIL run_tests; closed by the first non-read action.
+# by_fail/revision: a FAIL-opened lease only holds while the revision it was opened on is current.
+PLAN_LEASE: dict[str, object] = {}
+
+
+def _reset_plan_lease() -> None:
+    PLAN_LEASE.clear()
+    PLAN_LEASE.update(open=True, by_fail=False, revision=None)
+
+
+_reset_plan_lease()
 
 
 def install(spec: object, *, baseline: Mapping[str, object] | None = None) -> None:
@@ -90,6 +111,7 @@ def install(spec: object, *, baseline: Mapping[str, object] | None = None) -> No
         _roles, _overrides, _baseline = None, {}, None
         ROUTES_ACTIVE = False
         LAST_CLOSED_ACTION.clear()
+        _reset_plan_lease()
         ACCOUNTING.update(physical=0, accepted=0, discarded=0)
         return
     if not isinstance(spec, dict) or spec.get("schema") != SCHEMA:
@@ -119,6 +141,7 @@ def install(spec: object, *, baseline: Mapping[str, object] | None = None) -> No
     _baseline = dict(baseline) if baseline is not None else None
     ROUTES_ACTIVE = True
     LAST_CLOSED_ACTION.clear()
+    _reset_plan_lease()
     ACCOUNTING.update(physical=0, accepted=0, discarded=0)
 
 
@@ -175,6 +198,8 @@ def role_for_request(revision: object = None, *, request_kind: str | None = None
             return "edit"
     if request_kind == "decide2":
         return "decide2"
+    if routing_v2() and _plan_lease_holds(revision):
+        return "plan"
     if not LAST_CLOSED_ACTION:
         return "plan"
     row = LAST_CLOSED_ACTION
@@ -196,11 +221,30 @@ def close_action(record: Mapping[str, object], *, revision: object = None,
                        len(receipts) == len(receipt_ids) and
                        {row.get("receipt_id") for row in receipts} == set(receipt_ids) and
                        all(item.get("revision") == revision for item in receipts))
+    qualifying_fail = bool(record.get("tool") == "run_tests" and canonical.get("status") == "FAIL"
+                           and all_current and ids and receipt_ids)
     LAST_CLOSED_ACTION.clear()
     LAST_CLOSED_ACTION.update(action=record.get("tool"), call_id=record.get("tool_call_id"),
                               execution_ids=ids, check_receipt_ids=receipt_ids,
                               status=canonical.get("status"), revision=revision,
                               all_receipts_current=all_current)
+    if routing_v2():
+        _advance_plan_lease(record.get("tool"), qualifying_fail=qualifying_fail, revision=revision)
+
+
+def _plan_lease_holds(revision: object) -> bool:
+    if PLAN_LEASE.get("open") is not True:
+        return False
+    return PLAN_LEASE.get("by_fail") is False or PLAN_LEASE.get("revision") == revision
+
+
+def _advance_plan_lease(action: object, *, qualifying_fail: bool, revision: object) -> None:
+    """Reads keep the lease as it is; a qualifying FAIL opens it; any other action closes it."""
+    if qualifying_fail:
+        PLAN_LEASE.clear()
+        PLAN_LEASE.update(open=True, by_fail=True, revision=revision)
+    elif action not in LEASE_READ_ACTIONS:
+        PLAN_LEASE.update(open=False)
 
 
 def classify_calls(calls: object, *, custom_writes: set[str] | frozenset[str] = frozenset()) -> str:
