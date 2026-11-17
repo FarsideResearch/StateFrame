@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.7.37 (2026-11-17)
 
 - Tests: a subframe's entry point must come from a source it owns
