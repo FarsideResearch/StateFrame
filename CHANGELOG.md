@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fixed: only real lack of progress can stop an unbounded run. Reading a new line range of a file already read, new shell output (including no-op commands), web results and host-observed check output now count as progress. The exact-repeat tool-call breaker now follows its off switch on unbounded runs, treats a repeated call with a new result as progress, and only warns: it never ends the run.
 ## 0.7.30 (2026-11-17)
 
 - Tests: the parity baseline is pinned to the last release named in the tree, including when HEAD is a release merge

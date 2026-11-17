@@ -8503,7 +8503,7 @@ def work(d, *, resume=None):
             from long_horizon_telemetry import AppendOnlyLogicalDepth
             measurement.long_horizon_depth_tracker = AppendOnlyLogicalDepth()
             measurement.long_horizon_depth_tracker.observe(msgs)
-        if (step_cap is None or os.environ.get("STATEFRAME_TOOL_CALL_LOOP_BREAKER", "off").strip().lower()
+        if (os.environ.get("STATEFRAME_TOOL_CALL_LOOP_BREAKER", "off").strip().lower()
                 in {"on", "1", "true", "yes"}):
             from kernel_tool_call_loop_breaker import ToolCallLoopBreaker
             measurement._tool_call_loop_breaker = ToolCallLoopBreaker.from_environment()
