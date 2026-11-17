@@ -13,6 +13,7 @@ from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
 import re
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 
 
 MODE_ENV = "STATEFRAME_TOKENLAB_STALL_BREAKER"
@@ -38,7 +39,7 @@ STALLWIRE_MENU_EVENT = "tokenlab_stallwire_menu_projected"
 STALLWIRE_PROBE_EVENT = "tokenlab_stallwire_probe_suppressed"
 _STALLWIRE_TRUTHY = frozenset({"1", "on", "true", "yes"})
 _STALLWIRE_EDIT_TOOLS = frozenset({
-    "edit", "str_replace", "file_create", "replace_module", "write", "replace",
+    "edit", "str_replace", "file_create", "replace_module", "write", "replace", *PROTOCOL_EDIT_TOOL_NAMES,
 })
 _STALLWIRE_READ_TOOLS = frozenset({"read", "grep", "search", "locate"})
 _STALLWIRE_TEST_TOOLS = frozenset({"run_tests", "test", "pytest"})

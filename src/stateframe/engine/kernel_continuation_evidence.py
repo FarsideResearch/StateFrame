@@ -11,6 +11,7 @@ from kernel_continuation_state import (
 )
 from kernel_measurement import digest
 from kernel_verdict import SATISFIED, _selectors, evaluate_required_tests
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 
 EVIDENCE_KINDS = frozenset({
     "action_outcome_closed", "action_receipt", "step_dispatch_binding",
@@ -729,7 +730,7 @@ class HostEvidence:
                                                  and record.get("changes")):
                         status = "applied"
                     elif (effect.tool in {"edit", "str_replace", "write", "replace_module",
-                                            "replace", "insert_before"}
+                                            "replace", "insert_before", *PROTOCOL_EDIT_TOOL_NAMES}
                           and record.get("before_binding") == current
                           and any(r.get("kind") == "edit"
                                   and r.get("result_class") == "APPLIED" for r in matching)):

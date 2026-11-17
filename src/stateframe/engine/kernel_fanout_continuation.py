@@ -7,6 +7,7 @@ import re
 import shlex
 from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 
 
 MAX_SECTION_BYTES = 3_072
@@ -24,7 +25,7 @@ _DISPOSITION_KINDS = frozenset({
 _EDIT_TOOLS = frozenset({
     "apply_patch", "create_file", "delete", "delete_file", "edit", "edit_file",
     "file_create", "file_delete", "file_move", "insert_before", "move", "patch",
-    "rename_file", "replace", "replace_module", "str_replace", "write", "write_file",
+    "rename_file", "replace", "replace_module", "str_replace", "write", "write_file", *PROTOCOL_EDIT_TOOL_NAMES,
 })
 _CHECK_TOOLS = frozenset({"pytest", "run_tests", "test"})
 # Canonical wire shape of a parallel disposition, written by kernel_parallel and read here.
