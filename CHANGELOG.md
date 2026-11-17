@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.36 (2026-11-17)
 
 - Tests: fail-loud triage batches 3 and 4 for guarded effects, execution policy, test artifact policy, edit, evidence and tool kernel modules, re-pointed to current lines.
 
