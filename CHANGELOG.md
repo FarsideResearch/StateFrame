@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fixed: edit_source and rewrite_source now refuse hook definition and bundled input files, like the other edit tools.
 ## 0.7.37 (2026-11-17)
 
 - Tests: a subframe's entry point must come from a source it owns
