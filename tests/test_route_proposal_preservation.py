@@ -235,3 +235,89 @@ def test_routing_v2_p1_journal_kinds_are_resume_safe_tail() -> None:
     for kind in ("route_proposal_preserved", "token_estimate_fallback"):
         assert kind in restart.SAFE_TAIL
         assert restart.resume_event_rejection_reason(kind) is None
+def _install_temperature_split_table():
+    # edit differs from read only in temperature: same endpoint and model.
+    frame_routes.install(routes.resolve(DEFAULT, cli=["edit.temperature=0.2"], environ={}).public())
+
+
+def test_v2_temperature_only_edit_is_withheld(monkeypatch):
+    # MR-7b: under v2 the split compares full route identity, so a temperature-only difference withholds.
+    monkeypatch.setenv("STATEFRAME_ROUTING_SCHEMA", "2")
+    _install_temperature_split_table()
+    kept, withheld, target = frame_routes.route_split(frame_routes.resolve("read"), [READ, EDIT])
+    assert kept == [READ] and withheld == [EDIT] and target == "edit"
+
+
+def test_v2_withheld_proposal_makes_next_request_resolve_to_target_role(monkeypatch):
+    monkeypatch.setenv("STATEFRAME_ROUTING_SCHEMA", "2")
+    _install_temperature_split_table()
+    before = frame_routes.role_for_request("rev-A")
+    _kept, withheld, target = frame_routes.route_split(frame_routes.resolve("read"), [READ, EDIT])
+    frame_routes.preserve_proposal(Journal(), request_id="r1", target_role=target,
+                                   calls=withheld, revision="rev-A")
+    assert before != "edit"
+    assert frame_routes.role_for_request("rev-A") == "edit"
+    # The carried request runs on the target role's settings, not the answering route's.
+    assert frame_routes.applied_settings(frame_routes.resolve("edit"))["temperature"] == 0.2
+    assert frame_routes.applied_settings(frame_routes.resolve("read"))["temperature"] == 1.0
+
+
+def test_v2_role_falls_back_after_preserved_proposal_is_consumed(monkeypatch):
+    monkeypatch.setenv("STATEFRAME_ROUTING_SCHEMA", "2")
+    _install_temperature_split_table()
+    before = frame_routes.role_for_request("rev-A")
+    frame_routes.preserve_proposal(Journal(), request_id="r1", target_role="edit",
+                                   calls=[EDIT], revision="rev-A")
+    assert frame_routes.role_for_request("rev-A") == "edit"
+    frame_routes.take_preserved_messages("rev-A")
+    # The carrying request itself still runs on the target role; the fallback starts once its action closes.
+    assert frame_routes.role_for_request("rev-A") == "edit"
+    frame_routes.close_action({"action": "edit", "status": "APPLIED"}, revision="rev-A")
+    assert frame_routes.role_for_request("rev-A") != "edit" or frame_routes.CARRY_TARGET == {}
+    assert frame_routes.CARRY_TARGET == {}
+
+
+def test_v2_oldest_preserved_proposal_wins_and_decide2_is_not_overridden(monkeypatch):
+    monkeypatch.setenv("STATEFRAME_ROUTING_SCHEMA", "2")
+    _install_temperature_split_table()
+    frame_routes.preserve_proposal(Journal(), request_id="r1", target_role="edit",
+                                   calls=[EDIT], revision="rev-A")
+    frame_routes.preserve_proposal(Journal(), request_id="r2", target_role="finish",
+                                   calls=[EDIT], revision="rev-A")
+    assert frame_routes.role_for_request("rev-A") == "edit"
+    assert frame_routes.role_for_request("rev-A", request_kind="decide2") == "decide2"
+
+
+def test_v1_split_and_role_ignore_temperature_and_preserved_proposals(monkeypatch):
+    # Schema 1 keeps (endpoint, model) for the split and today's role logic, so nothing changes.
+    monkeypatch.setenv("STATEFRAME_ROUTING_SCHEMA", "1")
+    _install_temperature_split_table()
+    kept, withheld, target = frame_routes.route_split(frame_routes.resolve("read"), [READ, EDIT])
+    assert kept == [READ, EDIT] and withheld == [] and target is None
+    before = frame_routes.role_for_request("rev-A")
+    frame_routes.preserve_proposal(Journal(), request_id="r1", target_role="edit",
+                                   calls=[EDIT], revision="rev-A")
+    assert frame_routes.role_for_request("rev-A") == before
+
+
+def test_v2_carrying_request_keeps_target_role_after_the_carry_is_consumed(monkeypatch):
+    # Live order: the carry is consumed before prepare() asks for the role, so the role must survive it.
+    import kernel_frame_routes as fr
+    monkeypatch.setenv("STATEFRAME_ROUTING_SCHEMA", "2")
+    fr.PRESERVED_PROPOSALS.clear(); fr.CARRY_TARGET.clear()
+    fr.PRESERVED_PROPOSALS.append({"target_role": "edit", "revision": "r1", "calls": [], "digest": "d"})
+    messages = fr.take_preserved_messages("r1")
+    assert messages and not fr.PRESERVED_PROPOSALS
+    assert fr.role_for_request("r1") == "edit"
+    fr.close_action({"action": "edit", "status": "APPLIED"}, revision="r1")
+    assert fr.role_for_request("r1") != "edit" or fr.CARRY_TARGET == {}
+    assert fr.CARRY_TARGET == {}
+
+
+def test_v1_take_preserved_messages_sets_no_carry_target(monkeypatch):
+    import kernel_frame_routes as fr
+    monkeypatch.delenv("STATEFRAME_ROUTING_SCHEMA", raising=False)
+    fr.PRESERVED_PROPOSALS.clear(); fr.CARRY_TARGET.clear()
+    fr.PRESERVED_PROPOSALS.append({"target_role": "edit", "revision": "r1", "calls": [], "digest": "d"})
+    fr.take_preserved_messages("r1")
+    assert fr.CARRY_TARGET == {}

@@ -224,6 +224,20 @@ Watch for:
 - **A resumed run keeps its routes.** Changing a role's model, sampling or limits on resume is refused and names the setting. `stateframe resume --route` may move a role to a new endpoint address or rename its model, for when a server moves. Every replayed request must go to the role, endpoint and model it was recorded with, or resume stops before sending anything. The request that had no reply when the run stopped is checked against its rebuilt copy on the first resume; on later resumes only if the previous resume recorded that its own check passed. Otherwise, for example when a resumed run stops again before its check, StateFrame resumes by full replay without that check and prints a line saying so. If a rebuilt request's bytes differ, replay goes live early from that point, as it does without routes, still on the recorded route.
 - **Routed runs do not restore checkpoints.** With checkpoints enabled, a routed run still writes them, but its resume always replays the recorded run.
 
+### Unified routing (schema 2, off by default)
+
+`STATEFRAME_ROUTING_SCHEMA` picks how per-step routing decides. Unset or `1` is the behaviour above, byte for byte. `2` turns on the unified rules below; any other value stops the run. Set `STATEFRAME_ROUTING_SCHEMA=2` in a custom profile.
+
+- **One decision per request.** Each request gets one route decision that names its model, endpoint and key. A role configured in your routes file wins over the adaptive model router, and the router still checks the final request. Once a request is sealed its destination cannot change; if something tries, the run fails loudly instead of sending elsewhere. The decision is journaled once per request as `route_decision`. If the router would pick a different model when a request is rebuilt, its body adjustments are kept, the decided model stays, and `route_drift_pinned` is journaled.
+- **Helper calls use real model ids.** The `decide2` and work-frame calls send the configured default model id instead of the `decision-tier` and `work-frame` aliases. Set `STATEFRAME_DECIDE2_MODEL` or `STATEFRAME_WORK_FRAME_MODEL` in a custom profile to override them.
+- **Model guidance follows the model that answers.** Model-specific guidance is chosen for the selected deployment, not the model the run was launched with.
+- **The planner keeps its reads.** After a `plan` step, the role stays `plan` while every action since then is a read. The first edit, write or test run hands back to the rules above.
+- **Escalation keeps the work.** A reply that mixes reads with an edit runs the reads now and withholds only the edit. The withheld calls go into the next request on the `edit` (or `finish`) route as a proposal against the current revision, marked stale if the files changed in between, and `route_proposal_preserved` is journaled. A change of sampling or limits alone (same model and endpoint) also counts as a route change.
+- **Smaller side roles are allowed.** A role that never builds the main frame may have a smaller context than the run, as long as it fits its own setting. The main-frame role keeps the start check above. Token counts use the selected server's exact tokenizer when it has one; otherwise the conservative byte count, with `token_estimate_fallback` journaled once per endpoint.
+- **Failure memory needs proof.** Only a passing test run or check, or a finished run, clears the router's memory of earlier failures. An edit that applied but was not yet tested no longer does.
+
+Resume: these journal records are audit only. A resumed run re-decides each route, and a proposal withheld when the run stopped is not restored; that step is asked again on its target route.
+
 ## Profiles and switches
 
 `STATEFRAME_HTTP_GZIP` and `STATEFRAME_PLAIN_GZIP` are `off` by default. Set either to `on` in a custom profile only when the endpoint is a relay that inflates gzip request bodies. A stock llama-server rejects them with HTTP 415. In the default run mode, a compressed request refused with HTTP 415 is resent once without compression within the original deadline.
