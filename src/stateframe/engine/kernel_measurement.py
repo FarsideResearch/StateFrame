@@ -5862,10 +5862,10 @@ class RequestCapture:
                 record = self.qualified_request
                 if record is None:
                     raise RequestPreparationContractError("replacement did not publish a qualified request")
-            wire, body = record.wire, record.body
             if unified_routing:
                 # The qualified body must still carry the decided model and endpoint.
-                self.route_decision.assert_sealed(body, endpoint)
+                self.route_decision.assert_sealed(record.body, endpoint)
+            wire, body = record.wire, record.body
             self._emit_host_authorship_manifest(body, wire)
             sealed_metadata = json.loads(record.metadata)
             request_extensions = sealed_metadata["request_extensions"]
