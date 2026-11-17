@@ -17,6 +17,7 @@ from collections.abc import Mapping, Sequence
 from kernel_obligation_seed import (
     PROVENANCE as HOST_BRIEF_PROVENANCE,
     PublicBrief,
+    display_text,
     enabled as obligation_seed_enabled,
     evidence_ref_satisfies,
     extract_obligations,
@@ -279,7 +280,25 @@ def _summary(row: Mapping[str, object], *, kind: str) -> dict[str, object]:
     if row.get("status") == "dropped":
         return {"id": row["id"], "status": "dropped", "reason": row["drop_reason"]}
     title = row.get("title") if kind == "goal" else row.get("text")
-    return {"id": row["id"], "status": row["status"], "title": title}
+    return {"id": row["id"], "status": row["status"],
+            "title": display_text(title) if isinstance(title, str) else title}
+
+
+def _is_open_obligation_step(row: Mapping[str, object]) -> bool:
+    fields = row.get("fields")
+    return (row.get("status") in {"todo", "doing", "blocked"} and isinstance(fields, Mapping)
+            and bool(fields.get("obligation_id")))
+
+
+def _obligation_notice(payload: dict, validated_steps: Sequence[Mapping[str, object]],
+                       shown_steps: Sequence[Mapping[str, object]]) -> None:
+    """Add an explicit, counted notice when open obligation steps are not displayed."""
+    shown_ids = {row["id"] for row in shown_steps}
+    hidden = sum(1 for row in validated_steps
+                 if _is_open_obligation_step(row) and row["id"] not in shown_ids)
+    if hidden:
+        payload["notice"] = f"({hidden} more obligations not shown; all are tracked)"
+        payload["omitted"]["obligations_not_shown"] = hidden
 
 
 def _take_bounded(rows: list[dict], limit: int) -> tuple[list[dict], int]:
@@ -310,7 +329,8 @@ def render_work_record(state: Mapping[str, object] | "WorkRecordStore",
         for row in validated["steps"]:
             if row["status"] not in {"todo", "doing", "blocked"}:
                 continue
-            item = {"id": row["id"], "status": row["status"], "text": row["text"]}
+            item = {"id": row["id"], "status": row["status"],
+                    "text": display_text(row["text"])}
             fields = row.get("fields", {})
             if isinstance(fields, Mapping) and fields.get("obligation_id"):
                 item["obligation_id"] = fields["obligation_id"]
@@ -320,10 +340,11 @@ def render_work_record(state: Mapping[str, object] | "WorkRecordStore",
              "basis_refs": list(row["basis_refs"])}
             for row in validated["decisions"][-3:]
         ]
+        shown_open_steps = open_steps[-MAX_RENDER_OPEN:]
         payload = {
             "schema": SCHEMA,
             "frontier": {"goals": open_goals[-MAX_RENDER_OPEN:],
-                          "steps": open_steps[-MAX_RENDER_OPEN:]},
+                          "steps": shown_open_steps},
             "decisions": decisions,
             "omitted": {
                 "goals_closed": sum(row["status"] not in {"open", "blocked"}
@@ -333,6 +354,7 @@ def render_work_record(state: Mapping[str, object] | "WorkRecordStore",
                 "decisions_older": max(0, len(validated["decisions"]) - len(decisions)),
             },
         }
+        _obligation_notice(payload, validated["steps"], shown_open_steps)
         encoded = _canonical(payload)
         return "[WORK RECORD]\n" + encoded + "\n[/WORK RECORD]"
     goals_open = [copy.deepcopy(row) for row in validated["goals"]
@@ -352,6 +374,7 @@ def render_work_record(state: Mapping[str, object] | "WorkRecordStore",
     older_decisions = [{"id": row["id"]} for row in decisions[:-MAX_RENDER_DECISIONS]]
     goals_open, goals_open_omitted = _take_bounded(goals_open, MAX_RENDER_OPEN)
     steps_open, steps_open_omitted = _take_bounded(steps_open, MAX_RENDER_OPEN)
+    steps_open = [{**row, "text": display_text(row["text"])} for row in steps_open]
     goals_done, goals_done_omitted = _take_bounded(goals_done, MAX_RENDER_SUMMARIES)
     goals_dropped, goals_dropped_omitted = _take_bounded(goals_dropped, MAX_RENDER_SUMMARIES)
     steps_done, steps_done_omitted = _take_bounded(steps_done, MAX_RENDER_SUMMARIES)
@@ -367,6 +390,7 @@ def render_work_record(state: Mapping[str, object] | "WorkRecordStore",
             "steps_done": steps_done_omitted, "steps_dropped": steps_dropped_omitted,
         },
     }
+    _obligation_notice(payload, validated["steps"], steps_open)
     prefix_len = len("[WORK RECORD]\n") + len("\n[/WORK RECORD]")
     payload_limit = max(1, max_chars - prefix_len)
     encoded = _canonical(payload)

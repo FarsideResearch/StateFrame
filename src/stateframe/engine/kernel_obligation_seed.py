@@ -105,10 +105,21 @@ def _canonical(value: object) -> str:
     return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
 
 
-def _bounded_text(value: str) -> str:
-    if len(value) <= MAX_OBLIGATION_TEXT:
-        return value
-    return value[: MAX_OBLIGATION_TEXT - 3] + "..."
+def display_text(text: str) -> str:
+    """Bound text for model-facing or report output.  Never use this for authority."""
+    if len(text) <= MAX_OBLIGATION_TEXT:
+        return text
+    return text[: MAX_OBLIGATION_TEXT - 3] + "..."
+
+
+# Compatibility name for any caller that still imports the old helper.
+_bounded_text = display_text
+
+
+def display_obligations(obligations: Sequence["Obligation"]) -> tuple[tuple["Obligation", ...], int]:
+    """Return the first MAX_OBLIGATIONS obligations for display and the hidden count."""
+    shown = tuple(obligations[:MAX_OBLIGATIONS])
+    return shown, len(obligations) - len(shown)
 
 
 def _bounded_list(values: Sequence[str]) -> tuple[str, ...]:
@@ -142,8 +153,6 @@ class Obligation:
             raise ValueError("obligation id must be a bounded host id")
         if not isinstance(self.text, str) or not self.text.strip():
             raise ValueError("obligation text must be nonempty")
-        if len(self.text) > MAX_OBLIGATION_TEXT:
-            raise ValueError("obligation text is too long")
         if self.kind not in KINDS:
             raise ValueError("unknown obligation kind")
         if self.status != "open":
@@ -224,10 +233,6 @@ def public_manifest_for_owner(owner: object) -> dict[str, object]:
     if not isinstance(row, Mapping):
         return {"files": []}
     return public_manifest({"files": row.get("files", ())})
-
-
-def _span_text(text: str, start: int, end: int) -> str:
-    return _bounded_text(text[start:end].strip())
 
 
 def _normalized_brief(text: str) -> str:
@@ -346,7 +351,7 @@ def _candidate_clauses(text: str) -> list[str]:
         candidates.extend(item for clause in merged for item in _surface_splits(clause))
     if len(candidates) > 1:
         candidates = [item for item in candidates if not _is_preamble(item)]
-    return [_bounded_text(item) for item in candidates if item.strip()]
+    return [item for item in candidates if item.strip()]
 
 
 def _legacy_candidate_clauses(text: str) -> list[str]:
@@ -362,7 +367,7 @@ def _legacy_candidate_clauses(text: str) -> list[str]:
         for left, right in zip(points, points[1:]):
             clause = raw[left:right].strip()
             if clause and _REQUIREMENT.search(clause):
-                result.append(_bounded_text(clause))
+                result.append(clause)
     return result
 
 
@@ -469,7 +474,7 @@ def extract_obligations(brief: str, manifest: object = None) -> tuple[Obligation
     for line in brief.splitlines() or [brief]:
         label = _TASK_METADATA_LABEL.search(line)
         if label:
-            clause = _bounded_text(" ".join(line.split()))
+            clause = " ".join(line.split())
             if clause:
                 tagged_candidates.append((clause, label.group(1).lower()))
             continue
@@ -486,8 +491,6 @@ def extract_obligations(brief: str, manifest: object = None) -> tuple[Obligation
             unmappable=source_label is not None,
             source_label=source_label or "",
         ))
-        if len(result) >= MAX_OBLIGATIONS:
-            break
     return tuple(result)
 
 
@@ -516,8 +519,10 @@ def obligation_step_fields(obligation: Obligation | Mapping[str, object]) -> dic
         "kind": item.kind,
         "mentioned_symbols": list(item.mentioned_symbols),
         "mentioned_files": list(item.mentioned_files),
-        "source_text": item.text,
+        "source_text": display_text(item.text),
     }
+    if len(item.text) > MAX_OBLIGATION_TEXT:
+        fields["source_text_bounded"] = True
     if item.unmappable:
         fields.update({
             "source_label": item.source_label.lower(),
@@ -532,7 +537,9 @@ def host_seed_operations(obligations: Sequence[Obligation | Mapping[str, object]
     result = []
     for value in obligations:
         item = _coerce_obligation(value)
-        result.append({"op": "add_step", "goal_id": goal_id, "text": item.text,
+        # Work-record steps cap text at MAX_STEP_TEXT (== MAX_OBLIGATION_TEXT).
+        # The full clause stays on the Obligation; the step carries a bounded copy.
+        result.append({"op": "add_step", "goal_id": goal_id, "text": display_text(item.text),
                        "fields": obligation_step_fields(item)})
     return result
 
@@ -662,8 +669,9 @@ def seed_fingerprint(obligations: Sequence[Obligation]) -> str:
 
 
 __all__ = [
-    "KINDS", "MAX_OBLIGATION_TEXT", "MODE_ENV", "Obligation", "PROVENANCE", "PublicBrief",
-    "SCHEMA", "enabled", "evidence_ref_satisfies", "extract_obligations", "host_seed_operations",
+    "KINDS", "MAX_OBLIGATION_TEXT", "MAX_OBLIGATIONS", "MODE_ENV", "Obligation", "PROVENANCE",
+    "PublicBrief", "SCHEMA", "display_obligations", "display_text", "enabled",
+    "evidence_ref_satisfies", "extract_obligations", "host_seed_operations",
     "mode", "obligation_step_fields", "open_obligations", "public_manifest",
     "public_manifest_for_owner", "seed_fingerprint",
 ]
