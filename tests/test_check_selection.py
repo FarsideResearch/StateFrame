@@ -26,7 +26,7 @@ def test_repair_module_identity_and_repo_selector_overlay(monkeypatch, tmp_path:
         return SimpleNamespace(returncode=0, stdout="def test_fixed_behavior(): assert True\n")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    row = {"repo": "secondary", "sha": "abc123", "fn": "unique_selector_case"}
+    row = {"repo": "secondary", "sha": "abc1234", "fn": "unique_selector_case"}
     assert check_selection.fail_to_pass_ids(row) == ["tests/test_one.py::test_fixed_behavior"]
     assert check_selection.overlay_fix_tests(tmp_path / "grading", row) == 1
     assert (tmp_path / "grading/tests/test_one.py").read_text() == (

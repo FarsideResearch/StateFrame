@@ -5319,8 +5319,28 @@ def _effect_test_subprocess(command, *, root: pathlib.Path, targets, env, runner
 
 
 def _compose_test_command(command: Sequence[object], targets: Sequence[object]) -> tuple[str, ...]:
-    """Append selected test targets without depending on list/tuple command shape."""
-    return tuple(str(item) for item in (*command, *targets))
+    """Append selected test targets without depending on list/tuple command shape.
+
+    ``--`` keeps every target positional for argparse; option-shaped targets are
+    already refused before dispatch (``screen_resolved_targets``).
+    """
+    return tuple(str(item) for item in (*command, "--", *targets))
+
+
+def add_pytest_options(command: Sequence[object], options: Sequence[object]) -> tuple[str, ...]:
+    """Insert pytest options before the ``--`` target separator.
+
+    Anything after ``--`` is read as a path by pytest, so an option appended to a
+    composed command (xdist, plugin loads, worker counts) must land before it.
+    Targets never start with "-" (``screen_resolved_targets``), so the last ``--``
+    is the separator; a command without one just gets the options appended.
+    """
+    argv = [str(item) for item in command]
+    extra = [str(item) for item in options]
+    if "--" not in argv:
+        return tuple(argv + extra)
+    split = len(argv) - 1 - argv[::-1].index("--")
+    return tuple(argv[:split] + extra + argv[split:])
 
 
 def _discover_test_targets(root: pathlib.Path, needle: str) -> list[str]:
@@ -5715,6 +5735,15 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
                 targets = [str(selected) + suffix]
     if _profile:
         _profile.end_span(_target_span)
+    # Same final-argv screen as the task runners: resolution can leave a target whose
+    # first path part starts with "-", and pytest pre-scans "-pNAME" even after "--".
+    from task_runners import screen_resolved_targets
+    targets, _option_shaped = screen_resolved_targets(targets)
+    if _option_shaped:
+        shown = ", ".join(repr(item[:80]) for item in _option_shaped[:5])
+        return ("[selector] REFUSED_PREDISPATCH — option-shaped test target rejected: "
+                f"{shown}; provide file paths or selectors, not options.")
+    targets = list(targets)
     _config_span = _profile.start_span("config_command_preparation") if _profile else None
     _check_termination: dict = {}  # kill evidence of the latest check run
     try:
@@ -7284,6 +7313,7 @@ def work(d, *, resume=None):
         # masking it" — which is exactly the task brief autopilot receives. Subject only; the
         # body is excluded because it can narrate the patch itself.
         if os.environ.get("GROUNDED_BRIEF", "1") == "1" and d.get("sha") \
+                and re.fullmatch(r"[0-9a-fA-F]{7,64}", str(d["sha"])) \
                 and src_repo is not None and d.get("repo") != "build":
             # (build tasks have a synthetic sha and no git world — their brief IS the spec)
             git_root = (src_repo.parent if d.get("repo") == "secondary"

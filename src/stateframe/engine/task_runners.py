@@ -8,12 +8,13 @@ dependencies or executes a task-provided command string.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import subprocess
 import uuid
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal, TypeAlias, cast
 
@@ -35,6 +36,8 @@ RunnerStatus: TypeAlias = Literal[
 DbGuard: TypeAlias = Callable[[], bool]
 SubprocessRun: TypeAlias = Callable[..., subprocess.CompletedProcess[str]]
 MAX_OUTPUT_TAIL = 4_000
+
+logger = logging.getLogger(__name__)
 VITEST_BINARY = "node_modules/.bin/vitest"
 
 
@@ -135,6 +138,43 @@ def run_pytest(
     timeout: float = 300,
     env: Mapping[str, str] | None = None,
 ) -> TestResult:
+    """Screen model-supplied selectors, then run pytest (see ``_run_pytest``)."""
+
+    requested = _selector_tuple(selectors) or _selector_tuple(
+        (explicit,) if explicit else ()
+    )
+    if not requested:
+        return _run_pytest(
+            root, fn, explicit, rel_hint, selectors=selectors,
+            requires_db=requires_db, db_guard=db_guard, run=run,
+            timeout=timeout, env=env,
+        )
+    kept, dropped = _screen_selectors(root, requested)
+    if not kept:
+        return _result(
+            "pytest", "HARNESS_ERROR", None, (), _rejected_message(dropped)
+        )
+    result = _run_pytest(
+        root, fn, None, rel_hint, selectors=kept,
+        requires_db=requires_db, db_guard=db_guard, run=run,
+        timeout=timeout, env=env,
+    )
+    return _note_dropped(result, dropped)
+
+
+def _run_pytest(
+    root: Path,
+    fn: str,
+    explicit: str | None = None,
+    rel_hint: str | None = None,
+    *,
+    selectors: Sequence[str] = (),
+    requires_db: bool = True,
+    db_guard: DbGuard | None = None,
+    run: SubprocessRun | None = None,
+    timeout: float = 300,
+    env: Mapping[str, str] | None = None,
+) -> TestResult:
     """Run the current pytest contract and return a typed result.
 
     ``explicit`` and ``rel_hint`` retain the positional API used by the existing
@@ -150,9 +190,12 @@ def run_pytest(
     if gate is not None:
         return gate
 
-    targets, kexpr, resolve_error = _resolve_pytest_targets(
+    resolved, kexpr, resolve_error = _resolve_pytest_targets(
         root, fn, requested, subprocess_run
     )
+    # Resolution rewrites selectors (``./-x`` -> ``-x``), so the FINAL argv entries
+    # are screened again; the raw screen in ``run_pytest`` cannot see that form.
+    targets, dropped = screen_resolved_targets(resolved)
     selected = tuple(requested or targets)
     if resolve_error:
         return _result(
@@ -161,6 +204,10 @@ def run_pytest(
             None,
             selected,
             resolve_error,
+        )
+    if dropped and not targets:
+        return _result(
+            "pytest", "HARNESS_ERROR", None, selected, _rejected_message(dropped)
         )
     if not targets:
         return _result(
@@ -175,7 +222,9 @@ def run_pytest(
     command = [selected_test_python(), "-m", "pytest", "-x", "-q", "--no-header"]
     if kexpr:
         command.extend(["-k", kexpr])
-    command.extend(["-p", "no:cacheprovider", *targets])
+    # "--" makes argparse treat targets as positional; pytest still pre-scans -p after
+    # it, so option-shaped targets are rejected by screen_resolved_targets above.
+    command.extend(["-p", "no:cacheprovider", "--", *targets])
     process_env = _process_env(env, requires_db)
     try:
         completed = subprocess_run(
@@ -189,36 +238,65 @@ def run_pytest(
     except subprocess.TimeoutExpired:
         emit_timeout("task_runners", what="pytest task", why=f"pytest timed out after {timeout}s; limit: task runner timeout argument (no env override)",
                      deadline_s=timeout, cause_key="pytest:timeout")
-        return _result(
+        result = _result(
             "pytest", "TIMEOUT", None, selected, f"pytest timed out after {timeout}s"
         )
+        return _note_dropped(result, dropped)
     except (FileNotFoundError, OSError) as exc:
-        return _result(
+        result = _result(
             "pytest",
             "INFRA_ERROR",
             None,
             selected,
             f"pytest executable unavailable: {type(exc).__name__}",
         )
+        return _note_dropped(result, dropped)
     except Exception as exc:  # noqa: BLE001 - runner boundary must fail closed
-        return _result(
+        result = _result(
             "pytest",
             "INFRA_ERROR",
             None,
             selected,
             f"pytest subprocess failed: {type(exc).__name__}",
         )
+        return _note_dropped(result, dropped)
 
-    return parse_pytest_output(
+    result = parse_pytest_output(
         completed.stdout or "",
         completed.stderr or "",
         completed.returncode,
         selected=selected,
         rel_hint=rel_hint,
     )
+    return _note_dropped(result, dropped)
 
 
 def run_vitest(
+    root: Path,
+    selectors: Sequence[str] = (),
+    *,
+    requires_db: bool = True,
+    db_guard: DbGuard | None = None,
+    run: SubprocessRun | None = None,
+    timeout: float = 300,
+    env: Mapping[str, str] | None = None,
+) -> TestResult:
+    """Screen model-supplied selectors, then run vitest (see ``_run_vitest``)."""
+
+    requested = _selector_tuple(selectors)
+    kept, dropped = _screen_selectors(root, requested)
+    if requested and not kept:
+        return _result(
+            "vitest", "HARNESS_ERROR", None, (), _rejected_message(dropped)
+        )
+    result = _run_vitest(
+        root, kept, requires_db=requires_db, db_guard=db_guard, run=run,
+        timeout=timeout, env=env,
+    )
+    return _note_dropped(result, dropped)
+
+
+def _run_vitest(
     root: Path,
     selectors: Sequence[str] = (),
     *,
@@ -234,7 +312,9 @@ def run_vitest(
     gate = _database_gate("vitest", requires_db, db_guard, selected)
     if gate is not None:
         return gate
-    command = [VITEST_BINARY, "run", "--reporter=json", *selected]
+    command = [VITEST_BINARY, "run", "--reporter=json"]
+    if selected:
+        command.extend(["--", *selected])  # verified on vitest 2.x: "--" ends option parsing
     process_env = _process_env(env, requires_db)
     subprocess_run = run or subprocess.run
     try:
@@ -543,7 +623,8 @@ def _resolve_pytest_targets(
     if not requested:
         try:
             found = run(
-                ["grep", "-rl", "--include=test_*.py", fn, str(root)],
+                # "-e" and "--" keep a corpus fn such as "-V" a pattern, never an option.
+                ["grep", "-rl", "--include=test_*.py", "-e", fn, "--", str(root)],
                 capture_output=True,
                 text=True,
                 timeout=60,
@@ -597,7 +678,10 @@ def _resolve_pytest_targets(
             matches = recover_by_basename(root, base)
             if len(matches) == 1:
                 suffix = selector[len(selector.split("::", 1)[0]) :]
-                targets.append(str(matches[0].relative_to(root.resolve())) + suffix)
+                relative = _relative_to_root(root, matches[0])
+                if relative is None:
+                    return [], kexpr, f"test selector escapes sandbox: `{base}`"
+                targets.append(relative + suffix)
             elif len(matches) > 1:
                 return (
                     [],
@@ -608,9 +692,50 @@ def _resolve_pytest_targets(
                 return [], kexpr, f"test path does not exist: `{base}`"
         else:
             suffix = selector[len(selector.split("::", 1)[0]) :]
-            target_text = str(candidate.relative_to(root.resolve())) + suffix
-            targets.append(target_text)
+            relative = _relative_to_root(root, candidate)
+            if relative is None:
+                return [], kexpr, f"test selector escapes sandbox: `{base}`"
+            targets.append(relative + suffix)
     return targets, kexpr, None
+
+
+def _relative_to_root(root: Path, candidate: Path) -> str | None:
+    """Root-relative text for ``candidate``, or None when it does not sit under root.
+
+    ``rglob`` yields paths under the unresolved root (a symlinked or relative
+    directory), so both sides are resolved before ``relative_to``; a symlink that
+    leaves the repository is reported as an escape instead of raising ValueError.
+    """
+
+    try:
+        return str(candidate.resolve().relative_to(root.resolve()))
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def screen_resolved_targets(
+    targets: Sequence[str],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Split FINAL runner argv targets into (kept, dropped).
+
+    Resolution turns ``./-pevil``, ``tests/../-pevil``, a basename match or an
+    absolute path into the bare ``-pevil``, which pytest's plugin pre-scan still
+    honours after ``--`` (``-pNAME`` imports NAME).  A target whose first path
+    part starts with ``-`` is therefore dropped here, after resolution, by every
+    runner that hands model- or corpus-derived targets to pytest.
+    """
+
+    kept: list[str] = []
+    dropped: list[str] = []
+    for target in targets:
+        text = str(target)
+        path_part = text.split("::", 1)[0]
+        parts = Path(path_part).parts
+        option_like = text.lstrip().startswith("-") or bool(
+            parts and parts[0].startswith("-")
+        )
+        (dropped if option_like else kept).append(text)
+    return tuple(kept), tuple(dropped)
 
 
 def _safe_selector_path(root: Path, base: str) -> Path | None:
@@ -1028,6 +1153,46 @@ def _primary_failure(text: str, failed_nodes: Sequence[str]) -> str | None:
         ):
             return stripped[:MAX_OUTPUT_TAIL]
     return None
+
+
+def _screen_selectors(
+    root: Path, values: Sequence[str]
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Split selectors into (kept, dropped).
+
+    A selector that starts with ``-`` would be parsed as a runner option, and one
+    whose path part resolves outside ``root`` would read outside the repository.
+    Both are dropped; everything else passes through unchanged.
+    """
+
+    kept: list[str] = []
+    dropped: list[str] = []
+    for value in values:
+        path_part = value.split("::", 1)[0].strip("`'\"")
+        if (
+            value.lstrip().startswith("-")
+            or "\x00" in value
+            or _safe_selector_path(root, path_part) is None
+        ):
+            dropped.append(value)
+        else:
+            kept.append(value)
+    return tuple(kept), tuple(dropped)
+
+
+def _rejected_message(dropped: Sequence[str]) -> str:
+    shown = ", ".join(repr(item[:80]) for item in dropped[:5])
+    return f"unsafe test selectors rejected (option-like or outside repo): {shown}"
+
+
+def _note_dropped(result: TestResult, dropped: Sequence[str]) -> TestResult:
+    """Record dropped selectors in the log and the result's output tail."""
+
+    if not dropped:
+        return result
+    note = _rejected_message(dropped)
+    logger.warning("%s", note)
+    return replace(result, output_tail=_tail(note + "\n" + result.output_tail))
 
 
 def _selector_tuple(values: Sequence[str] | None) -> tuple[str, ...]:

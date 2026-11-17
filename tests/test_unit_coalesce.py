@@ -2167,11 +2167,14 @@ def test_r5_p2_5_real_xdist_passes_are_gate_evidence(coalesce_on, monkeypatch, w
 
     def distributed(command, *args, **kwargs):
         # Load the installed plugin explicitly; the harness disables autoload.
-        actual = list(command) + ["-p", "xdist.plugin", "-n", "4"]
+        # Options go before the "--" target separator (react_repair.add_pytest_options).
+        from probes.react_repair import add_pytest_options
+        actual = list(add_pytest_options(command, ["-p", "xdist.plugin", "-n", "4"]))
         if workers == "named":
-            actual = list(command) + ["-p", "xdist.plugin", "--dist=load"]
+            extra = ["-p", "xdist.plugin", "--dist=load"]
             for index in range(4):
-                actual += ["--tx", f"popen//id=gate-worker-{index}"]
+                extra += ["--tx", f"popen//id=gate-worker-{index}"]
+            actual = list(add_pytest_options(command, extra))
         commands.append(actual)
         return original(actual, *args, **kwargs)
 
