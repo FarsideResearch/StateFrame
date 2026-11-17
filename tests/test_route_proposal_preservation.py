@@ -227,3 +227,11 @@ def test_react_repair_gate_name_is_bound_to_the_schema_switch():
     from kernel_routing_schema import routing_v2 as schema_switch
 
     assert react_repair.routing_v2 is schema_switch
+
+
+def test_routing_v2_p1_journal_kinds_are_resume_safe_tail() -> None:
+    from stateframe.engine import kernel_continuation_restart as restart
+
+    for kind in ("route_proposal_preserved", "token_estimate_fallback"):
+        assert kind in restart.SAFE_TAIL
+        assert restart.resume_event_rejection_reason(kind) is None
