@@ -6,6 +6,7 @@
 ## 0.7.41 (2026-11-17)
 
 - Fixed: after a parallel fan-out, the continuation now reads the recorded unit results and the owned paths and check selectors that pins need, so repair continuations and pins are no longer dropped. A fan-out whose children all finished but whose parent final check failed now shows FAILED instead of PASS or VERIFIED, and the next step tells the model to resolve the final check rather than finish.
+- Fixed: the parallel result now keeps the parent final check's receipt, so the written result and the disposition show what check ran. A subframe whose composition check failed reports that check's status instead of NOT_RUN, and committed work with no check that ran is labeled UNVERIFIED instead of NOT_RUN.
 
 ## 0.7.40 (2026-11-17)
 
