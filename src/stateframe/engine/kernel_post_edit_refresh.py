@@ -5,9 +5,10 @@ import copy
 import hashlib
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 
 
-_EDIT_KINDS = frozenset({"edit", "str_replace", "file_create", "file_delete", "file_move", "shell_effect", "replace_module", "write", "replace"})
+_EDIT_KINDS = frozenset({"edit", "str_replace", "file_create", "file_delete", "file_move", "shell_effect", "replace_module", "write", "replace", *PROTOCOL_EDIT_TOOL_NAMES})
 _CHECK_KINDS = frozenset({"test", "run_tests", "pytest", "check", "verification"})
 
 

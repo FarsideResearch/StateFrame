@@ -11,12 +11,13 @@ from kernel_preedit_coverage import (
     BoundSource, CoverageSite, PreeditInput, PublicRequirement, ScopeInventory,
     render_preedit_coverage,
 )
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 
 SCHEMA = "kernel-preedit-coverage-state/1"
 ENV = "STATEFRAME_PREEDIT_COVERAGE"
 STATE_FIELD = "_preedit_coverage_state"
 SUBMISSION_FIELD = "preedit_coverage_delivery"
-_EDIT_KINDS = frozenset({"edit", "str_replace", "file_create", "replace_module", "write", "replace"})
+_EDIT_KINDS = frozenset({"edit", "str_replace", "file_create", "replace_module", "write", "replace", *PROTOCOL_EDIT_TOOL_NAMES})
 
 
 def enabled(runtime: object) -> bool:

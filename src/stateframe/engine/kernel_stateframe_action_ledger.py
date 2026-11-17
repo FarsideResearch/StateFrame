@@ -13,6 +13,7 @@ import os
 import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 
 SCHEMA = "stateframe-framefit3-action-ledger/1"
 OPEN_EDIT_SITE_SCHEMA = "stateframe-framefit4-open-edit-site/1"
@@ -103,7 +104,7 @@ def _call_argument_bytes(call: Mapping[str, object]) -> bytes:
 def _bounded_action_outcome(name: str, path: str, result_text: str) -> str:
     normalized = result_text.casefold()
     if (
-        name in {"str_replace", "edit", "edit_file"}
+        name in {"str_replace", "edit", "edit_file", *PROTOCOL_EDIT_TOOL_NAMES}
         and normalized.startswith(("str_replace applied.", "edit applied."))
     ):
         return "APPLIED"
@@ -414,7 +415,7 @@ def _edit_fact(
     old_text = arguments.get("old_str")
     new_text = arguments.get("new_str")
     if (
-        name not in {"str_replace", "edit", "edit_file"}
+        name not in {"str_replace", "edit", "edit_file", *PROTOCOL_EDIT_TOOL_NAMES}
         or not isinstance(old_text, str)
         or not isinstance(new_text, str)
         or not result_text.startswith(("str_replace applied.", "edit applied."))
@@ -475,7 +476,7 @@ def _edit_action_fact(
             turn_index=turn_index,
             journal=journal,
         )
-        if name in {"str_replace", "edit", "edit_file"}
+        if name in {"str_replace", "edit", "edit_file", *PROTOCOL_EDIT_TOOL_NAMES}
         and len(argument_bytes) > MAX_ACTION_ARGUMENT_BYTES
         else None
     )
@@ -1160,7 +1161,7 @@ def _read_current_open_site(
 
 def _is_open_site_action(call: Mapping[str, object]) -> bool:
     return _tool_name(call) in {
-        "read", "str_replace", "edit", "edit_file", "file_create"
+        "read", "str_replace", "edit", "edit_file", "file_create", *PROTOCOL_EDIT_TOOL_NAMES
     }
 
 
@@ -1208,7 +1209,7 @@ def _fallback_edit_open_site_locator(
     current_reads: Mapping[str, tuple[dict[str, object], str]],
     candidate_revision: str,
 ) -> dict[str, object] | None:
-    if name not in {"str_replace", "edit", "edit_file"}:
+    if name not in {"str_replace", "edit", "edit_file", *PROTOCOL_EDIT_TOOL_NAMES}:
         return None
     if not result_text.startswith(("str_replace applied.", "edit applied.")):
         return None
@@ -1411,7 +1412,7 @@ def build_action_context(
                     group_reads[path] = (fact, content)
                     read_contents[call_id] = content
                     future_reads[(path, int(group["index"]))] = str(fact["revision"])
-            elif name in {"str_replace", "edit", "edit_file", "file_create"}:
+            elif name in {"str_replace", "edit", "edit_file", "file_create", *PROTOCOL_EDIT_TOOL_NAMES}:
                 path = _safe_path(arguments.get("path", arguments.get("target_path")))
                 if path:
                     edited_paths.add(path)

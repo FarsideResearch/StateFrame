@@ -20,6 +20,7 @@ from kernel_stateframe_envelope import STATE_HEADER, serialize_stateframe_payloa
 from kernel_evictfix_mode import enabled as evictfix_enabled
 from kernel_prompt_compact import short_id
 from kernel_stateframe_marker import escape_state_marker_data
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 
 
 MODE_ENV = "STATEFRAME_F4"
@@ -56,7 +57,7 @@ _SOURCE_PAGE_HEADER_LEGACY = re.compile(
 _SOURCE_CITATION_FIELDS = frozenset({
     "path", "file", "filename", "target", "target_path", "query", "search", "symbol",
 })
-_EDIT_TOOL_NAMES = frozenset({"edit", "str_replace", "file_delete", "file_move", "shell", "apply_patch", "edit_file", "write_file"})
+_EDIT_TOOL_NAMES = frozenset({"edit", "str_replace", "file_delete", "file_move", "shell", "apply_patch", "edit_file", "write_file", *PROTOCOL_EDIT_TOOL_NAMES})
 
 _PUBLIC_CHECK_PATHS = (
     ("verification",),

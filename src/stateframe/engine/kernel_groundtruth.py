@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import TypeAlias
 
 from kernel_liveness import Evidence, OrganCensusSpec, TriState
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 
 
 SCHEMA = "poc.kernel_groundtruth/1"
@@ -371,7 +372,7 @@ def _assertion_from_action(action: Record) -> tuple[PlanAssertion, ...]:
     # Receipt tapes predate typed plans.  An applied edit still asserts that
     # its target exists; use the operation literal, never the target filename,
     # so legacy tapes retain a safe measurement without self-grepping.
-    if _text(action.get("kind")).lower() in {"edit", "str_replace"}:
+    if _text(action.get("kind")).lower() in {"edit", "str_replace", *PROTOCOL_EDIT_TOOL_NAMES}:
         target, _, _ = _path_span(action.get("target_path") or action.get("path") or action.get("intent"))
         if target:
             return (PlanAssertion(
@@ -704,12 +705,12 @@ class ConsumptionTracker:
             line = _text(receipt.get("line") or receipt.get("detail"))
             if line:
                 self.record_organ_line(name, line, turn=turn, evidence_ref=_receipt_id(receipt))
-        if kind in {"edit", "str_replace", "test"}:
+        if kind in {"edit", "str_replace", "test", *PROTOCOL_EDIT_TOOL_NAMES}:
             self.observe_action(receipt)
 
     def observe_action(self, action: Record) -> tuple[ObservedFact, ...]:
         kind = _text(action.get("kind")).lower()
-        if kind not in {"edit", "str_replace", "test"}:
+        if kind not in {"edit", "str_replace", "test", *PROTOCOL_EDIT_TOOL_NAMES}:
             return ()
         turn = _int(action.get("turn"))
         action_id = _receipt_id(action) or f"turn:{turn}"

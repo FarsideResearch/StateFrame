@@ -13,6 +13,7 @@ import hashlib
 import os
 import re
 from collections.abc import Mapping, Sequence
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 
 MODE_ENV = "STATEFRAME_V2_S1"
 MAX_TOKENS = 450
@@ -32,7 +33,7 @@ _STOP_WORDS = {
     "on", "to", "of", "from", "as", "is", "in", "at", "by", "until", "then",
 }
 _GOOD_RESULTS = {"OK", "GREEN", "PASSED", "PASS", "SUCCESS", "REUSED_VERIFICATION", "APPLIED"}
-_EDIT_KINDS = {"edit", "str_replace", "file_create"}
+_EDIT_KINDS = {"edit", "str_replace", "file_create", *PROTOCOL_EDIT_TOOL_NAMES}
 
 
 def stateframe_v2_s1_mode() -> str:
@@ -276,7 +277,7 @@ def _resolution_receipts(receipts: Sequence[object], revision: str, path: str) -
     return [_receipt_id(item) for item in receipts if isinstance(item, Mapping)
             and _path_matches(path, item) and _current_recheck(item, revision)
             and str(item.get("kind", item.get("tool", ""))).lower()
-            in {"read", "test", "run_tests", "probe", "edit", "str_replace", "file_create"}]
+            in {"read", "test", "run_tests", "probe", "edit", "str_replace", "file_create", *PROTOCOL_EDIT_TOOL_NAMES}]
 
 
 class S1Store:

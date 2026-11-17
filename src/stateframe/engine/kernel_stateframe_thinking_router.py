@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from collections.abc import Iterable, Mapping, Sequence
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 
 
 MODE_ENV = "STATEFRAME_THINKING_ROUTER"
@@ -221,7 +222,7 @@ def _row_is_applied_edit(row: object) -> bool:
     tool = row.get("tool", row.get("kind", ""))
     if tool in (None, ""):
         return True
-    return _normal_action(tool) in {"edit", "str_replace", "file_create", "replace_module"}
+    return _normal_action(tool) in {"edit", "str_replace", "file_create", "replace_module", *PROTOCOL_EDIT_TOOL_NAMES}
 
 
 def _has_applied_edit(frame: Mapping[str, object]) -> bool:

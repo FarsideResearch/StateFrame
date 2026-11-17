@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 import re
 from typing import Literal
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 
 if __package__:
     from .kernel_read_receipts import ReceiptIdentity, DecodedSpan, line_digests_with_numbers
@@ -497,7 +498,7 @@ def freeze_preparation(body, runtime, *, request_id: str, byte_cap: int,
     for call in getattr(batch, "pending", ()):
         function = call.get("function") if isinstance(call, dict) else None
         if not isinstance(function, dict) or function.get("name") not in {
-                "edit", "str_replace", "insert_before", "file_create", "file_delete", "file_move"}:
+                "edit", "str_replace", "insert_before", "file_create", "file_delete", "file_move", *PROTOCOL_EDIT_TOOL_NAMES}:
             continue
         arguments = function.get("arguments", {})
         if isinstance(arguments, str):
