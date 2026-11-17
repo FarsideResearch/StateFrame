@@ -246,10 +246,13 @@ class NativeToolBatch:
                         "No calls from this batch were executed; submit a corrected batch."), []
             if before_commit is not None and callable(before_commit):
                 try:
-                    before_commit(calls)
+                    committed = before_commit(calls)
                 except BaseException:
                     self._audit_unexecuted_reads(calls)
                     raise
+                # Routing v2 may return the subset that runs now; escalating calls stay withheld.
+                if isinstance(committed, list) and committed:
+                    calls = committed
             # Selection and feedback consumption commit only after routing accepts the full batch.
             from kernel_native_prefix import enabled as prefix_enabled
             if before_commit is not None and prefix_enabled():

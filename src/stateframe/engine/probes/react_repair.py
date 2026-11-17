@@ -29,7 +29,7 @@ from collections.abc import Collection, Mapping, Sequence
 from contextlib import nullcontext, suppress
 from dataclasses import dataclass, field
 from types import SimpleNamespace
-from typing import Callable
+from typing import Any, Callable
 
 from kernel_shell_tool import SHELL_SCHEMA
 from unit_planner_v2 import capture_incomplete_gate_observation
@@ -172,6 +172,7 @@ from kernel_done_acceptance import done_accepted  # noqa: E402
 from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES  # noqa: E402
 import kernel_workspace_truth as _workspace_truth  # noqa: E402
 import kernel_frame_routes as _frame_routes  # noqa: E402
+from kernel_routing_schema import routing_v2  # noqa: E402
 from stateframe.test_runners import collection_change_reason, pytest_plugin_modules  # noqa: E402
 
 API = os.environ.get("DS_URL", "")
@@ -6989,6 +6990,14 @@ def _initial_task_content(brief: str, orientation: str, intake_orientation: str)
     return content + "\nBegin."
 
 
+def _preserved_request_inputs(measurement: Any, messages: list, uncapped: list) -> tuple[list, list]:
+    """MR-5 v2: append withheld proposals to the next provider request (consumed once). Identity otherwise."""
+    if not _frame_routes.has_preserved_proposals():
+        return messages, uncapped
+    suffix = _frame_routes.take_preserved_messages(measurement.binding().get("artifact"))
+    return list(messages) + suffix, list(uncapped) + suffix
+
+
 def work(d, *, resume=None):
     # Workers and scripted tapes may assign MAX_STEPS after import.
     step_cap = parse_step_limit(MAX_STEPS)
@@ -9764,18 +9773,20 @@ def work(d, *, resume=None):
             if _provider_request and callable(_prepare_host_inputs):
                 msgs = _prepare_host_inputs(msgs)
                 _uncapped_messages = _prepare_host_inputs(_uncapped_messages)
+            _leg_msgs, _leg_uncapped = (_preserved_request_inputs(measurement, msgs, _uncapped_messages)
+                                        if _provider_request else (msgs, _uncapped_messages))
             if not _provider_request:
                 _prepared = measurement.prepare_queued_native_action(
                     msgs, uncapped=_uncapped_messages, tools=_request_tools)
             elif _request_host_text_preparer is not None:
                 _prepared = measurement.prepare(
-                    msgs, uncapped=_uncapped_messages,
+                    _leg_msgs, uncapped=_leg_uncapped,
                     tools=_request_tools, provider_request=True,
                     request_host_text_preparer=_request_host_text_preparer,
                 )
             else:
                 _prepared = measurement.prepare(
-                    msgs, uncapped=_uncapped_messages,
+                    _leg_msgs, uncapped=_leg_uncapped,
                     tools=_request_tools, provider_request=_provider_request,
                 )
             # Validate the exact final contract that was prepared for this
@@ -9915,10 +9926,21 @@ def work(d, *, resume=None):
                                     custom_writes = workspace_write_tools(_agent_tools)
 
                                     def before_commit(batch):
-                                        target = escalation_target(route, batch,
-                                                                   custom_writes=custom_writes)
-                                        if target is not None:
-                                            raise RouteEscalation(target, batch)
+                                        if not routing_v2():
+                                            target = escalation_target(route, batch,
+                                                                       custom_writes=custom_writes)
+                                            if target is not None:
+                                                raise RouteEscalation(target, batch)
+                                            return None
+                                        # MR-5 v2: reads run now; only escalating calls are withheld.
+                                        _route_kept, _route_withheld, _route_target = _frame_routes.route_split(
+                                            route, batch, custom_writes=custom_writes)
+                                        if _route_target is None:
+                                            return None
+                                        if not _route_kept:
+                                            raise RouteEscalation(_route_target, _route_withheld)
+                                        _route_split_holder["withheld"] = (_route_target, _route_withheld)
+                                        return _route_kept
                                 response = native_batch.next(
                                     ask_tools, list(_prepared.messages), temp=run_temp,
                                     tools=_request_tools, known_refs=_action_known_refs,
@@ -10023,8 +10045,10 @@ def work(d, *, resume=None):
                         from kernel_frame_routes import RouteEscalation, escalation_target
                         _route_escalated = False
                         _route_stopped = False
+                        _route_split_holder: dict = {}
                         while True:
                             first_capture = _prepared.capture
+                            _route_split_holder.clear()
                             try:
                                 content, calls = _provider_request_once()
                             except RouteEscalation as decision:
@@ -10036,32 +10060,52 @@ def work(d, *, resume=None):
                                 custom_writes = (workspace_write_tools(_agent_tools)
                                                  if getattr(first_capture, "frame_route", None) is not None
                                                  else frozenset())
-                                _route_target = (escalation_target(getattr(first_capture, "frame_route", None), calls,
-                                                            custom_writes=custom_writes)
-                                          if not _route_escalated and native_batch is None else None)
+                                if routing_v2() and not _route_escalated and native_batch is None:
+                                    # MR-5 v2 non-native: reads run now, escalating calls are preserved.
+                                    _route_kept, _route_withheld, _route_target = _frame_routes.route_split(
+                                        getattr(first_capture, "frame_route", None), calls,
+                                        custom_writes=custom_writes)
+                                    if _route_target is not None and _route_kept:
+                                        calls = _route_kept
+                                        _route_split_holder["withheld"] = (_route_target, _route_withheld)
+                                        _route_target = None
+                                else:
+                                    _route_target = (escalation_target(getattr(first_capture, "frame_route", None), calls,
+                                                                custom_writes=custom_writes)
+                                              if not _route_escalated and native_batch is None else None)
                             if _route_target is None:
                                 break
                             _route_escalated = True
                             from kernel_frame_routes import note_response, reject_capture
                             note_response(discarded=True)
                             reject_capture(measurement, first_capture)
-                            first_capture.journal.emit(
-                                "route_escalation_discarded", request_id=first_capture.request_id,
-                                step=step, role=first_capture.frame_route.role, to=_route_target,
-                                classes=[(call.get("function") or {}).get("name") for call in calls],
-                                usage=dict(getattr(first_capture, "accounting", {})), dispatch=False)
+                            if routing_v2():
+                                # MR-5 v2: the completed proposal survives the role change and is carried.
+                                _frame_routes.preserve_proposal(
+                                    first_capture.journal, request_id=first_capture.request_id,
+                                    target_role=_route_target, calls=calls,
+                                    revision=measurement.binding().get("artifact"))
+                            else:
+                                first_capture.journal.emit(
+                                    "route_escalation_discarded", request_id=first_capture.request_id,
+                                    step=step, role=first_capture.frame_route.role, to=_route_target,
+                                    classes=[(call.get("function") or {}).get("name") for call in calls],
+                                    usage=dict(getattr(first_capture, "accounting", {})), dispatch=False)
                             if _capture_token is not None:
                                 ACTIVE_REQUEST.reset(_capture_token)
                                 _capture_token = None
+                            _regen_msgs, _regen_uncapped = (
+                                _preserved_request_inputs(measurement, msgs, _uncapped_messages)
+                                if _provider_request else (msgs, _uncapped_messages))
                             if _provider_request and _request_host_text_preparer is not None:
                                 _prepared = measurement.prepare(
-                                    msgs, uncapped=_uncapped_messages, tools=_request_tools,
+                                    _regen_msgs, uncapped=_regen_uncapped, tools=_request_tools,
                                     provider_request=True,
                                     request_host_text_preparer=_request_host_text_preparer,
                                     forced_route=_route_target, frozen_route_capture=first_capture)
                             else:
                                 _prepared = measurement.prepare(
-                                    msgs, uncapped=_uncapped_messages, tools=_request_tools,
+                                    _regen_msgs, uncapped=_regen_uncapped, tools=_request_tools,
                                     provider_request=_provider_request,
                                     forced_route=_route_target, frozen_route_capture=first_capture)
                             if not provider_dispatch_allowed(_prepared):
@@ -10079,6 +10123,12 @@ def work(d, *, resume=None):
                                 measurement.system_outcome = "response_budget_exhausted"
                                 break
                             _capture_token = measurement.activate(_prepared)
+                        _route_split = _route_split_holder.pop("withheld", None)
+                        if _route_split is not None and not _route_stopped:
+                            _frame_routes.preserve_proposal(
+                                _prepared.capture.journal, request_id=_prepared.capture.request_id,
+                                target_role=_route_split[0], calls=_route_split[1],
+                                revision=measurement.binding().get("artifact"))
                         if _route_stopped:
                             break
                         if getattr(_prepared.capture, "frame_route", None) is not None:

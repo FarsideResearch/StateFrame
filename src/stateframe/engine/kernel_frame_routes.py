@@ -9,12 +9,13 @@ Under routing schema 2 a plan lease also stays open through read-kind actions
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import ipaddress
 import json
 import os
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Any, Mapping
 from urllib.parse import urlsplit, urlunsplit
 
 from kernel_routing_schema import routing_v2
@@ -84,6 +85,8 @@ ROUTES_ACTIVE = False
 _overrides: dict[str, tuple[str, ...]] = {}
 _baseline: dict[str, object] | None = None
 LAST_CLOSED_ACTION: dict[str, object] = {}
+# Routing v2 (MR-5): withheld edit/finish proposals awaiting the next provider request, bound to a revision.
+PRESERVED_PROPOSALS: list[dict[str, object]] = []
 ACCOUNTING: dict[str, int] = {"physical": 0, "accepted": 0, "discarded": 0}
 # MR-4 (routing schema 2 only). Read-kind frame tools that keep a plan lease open. These are the
 # router's _READ_ACTIONS lowercased; tests/test_frame_routes_plan_lease.py pins the match.
@@ -112,6 +115,7 @@ def install(spec: object, *, baseline: Mapping[str, object] | None = None) -> No
         ROUTES_ACTIVE = False
         LAST_CLOSED_ACTION.clear()
         _reset_plan_lease()
+        PRESERVED_PROPOSALS.clear()
         ACCOUNTING.update(physical=0, accepted=0, discarded=0)
         return
     if not isinstance(spec, dict) or spec.get("schema") != SCHEMA:
@@ -142,6 +146,7 @@ def install(spec: object, *, baseline: Mapping[str, object] | None = None) -> No
     ROUTES_ACTIVE = True
     LAST_CLOSED_ACTION.clear()
     _reset_plan_lease()
+    PRESERVED_PROPOSALS.clear()
     ACCOUNTING.update(physical=0, accepted=0, discarded=0)
 
 
@@ -274,14 +279,18 @@ def forced_leg_options(capture: object) -> dict[str, object]:
     return {"forced_route": route.role, "frozen_route_capture": frozen}
 
 
+def _well_formed(calls: list) -> bool:
+    return not any(not isinstance(call, dict) or not isinstance(call.get("function"), dict)
+                   or not isinstance(call["function"].get("name"), str)
+                   or not isinstance(call["function"].get("arguments"), str)
+                   for call in calls)
+
+
 def escalation_target(answering: Route | None, calls: object,
                       *, custom_writes: set[str] | frozenset[str] = frozenset()) -> str | None:
     if answering is None or not isinstance(calls, list) or not calls:
         return None
-    if any(not isinstance(call, dict) or not isinstance(call.get("function"), dict)
-           or not isinstance(call["function"].get("name"), str)
-           or not isinstance(call["function"].get("arguments"), str)
-           for call in calls):
+    if not _well_formed(calls):
         return None
     role = classify_calls(calls, custom_writes=custom_writes)
     if role not in {"edit", "finish"}:
@@ -294,6 +303,71 @@ class RouteEscalation(Exception):
     def __init__(self, target: str, calls: list[dict]) -> None:
         self.target = target
         self.calls = calls
+
+
+def route_split(answering: Route | None, calls: object, *,
+                custom_writes: set[str] | frozenset[str] = frozenset()
+                ) -> tuple[list[dict], list[dict], str | None]:
+    """Routing v2 (MR-5): split a batch into calls that run on the answering route and withheld calls.
+
+    Returns (kept, withheld, target). Only edit/finish calls whose role resolves to another
+    endpoint/model are withheld; read-kind calls always stay. target is None when nothing escalates,
+    and then kept is the whole batch. Callers use this only under routing_v2().
+    """
+    if answering is None or not isinstance(calls, list) or not _well_formed(calls):
+        return (list(calls) if isinstance(calls, list) else []), [], None
+    kept: list[dict] = []
+    withheld: list[dict] = []
+    targets: set[str] = set()
+    for call in calls:
+        role = classify_calls([call], custom_writes=custom_writes)
+        if role in {"edit", "finish"}:
+            target = resolve(role)
+            if (target.endpoint, target.model) != (answering.endpoint, answering.model):
+                withheld.append(call)
+                targets.add(role)
+                continue
+        kept.append(call)
+    if not withheld:
+        return list(calls), [], None
+    return kept, withheld, "edit" if "edit" in targets else "finish"
+
+
+def _proposal_digest(calls: list[dict]) -> str:
+    return hashlib.sha256(json.dumps(calls, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def preserve_proposal(journal: Any, *, request_id: object, target_role: str,
+                      calls: list[dict], revision: object) -> None:
+    """Routing v2 (MR-5): keep a withheld proposal, bound to the revision it was made against."""
+    snapshot = copy.deepcopy(list(calls))
+    digest = _proposal_digest(snapshot)
+    PRESERVED_PROPOSALS.append({"calls": snapshot, "target_role": target_role, "revision": revision})
+    journal.emit("route_proposal_preserved", request_id=request_id, target_role=target_role,
+                 revision=revision, call_names=[(call.get("function") or {}).get("name") for call in snapshot],
+                 proposal_digest=digest, dispatch=False)
+
+
+def has_preserved_proposals() -> bool:
+    return bool(PRESERVED_PROPOSALS)
+
+
+def take_preserved_messages(current_revision: object) -> list[dict[str, str]]:
+    """Consume withheld proposals as user messages for the next request; stale ones are marked."""
+    items = list(PRESERVED_PROPOSALS)
+    PRESERVED_PROPOSALS.clear()
+    messages: list[dict[str, str]] = []
+    for item in items:
+        body = json.dumps(item["calls"], sort_keys=True, indent=2)
+        proposed = item["revision"]
+        if proposed == current_revision:
+            head = f"A previous step proposed these changes against revision {proposed}; apply them if still correct, or revise:"
+        else:
+            head = (f"A previous step proposed these changes against revision {proposed}, which is stale "
+                    f"(the workspace is now at revision {current_revision}); re-check them against the "
+                    "current state before applying, or revise:")
+        messages.append({"role": "user", "content": f"{head}\n{body}"})
+    return messages
 
 
 def unclassified_dispatcher(names: set[str] | frozenset[str]) -> set[str]:
