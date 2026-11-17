@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.7.30 (2026-11-17)
 
 - Tests: the parity baseline is pinned to the last release named in the tree, including when HEAD is a release merge
