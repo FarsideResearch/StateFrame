@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.27 (2026-11-17)
+
+- Added: `STATEFRAME_SEND_INDEX_HEADER=on` (default `off`) labels every recorded chat POST with `X-SF-Send-Index` and `X-SF-Send-Attempt` request headers, so a recording server can tell a transport retry from a new send. The request body and recorded hashes do not change.
+
 ## 0.7.26 (2026-11-17)
 
 - Security: verification selectors containing a line break are now refused before matching

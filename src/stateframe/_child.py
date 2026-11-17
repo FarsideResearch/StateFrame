@@ -417,6 +417,8 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
     wire_dir = run / "wire"
     wire_dir.mkdir(exist_ok=True)
     original = kernel_bounded_http.request_bytes
+    # Read once, before any send: an unknown value refuses here instead of mid-send.
+    echo_send_index = kernel_bounded_http.send_index_header_enabled()
     counter = {"n": 0}
     HOST_STATE["wire"] = counter
     wire_lock = threading.Lock()
@@ -620,6 +622,7 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
             response = (replayed if replayed is not None else original(
                 wire, endpoint, key, record_attempts=transport_attempts.extend,
                 **({"before_attempt": before_attempt} if send_ledger is not None else {}),
+                **({"send_index": index} if echo_send_index else {}),
                 **({**kwargs, "route_meta": route} if routed_endpoints is not None else kwargs)))
         except Exception as error:
             settle_after_error(index, transport_attempts)
