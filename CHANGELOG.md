@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.7.28 (2026-11-17)
 
 - Fixed: mutation runs can checkpoint and resume; the launch ledger reopens on restore. Before, the ledger handle could not be pickled, so a mutation run never wrote a checkpoint.
