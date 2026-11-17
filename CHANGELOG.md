@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.7.32 (2026-11-17)
 
 - Requirements ledger: plain requested work such as "Sort results by timestamp." or "Focus: Reject stale lease tokens" is kept as unresolved host work instead of being dropped as context, and coverage_complete now checks that every span has one coverage row and that requirement refs and source spans exist. Unresolved work still never blocks completion. Tests: `tests/test_requirements_ledger_imperative_spans.py`.
