@@ -59,18 +59,6 @@ def _tool_names(tools: Sequence[object]) -> list[str]:
     return names
 
 
-def _parallel_terminal_drop_enabled(runtime: object) -> bool:
-    return (getattr(runtime, "_parallel_parent_terminal", False) is True
-            and os.environ.get(
-                "STATEFRAME_PARALLEL_DROP_TOOL_AFTER_TERMINAL", "on").strip().lower() == "on")
-
-
-def _without_parallel(tools: Sequence[Mapping[str, object]]) -> list[dict]:
-    return [copy.deepcopy(dict(tool)) for tool in tools
-            if not (isinstance(tool.get("function"), Mapping)
-                    and tool["function"].get("name") == "parallel")]
-
-
 def request_tool_floor_enabled(runtime: object | None = None) -> bool:
     """Return the strict, default-off request-final tool-floor switch."""
     configured = (
@@ -679,9 +667,6 @@ def author_final_tool_surface(
                 if blocked is None:
                     raise _SurfaceUnavailable("subframe_blocked_schema_missing")
                 final_tools.append(copy.deepcopy(blocked))
-        parallel_terminal = _parallel_terminal_drop_enabled(runtime)
-        if parallel_terminal:
-            final_tools = _without_parallel(final_tools)
         names = _tool_names(final_tools)
         if (not names or any(not name for name in names)
                 or len(names) != len(set(names))):
@@ -707,8 +692,6 @@ def author_final_tool_surface(
                 listed_tools = [tool for tool in listed_tools
                                 if tool.get("function", {}).get("name")
                                 in unit_policy.allowed_tools]
-            if parallel_terminal:
-                listed_tools = _without_parallel(listed_tools)
             dispatch_tools = callable_subset(listed_tools, names)
             if set(_tool_names(dispatch_tools)) != set(names):
                 raise _SurfaceUnavailable("stable_tool_head_unbound")

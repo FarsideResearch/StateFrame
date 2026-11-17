@@ -10,11 +10,10 @@ from kernel_parallel import (PARALLEL_TOOL, ParallelInputError, _UNIT, _complete
                              _planner_clauses, _request)
 from kernel_parallel_admission import DirectorySnapshot, admit
 from kernel_parallel_records import ParallelLimits
-from kernel_request_tool_surface import _parallel_terminal_drop_enabled, _without_parallel
 from probes.react_repair import (
     PARALLEL_PARENT_GUIDANCE,
     _parallel_parent_system_instruction,
-    _parallel_parent_tool_surface,
+    _parallel_result_is_terminal,
 )
 
 
@@ -185,11 +184,9 @@ def test_schema_examples_match_create_and_own_admission(tmp_path):
     assert refused.refusal.paths == ("src/adapters4/csv_reader.py",)
 
 
-def test_parallel_terminal_menu_policy_drops_only_verified_complete_results():
-    tools = [
-        {"type": "function", "function": {"name": "read"}},
-        {"type": "function", "function": {"name": "parallel"}},
-    ]
+def test_parallel_terminal_classification_only_verified_complete_results_retire():
+    # Only a fully verified fanout retires its plan; the tool itself is never removed (see
+    # test_parallel_available_after_fanout.py).
     success = SimpleNamespace(
         admission=SimpleNamespace(status="ADMITTED"),
         outcomes=(SimpleNamespace(status="COMMITTED"),),
@@ -204,23 +201,7 @@ def test_parallel_terminal_menu_policy_drops_only_verified_complete_results():
         integration="UNVERIFIED",
     )
 
-    assert "parallel" in _tool_names(_parallel_parent_tool_surface(tools, None))
-    assert "parallel" not in _tool_names(_parallel_parent_tool_surface(tools, success))
-    assert "parallel" in _tool_names(_parallel_parent_tool_surface(tools, refused))
-    assert "parallel" in _tool_names(_parallel_parent_tool_surface(tools, incomplete))
-    assert _parallel_parent_tool_surface(tools, success, enabled=False) == tools
-
-
-def test_terminal_parent_filter_removes_stable_listed_parallel_schema(monkeypatch):
-    runtime = SimpleNamespace(_parallel_parent_terminal=True)
-    stale_stable_surface = [
-        {"type": "function", "function": {"name": "read"}},
-        {"type": "function", "function": {"name": "parallel"}},
-    ]
-
-    monkeypatch.setenv("STATEFRAME_PARALLEL_DROP_TOOL_AFTER_TERMINAL", "on")
-    assert _parallel_terminal_drop_enabled(runtime)
-    assert _tool_names(_without_parallel(stale_stable_surface)) == ["read"]
-
-    monkeypatch.setenv("STATEFRAME_PARALLEL_DROP_TOOL_AFTER_TERMINAL", "off")
-    assert not _parallel_terminal_drop_enabled(runtime)
+    assert _parallel_result_is_terminal(success)
+    assert not _parallel_result_is_terminal(refused)
+    assert not _parallel_result_is_terminal(incomplete)
+    assert not _parallel_result_is_terminal(None)

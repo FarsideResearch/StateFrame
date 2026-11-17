@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Parallel subframes: after a verified fan-out the `parallel` tool stays available for the rest of the run. Only the completed plan is retired, so re-dispatching that identical plan is refused while new plans run.
+
 ## 0.7.59 (2026-11-18)
 
 - Added a merge core for edits made against a file that changed on disk: an edit now re-locates its span by exact bytes, or merges non-overlapping line changes, and only reports a conflict when both sides changed the same lines. Nothing calls it yet, so current behaviour is unchanged.

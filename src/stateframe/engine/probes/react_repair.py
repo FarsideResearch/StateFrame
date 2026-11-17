@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any, Callable
 
+import kernel_parallel_retirement as parallel_retirement
 from kernel_shell_tool import SHELL_SCHEMA
 from unit_planner_v2 import capture_incomplete_gate_observation
 from kernel_working_set_stop import WorkingSetSuspended
@@ -3207,18 +3208,8 @@ def _parallel_result_is_terminal(result: object) -> bool:
     return all(getattr(outcome, "status", None) == "COMMITTED" for outcome in outcomes)
 
 
-def _parallel_parent_tool_surface(tools: list[dict], result: object | None,
-                                  *, enabled: bool = True) -> list[dict]:
-    """Retain parallel while a refusal or incomplete run can still be retried."""
-    if not enabled or not _parallel_result_is_terminal(result):
-        return tools
-    return [tool for tool in tools
-            if not (isinstance(tool, Mapping)
-                    and isinstance(tool.get("function"), Mapping)
-                    and tool["function"].get("name") == "parallel")]
-
-
-def _parallel_drop_terminal_enabled() -> bool:
+def _parallel_plan_retirement_enabled() -> bool:
+    """Completed-plan re-dispatch guard switch; on by default. The tool itself is never removed."""
     value = os.environ.get("STATEFRAME_PARALLEL_DROP_TOOL_AFTER_TERMINAL", "on").strip().lower()
     if value not in {"on", "off"}:
         raise ValueError("STATEFRAME_PARALLEL_DROP_TOOL_AFTER_TERMINAL must be on or off")
@@ -9266,7 +9257,14 @@ def work(d, *, resume=None):
             return True
 
         def _dispatch_parent_parallel(tool_call_id, arguments, *, schema_errors=()):
-            nonlocal tool_surface, _parallel_parent_terminal
+            # Retirement is per plan: the tool stays offered so a new plan can still run.
+            retirement_on = _parallel_plan_retirement_enabled()
+            replay_refusal = parallel_retirement.refusal_for(
+                measurement, arguments, enabled=retirement_on)
+            if replay_refusal is not None:
+                bolt.receipt("parallel", "parallel", "retired", "REFUSED", replay_refusal)
+                measurement.observe("parallel", replay_refusal)
+                return replay_refusal
             call_name, result = _execute_parent_parallel(
                 measurement, bolt, root, created_this_run,
                 baseline_tests, _sandbox_deadline, tool_call_id,
@@ -9275,12 +9273,9 @@ def work(d, *, resume=None):
             bolt.receipt("parallel", "parallel", call_name,
                          "APPLIED" if result.txn_order else "REFUSED", observation)
             measurement.observe("parallel", observation)
-            if _parallel_drop_terminal_enabled():
-                reduced_surface = _parallel_parent_tool_surface(tool_surface, result)
-                if len(reduced_surface) != len(tool_surface):
-                    tool_surface = reduced_surface
-                    _parallel_parent_terminal = True
-                    measurement._parallel_parent_terminal = True
+            parallel_retirement.retire_completed_plan(
+                measurement, arguments, _parallel_result_is_terminal(result),
+                enabled=retirement_on)
             return observation
 
         def _parallel_schema_refusal(tool_call_id, arguments, errors):
@@ -9364,13 +9359,10 @@ def work(d, *, resume=None):
 
         _pending_hook_action = None
         _forced_parallel_dispatched = False
-        _parallel_parent_terminal = False
 
         # True save/load resume (kernel_checkpoint): restore before the loop, snapshot at each boundary.
         import kernel_checkpoint as _kernel_checkpoint
         _checkpoint_restored = _kernel_checkpoint.restore_point(sys._getframe(), POC)
-        if _parallel_parent_terminal:
-            measurement._parallel_parent_terminal = True
         if _checkpoint_restored and _hook_wiring_for_run is not None:
             try:
                 _hook_wiring_for_run.rebind_after_checkpoint(root, d, baseline_tests, measurement)
@@ -9716,12 +9708,6 @@ def work(d, *, resume=None):
                 else:
                     # A pre-dispatch hook already appended its refusal reply.
                     _uncapped_messages = copy.deepcopy(msgs)
-                if getattr(measurement, "_parallel_parent_terminal", False):
-                    _request_tools = (measurement.tool_menu(
-                        tool_surface, _uncapped_messages) if toolcall_mode else None)
-                    if (native_batch is not None and _request_tools is not None
-                            and os.environ.get("STATEFRAME_EMPIRICAL_FIXES", "off") == "on"):
-                        _request_tools = native_batch.menu_for_pending(_request_tools)
             if getattr(measurement, "long_horizon_depth_tracker", None) is not None:
                 measurement.long_horizon_depth_tracker.observe(msgs)
             if measurement.restart_enabled:
@@ -9736,8 +9722,7 @@ def work(d, *, resume=None):
                     "schema_violation_details": schema_violation_details,
                     "unknown_tool_names": unknown_tool_names, "first_edit_step": first_edit_step,
                     "wrong_tool_before_first_edit": wrong_tool_before_first_edit,
-                    "_forced_parallel_dispatched": _forced_parallel_dispatched,
-                    "_parallel_parent_terminal": _parallel_parent_terminal}
+                    "_forced_parallel_dispatched": _forced_parallel_dispatched}
                 if _host_truth_progress_enabled:
                     _checkpoint_progress = _progress_facts()
                     _checkpoint_state.update({
