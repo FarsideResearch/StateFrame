@@ -1,6 +1,6 @@
 {
  "dropped_lab_only": 1,
- "file_count": 859,
+ "file_count": 860,
  "files": {
   "architecture/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "architecture/domain_ids.py": "b0aefd60ec4b876a45ff77f2badfdf12a4902af02cbb6506398b46da368106fd",
@@ -194,6 +194,7 @@
   "kernel_crosssession.py": "0b91310c1d862e02d4a74f53fd09eade0f64e9d48b3a47cac8c4917e941c0ddd",
   "kernel_custom_tools.py": "1ea3cdb78f5f94b974ddcd3371df1a89329c68027f291d954898bf1e8766b3d0",
   "kernel_cutoff_rule.py": "e9096f9a12f09cc35a3fe97f7ed614125d86222abd875143719beefde8f680da",
+  "kernel_data_exact.py": "a374f5f52f896d5a89869d7f67e50734e4135e17686d8726ea8d89f80ed04285",
   "kernel_data_packet.py": "f2c242f5b9a225e9da85d9c6dd0b862e6ac02e298b86f91820f64149a138ff6f",
   "kernel_decide2.py": "5a835c0f596deea1391282e0c5ed391f8686f20b32b4880ecd1b472caaf0b46d",
   "kernel_decide2_ladder.py": "2d1ba2a23f81da209bbff1834777eb6a853d4be95a4ef63751c41159c59799e3",
@@ -823,7 +824,7 @@
   "protected_tree_guard.py": "bd5bec6033b7f4e0bfaaf108e40a4686c36e0d5e5f4a9429aa33975c0af17846",
   "realtask_benchmark.py": "76bb5bca535d77fc6fb2b07409265bb56228b0cf0a7d7cd55592a2e6b329d328",
   "realtask_worker_receipts.py": "7f358362d2b839957f2541961ce11b6e65bcb26fa60e5f3d28de22144d47421f",
-  "release-manifest.json": "e5cdd0876c9384c6909570d4c66a7313a51bbca4bd59b1dd297fe26af76d94ea",
+  "release-manifest.json": "3e03838890cd63b36fd80e195fe06e7f9a958459c2c14e793c7ab51cac52b2c2",
   "sampler_config.py": "1549b3a60e0ebc8fbbad8ed5256f52477cd1bb2491a8da350c64c01e01c81b2d",
   "sf_launch.py": "0e0d792f923a3cbcb68cd22cbb06c7f14dcfc470c8b7c24ed78eacd79990ea5c",
   "sf_mutate_boot.py": "a213bba08b5171f830ba8c1afbcfbcf66b7768ab15961e167a9bcba368d97786",
@@ -833,7 +834,7 @@
   "spec_exec.py": "0a80d5488bc812718b4608e086c12c1b8999604cd075f01217eb9bf172424768",
   "swarm/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "swarm/client2.py": "fa141060de5346b46678660fe770c8adcef6b30f579417a52c013d3219d08c70",
-  "switch-registry.json": "5479d38d6466129dea9da3b78a6a54b9c24beb68e4a60c8122687cbe5064c2bd",
+  "switch-registry.json": "880308c31731c23c2bddd4fbdc969f9d4e3de37ededccbf436f6c641c492ec97",
   "symbol_registry.py": "313f59a4b263b65e3e29d4c0d61bc5f5f74e49e0dab08508f3c6cc075dc796a9",
   "sys1/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "sys1/adapter.py": "633e61b3fcd43dc6a07d628a3c8eb4d4d1e54e53de078cbe9dd74ed677847ab1",
@@ -4795,7 +4796,7 @@
  "release_listed_but_absent_in_source": [],
  "release_manifest": "37f11a29d4ceccbc5ea3aa95d1e60249e41b93974fe1da74e347ccfad28f1374",
  "schema": "stateframe-engine-source/1",
- "shipped_hash": "c26d1f7fd07ca9e07693454caf3f113fcdb9f648e55e2fd81b6b5aaefc4c85fa",
+ "shipped_hash": "f4decb7dc16e5fe6a3f99ab339a2843b4b2feeb37ff219f9058f5b4a82941bff",
  "source_hash": "1a75f27c6197deed9df5acd441902846aced5fd358729dab308577e184a077c4",
  "source_tree": "37f11a29d4ceccbc5ea3aa95d1e60249e41b93974fe1da74e347ccfad28f1374"
 }

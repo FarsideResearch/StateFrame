@@ -10,7 +10,6 @@ import importlib
 
 import pytest
 
-pytestmark = pytest.mark.xfail(strict=True, raises=ImportError, reason="DW2: module not implemented yet")
 
 _NATIVE_MAX = 2**63 - 1
 
