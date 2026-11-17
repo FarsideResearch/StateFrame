@@ -34,7 +34,7 @@ def test_no_timeout_is_infinite():
     assert runner._engine_wall(5.0, math.inf, None) == (math.inf, math.inf)
 
 
-def _drive_spec(tmp_path, monkeypatch, remaining, deadline):
+def _drive_spec(tmp_path, monkeypatch, remaining, deadline, environment=None):
     class Engine:
         returncode = 0
         stdout = iter(())
@@ -50,7 +50,7 @@ def _drive_spec(tmp_path, monkeypatch, remaining, deadline):
     monkeypatch.setattr(runner, "_child_env", lambda _o: {})
     monkeypatch.setattr(runner, "engine_reads_test_python", lambda: False)
     monkeypatch.setattr(runner, "_stop_group", lambda _p: None)
-    (tmp_path / "spec.json").write_text(json.dumps({"environment": {}}))
+    (tmp_path / "spec.json").write_text(json.dumps({"environment": dict(environment or {})}))
     options = SimpleNamespace(timeout_s=None if math.isinf(remaining) else remaining,
                               _deadline=deadline, python=__import__("sys").executable,
                               shell_confirm=None, quiet=True)
@@ -62,8 +62,12 @@ def _drive_spec(tmp_path, monkeypatch, remaining, deadline):
 
 
 def test_drive_writes_engine_budget_into_spec(tmp_path, monkeypatch):
+    # The request knobs are seeded as the user would set them: the wrapper injects no defaults,
+    # so a user knob larger than the run wall must still be clamped to it.
     remaining = 600.0
-    env = _drive_spec(tmp_path, monkeypatch, remaining, runner.time.monotonic() + remaining)
+    user_knobs = {"REACT_REQUEST_TIMEOUT_S": "1800", "STATEFRAME_PER_REQUEST_TIMEOUT_S": "600"}
+    env = _drive_spec(tmp_path, monkeypatch, remaining, runner.time.monotonic() + remaining,
+                      environment=user_knobs)
     reserve = min(120.0, 0.1 * remaining)
     assert 0 < float(env["STATEFRAME_RUN_WALL_SECONDS"]) <= remaining - reserve + 1e-6
     assert float(env["STATEFRAME_PER_REQUEST_TIMEOUT_S"]) <= float(env["STATEFRAME_RUN_WALL_SECONDS"])

@@ -945,8 +945,8 @@ def _safe_timeout_endpoint(endpoint: str) -> str:
 
 
 REQUEST_TIMEOUT_LIMIT_NOTE = (
-    "limit: model request timeout, default 300s socket / 420s wall; override "
-    "REACT_REQUEST_TIMEOUT_S (socket; wall = +120s) or STATEFRAME_PER_REQUEST_TIMEOUT_S (both)")
+    "limit: model request stalled, default 300s without response bytes and no total limit; set "
+    "STATEFRAME_PER_REQUEST_TIMEOUT_S (or REACT_REQUEST_TIMEOUT_S) to add a per-request limit")
 
 
 def journal_provider_request_timeout(
@@ -3608,16 +3608,18 @@ class RequestCapture:
             attempt_started = time.monotonic()
             attempt_wall_timeout = (
                 wall_timeout if remaining is None else min(wall_timeout, remaining))
+            # No elapsed cap unless the user set one: attempt_deadline stays None when there is no
+            # knob, route or admission deadline, and socket_timeout remains the idle bound.
             attempt_deadline = deadline
             if per_request_timeout_active:
                 per_request_deadline = attempt_started + attempt_wall_timeout
                 attempt_deadline = (
                     per_request_deadline if deadline is None
                     else min(deadline, per_request_deadline))
-            if attempt_deadline is None:
-                attempt_deadline = attempt_started + attempt_wall_timeout
             if ttft_retry_deadline is not None:
-                attempt_deadline = min(attempt_deadline, ttft_retry_deadline)
+                attempt_deadline = (
+                    ttft_retry_deadline if attempt_deadline is None
+                    else min(attempt_deadline, ttft_retry_deadline))
             attempt_timeout = min(socket_timeout, attempt_wall_timeout)
             permit = None
             if parent is not None:
