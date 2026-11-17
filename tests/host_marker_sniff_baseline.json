@@ -26,6 +26,7 @@
   "kernel_coordinated_change_ledger.py::extract_public_journal",
   "kernel_countdown_slot.py::canonical_time_text",
   "kernel_edit_rejection_fresh_text.py::annotate_rejection",
+  "kernel_edit_source_batch.py::display_marker_in",
   "kernel_editready_fact.py::_safe_panel",
   "kernel_exposure_truth.py::_is_frame_message",
   "kernel_exposure_truth.py::_is_host_panel_message",

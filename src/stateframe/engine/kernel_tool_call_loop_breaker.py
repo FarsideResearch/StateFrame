@@ -15,6 +15,8 @@ import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
+
 
 SWITCH = "STATEFRAME_TOOL_CALL_LOOP_BREAKER"
 STREAK_ENV = "STATEFRAME_TOOL_CALL_LOOP_BREAKER_STREAK"
@@ -26,13 +28,14 @@ _SEEN_FILTER_BYTES = 8 * 1024 * 1024
 _SEEN_FILTER_HASHES = 24
 _LEGACY_SEEN_FILTER_BYTES = 128 * 1024
 
-_EDIT_TOOLS = frozenset({"edit", "str_replace", "replace_module", "file_create", "write", "replace"})
+_EDIT_TOOLS = frozenset({"edit", "str_replace", "replace_module", "file_create", "write", "replace",
+                         *PROTOCOL_EDIT_TOOL_NAMES})
 _TEST_TOOLS = frozenset({"run_tests", "test", "pytest"})
 _LOOP_TOOLS = frozenset({
     "read", "grep", "file_list", "run_tests", "test", "pytest", "edit",
     "str_replace", "replace_module", "file_create", "write", "replace",
     "probe", "predict", "dependency_fact", "dispute_check", "read_ticket",
-    "dispute", "work",
+    "dispute", "work", *PROTOCOL_EDIT_TOOL_NAMES,
 })
 _IGNORED_ARGUMENTS = frozenset({"why", "reason"})
 _REJECTION_MARKERS = (
@@ -213,6 +216,21 @@ class ToolCallLoopBreaker:
     def take_notice(self) -> str | None:
         notice = self._pending_notice
         self._pending_notice = None
+        return notice
+
+    def trip_external(self, tool: str, reason: str) -> str | None:
+        """Trip once from an external repeat detector (e.g. identical edit refusals).
+
+        Returns the notice when this call tripped the breaker, else None (already tripped).
+        """
+        if self.tripped:
+            return None
+        name = _tool_name(tool)
+        self.tripped = True
+        self.first_break_action = name
+        notice = (f"{LOOP_BREAKER_NOTICE}: `{name}` {reason} Choose a different action or "
+                  "stop with a concrete blocker.")
+        self._pending_notice = notice
         return notice
 
 

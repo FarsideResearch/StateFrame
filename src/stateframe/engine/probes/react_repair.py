@@ -169,6 +169,7 @@ from kernel_silent_off_organs import (  # noqa: E402
 )
 from sampler_config import apply_to_request as _apply_sampler_fields  # noqa: E402
 from kernel_done_acceptance import done_accepted  # noqa: E402
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES  # noqa: E402
 import kernel_workspace_truth as _workspace_truth  # noqa: E402
 import kernel_frame_routes as _frame_routes  # noqa: E402
 from stateframe.test_runners import collection_change_reason, pytest_plugin_modules  # noqa: E402
@@ -2847,7 +2848,7 @@ _JQ_REPLACE_MODULE_TOOL = {"type": "function", "function": {
 # dispatch. Shell and authored checks have separate effect/write authorities.
 SCOPED_WRITE_TOOLS = frozenset({
     "edit", "str_replace", "insert_before", "replace_module",
-    "file_create", "file_delete", "file_move",
+    "file_create", "file_delete", "file_move", *PROTOCOL_EDIT_TOOL_NAMES,
 })
 
 def _nonpy_neutralize_tool_surface(tools: Sequence[Mapping[str, object]]) -> list:
@@ -3128,8 +3129,9 @@ def _tools_for_probe_modes(*, probe_gate_on: bool,
         from kernel_job_watch import tool_surface as job_tool_surface
         selected = job_tool_surface(selected)
         from kernel_completion_owner import canonicalize_tool_surface
-        return canonicalize_tool_surface(
-            _owner_coordinate_read_surface(selected), probe_modes=probe_modes)
+        from kernel_edit_source_tool_surface import tool_surface as _edit_protocol_surface
+        return _edit_protocol_surface(canonicalize_tool_surface(
+            _owner_coordinate_read_surface(selected), probe_modes=probe_modes))
     selected = copy.deepcopy(selected)
     for tool in selected:
         function = tool.get("function", {})
@@ -3143,8 +3145,9 @@ def _tools_for_probe_modes(*, probe_gate_on: bool,
     from kernel_job_watch import tool_surface as job_tool_surface
     selected = job_tool_surface(selected)
     from kernel_completion_owner import canonicalize_tool_surface
-    return canonicalize_tool_surface(
-        _owner_coordinate_read_surface(selected), probe_modes=probe_modes)
+    from kernel_edit_source_tool_surface import tool_surface as _edit_protocol_surface
+    return _edit_protocol_surface(canonicalize_tool_surface(
+        _owner_coordinate_read_surface(selected), probe_modes=probe_modes))
 
 
 def _execute_parent_parallel(measurement, bolt, root, created_this_run,
@@ -4597,6 +4600,20 @@ def _str_replace_nonpy_edit(path: pathlib.Path, old_str: str, new_str: str, *,
     )
 
 
+def _legacy_safe_validator_route(root: pathlib.Path | None) -> bool:
+    """legacy_safe + STATEFRAME_BOUND_EDIT=on: the exact single edit runs through the shared
+    batch validator and EditAuthority; the model-visible prose is unchanged (golden suite)."""
+    if root is None:
+        return False
+    if os.environ.get("STATEFRAME_EMPIRICAL_FIXES", "off") == "on":
+        return False
+    from kernel_bound_edit import enabled as bound_edit_enabled
+    if not bound_edit_enabled():
+        return False
+    from kernel_edit_protocol_switch import LEGACY_SAFE, mode as edit_protocol_mode
+    return edit_protocol_mode() == LEGACY_SAFE
+
+
 def str_replace_edit(path: pathlib.Path, old_str: str, new_str: str, *,
                      target_ref: object = None, root: pathlib.Path | None = None,
                      public_brief: object = None, journal: object = None) -> str:
@@ -4652,48 +4669,65 @@ def str_replace_edit(path: pathlib.Path, old_str: str, new_str: str, *,
     src, decode_refusal = _read_edit_source(path, "str_replace")
     if decode_refusal is not None:
         return decode_refusal
-    n = src.count(old_str)
-    if n == 0:
-        if os.environ.get("STATEFRAME_EMPIRICAL_FIXES", "off") == "on":
-            from kernel_empirical_fixes import normalized_str_replace_candidate
-            normalized_source, normalized_note = normalized_str_replace_candidate(
-                src, old_str, new_str)
-            if normalized_note and normalized_source is None:
-                return normalized_note
-            if normalized_source is not None:
-                new_src = normalized_source
-                try:
-                    ast.parse(new_src)
-                except SyntaxError as e:
-                    return (f"str_replace REJECTED: the file would not parse afterwards "
-                            f"({e.msg} line {e.lineno}). Nothing was changed.")
-                from kernel_destructive_edit_guard import guard_write
-                shrink_refusal = guard_write(
-                    path, new_src, root=root, public_brief=public_brief,
-                )
-                if shrink_refusal is not None:
-                    return shrink_refusal
-                from kernel_green_lock import guard_product_mutation, note_applied_product_edit
-                refusal = guard_product_mutation(path)
-                if refusal is not None:
-                    return "str_replace REJECTED: " + refusal
-                applied, shadow = _effect_write(path, new_src)
-                if not applied:
-                    return shadow or "str_replace SHADOW: effect withheld"
-                note_applied_product_edit(path)
-                return _post_edit_observation(
-                    path, "str_replace applied. [normalized leading-indent match]")
-        return ("str_replace REJECTED: old_str not found. Copy the exact current text "
-                "(check whitespace) — `read` the region first.")
-    if n > 1:
-        return (f"str_replace REJECTED: old_str matches {n} places. Include more "
-                f"surrounding lines so it is unique.")
-    new_src = src.replace(old_str, new_str, 1)
-    try:
-        ast.parse(new_src)
-    except SyntaxError as e:
-        return (f"str_replace REJECTED: the file would not parse afterwards "
-                f"({e.msg} line {e.lineno}). Nothing was changed.")
+    if _legacy_safe_validator_route(root):
+        from kernel_legacy_safe_edit import single_edit
+        from kernel_revision_bound_edit import EditPlanError
+        try:
+            _relative = path.resolve().relative_to(root.resolve()).as_posix()
+        except (OSError, ValueError):
+            _relative = path.as_posix().replace("\\", "/").removeprefix("./")
+        try:
+            _outcome = single_edit(relative_path=_relative, source=src.encode("utf-8"),
+                                   old_text=old_str, new_text=new_str, root=root)
+        except EditPlanError as _authority_error:
+            # The edit authority disagreed with the validator: refuse, never raise out of the tool.
+            return f"str_replace REJECTED: {_authority_error}. Nothing was changed."
+        if _outcome.observation is not None:
+            return _outcome.observation
+        new_src = _outcome.candidate.decode("utf-8")
+    else:
+        n = src.count(old_str)
+        if n == 0:
+            if os.environ.get("STATEFRAME_EMPIRICAL_FIXES", "off") == "on":
+                from kernel_empirical_fixes import normalized_str_replace_candidate
+                normalized_source, normalized_note = normalized_str_replace_candidate(
+                    src, old_str, new_str)
+                if normalized_note and normalized_source is None:
+                    return normalized_note
+                if normalized_source is not None:
+                    new_src = normalized_source
+                    try:
+                        ast.parse(new_src)
+                    except SyntaxError as e:
+                        return (f"str_replace REJECTED: the file would not parse afterwards "
+                                f"({e.msg} line {e.lineno}). Nothing was changed.")
+                    from kernel_destructive_edit_guard import guard_write
+                    shrink_refusal = guard_write(
+                        path, new_src, root=root, public_brief=public_brief,
+                    )
+                    if shrink_refusal is not None:
+                        return shrink_refusal
+                    from kernel_green_lock import guard_product_mutation, note_applied_product_edit
+                    refusal = guard_product_mutation(path)
+                    if refusal is not None:
+                        return "str_replace REJECTED: " + refusal
+                    applied, shadow = _effect_write(path, new_src)
+                    if not applied:
+                        return shadow or "str_replace SHADOW: effect withheld"
+                    note_applied_product_edit(path)
+                    return _post_edit_observation(
+                        path, "str_replace applied. [normalized leading-indent match]")
+            return ("str_replace REJECTED: old_str not found. Copy the exact current text "
+                    "(check whitespace) — `read` the region first.")
+        if n > 1:
+            return (f"str_replace REJECTED: old_str matches {n} places. Include more "
+                    f"surrounding lines so it is unique.")
+        new_src = src.replace(old_str, new_str, 1)
+        try:
+            ast.parse(new_src)
+        except SyntaxError as e:
+            return (f"str_replace REJECTED: the file would not parse afterwards "
+                    f"({e.msg} line {e.lineno}). Nothing was changed.")
     from kernel_destructive_edit_guard import guard_write
     shrink_refusal = guard_write(
         path, new_src, root=root, public_brief=public_brief,
@@ -7668,6 +7702,11 @@ def work(d, *, resume=None):
         from kernel_shell_tool import service as shell_service
         _shell = shell_service()
         _hook_wiring_for_run = globals().get("_hook_wiring")
+        from kernel_edit_protocol_switch import handles_enabled as _edit_protocol_handles
+        from kernel_edit_source_tool import EditProtocolRunState
+        # The transport attaches each request's handle map (kernel_edit_request_map);
+        # an empty map refuses every handle as STALE_HANDLE.
+        _edit_protocol_state = EditProtocolRunState()
         if _shell is not None:
             if _hook_wiring_for_run is None:
                 _shell.bind(root, d, baseline_tests)
@@ -8273,6 +8312,14 @@ def work(d, *, resume=None):
             step_limit=_budget.tool_attempt_limit,
             multi_file=multifile, edit_contract=_edit_contract, workspace=continuation_workspace, resume=resume)
         measurement.run_limitations = run_limitations
+        from kernel_edit_request_map import bind_run as _bind_edit_map_run
+        if _edit_protocol_handles():
+            # The transport mints each request's handle map into this state (kernel_edit_request_map).
+            measurement._edit_protocol_state = _edit_protocol_state
+            # Also bound per run: the send seam may hold no runtime (no active runtime in plain runs).
+            _bind_edit_map_run(_edit_protocol_state, root)
+        else:
+            _bind_edit_map_run(None, root)  # never let an earlier run's state reach this one
 
         def _free(getter: Callable[[], object], default: object = None) -> object:
             # A closure cell for a local the host has not assigned yet raises NameError; treat it as absent.
@@ -8942,6 +8989,9 @@ def work(d, *, resume=None):
                 and "unbounded_progress_watch" in _restored):
             _progress_watch = UnboundedProgressWatch.from_snapshot(
                 _restored["unbounded_progress_watch"])
+        if resume is not None and isinstance(_restored, Mapping):
+            from kernel_edit_repair_hook import SNAPSHOT_KEY as _EDIT_REPAIR_KEY, restore_ledger
+            restore_ledger(measurement, _restored.get(_EDIT_REPAIR_KEY))  # edit_repair_ledger
 
         def _finish_edit_nturn() -> None:
             nonlocal _edit_nturn_request_active
@@ -9423,6 +9473,8 @@ def work(d, *, resume=None):
             _rejection_template_source = None
             _rejection_template_path = None
             tool_target_ref = None        # optional STATEFRAME_BOUND_EDIT target
+            _pending_edit_repair = None   # edit protocol: next-request text after a refused batch
+            tool_edit_protocol_args = None   # (tool_name, args) for edit_source / rewrite_source
             tool_probe_args = None        # structured probe arguments (gate or observation mode)
             tool_repro_args = None        # model-authored scratch reproduction arguments
             tool_predict_args = None      # host-owned scratch prediction arguments
@@ -9656,6 +9708,10 @@ def work(d, *, resume=None):
                     })
                 if _progress_watch is not None:
                     _checkpoint_state["unbounded_progress_watch"] = _progress_watch.snapshot()
+                from kernel_edit_repair_hook import SNAPSHOT_KEY as _EDIT_REPAIR_KEY, snapshot_ledger
+                _edit_repair_ledger = snapshot_ledger(measurement)
+                if _edit_repair_ledger is not None:  # edit_repair_ledger: absent until a refusal
+                    _checkpoint_state[_EDIT_REPAIR_KEY] = _edit_repair_ledger
                 checkpoint(measurement, _uncapped_messages, _checkpoint_state)
             _provider_request = not (native_batch is not None and native_batch.pending)
             _green_then_exhaust_boundary = (
@@ -11099,6 +11155,9 @@ def work(d, *, resume=None):
                                 model_action_args=_args,
                             )
                             continue
+                        elif _name in ("edit_source", "rewrite_source") and _edit_protocol_handles():
+                            line = _name
+                            tool_edit_protocol_args = (_name, dict(_args))
                         elif _name == "str_replace":
                             # Rides the `edit` rail (kernel treats it as the action it is:
                             # ledger cleared, edits counted) with its own applicator.
@@ -13591,6 +13650,94 @@ def work(d, *, resume=None):
                     # dispatch_live_read applies repeat-read notes to this tool result.
                 finally:
                     _finish_read_attempt(measurement, error=sys.exc_info()[1])
+            elif line in ("edit_source", "rewrite_source") and tool_edit_protocol_args is not None:
+                from kernel_edit_source_tool import APPLIED as _EP_APPLIED, EXECUTORS as _EP_EXECUTORS
+                from kernel_edit_source_tool import REJECTED as _EP_REJECTED, REPLAYED as _EP_REPLAYED
+                from kernel_scope_widen_guard import read as _ep_read
+                _ep_tool, _ep_args = tool_edit_protocol_args
+
+                def _ep_not_editable(relative: str) -> str | None:
+                    _ep_path = root / relative
+                    if protected_test_path(_ep_path, baseline_tests):
+                        return "NOT_EDITABLE: protected public test paths are immutable"
+                    if multifile:
+                        _scope_widen(relative)
+                    if _outside_edit_scope(relative):
+                        return "NOT_EDITABLE: path is outside editable_paths"
+                    return None
+
+                def _ep_write(path: pathlib.Path, data: bytes) -> tuple[bool, str | None]:
+                    return _effect_write_bytes(path, data, operation=_ep_tool)
+
+                if _hook_gate_route(_ep_tool, _ep_args):
+                    continue
+                _ep_extra = ({"public_brief": _task_public_brief(d)}
+                             if _ep_tool == "rewrite_source" else {})
+                _ep_out = _EP_EXECUTORS[_ep_tool](
+                    root, _ep_args, state=_edit_protocol_state, read_bytes=_ep_read,
+                    journal=measurement.journal, not_editable=_ep_not_editable,
+                    write_bytes=_ep_write, **_ep_extra)
+                obs = _ep_out.observation()
+                # A refused batch on a resolved file: the transcript keeps only codes + fingerprints and the
+                # repair request (fresh handles + the file's current bytes) becomes the next user message.
+                _edit_source_refused = (_ep_out if _ep_out.status == _EP_REJECTED and _ep_out.refusals
+                                        and _ep_out.path is not None else None)
+                if _ep_tool in PROTOCOL_EDIT_TOOL_NAMES and _edit_source_refused is not None:
+                    from kernel_edit_repair_hook import build_repair, journal_fields, trip_loop_breaker_if_blocked
+                    try:
+                        _edit_source_bytes = _ep_read(root / _edit_source_refused.path)
+                    except OSError:
+                        _edit_source_bytes = b""
+                    _edit_source_proposal = (list(_ep_args.get("edits") or ()) if _ep_tool == "edit_source" else
+                                             [{"handle": _ep_args.get("handle"), "old_text": "",
+                                               "new_text": _ep_args.get("new_text")}])
+                    try:
+                        _repair = build_repair(
+                            runtime=measurement,
+                            refusals=_edit_source_refused.refusals,
+                            current_bytes=_edit_source_bytes,
+                            path=_edit_source_refused.path,
+                            proposal=_edit_source_proposal,
+                            request_ordinal=step + 1,
+                        )
+                    except ValueError as _repair_error:
+                        measurement.journal.emit(
+                            "edit_repair_request_failed", producer="kernel_edit_repair_hook", dispatch=False,
+                            tool=_ep_tool, error_type=type(_repair_error).__name__, codes=list(_ep_out.codes()))
+                    else:
+                        obs = _repair.observation()
+                        _pending_edit_repair = _repair.render()
+                        # The repair request's handles are the only valid ones for the next call.
+                        _edit_protocol_state.set_request(_repair.handle_map)
+                        trip_loop_breaker_if_blocked(measurement, _repair, _ep_tool)
+                        measurement.journal.emit("edit_repair_request", producer="kernel_edit_repair_hook",
+                                                 dispatch=False, **journal_fields(_repair))
+                bolt.receipt(
+                    "edit", _ep_tool, json.dumps(_ep_args, sort_keys=True),
+                    "APPLIED" if _ep_out.status == _EP_APPLIED else
+                    "NO_OP" if _ep_out.status == _EP_REPLAYED else "REJECTED", obs[:240])
+                measurement.observe(line, obs)
+                msgs.append(_tool_reply_for_call(msgs, tool_call_id, obs) if tool_call_id else
+                            {"role": "user", "content": obs})
+                # The repair request enters msgs only here, as a NEW final user message after the tool
+                # reply; everything before it is the previous request's retained prefix.
+                _edit_repair_text = locals().get("_pending_edit_repair")
+                if isinstance(_edit_repair_text, str) and _edit_repair_text:
+                    from kernel_edit_repair_hook import place_repair_message
+                    place_repair_message(msgs, _edit_repair_text)
+                    _pending_edit_repair = None
+                if _ep_out.status == _EP_APPLIED:
+                    # The published bytes invalidate every handle of this request.
+                    _edit_protocol_state.set_request(None)
+                    if _hook_wiring_for_run is not None:
+                        _hook_wiring_for_run.note_applied(tool_call_id, _ep_out.changed_paths)
+                    if first_edit_step is None:
+                        first_edit_step = step
+                    edits += len(_ep_out.changed_paths)
+                    from kernel_green_lock import note_applied_product_edit
+                    for _ep_rel in _ep_out.changed_paths:
+                        note_applied_product_edit(root / _ep_rel)
+                continue
             elif line == "str_replace" and tool_batch_args is not None:
                 from kernel_coordinated_change_ledger import (
                     APPLY_EVENT, APPLY_SCHEMA, BatchFailure, BatchResult,

@@ -116,6 +116,11 @@ def _valid_worker_state_fields(value: object) -> bool:
         if watch.threshold != 32:
             return False
         value = {key: child for key, child in value.items() if key != "unbounded_progress_watch"}
+    if "edit_repair_ledger" in value:
+        from kernel_edit_repair_hook import valid_snapshot
+        if not valid_snapshot(value["edit_repair_ledger"]):
+            return False
+        value = {key: child for key, child in value.items() if key != "edit_repair_ledger"}
     base = set(WORKER_FIELDS)
     extra = set(value) - base
     if not extra:
@@ -379,6 +384,9 @@ _CAPACITY_SAFE_TAIL = frozenset(
 SAFE_TAIL = frozenset({
     "read_attempt", "read_result",  # audit only; never source/selection authority
     "read_capture_skipped", "read_capture_failed",  # audit only; delivery is unchanged
+    # Edit protocol audit records: the request map is re-minted per send and the repair ledger
+    # resumes from the checkpoint's edit_repair_ledger field, never from these events.
+    "edit_handle_map", "edit_handle_map_failed", "edit_repair_request", "edit_repair_request_failed",
     # Opt-in check-truth failure records (audit only): the fallback they describe is re-derived on replay.
     "check_execution_binding_register_failed", "check_truth_vacuity_journal_failed",
     "check_execution_binding_scope_failed",

@@ -11,6 +11,7 @@ import os
 from collections.abc import Iterable
 
 from kernel_bounded_locate_code import OBSERVATION_TOOLS
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 
 
 MODE_ENV = "STATEFRAME_GREENLOCK_MENU_AUTHORITY_CONTINUATION"
@@ -20,7 +21,8 @@ MODE_ENV = "STATEFRAME_GREENLOCK_MENU_AUTHORITY_CONTINUATION"
 PREDICT_MODE_ENV = "STATEFRAME_CONTINUATION_PREDICT"
 CONTROL_TOOLS = frozenset({"done", "continuation_detour", "continuation_reobserve",
                            "work_update", "note_update", "work"})
-EDIT_TOOLS = frozenset({"edit", "str_replace", "file_create", "file_delete", "file_move", "shell", "insert_before", "parallel"})
+EDIT_TOOLS = frozenset({"edit", "str_replace", "file_create", "file_delete", "file_move", "shell", "insert_before", "parallel",
+                        *PROTOCOL_EDIT_TOOL_NAMES})
 AUTHORED_CHECK_TOOLS = frozenset({"authored_check"})
 EFFECT_TOOLS = frozenset({
     *OBSERVATION_TOOLS, "text", *EDIT_TOOLS, "run_tests", *AUTHORED_CHECK_TOOLS,

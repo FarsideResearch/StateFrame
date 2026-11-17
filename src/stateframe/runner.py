@@ -708,6 +708,7 @@ OPT_IN_SWITCHES = {
     "STATEFRAME_CROSSFILE_INDEX": ("on", "off"),  # opt-in read-only cross-file symbol index; off by default
     "STATEFRAME_CROSSFILE_EXISTENCE_CHECK": ("on", "off"),  # opt-in report of edits leaving repo symbol references dangling; off by default
     "STATEFRAME_CROSSFILE_SIGNATURE_CHECK": ("on", "off"),  # opt-in report of callers broken by a changed signature; off by default
+    "STATEFRAME_EDIT_PROTOCOL": ("legacy_safe", "handles"),  # one edit interface per run; legacy_safe by default
 }
 PARALLEL_CONTROL_SWITCHES = frozenset({
     "STATEFRAME_PARALLEL_DROP_TOOL_AFTER_TERMINAL",

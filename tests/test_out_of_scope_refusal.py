@@ -44,7 +44,10 @@ def test_default_scope_refuses_existing_product_file(tmp_path, tool, arguments):
 
 
 def test_write_tool_inventory_requires_scope_guard():
-    offered = {item["function"]["name"] for item in [*rr.TOOLS, rr._JQ_REPLACE_MODULE_TOOL]}
+    from kernel_edit_source_tool_surface import EDIT_SOURCE_SCHEMA, REWRITE_SOURCE_SCHEMA
+    # The edit-protocol tools are offered under STATEFRAME_EDIT_PROTOCOL=handles.
+    offered = {item["function"]["name"] for item in [
+        *rr.TOOLS, rr._JQ_REPLACE_MODULE_TOOL, EDIT_SOURCE_SCHEMA, REWRITE_SOURCE_SCHEMA]}
     read_only = {"grep", "list_files", "read", "run_tests", "read_check_receipt",
                  "recall", "done", "git", "job_output", "job_wait", "job_stop",
                  "skill_load", "web_fetch"}

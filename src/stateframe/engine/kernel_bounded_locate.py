@@ -31,6 +31,7 @@ except ImportError:  # Python 3.9 compatibility for the v46 runner.
             return self.value
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 
 
 LOCATE_SWITCH_ENV = "STATEFRAME_BOUNDED_LOCATE"
@@ -74,6 +75,7 @@ _READ_TOOLS = frozenset({"read", "grep", "list", "ls", "recall_evidence", "recal
                          "recall_generated_artifact", "read_ticket"})
 _EDIT_TOOLS = frozenset({
     "edit", "str_replace", "file_create", "file_delete", "file_move", "replace_module", "write", "replace",
+    *PROTOCOL_EDIT_TOOL_NAMES,
 })
 
 
