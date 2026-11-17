@@ -24,6 +24,8 @@ from enum import Enum
 from itertools import islice
 from urllib.parse import urlparse
 
+from kernel_routing_schema import routing_v2
+
 
 MODE_ENV = "STATEFRAME_MODEL_ROUTER"
 CONFIG_ENV = "STATEFRAME_MODEL_ROUTER_CONFIG"
@@ -175,6 +177,12 @@ _SUCCESS_STATUSES = frozenset({
     "ACCEPTED", "APPLIED", "COMMITTED", "COMPLETED", "DONE", "GREEN", "OK",
     "PASS", "PASSED", "SUCCESS", "SUCCEEDED",
 })
+# MR-8 (schema 2 only): verifying success is the only thing that clears failure memory.
+# An APPLIED edit proves the write landed, not that it is right.
+_VERIFYING_ACTIONS = frozenset({
+    "RUN_TESTS", "TEST", "PYTEST", "VERIFY", "VERIFY_CURRENT_SOURCE", "MECHANICAL_VERIFY",
+})
+_TERMINAL_STATUSES = frozenset({"DONE", "COMMITTED"})
 
 
 def _mapping(value: object) -> Mapping[str, object] | None:
@@ -675,6 +683,26 @@ def _receipt_is_successful(row: Mapping[str, object]) -> bool:
             and _row_status(row) in _SUCCESS_STATUSES)
 
 
+def _receipt_verifies_success(row: Mapping[str, object]) -> bool:
+    """MR-8 v2: a successful verification or terminal completion, not any applied write.
+
+    Verifying: a passing test/check receipt. Terminal: DONE/COMMITTED status.
+    Uses the same meaningful + success-status gates as ``_receipt_is_successful``.
+    """
+    if not _receipt_is_successful(row):
+        return False
+    return _row_status(row) in _TERMINAL_STATUSES or _row_action(row) in _VERIFYING_ACTIONS
+
+
+def _read_reveals_new_evidence(row: Mapping[str, object]) -> bool:
+    """MR-8 v2: a read row that the producer flagged as returning new evidence.
+
+    Reads are never meaningful by action name, so this takes only the producer's explicit
+    ``meaningful_action`` flag, the same branch ``_receipt_is_meaningful`` honours first.
+    """
+    return row.get("meaningful_action") is True
+
+
 def _failure_token(row: Mapping[str, object], *, hypothesis: bool = False) -> str | None:
     names = (
         ("hypothesis_id", "hypothesis_digest", "rejected_hypothesis_id")
@@ -746,14 +774,20 @@ def _host_signal_projection_uncached(runtime: object | None,
     counterexample_counts: dict[str, int] = {}
     hypothesis_counts: dict[str, int] = {}
     reads_since_action = 0
+    schema_v2 = routing_v2()
     for row in evidence_rows:
         action = _row_action(row)
         status = _row_status(row)
         if action in _READ_ACTIONS:
-            reads_since_action += 1
+            if schema_v2 and _read_reveals_new_evidence(row):
+                reads_since_action = 0
+            else:
+                reads_since_action += 1
         elif action in _DISCRIMINATING_ACTIONS or _receipt_is_meaningful(row):
             reads_since_action = 0
-        if _receipt_is_successful(row):
+        clears_failure_memory = (_receipt_verifies_success(row) if schema_v2
+                                 else _receipt_is_successful(row))
+        if clears_failure_memory:
             # A successful host action makes earlier rejected attempts stale
             # for escalation.  Keep only the current consecutive failure
             # streak in this relevant, revision-bound stream.
@@ -856,7 +890,7 @@ def host_signal_projection(runtime: object | None, frame: Mapping[str, object]) 
     a new receipt, replacement collection, or new frame recomputes the full
     safety projection.
     """
-    token = (id(frame), _projection_input_token(runtime, frame))
+    token = (id(frame), _projection_input_token(runtime, frame), routing_v2())
     cached = getattr(runtime, "_model_router_projection_cache", None) if runtime is not None else None
     if isinstance(cached, Mapping) and cached.get("token") == token:
         result = cached.get("result")
