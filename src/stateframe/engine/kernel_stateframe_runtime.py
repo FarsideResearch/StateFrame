@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from kernel_step_limits import parse_step_limit, reached, remaining as limit_remaining
 import kernel_frame_routes as _frame_routes
+from kernel_routing_schema import ROUTING_SCHEMA_ENV as _ROUTING_SCHEMA_ENV_SOURCE
 
 import copy
 import ast
@@ -66,6 +67,12 @@ def _log_render_overflow(view: RenderOverflow, journal: object | None) -> None:
 
 
 PUBLIC_TEST_VERDICT_FACT_ENV = "STATEFRAME_PUBLIC_TEST_VERDICT_FACT"
+# Switch registry anchor: kernel_routing_schema.py is not a manifest-declared module, so the
+# registry scan only sees STATEFRAME_ROUTING_SCHEMA through this declared file. The check keeps
+# the two spellings from drifting.
+ROUTING_SCHEMA_ENV = "STATEFRAME_ROUTING_SCHEMA"
+if ROUTING_SCHEMA_ENV != _ROUTING_SCHEMA_ENV_SOURCE:
+    raise RuntimeError("STATEFRAME_ROUTING_SCHEMA spelling drifted from kernel_routing_schema")
 
 
 def _model_facing_check_evidence(runtime: object) -> dict[str, object]:

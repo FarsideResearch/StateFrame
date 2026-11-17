@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import kernel_frame_routes as _frame_routes
+from kernel_route_decision import RouteDecision, resolve_route_decision
+from kernel_routing_schema import routing_v2
 
 import contextvars
 import copy
@@ -133,6 +135,10 @@ def _record_probe_destination_provenance(capture: object, endpoint: str) -> None
                     "credential_source": "env" if credential_env else "unavailable",
                     "credential_env": credential_env,
                 }
+        decision = getattr(capture, "route_decision", None)
+        if routing_v2() and isinstance(decision, RouteDecision):
+            # Schema 2: the source is the single decision that also governed the wire.
+            provenance["source"] = decision.source
     except Exception:  # noqa: BLE001 - metadata failure must not suppress the physical request
         provenance = {
             "schema": _PROBE_DESTINATION_SCHEMA,
@@ -4100,6 +4106,9 @@ class RequestCapture:
                 from kernel_bounded_http import queue_wait_max_seconds
                 # Recovery uses the destination actually submitted, including a routed key.
                 # Keep its key transient, but retain its credential-free provenance in captures.
+                if routing_v2() and getattr(self, "route_decision", None) is not None:
+                    # Seal: nothing between the decision and the physical send may swap the route.
+                    self.route_decision.assert_sealed(body, endpoint)
                 _record_probe_destination_provenance(self, endpoint)
                 self._provider_probe_destination = (endpoint, key)
                 queue_cap = queue_wait_max_seconds()
@@ -5600,12 +5609,19 @@ class RequestCapture:
         model_router = getattr(self, "model_router", None)
         if model_router is None:
             model_router = getattr(self.journal, "model_router", None)
-        if not _recovery_prepared and model_router is not None:
+        # MODEL-ROUTING-UNIFY: schema 2 decides the destination once (static route > router >
+        # default) and caches it per request_id. Schema 1 runs the sequential legacy blocks below.
+        unified_routing = routing_v2()
+        if unified_routing:
+            _decision, body, endpoint, key = resolve_route_decision(
+                self, body, endpoint, key, recovery_prepared=_recovery_prepared)
+        if not unified_routing and not _recovery_prepared and model_router is not None:
             prepared_call = model_router.prepare_call(self, body, endpoint, key)
             body, endpoint, key = (prepared_call.body, prepared_call.endpoint,
                                    prepared_call.key)
             model_router.validate_final_request(self, body)
-        if _frame_routes.ROUTES_ACTIVE and not _recovery_prepared and getattr(self, "frame_route", None) is not None:
+        if (not unified_routing and _frame_routes.ROUTES_ACTIVE and not _recovery_prepared
+                and getattr(self, "frame_route", None) is not None):
             route = self.frame_route
             from kernel_frame_routes import require_local
             body["model"] = route.model
@@ -5847,6 +5863,9 @@ class RequestCapture:
                 if record is None:
                     raise RequestPreparationContractError("replacement did not publish a qualified request")
             wire, body = record.wire, record.body
+            if unified_routing:
+                # The qualified body must still carry the decided model and endpoint.
+                self.route_decision.assert_sealed(body, endpoint)
             self._emit_host_authorship_manifest(body, wire)
             sealed_metadata = json.loads(record.metadata)
             request_extensions = sealed_metadata["request_extensions"]
