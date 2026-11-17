@@ -2683,6 +2683,36 @@ def _copy_scan_key(info: os.stat_result, generation: int) -> tuple[int, int, int
     return _snapshot_file_cache_key(info, generation, "")
 
 
+def _file_sha256(path: str | os.PathLike[str]) -> str | None:
+    """SHA-256 of a regular file, streamed in 1 MiB blocks; None when it is not readable as one."""
+    descriptor = None
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                             | getattr(os, "O_CLOEXEC", 0))
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            return None
+        digest = hashlib.sha256()
+        while True:
+            block = os.read(descriptor, 1 << 20)
+            if not block:
+                return digest.hexdigest()
+            digest.update(block)
+    except OSError:
+        return None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _capture_recorded(source: Path, destination: Path, relpath: str,
+                      digests: dict[str, str] | None, **kwargs: bool) -> bool:
+    """``_capture_snapshot_file`` that also records the sha256 of the bytes it published."""
+    identity, cloned = _capture_snapshot_file(source, destination, **kwargs)
+    if digests is not None and identity[1]:
+        digests[relpath] = identity[1]
+    return cloned
+
+
 def _copy_tree(source: Path, target: Path, previous: Path | None,
                durable_inodes: set[tuple[int, int]], *, seed: Path | None = None,
                objects: Path | None = None,
@@ -2690,9 +2720,11 @@ def _copy_tree(source: Path, target: Path, previous: Path | None,
                excluded: set[Path] | None = None) -> dict[str, int]:
     """Copy ``source`` to ``target``; a file unchanged since the previous checkpoint is hard-linked.
 
-    Checkpoint copies are never modified after they are written, so linking to one is safe; a file
-    is unchanged when size and mtime_ns equal the previous copy (copies keep the source mtime).
-    Seed-matching env files and big changed files are APFS-cloned (copy-on-write)
+    Checkpoint copies are never modified after they are written, so linking to one is safe. Size and
+    mtime_ns only pre-filter the candidates (copies keep the source mtime): a link also needs the live
+    bytes to hash equal to the prior copy's recorded sha256 (``_SAVE["copy_digests"]``) or, for a
+    snapshot without a record, to the prior file's own sha256. Anything unproven is captured from the
+    live file. Seed-matching env files and big changed files are APFS-cloned (copy-on-write)
     when possible; other changed files go through the content-addressed ``objects`` store when one
     is given, else they are copied. One lstat per unchanged file (scandir types are free).
     """
@@ -2703,6 +2735,8 @@ def _copy_tree(source: Path, target: Path, previous: Path | None,
         # boundary filters through wrappers that only forward the seed option.
         home, home_subtree, excluded = _SAVE.get("snapshot_exclusions", (None, None, None))
     excluded = excluded or set()
+    # (digests written for this copy, digests the prior snapshot recorded); both optional.
+    digests, prior_digests = _SAVE.get("copy_digests", (None, None))
     counts = {"linked": 0, "copied": 0, "cloned": 0}
     counter = [0]
     if previous is None:
@@ -2755,8 +2789,8 @@ def _copy_tree(source: Path, target: Path, previous: Path | None,
                     seed_info = None
                 if (seed_info is not None and info.st_dev == seed_info.st_dev
                         and info.st_ino == seed_info.st_ino and stat.S_ISREG(seed_info.st_mode)):
-                    _identity, cloned = _capture_snapshot_file(
-                        Path(path), Path(destination), prefer_clone=True)
+                    cloned = _capture_recorded(Path(path), Path(destination), relpath, digests,
+                                               prefer_clone=True)
                     counts["cloned" if cloned else "copied"] += 1
                     continue
             if old_dir is not None:
@@ -2769,15 +2803,27 @@ def _copy_tree(source: Path, target: Path, previous: Path | None,
                         and (prior.st_dev, prior.st_ino) != (info.st_dev, info.st_ino)
                         and prior.st_size == info.st_size
                         and prior.st_mtime_ns == info.st_mtime_ns):
+                    # size+mtime passed: that is only a pre-filter. Hash the live bytes (scan them
+                    # for registered secrets first, as before, when not already verified).
                     if not scanned:
-                        _check_snapshot_file(Path(path))
+                        live_digest = _check_snapshot_file(Path(path))[1]
                         if generation == _SECRET_GENERATION:
                             _VERIFIED_POOL_IDENTITIES.add(scan_key)
-                    os.link(old, destination)
-                    durable_inodes.add((prior.st_dev, prior.st_ino))
-                    counts["linked"] += 1
-                    continue
+                        scanned = True
+                    else:
+                        live_digest = _file_sha256(path)
+                    recorded = prior_digests.get(relpath) if prior_digests is not None else None
+                    prior_digest = recorded if type(recorded) is str else _file_sha256(old)
+                    if live_digest and prior_digest == live_digest:
+                        os.link(old, destination)
+                        durable_inodes.add((prior.st_dev, prior.st_ino))
+                        if digests is not None:
+                            digests[relpath] = live_digest
+                        counts["linked"] += 1
+                        continue
             if seed_root is not None and darwin:
+                # Only the clone preference depends on the seed match: the live bytes are captured,
+                # never the seed's, so a stale seed copy cannot be reused here.
                 try:
                     seed_info = os.stat(os.path.join(seed_root, relpath))
                 except OSError:
@@ -2785,19 +2831,20 @@ def _copy_tree(source: Path, target: Path, previous: Path | None,
                 if (seed_info is not None and stat.S_ISREG(seed_info.st_mode)
                         and seed_info.st_size == info.st_size
                         and seed_info.st_mtime_ns == info.st_mtime_ns):
-                    _identity, cloned = _capture_snapshot_file(
-                        Path(path), Path(destination), prefer_clone=True)
+                    cloned = _capture_recorded(Path(path), Path(destination), relpath, digests,
+                                               prefer_clone=True)
                     counts["cloned" if cloned else "copied"] += 1
                     continue
             if info.st_size >= _BIG_FILE and darwin:
-                _identity, cloned = _capture_snapshot_file(Path(path), Path(destination))
+                cloned = _capture_recorded(Path(path), Path(destination), relpath, digests)
                 counts["cloned" if cloned else "copied"] += 1
                 continue
             if objects is not None and stat.S_ISREG(info.st_mode):
                 # Scan before storing, then require the source to be unchanged across both steps so
                 # the stored bytes are the bytes that were scanned for registered secrets.
+                scanned_digest = None
                 if not scanned:
-                    _check_snapshot_file(Path(path))
+                    scanned_digest = _check_snapshot_file(Path(path))[1]
                 stored = _store_object(path, info, objects, counter)
                 after = os.lstat(path)
                 if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns,
@@ -2813,9 +2860,12 @@ def _copy_tree(source: Path, target: Path, previous: Path | None,
                     # reach the filesystem link limit; a private copy is always correct.
                     if error.errno != errno.EMLINK:
                         raise
-                    _identity, cloned = _capture_snapshot_file(Path(path), Path(destination))
+                    _capture_recorded(Path(path), Path(destination), relpath, digests)
+                else:
+                    if digests is not None and scanned_digest is not None:
+                        digests[relpath] = scanned_digest
             else:
-                _identity, cloned = _capture_snapshot_file(Path(path), Path(destination))
+                _capture_recorded(Path(path), Path(destination), relpath, digests)
             if generation == _SECRET_GENERATION:
                 _VERIFIED_POOL_IDENTITIES.add(scan_key)
             counts["copied"] += 1
@@ -3275,6 +3325,9 @@ def _save_into(payload, ctx, step, run_dir, root, final, tmp, clocks, started, c
             prior_meta = json.loads((previous / META_FILE).read_text())
         except (OSError, ValueError):
             pass
+    recorded_digests = prior_meta.get("file_sha256")
+    recorded_digests = recorded_digests if isinstance(recorded_digests, dict) else {}
+    file_digests: dict[str, dict[str, str]] = {}
     copied = {"linked": 0, "copied": 0, "cloned": 0}
     manifests: dict[str, list] = {}
     file_chunks: dict[str, list] = {}
@@ -3305,9 +3358,16 @@ def _save_into(payload, ctx, step, run_dir, root, final, tmp, clocks, started, c
         seed = _seed_for_run(run_dir) if name == "env" else None
         # Boundary filters and the object store ride in _SAVE, so wrappers that only forward
         # ``seed`` keep the original copy-hook call contract.
-        for key, value in _copy_tree(source, destination, prior, durable_inodes,
-                                     seed=seed).items():
-            copied[key] += value
+        prior_map = recorded_digests.get(name)
+        file_digests[name] = {}
+        _SAVE["copy_digests"] = (file_digests[name],
+                                 prior_map if isinstance(prior_map, dict) else {})
+        try:
+            for key, value in _copy_tree(source, destination, prior, durable_inodes,
+                                         seed=seed).items():
+                copied[key] += value
+        finally:
+            _SAVE.pop("copy_digests", None)
     manifest_bytes = json.dumps(manifests, sort_keys=True, separators=(",", ":")).encode()
     pool_sha256 = {
         f"{relative}/{name}": _POOL_KNOWN[str(root / POOL_DIR / relative.replace('/', '__'))][name][1]
@@ -3325,6 +3385,7 @@ def _save_into(payload, ctx, step, run_dir, root, final, tmp, clocks, started, c
         "blob_manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
         "pool_sha256": pool_sha256,
         "file_chunks": file_chunks,
+        "file_sha256": file_digests,
         "blob_count": sum(len(names) for names in manifests.values()),
         "seconds": {"collect": round(collected - started, 3), "files": round(files_done - collected, 3),
                     "capture": round(time.perf_counter() - started, 3)},

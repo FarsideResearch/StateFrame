@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Checkpoints: a file rewritten with the same size and modification time is now captured instead of reusing the previous snapshot's copy.
+
 ## 0.7.38 (2026-11-17)
 
 - Fixed: edit_source and rewrite_source now refuse hook definition and bundled input files, like the other edit tools.
