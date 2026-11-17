@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.7.33 (2026-11-17)
 
 - Added (off by default, set in a custom profile): `STATEFRAME_ROUTING_SCHEMA` (`1` legacy, the default; `2` unified). With `2`, one route decision per request picks the model, endpoint and credential: a configured static frame route wins over the adaptive router, the router still validates the final request, and the destination cannot change after the request is sealed (it fails loud instead). The decision is journaled once per request as `route_decision`. The decide2 and work-frame helper calls send the configured default model id instead of the `decision-tier`/`work-frame` aliases (set `STATEFRAME_DECIDE2_MODEL` and `STATEFRAME_WORK_FRAME_MODEL` in a profile to override them), and model guidance follows the model actually selected, not the launch model. With `1` or unset, requests are unchanged. Tests: `tests/test_routing_schema.py`, `tests/test_routing_v2_route_decision.py`, `tests/test_routing_v2_model_ids.py`, `tests/test_routing_v2_policy.py`.
