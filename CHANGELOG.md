@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.30 (2026-11-17)
+
+- Tests: the parity baseline is pinned to the last release named in the tree, including when HEAD is a release merge
+
 ## 0.7.29 (2026-11-17)
 
 - Fixed: a model request is no longer stopped by elapsed time unless you set a limit. The wrapper no longer injects default `REACT_REQUEST_TIMEOUT_S`/`STATEFRAME_PER_REQUEST_TIMEOUT_S` values, the engine no longer builds a 1,920 s request deadline or a per-attempt fallback wall, and a streaming response body is ended only when no bytes arrive for the socket timeout (each chunk renews the wait; your run or queue limit still applies).

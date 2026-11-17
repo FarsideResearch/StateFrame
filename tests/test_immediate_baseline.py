@@ -1,4 +1,4 @@
-"""The parity baseline should follow the branch base in shallow lane clones."""
+"""The parity baseline is the pinned last release, never a clone-layout guess."""
 
 from __future__ import annotations
 
@@ -12,47 +12,74 @@ from tools import immediate_baseline
 HEAD = "a" * 40
 BASE = "b" * 40
 OLDER = "c" * 40
-UNRELATED = "d" * 40
-RELEASE = "e" * 40
+REMOTE = "d" * 40
+CHANGELOG = "# Changelog\n\n## Unreleased\n\n## 0.4.39 (2026-01-02)\n\n## 0.4.38\n"
 
 
-def _answers(monkeypatch: pytest.MonkeyPatch, answers: dict[tuple[str, ...], str | None]) -> None:
-    monkeypatch.setattr(immediate_baseline, "_git_text", lambda *args: answers.get(args))
+def _answers(monkeypatch: pytest.MonkeyPatch, answers: dict[tuple[str, ...], str | None]) -> list:
+    asked = []
+
+    def fake(*args: str, root=None) -> str | None:
+        asked.append(args)
+        return answers.get(args)
+
+    monkeypatch.setattr(immediate_baseline, "_git_text", fake)
+    return asked
 
 
-def test_nearest_remote_ancestor_beats_older_release(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_remote_refs_and_parent_are_never_consulted(monkeypatch: pytest.MonkeyPatch) -> None:
+    asked = _answers(monkeypatch, {
+        ("rev-parse", "--verify", "HEAD^{commit}"): HEAD,
+        ("show", "HEAD:CHANGELOG.md"): CHANGELOG,
+        ("rev-parse", "--verify", "--quiet", "refs/tags/v0.4.39^{commit}"): BASE,
+        ("merge-base", "--is-ancestor", BASE, HEAD): "",
+        ("rev-parse", "--verify", "origin/main^{commit}"): REMOTE,
+        ("for-each-ref", "--format=%(objectname)", "refs/remotes"): REMOTE,
+        ("rev-parse", "--verify", "HEAD^1^{commit}"): OLDER,
+    })
+    assert immediate_baseline._immediate_base_release() == BASE
+    assert not any("origin/main" in " ".join(a) or "refs/remotes" in a or "HEAD^1^{commit}" in a
+                   for a in asked)
+
+
+def test_untagged_release_found_by_subject_in_head_history(monkeypatch: pytest.MonkeyPatch) -> None:
     _answers(monkeypatch, {
         ("rev-parse", "--verify", "HEAD^{commit}"): HEAD,
-        ("for-each-ref", "--format=%(objectname)", "refs/remotes"):
-            "\n".join((HEAD, OLDER, BASE, UNRELATED, BASE)),
-        ("merge-base", HEAD, BASE): BASE,
-        ("merge-base", HEAD, OLDER): OLDER,
-        ("merge-base", HEAD, UNRELATED): OLDER,
-        ("rev-list", "--count", f"{BASE}..{HEAD}"): "3",
-        ("rev-list", "--count", f"{OLDER}..{HEAD}"): "20",
-        ("log", "--format=%H%x09%s", "HEAD"): f"{RELEASE}\tRelease 0.4.39",
+        ("show", "HEAD:CHANGELOG.md"): CHANGELOG,
+        ("log", "--topo-order", "--format=%H%x09%s", HEAD):
+            f"{HEAD}\twork\n{BASE}\tRelease 0.4.39\n{OLDER}\tRelease 0.4.38",
     })
     assert immediate_baseline._immediate_base_release() == BASE
 
 
-def test_release_fallback_remains_when_no_remote_ancestor(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_release_head_uses_previous_release(monkeypatch: pytest.MonkeyPatch) -> None:
     _answers(monkeypatch, {
         ("rev-parse", "--verify", "HEAD^{commit}"): HEAD,
-        ("for-each-ref", "--format=%(objectname)", "refs/remotes"): UNRELATED,
-        ("merge-base", HEAD, UNRELATED): OLDER,
-        ("log", "--format=%H%x09%s", "HEAD"): f"{HEAD}\twork\n{RELEASE}\tRelease 0.4.39",
+        ("show", "HEAD:CHANGELOG.md"): "## 0.4.39\n\n## 0.4.38\n",
+        ("log", "--topo-order", "--format=%H%x09%s", HEAD):
+            f"{HEAD}\tRelease 0.4.39\n{OLDER}\tRelease 0.4.38",
     })
-    assert immediate_baseline._immediate_base_release() == RELEASE
+    assert immediate_baseline._immediate_base_release() == OLDER
 
 
-def test_branch_only_clone_uses_parent_before_old_release(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_missing_pinned_release_skips(monkeypatch: pytest.MonkeyPatch) -> None:
     _answers(monkeypatch, {
         ("rev-parse", "--verify", "HEAD^{commit}"): HEAD,
-        ("for-each-ref", "--format=%(objectname)", "refs/remotes"): HEAD,
-        ("rev-parse", "--verify", "HEAD^1^{commit}"): BASE,
-        ("log", "--format=%H%x09%s", "HEAD"): f"{RELEASE}\tRelease 0.4.39",
+        ("show", "HEAD:CHANGELOG.md"): CHANGELOG,
+        ("log", "--topo-order", "--format=%H%x09%s", HEAD): f"{HEAD}\twork",
+        ("rev-parse", "--verify", "origin/main^{commit}"): REMOTE,
     })
-    assert immediate_baseline._immediate_base_release() == BASE
+    with pytest.raises(pytest.skip.Exception, match="0.4.39"):
+        immediate_baseline._immediate_base_release()
+
+
+def test_no_released_version_skips(monkeypatch: pytest.MonkeyPatch) -> None:
+    _answers(monkeypatch, {
+        ("rev-parse", "--verify", "HEAD^{commit}"): HEAD,
+        ("show", "HEAD:CHANGELOG.md"): "# Changelog\n\n## Unreleased\n",
+    })
+    with pytest.raises(pytest.skip.Exception, match="names no released version"):
+        immediate_baseline._immediate_base_release()
 
 
 def test_local_git_timeout_fails_instead_of_using_stale_release(
@@ -69,30 +96,3 @@ def test_local_git_timeout_fails_instead_of_using_stale_release(
     with pytest.raises(pytest.fail.Exception, match="local git baseline lookup timed out"):
         immediate_baseline._git_text("rev-parse", "HEAD")
     assert seen[0][1]["timeout"] == 120
-
-
-def test_origin_main_retains_priority(monkeypatch: pytest.MonkeyPatch) -> None:
-    _answers(monkeypatch, {
-        ("rev-parse", "--verify", "HEAD^{commit}"): HEAD,
-        ("rev-parse", "--verify", "origin/main^{commit}"): OLDER,
-        ("merge-base", "HEAD", "origin/main"): OLDER,
-        ("for-each-ref", "--format=%(objectname)", "refs/remotes"): BASE,
-        ("merge-base", HEAD, BASE): BASE,
-        ("rev-list", "--count", f"{BASE}..{HEAD}"): "1",
-    })
-    assert immediate_baseline._immediate_base_release() == OLDER
-
-
-def test_ambiguous_remote_ancestors_require_an_explicit_pin(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _answers(monkeypatch, {
-        ("rev-parse", "--verify", "HEAD^{commit}"): HEAD,
-        ("for-each-ref", "--format=%(objectname)", "refs/remotes"): f"{BASE}\n{OLDER}",
-        ("merge-base", HEAD, BASE): BASE,
-        ("merge-base", HEAD, OLDER): OLDER,
-        ("rev-list", "--count", f"{BASE}..{HEAD}"): "1",
-        ("rev-list", "--count", f"{OLDER}..{HEAD}"): "1",
-    })
-    with pytest.raises(pytest.fail.Exception, match="multiple equally close remote baselines"):
-        immediate_baseline._immediate_base_release()

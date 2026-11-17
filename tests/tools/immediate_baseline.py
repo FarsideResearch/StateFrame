@@ -14,16 +14,24 @@ from tools.sandbox_temp import timeout_scale
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-_RELEASE_SUBJECT = re.compile(
-    r"^(?:StateFrame .+: version and changelog|Release v?\d+(?:\.\d+)+|"
-    r"Merge pull request #\d+ from .*/release/v?\d+(?:\.\d+)+)$"
-)
+# The released versions, newest first, come from HEAD's own CHANGELOG.md: the in-tree
+# source of truth that names the last release. "## Unreleased" is not a release.
+_RELEASED_HEADING = re.compile(r"^## v?(\d+(?:\.\d+)+)(?:\s|$)", re.MULTILINE)
 
 
-def _git_text(*arguments: str) -> str | None:
+def _release_subject(version: str) -> re.Pattern[str]:
+    escaped = re.escape(version)
+    return re.compile(
+        rf"^(?:StateFrame v?{escaped}: version and changelog|Release v?{escaped}|"
+        rf"Merge pull request #\d+ from .*/release/v?{escaped})$"
+    )
+
+
+def _git_text(*arguments: str, root: Path | None = None) -> str | None:
+    repository = REPOSITORY_ROOT if root is None else root
     try:
         result = subprocess.run(
-            ["git", "-C", str(REPOSITORY_ROOT), *arguments],
+            ["git", "-C", str(repository), *arguments],
             capture_output=True,
             text=True,
             check=False,
@@ -36,54 +44,63 @@ def _git_text(*arguments: str) -> str | None:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
-def _nearest_remote_ancestor(head: str) -> str | None:
-    """Use the closest remote branch point when the usual origin/main is absent."""
-    refs = _git_text("for-each-ref", "--format=%(objectname)", "refs/remotes") or ""
-    candidates: list[tuple[int, str]] = []
-    for commit in set(refs.splitlines()):
-        if commit == head or not re.fullmatch(r"[0-9a-fA-F]{40}", commit):
-            continue
-        if _git_text("merge-base", head, commit) != commit:
-            continue
-        distance = _git_text("rev-list", "--count", f"{commit}..{head}")
-        if distance is not None and distance.isdecimal():
-            candidates.append((int(distance), commit))
-    if not candidates:
-        return None
-    candidates.sort()
-    if len(candidates) > 1 and candidates[0][0] == candidates[1][0]:
-        pytest.fail("multiple equally close remote baselines; set SF_TEST_BASELINE_IMMEDIATE")
-    return candidates[0][1]
+def _released_versions(root: Path | None) -> list[str]:
+    changelog = _git_text("show", "HEAD:CHANGELOG.md", root=root)
+    if changelog is None:
+        return []
+    return _RELEASED_HEADING.findall(changelog)
 
 
-def _immediate_base_release() -> str:
-    head = _git_text("rev-parse", "--verify", "HEAD^{commit}")
+def _release_commit(version: str, head: str, root: Path | None) -> str | None:
+    """Return release ``version``'s commit in HEAD's own history (inclusive), or None.
+
+    Tag ``v<version>`` wins when it lies in HEAD's history; a same-named tag elsewhere
+    (for example a published merge on another line) is not this tree's release. Without
+    such a tag, the release commit is found by its subject in HEAD's history, which is
+    the same in every non-shallow clone. Remote refs and parents are never consulted.
+    """
+    tagged = _git_text("rev-parse", "--verify", "--quiet", f"refs/tags/v{version}^{{commit}}", root=root)
+    if tagged and (tagged == head or _git_text("merge-base", "--is-ancestor", tagged, head, root=root) is not None):
+        return tagged
+    history = _git_text("log", "--topo-order", "--format=%H%x09%s", head, root=root)
+    subject = _release_subject(version)
+    for line in (history or "").splitlines():
+        commit, separator, text = line.partition("\t")
+        if separator and subject.fullmatch(text):
+            return commit
+    return None
+
+
+def _immediate_base_release(root: Path | None = None) -> str:
+    """Return the last release strictly before HEAD, as pinned by HEAD's CHANGELOG.md.
+
+    The result depends only on the commit, never on clone layout: no origin/main, no
+    nearest remote ref, no first parent. When HEAD is itself the newest release, the
+    base is the release before it, so parity never compares a tree with itself. An
+    unresolvable pinned release skips rather than falling back to another base.
+    """
+    head = _git_text("rev-parse", "--verify", "HEAD^{commit}", root=root)
     if head is None:
         pytest.skip("cannot derive the immediate base release because HEAD is unavailable")
-
-    if _git_text("rev-parse", "--verify", "origin/main^{commit}") is not None:
-        merge_base = _git_text("merge-base", "HEAD", "origin/main")
-        if merge_base is not None and merge_base != head:
-            return merge_base
-
-    remote_base = _nearest_remote_ancestor(head)
-    if remote_base is not None:
-        return remote_base
-
-    # A normal clone of a branch-only local repository retains only the checked-out
-    # branch's tip as a remote ref. Its first parent is the same immediate ancestor
-    # that the source repository's remote refs would select for a one-commit branch.
-    parent = _git_text("rev-parse", "--verify", "HEAD^1^{commit}")
-    if parent is not None and parent != head:
-        return parent
-
-    history = _git_text("log", "--format=%H%x09%s", "HEAD")
-    if history is not None:
-        for line in history.splitlines():
-            commit, separator, subject = line.partition("\t")
-            if separator and commit != head and _RELEASE_SUBJECT.fullmatch(subject):
-                return commit
-    pytest.skip("cannot find an ancestor release commit to use as the hook parity baseline")
+    versions = _released_versions(root)
+    if not versions:
+        pytest.skip("CHANGELOG.md at HEAD names no released version to use as the parity "
+                    "baseline; set SF_TEST_BASELINE_IMMEDIATE")
+    head_subject = _git_text("log", "-1", "--format=%s", head, root=root) or ""
+    for version in versions[:2]:
+        # HEAD is this version's release when it is the release commit itself or a release
+        # merge for it (whose tag may sit on the merged commit with the same tree).
+        if _release_subject(version).fullmatch(head_subject):
+            continue
+        commit = _release_commit(version, head, root)
+        if commit is None:
+            pytest.skip(f"pinned base release {version} (CHANGELOG.md at HEAD) has no tag "
+                        f"v{version} or release commit in this clone's history; set "
+                        "SF_TEST_BASELINE_IMMEDIATE")
+        if commit != head:
+            return commit
+    pytest.skip("HEAD is the only release named by CHANGELOG.md, so it has no earlier "
+                "release to use as the parity baseline; set SF_TEST_BASELINE_IMMEDIATE")
 
 
 @pytest.fixture(scope="module")
