@@ -382,6 +382,9 @@ _CAPACITY_SAFE_TAIL = frozenset(
     if classification == "SAFE_TAIL"
 )
 SAFE_TAIL = frozenset({
+    # Routing schema 2 audit records: the RouteDecision is re-derived per request on replay
+    # (cross-process replay is not read back), so these never carry resume authority.
+    "route_decision", "route_drift_pinned",
     "read_attempt", "read_result",  # audit only; never source/selection authority
     "read_capture_skipped", "read_capture_failed",  # audit only; delivery is unchanged
     # Edit protocol audit records: the request map is re-minted per send and the repair ledger

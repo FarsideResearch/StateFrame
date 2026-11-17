@@ -426,3 +426,11 @@ def test_schema_1_decision_leaves_runtime_selection_and_policy_untouched(monkeyp
     assert not hasattr(runtime, "selected_model")
     assert policy.model_name == "launch-a"  # legacy launch-served-wins
     assert meter.journal.named("route_drift_pinned") == []
+
+
+def test_routing_v2_journal_kinds_are_resume_safe_tail() -> None:
+    from stateframe.engine import kernel_continuation_restart as restart
+
+    for kind in ("route_decision", "route_drift_pinned"):
+        assert kind in restart.SAFE_TAIL
+        assert restart.resume_event_rejection_reason(kind) is None
