@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.21 (2026-11-16)
+
+- Tests: the release gate now checks its own integrity (the collected tests must match the expected set, with exact ids and failing pipelines caught) and runs 52 more request-identity parity tests as mandatory.
+
 ## 0.7.20 (2026-11-16)
 
 - Removed the read lockout. The engine never hides read, grep or shell from the model on its own. STATEFRAME_READ_LOCKOUT is retired: a host that still sets it gets a journal note instead of a refused run.

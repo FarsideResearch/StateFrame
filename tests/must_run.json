@@ -1450,6 +1450,889 @@
       "baseline": null,
       "witness_schema": "assertion_match",
       "witness_assertion": "assert len(script.requests) >= 6, output"
+    },
+    {
+      "scenario_id": "acceptance_test_resume_completion_test_e19_volatile_shell_observation_is_byte_identical_on_resume",
+      "nodeid": "tests/acceptance/test_resume_completion.py::test_e19_volatile_shell_observation_is_byte_identical_on_resume",
+      "item_nodeids": [
+        "tests/acceptance/test_resume_completion.py::test_e19_volatile_shell_observation_is_byte_identical_on_resume"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [
+        "host_sandbox"
+      ],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert actual[\"messages\"] == expected[\"messages\"]"
+    },
+    {
+      "scenario_id": "test_checkpoint_save_cost_test_sigkill_then_resume_is_byte_identical_to_no_kill_run",
+      "nodeid": "tests/test_checkpoint_save_cost.py::test_sigkill_then_resume_is_byte_identical_to_no_kill_run",
+      "item_nodeids": [
+        "tests/test_checkpoint_save_cost.py::test_sigkill_then_resume_is_byte_identical_to_no_kill_run[mid:3]",
+        "tests/test_checkpoint_save_cost.py::test_sigkill_then_resume_is_byte_identical_to_no_kill_run[mid:1]",
+        "tests/test_checkpoint_save_cost.py::test_sigkill_then_resume_is_byte_identical_to_no_kill_run[prepublish:4]",
+        "tests/test_checkpoint_save_cost.py::test_sigkill_then_resume_is_byte_identical_to_no_kill_run[between:2]",
+        "tests/test_checkpoint_save_cost.py::test_sigkill_then_resume_is_byte_identical_to_no_kill_run[between:5]"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert resumed.stdout.strip() == control_digest"
+    },
+    {
+      "scenario_id": "test_code_bookmarks_test_activation_boundary_and_kill_switch_are_byte_identical",
+      "nodeid": "tests/test_code_bookmarks.py::test_activation_boundary_and_kill_switch_are_byte_identical",
+      "item_nodeids": [
+        "tests/test_code_bookmarks.py::test_activation_boundary_and_kill_switch_are_byte_identical[False]",
+        "tests/test_code_bookmarks.py::test_activation_boundary_and_kill_switch_are_byte_identical[True]"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert collect(runtime, frame) == []"
+    },
+    {
+      "scenario_id": "test_edit_scope_compact_test_small_whole_repo_surface_is_byte_identical_to_71739465",
+      "nodeid": "tests/test_edit_scope_compact.py::test_small_whole_repo_surface_is_byte_identical_to_71739465",
+      "item_nodeids": [
+        "tests/test_edit_scope_compact.py::test_small_whole_repo_surface_is_byte_identical_to_71739465"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert parity.digest(result) == PARITY_DIGEST_50"
+    },
+    {
+      "scenario_id": "test_editready_authority_panels_test_off_is_byte_identical",
+      "nodeid": "tests/test_editready_authority_panels.py::test_off_is_byte_identical",
+      "item_nodeids": [
+        "tests/test_editready_authority_panels.py::test_off_is_byte_identical"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert json.dumps(out, sort_keys=True) == json.dumps(messages, sort_keys=True)"
+    },
+    {
+      "scenario_id": "test_enginecheck_adapter_test_same_scenario_twice_gives_byte_identical_requests",
+      "nodeid": "tests/test_enginecheck_adapter.py::test_same_scenario_twice_gives_byte_identical_requests",
+      "item_nodeids": [
+        "tests/test_enginecheck_adapter.py::test_same_scenario_twice_gives_byte_identical_requests"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert first.requests == second.requests"
+    },
+    {
+      "scenario_id": "test_f4_handoff_staleness_test_handoff_without_model_basis_is_byte_identical_to_v0_5_9",
+      "nodeid": "tests/test_f4_handoff_staleness.py::test_handoff_without_model_basis_is_byte_identical_to_v0_5_9",
+      "item_nodeids": [
+        "tests/test_f4_handoff_staleness.py::test_handoff_without_model_basis_is_byte_identical_to_v0_5_9"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert _handoff_text(slots, host, 'drops tokens', limits=(240, 300, 220, 220, 220)) == _V059_GOLDEN"
+    },
+    {
+      "scenario_id": "test_f4_state_marker_echo_test_middle_marker_stays_byte_identical_and_only_leading_marker_counts",
+      "nodeid": "tests/test_f4_state_marker_echo.py::test_middle_marker_stays_byte_identical_and_only_leading_marker_counts",
+      "item_nodeids": [
+        "tests/test_f4_state_marker_echo.py::test_middle_marker_stays_byte_identical_and_only_leading_marker_counts"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert sum((item['content'].startswith(STATE_HEADER) for item in messages)) == 1"
+    },
+    {
+      "scenario_id": "test_finish_on_green_receipt_json_test_gate_evidence_identity_is_byte_identical_for_json_native_rows",
+      "nodeid": "tests/test_finish_on_green_receipt_json.py::test_gate_evidence_identity_is_byte_identical_for_json_native_rows",
+      "item_nodeids": [
+        "tests/test_finish_on_green_receipt_json.py::test_gate_evidence_identity_is_byte_identical_for_json_native_rows"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert canonical_bytes(gate_evidence_identity(native)) == canonical_bytes(native)"
+    },
+    {
+      "scenario_id": "test_finish_on_green_receipt_json_test_gate_evidence_identity_keeps_json_native_mapping_keys_byte_identical",
+      "nodeid": "tests/test_finish_on_green_receipt_json.py::test_gate_evidence_identity_keeps_json_native_mapping_keys_byte_identical",
+      "item_nodeids": [
+        "tests/test_finish_on_green_receipt_json.py::test_gate_evidence_identity_keeps_json_native_mapping_keys_byte_identical"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert canonical_bytes(gate_evidence_identity(row)) == canonical_bytes(row)"
+    },
+    {
+      "scenario_id": "test_git_show_ancestry_test_ancestry_guard_rejects_even_present_nonancestor_objects",
+      "nodeid": "tests/test_git_show_ancestry.py::test_ancestry_guard_rejects_even_present_nonancestor_objects",
+      "item_nodeids": [
+        "tests/test_git_show_ancestry.py::test_ancestry_guard_rejects_even_present_nonancestor_objects[parent-False-git_show]",
+        "tests/test_git_show_ancestry.py::test_ancestry_guard_rejects_even_present_nonancestor_objects[parent-False-pinned_tree]",
+        "tests/test_git_show_ancestry.py::test_ancestry_guard_rejects_even_present_nonancestor_objects[parent-False-parity_helper]",
+        "tests/test_git_show_ancestry.py::test_ancestry_guard_rejects_even_present_nonancestor_objects[parent-False-parameter]",
+        "tests/test_git_show_ancestry.py::test_ancestry_guard_rejects_even_present_nonancestor_objects[sibling-True-git_show]",
+        "tests/test_git_show_ancestry.py::test_ancestry_guard_rejects_even_present_nonancestor_objects[sibling-True-pinned_tree]",
+        "tests/test_git_show_ancestry.py::test_ancestry_guard_rejects_even_present_nonancestor_objects[sibling-True-parity_helper]",
+        "tests/test_git_show_ancestry.py::test_ancestry_guard_rejects_even_present_nonancestor_objects[sibling-True-parameter]",
+        "tests/test_git_show_ancestry.py::test_ancestry_guard_rejects_even_present_nonancestor_objects[missing-True-git_show]",
+        "tests/test_git_show_ancestry.py::test_ancestry_guard_rejects_even_present_nonancestor_objects[missing-True-pinned_tree]",
+        "tests/test_git_show_ancestry.py::test_ancestry_guard_rejects_even_present_nonancestor_objects[missing-True-parity_helper]",
+        "tests/test_git_show_ancestry.py::test_ancestry_guard_rejects_even_present_nonancestor_objects[missing-True-parameter]",
+        "tests/test_git_show_ancestry.py::test_ancestry_guard_rejects_even_present_nonancestor_objects[malformed-True-git_show]",
+        "tests/test_git_show_ancestry.py::test_ancestry_guard_rejects_even_present_nonancestor_objects[malformed-True-pinned_tree]",
+        "tests/test_git_show_ancestry.py::test_ancestry_guard_rejects_even_present_nonancestor_objects[malformed-True-parity_helper]",
+        "tests/test_git_show_ancestry.py::test_ancestry_guard_rejects_even_present_nonancestor_objects[malformed-True-parameter]"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert references"
+    },
+    {
+      "scenario_id": "test_git_show_ancestry_test_literal_parity_reference_discovery",
+      "nodeid": "tests/test_git_show_ancestry.py::test_literal_parity_reference_discovery",
+      "item_nodeids": [
+        "tests/test_git_show_ancestry.py::test_literal_parity_reference_discovery[pinned_tree(\"abc1234\", factory)-expected0]",
+        "tests/test_git_show_ancestry.py::test_literal_parity_reference_discovery[pinned_tree(commit=\"abc1234\", tmp_path_factory=factory)-expected1]",
+        "tests/test_git_show_ancestry.py::test_literal_parity_reference_discovery[test_off_provider_bytes_match_cutover_base(tmp, factory, \"abc1234\")-expected2]",
+        "tests/test_git_show_ancestry.py::test_literal_parity_reference_discovery[test_off_provider_bytes_match_cutover_base(tmp, factory, reference=\"abc1234\")-expected3]",
+        "tests/test_git_show_ancestry.py::test_literal_parity_reference_discovery[@pytest.mark.parametrize(\"reference\", [\"abc1234\", pytest.param(\"def5678\", id=\"base\")])\\ndef test_parity(reference): pass-expected4]",
+        "tests/test_git_show_ancestry.py::test_literal_parity_reference_discovery[pinned_tree(\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", factory)-expected5]",
+        "tests/test_git_show_ancestry.py::test_literal_parity_reference_discovery[pinned_tree(reference, factory)-expected6]",
+        "tests/test_git_show_ancestry.py::test_literal_parity_reference_discovery[# pinned_tree(\"abc1234\", factory)\\nvalue = \"def5678\"-expected7]"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert literal_parity_references(source) == expected"
+    },
+    {
+      "scenario_id": "test_history_digest_ids_test_ids_on_or_unset_keeps_the_legacy_digest_byte_identical",
+      "nodeid": "tests/test_history_digest_ids.py::test_ids_on_or_unset_keeps_the_legacy_digest_byte_identical",
+      "item_nodeids": [
+        "tests/test_history_digest_ids.py::test_ids_on_or_unset_keeps_the_legacy_digest_byte_identical[environ0]",
+        "tests/test_history_digest_ids.py::test_ids_on_or_unset_keeps_the_legacy_digest_byte_identical[environ1]"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert json.dumps(attached, sort_keys=True) == json.dumps(recorded, sort_keys=True)"
+    },
+    {
+      "scenario_id": "test_hook_diet_parity_test_no_hooks_diet_breakdown_keeps_021_sections_and_allowlist",
+      "nodeid": "tests/test_hook_diet_parity.py::test_no_hooks_diet_breakdown_keeps_021_sections_and_allowlist",
+      "item_nodeids": [
+        "tests/test_hook_diet_parity.py::test_no_hooks_diet_breakdown_keeps_021_sections_and_allowlist"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert 'user_hooks' not in result['allowlist']"
+    },
+    {
+      "scenario_id": "test_hook_diet_parity_test_wired_diet_admits_typed_hook_panel",
+      "nodeid": "tests/test_hook_diet_parity.py::test_wired_diet_admits_typed_hook_panel",
+      "item_nodeids": [
+        "tests/test_hook_diet_parity.py::test_wired_diet_admits_typed_hook_panel"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert result['sections']['user_hooks']['messages'] == 1"
+    },
+    {
+      "scenario_id": "test_hook_wiring_parity_test_journal_kind_parity_rejects_unexpected_extra_kind",
+      "nodeid": "tests/test_hook_wiring_parity.py::test_journal_kind_parity_rejects_unexpected_extra_kind",
+      "item_nodeids": [
+        "tests/test_hook_wiring_parity.py::test_journal_kind_parity_rejects_unexpected_extra_kind"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [
+        "host_sandbox"
+      ],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert trimmed == baseline_kinds"
+    },
+    {
+      "scenario_id": "test_hook_wiring_parity_test_release_diet_counts_allow_only_verified_schema_effects",
+      "nodeid": "tests/test_hook_wiring_parity.py::test_release_diet_counts_allow_only_verified_schema_effects",
+      "item_nodeids": [
+        "tests/test_hook_wiring_parity.py::test_release_diet_counts_allow_only_verified_schema_effects"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [
+        "host_sandbox"
+      ],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert len(baseline_payloads) == len(current_payloads)"
+    },
+    {
+      "scenario_id": "test_hook_wiring_parity_test_spec_key_parity_rejects_unexpected_extra_key",
+      "nodeid": "tests/test_hook_wiring_parity.py::test_spec_key_parity_rejects_unexpected_extra_key",
+      "item_nodeids": [
+        "tests/test_hook_wiring_parity.py::test_spec_key_parity_rejects_unexpected_extra_key"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [
+        "host_sandbox"
+      ],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert current_keys == expected"
+    },
+    {
+      "scenario_id": "test_journal_replay_publication_test_parity_control_skipped_live_handoff_fails",
+      "nodeid": "tests/test_journal_replay_publication.py::test_parity_control_skipped_live_handoff_fails",
+      "item_nodeids": [
+        "tests/test_journal_replay_publication.py::test_parity_control_skipped_live_handoff_fails"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert skipped[\"sequence\"] + 1 == third[\"sequence\"]"
+    },
+    {
+      "scenario_id": "test_llama_wire_seal_parity_test_bundled_llama_wire_matches_normalization_input_and_its_seal",
+      "nodeid": "tests/test_llama_wire_seal_parity.py::test_bundled_llama_wire_matches_normalization_input_and_its_seal",
+      "item_nodeids": [
+        "tests/test_llama_wire_seal_parity.py::test_bundled_llama_wire_matches_normalization_input_and_its_seal[discount_bug-Fix the pricing code so the tests pass.]",
+        "tests/test_llama_wire_seal_parity.py::test_bundled_llama_wire_matches_normalization_input_and_its_seal[tiny_site-Build the small static shop site described in the README.]",
+        "tests/test_llama_wire_seal_parity.py::test_bundled_llama_wire_matches_normalization_input_and_its_seal[brief_to_report-Write the report the brief asks for.]"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [
+        "host_sandbox"
+      ],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert wires == inputs"
+    },
+    {
+      "scenario_id": "test_llama_wire_seal_parity_test_ready_seals_require_a_wire_hash_and_ready_status",
+      "nodeid": "tests/test_llama_wire_seal_parity.py::test_ready_seals_require_a_wire_hash_and_ready_status",
+      "item_nodeids": [
+        "tests/test_llama_wire_seal_parity.py::test_ready_seals_require_a_wire_hash_and_ready_status"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert _ready_seal_hashes(rows) == {digest}"
+    },
+    {
+      "scenario_id": "test_llama_wire_seal_parity_test_scripted_path_excludes_ambient_temporary_interpreters",
+      "nodeid": "tests/test_llama_wire_seal_parity.py::test_scripted_path_excludes_ambient_temporary_interpreters",
+      "item_nodeids": [
+        "tests/test_llama_wire_seal_parity.py::test_scripted_path_excludes_ambient_temporary_interpreters"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert environment[PROVIDER_OVERRIDE_ENV] == LLAMA_CPP"
+    },
+    {
+      "scenario_id": "test_llama_wire_seal_parity_test_wire_guard_accepts_unchanged_sealed_request",
+      "nodeid": "tests/test_llama_wire_seal_parity.py::test_wire_guard_accepts_unchanged_sealed_request",
+      "item_nodeids": [
+        "tests/test_llama_wire_seal_parity.py::test_wire_guard_accepts_unchanged_sealed_request"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert wires == inputs"
+    },
+    {
+      "scenario_id": "test_mutate_parity_test_ambient_level_reaches_run_spec_not_just_tool_menu",
+      "nodeid": "tests/test_mutate_parity.py::test_ambient_level_reaches_run_spec_not_just_tool_menu",
+      "item_nodeids": [
+        "tests/test_mutate_parity.py::test_ambient_level_reaches_run_spec_not_just_tool_menu"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [
+        "host_sandbox"
+      ],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert spec['environment']['STATEFRAME_MUTATIONS'] == 'authored'"
+    },
+    {
+      "scenario_id": "test_mutate_parity_test_default_level_is_off_and_omits_spec_key",
+      "nodeid": "tests/test_mutate_parity.py::test_default_level_is_off_and_omits_spec_key",
+      "item_nodeids": [
+        "tests/test_mutate_parity.py::test_default_level_is_off_and_omits_spec_key"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert {name for name in sys.modules if name.startswith('kernel_mutate')} == before"
+    },
+    {
+      "scenario_id": "test_mutate_parity_test_explicit_off_overrides_ambient_and_profile",
+      "nodeid": "tests/test_mutate_parity.py::test_explicit_off_overrides_ambient_and_profile",
+      "item_nodeids": [
+        "tests/test_mutate_parity.py::test_explicit_off_overrides_ambient_and_profile"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert 'STATEFRAME_MUTATIONS' not in runner.profiles.load('r2hc3')"
+    },
+    {
+      "scenario_id": "test_mutate_parity_test_opt_in_switch_accepts_only_literal_levels",
+      "nodeid": "tests/test_mutate_parity.py::test_opt_in_switch_accepts_only_literal_levels",
+      "item_nodeids": [
+        "tests/test_mutate_parity.py::test_opt_in_switch_accepts_only_literal_levels"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert runner.resolve_opt_in_switches()['STATEFRAME_MUTATIONS'] == 'prebuilt'"
+    },
+    {
+      "scenario_id": "test_no_mcp_release_comparison_test_nested_sandbox_refusal_is_infrastructure_not_parity",
+      "nodeid": "tests/test_no_mcp_release_comparison.py::test_nested_sandbox_refusal_is_infrastructure_not_parity",
+      "item_nodeids": [
+        "tests/test_no_mcp_release_comparison.py::test_nested_sandbox_refusal_is_infrastructure_not_parity"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert not _nested_sandbox_refusal(b'request byte mismatch')"
+    },
+    {
+      "scenario_id": "test_offmode_compatibility_test_parity_command_compares_raw_bytes_and_exercises_resume",
+      "nodeid": "tests/test_offmode_compatibility.py::test_parity_command_compares_raw_bytes_and_exercises_resume",
+      "item_nodeids": [
+        "tests/test_offmode_compatibility.py::test_parity_command_compares_raw_bytes_and_exercises_resume[{\"a\":1,\"b\":2}-0]",
+        "tests/test_offmode_compatibility.py::test_parity_command_compares_raw_bytes_and_exercises_resume[{\"b\":2,\"a\":1}-1]"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert calls == [(tree, example, resume) for example, resume in [(name, False) for name in parity.EXAMPLES] + [('discount_bug', True)] for tree in (baseline, candidate)]"
+    },
+    {
+      "scenario_id": "test_parallel_shell_parity_test_off_mode_shell_directory_is_not_tracked_as_created_file",
+      "nodeid": "tests/test_parallel_shell_parity.py::test_off_mode_shell_directory_is_not_tracked_as_created_file",
+      "item_nodeids": [
+        "tests/test_parallel_shell_parity.py::test_off_mode_shell_directory_is_not_tracked_as_created_file"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert receipts[0][1]['effects'] == ({'path': 'new-directory', 'change': 'created'}, {'path': 'new-file.py', 'change': 'created'})"
+    },
+    {
+      "scenario_id": "test_parallel_worker_prep_test_engine_venv_installs_bypass_shared_pip_cache",
+      "nodeid": "tests/test_parallel_worker_prep.py::test_engine_venv_installs_bypass_shared_pip_cache",
+      "item_nodeids": [
+        "tests/test_parallel_worker_prep.py::test_engine_venv_installs_bypass_shared_pip_cache[parallel-e2e]",
+        "tests/test_parallel_worker_prep.py::test_engine_venv_installs_bypass_shared_pip_cache[release-parity]"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert len(installs) == 2"
+    },
+    {
+      "scenario_id": "test_parallel_worker_prep_test_release_parity_checks_wire_before_summary",
+      "nodeid": "tests/test_parallel_worker_prep.py::test_release_parity_checks_wire_before_summary",
+      "item_nodeids": [
+        "tests/test_parallel_worker_prep.py::test_release_parity_checks_wire_before_summary"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert source.index('_assert_wire_parity(') < source.index('old_summary_a =')"
+    },
+    {
+      "scenario_id": "test_parallel_worker_prep_test_wire_parity_reports_first_send_byte_and_component",
+      "nodeid": "tests/test_parallel_worker_prep.py::test_wire_parity_reports_first_send_byte_and_component",
+      "item_nodeids": [
+        "tests/test_parallel_worker_prep.py::test_wire_parity_reports_first_send_byte_and_component[content-messages[0].content]",
+        "tests/test_parallel_worker_prep.py::test_wire_parity_reports_first_send_byte_and_component[description-tools[0].function.description]"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert f'byte {offset}' in message"
+    },
+    {
+      "scenario_id": "test_powerups_parity_test_feature_off_raw_request_parity",
+      "nodeid": "tests/test_powerups_parity.py::test_feature_off_raw_request_parity",
+      "item_nodeids": [
+        "tests/test_powerups_parity.py::test_feature_off_raw_request_parity"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [
+        "host_sandbox"
+      ],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert ordinary[1] == disabled[1]"
+    },
+    {
+      "scenario_id": "test_provider_body_test_shipped_profile_llama_body_is_byte_identical_to_unmodified_parent_code",
+      "nodeid": "tests/test_provider_body.py::test_shipped_profile_llama_body_is_byte_identical_to_unmodified_parent_code",
+      "item_nodeids": [
+        "tests/test_provider_body.py::test_shipped_profile_llama_body_is_byte_identical_to_unmodified_parent_code"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert json.dumps(llama_body).encode('utf-8') == json.dumps(baseline_body).encode('utf-8')"
+    },
+    {
+      "scenario_id": "test_read_receipts_admission_test_off_is_byte_identical_and_emits_nothing",
+      "nodeid": "tests/test_read_receipts_admission.py::test_off_is_byte_identical_and_emits_nothing",
+      "item_nodeids": [
+        "tests/test_read_receipts_admission.py::test_off_is_byte_identical_and_emits_nothing"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert not [e for e in rt.journal.events if e['kind'] == 'read_admission']"
+    },
+    {
+      "scenario_id": "test_shell_e2e_test_kill_resume_serves_byte_identical_next_request",
+      "nodeid": "tests/test_shell_e2e.py::test_kill_resume_serves_byte_identical_next_request",
+      "item_nodeids": [
+        "tests/test_shell_e2e.py::test_kill_resume_serves_byte_identical_next_request"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [
+        "host_sandbox"
+      ],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert rebuilt[name] == body"
+    },
+    {
+      "scenario_id": "test_stable_wire_tail_test_relayout_keeps_windows_before_the_first_changed_one_byte_identical",
+      "nodeid": "tests/test_stable_wire_tail.py::test_relayout_keeps_windows_before_the_first_changed_one_byte_identical",
+      "item_nodeids": [
+        "tests/test_stable_wire_tail.py::test_relayout_keeps_windows_before_the_first_changed_one_byte_identical[rerender]",
+        "tests/test_stable_wire_tail.py::test_relayout_keeps_windows_before_the_first_changed_one_byte_identical[headroom]"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert reasons == [trigger]"
+    },
+    {
+      "scenario_id": "test_timing_sweep_parity_test_host_span_bounded_buffers_keep_oldest_to_newest_order",
+      "nodeid": "tests/test_timing_sweep_parity.py::test_host_span_bounded_buffers_keep_oldest_to_newest_order",
+      "item_nodeids": [
+        "tests/test_timing_sweep_parity.py::test_host_span_bounded_buffers_keep_oldest_to_newest_order"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert [row['name'] for row in recorder.trace_snapshot()] == ['third', 'fourth']"
+    },
+    {
+      "scenario_id": "test_timing_sweep_parity_test_host_span_finish_preserves_stack_and_trace",
+      "nodeid": "tests/test_timing_sweep_parity.py::test_host_span_finish_preserves_stack_and_trace",
+      "item_nodeids": [
+        "tests/test_timing_sweep_parity.py::test_host_span_finish_preserves_stack_and_trace"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert [row['elapsed_ns'] for row in recorder.trace_snapshot()] == [20, 30]"
+    },
+    {
+      "scenario_id": "test_timing_sweep_parity_test_host_span_serialization_has_exact_fields_and_order",
+      "nodeid": "tests/test_timing_sweep_parity.py::test_host_span_serialization_has_exact_fields_and_order",
+      "item_nodeids": [
+        "tests/test_timing_sweep_parity.py::test_host_span_serialization_has_exact_fields_and_order"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert json.dumps(span.to_dict(), separators=(',', ':')) == '{\"name\":\"sample\",\"started_ns\":10,\"ended_ns\":17,\"elapsed_ns\":7,\"boundary\":\"request_preparation\",\"sequence\":4,\"action_id\":\"action\",\"attributes\":{\"z\":\"last\",\"a\":\"first\"},\"parent_span\":\"root\",\"cpu_ns\":6,\"cache_hits\":1,\"cache_misses\":2,\"bytes_scanned\":3,\"records_folded\":4,\"files_read\":5,\"fsyncs\":6}'"
+    },
+    {
+      "scenario_id": "test_timing_sweep_parity_test_host_span_serialization_uses_elapsed_property",
+      "nodeid": "tests/test_timing_sweep_parity.py::test_host_span_serialization_uses_elapsed_property",
+      "item_nodeids": [
+        "tests/test_timing_sweep_parity.py::test_host_span_serialization_uses_elapsed_property"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert span.to_dict()['elapsed_ns'] == 99"
+    },
+    {
+      "scenario_id": "test_timing_sweep_parity_test_timing_5000_overlapping_spans_finishes_under_50_ms",
+      "nodeid": "tests/test_timing_sweep_parity.py::test_timing_5000_overlapping_spans_finishes_under_50_ms",
+      "item_nodeids": [
+        "tests/test_timing_sweep_parity.py::test_timing_5000_overlapping_spans_finishes_under_50_ms"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert actual['step_breakdown_ns'] == expected_breakdown"
+    },
+    {
+      "scenario_id": "test_timing_sweep_parity_test_timing_sweep_matches_interval_scan_and_all_fields",
+      "nodeid": "tests/test_timing_sweep_parity.py::test_timing_sweep_matches_interval_scan_and_all_fields",
+      "item_nodeids": [
+        "tests/test_timing_sweep_parity.py::test_timing_sweep_matches_interval_scan_and_all_fields"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert json.dumps(actual) == json.dumps(expected)"
+    },
+    {
+      "scenario_id": "test_timing_sweep_parity_test_timing_zero_gap_and_disabled",
+      "nodeid": "tests/test_timing_sweep_parity.py::test_timing_zero_gap_and_disabled",
+      "item_nodeids": [
+        "tests/test_timing_sweep_parity.py::test_timing_zero_gap_and_disabled"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert actual['step_breakdown_ns'] == {}"
+    },
+    {
+      "scenario_id": "test_unit_coalesce_test_off_byte_parity",
+      "nodeid": "tests/test_unit_coalesce.py::test_off_byte_parity",
+      "item_nodeids": [
+        "tests/test_unit_coalesce.py::test_off_byte_parity"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert unset.unit_plan.plan_digest == off.unit_plan.plan_digest"
+    },
+    {
+      "scenario_id": "test_unit_coalesce_test_parity_base_is_parent_of_feature_addition",
+      "nodeid": "tests/test_unit_coalesce.py::test_parity_base_is_parent_of_feature_addition",
+      "item_nodeids": [
+        "tests/test_unit_coalesce.py::test_parity_base_is_parent_of_feature_addition"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert calls == [['git', 'log', '--diff-filter=A', '--format=%H', '-1', '--', 'src/stateframe/engine/unit_coalesce.py'], ['git', 'rev-parse', '--verify', added + '^']]"
+    },
+    {
+      "scenario_id": "test_unit_coalesce_test_r2_n8_parity_and_contract_pins_are_identified",
+      "nodeid": "tests/test_unit_coalesce.py::test_r2_n8_parity_and_contract_pins_are_identified",
+      "item_nodeids": [
+        "tests/test_unit_coalesce.py::test_r2_n8_parity_and_contract_pins_are_identified"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert 'parity pin' in (test_review_11_off_matches_baseline_recorded_request.__doc__ or '')"
+    },
+    {
+      "scenario_id": "test_unit_planner_v2_test_switch_off_is_byte_identical_to_v059_planner",
+      "nodeid": "tests/test_unit_planner_v2.py::test_switch_off_is_byte_identical_to_v059_planner",
+      "item_nodeids": [
+        "tests/test_unit_planner_v2.py::test_switch_off_is_byte_identical_to_v059_planner[False-sha256:61e7d39e826af02cbf7538fec1e78462dff90598790e229e7857814dd9e2a9e5-8a0c367becbb11333fc2e739a86110d2c3927fa5fe583352f2bb46e2473e82ac]",
+        "tests/test_unit_planner_v2.py::test_switch_off_is_byte_identical_to_v059_planner[True-sha256:9b69a57efe8eb515474414d23757c0383e9e2688aef83a1baca4050adc875847-24dfb3237af7eb13e41df508d4b5d321838a31ac68f03fca5ae6167fa1b3b683]"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert hashlib.sha256(text.encode()).hexdigest() == text_sha"
+    },
+    {
+      "scenario_id": "test_view_ladder_integration_test_frozen_selection_re_renders_byte_identically_across_requests",
+      "nodeid": "tests/test_view_ladder_integration.py::test_frozen_selection_re_renders_byte_identically_across_requests",
+      "item_nodeids": [
+        "tests/test_view_ladder_integration.py::test_frozen_selection_re_renders_byte_identically_across_requests"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert render_a.text.encode() == render_b.text.encode()"
+    },
+    {
+      "scenario_id": "test_working_set_off_parity_base_test_off_parity_direct_callers_share_trace_results",
+      "nodeid": "tests/test_working_set_off_parity_base.py::test_off_parity_direct_callers_share_trace_results",
+      "item_nodeids": [
+        "tests/test_working_set_off_parity_base.py::test_off_parity_direct_callers_share_trace_results"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert calls == [reference, current]"
+    },
+    {
+      "scenario_id": "test_unit_coalesce_test_parity_sha_guard_accepts_runtime_parent_and_golden_bytes",
+      "nodeid": "tests/test_unit_coalesce.py::test_parity_sha_guard_accepts_runtime_parent_and_golden_bytes",
+      "item_nodeids": [
+        "tests/test_unit_coalesce.py::test_parity_sha_guard_accepts_runtime_parent_and_golden_bytes"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert not pinned_show.findall(source)"
     }
   ],
   "optional_dependencies": [
