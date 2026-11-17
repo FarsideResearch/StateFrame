@@ -259,9 +259,56 @@ _TASK_METADATA_LABEL = re.compile(r"(?<![A-Za-z0-9_])(?:#{1,6}\s*)?(Title|Sympto
 
 
 def _task_metadata_label(text: str) -> str | None:
-    """Return labels that describe a task instead of stating a verifiable requirement."""
+    """Return labels that describe a task instead of stating a verifiable requirement.
+
+    A ``Focus:`` line that carries words after the label states work, so it is
+    classified like any other clause instead of being kept as advisory text.
+    """
     match = _TASK_METADATA_LABEL.search(text)
-    return match.group(1).lower() if match else None
+    if match is None:
+        return None
+    label = match.group(1).lower()
+    if label == "focus" and any(ch.isalpha() for ch in text[match.end():]):
+        return None
+    return label
+
+
+def _has_text_content(clause: str) -> bool:
+    """True when a span has any letter or digit (pure punctuation is never work)."""
+    return any(ch.isalnum() for ch in clause)
+
+
+def _append_unresolved(requirements: list[dict[str, Any]], coverage: list[dict[str, Any]], *,
+                       span_id: str, clause: str, source_row: Mapping[str, Any],
+                       current_revision: object, ticket_digest: str,
+                       assessment_reason: str, coverage_reason: str) -> None:
+    """Record a span as an unresolved requirement the host must adjudicate.
+
+    Unresolved work never blocks completion (policy unknown_blocks_completion is
+    False); it only keeps the instruction visible instead of silently dropping it.
+    """
+    req_id = f"R{len(requirements) + 1}"
+    unresolved = _unresolved_contract(span_id, clause)
+    scenario_provenance, oracle_provenance = _scenario_oracle_provenance(
+        source_row, span_id, clause, unresolved
+    )
+    requirements.append({
+        "id": req_id, "version": 1, "kind": "unresolved",
+        "source_span_ids": [span_id], "exact_clause": clause,
+        "contract": unresolved, "check_refs": [],
+        "scenario_provenance": scenario_provenance,
+        "oracle_provenance": oracle_provenance,
+        "assessment": {
+            "status": "open", "at_revision": _revision(current_revision, f"sha256:{ticket_digest}"),
+            "reason": assessment_reason, "basis": "none", "policy_ref": None,
+            "evidence_ids": [], "scope": clause,
+            "limitations": ["No supported template matched; host must not guess."],
+        },
+        "supersedes": None,
+    })
+    coverage.append({"span_id": span_id, "disposition": "unresolved",
+                     "requirement_refs": [{"id": req_id, "version": 1}],
+                     "reason": coverage_reason})
 
 
 def _logical_clause(value: str) -> str:
@@ -812,34 +859,30 @@ def build_ledger(ticket_source_id: str | Mapping[str, Any], ticket_text: str | N
                               "requirement_refs": [{"id": req_id, "version": 1}],
                               "reason": f"Matched deterministic template {_template}; semantic status={semantic.get('status')}."})
         elif _is_normative(clause):
-            req_id = f"R{len(requirements) + 1}"
-            unresolved = _unresolved_contract(span_id, clause)
-            scenario_provenance, oracle_provenance = _scenario_oracle_provenance(
-                source_rows[0], span_id, clause, unresolved
+            _append_unresolved(
+                requirements, coverage, span_id=span_id, clause=clause, source_row=source_rows[0],
+                current_revision=current_revision, ticket_digest=ticket_digest,
+                assessment_reason="unresolved public ticket interpretation",
+                coverage_reason="Normative language was found but no supported template matched.",
             )
-            requirements.append({
-                "id": req_id, "version": 1, "kind": "unresolved",
-                "source_span_ids": [span_id], "exact_clause": clause,
-                "contract": unresolved, "check_refs": [],
-                "scenario_provenance": scenario_provenance,
-                "oracle_provenance": oracle_provenance,
-                "assessment": {
-                    "status": "open", "at_revision": _revision(current_revision, f"sha256:{ticket_digest}"),
-                    "reason": "unresolved public ticket interpretation", "basis": "none", "policy_ref": None,
-                    "evidence_ids": [], "scope": clause,
-                    "limitations": ["No supported template matched; host must not guess."],
-                },
-                "supersedes": None,
-            })
-            coverage.append({"span_id": span_id, "disposition": "unresolved",
-                              "requirement_refs": [{"id": req_id, "version": 1}],
-                              "reason": "Normative language was found but no supported template matched."})
         elif _is_explicit_context_only(clause):
             coverage.append({"span_id": span_id, "disposition": "non_normative",
                               "requirement_refs": [], "reason": "Explicitly marked as implementation/context prose."})
-        else:
+        elif not _has_text_content(clause):
             coverage.append({"span_id": span_id, "disposition": "context_only",
                               "requirement_refs": [], "reason": "No normative trigger was found."})
+        else:
+            # Plain requested work (e.g. "Sort results by timestamp.") has no
+            # template or trigger word.  Keep it visible as host-owned work.
+            _append_unresolved(
+                requirements, coverage, span_id=span_id, clause=clause, source_row=source_rows[0],
+                current_revision=current_revision, ticket_digest=ticket_digest,
+                assessment_reason="unclassified public ticket span",
+                coverage_reason=(
+                    "Unclassified instruction span: no template or normative trigger matched; "
+                    "kept as unresolved work for host adjudication (owner: host)."
+                ),
+            )
 
     # The unresolved binding's support span is repaired after the first actual
     # span exists; an empty ticket was rejected above.
@@ -1263,8 +1306,43 @@ def reopen_dirty_requirements(
 
 
 def coverage_complete(ledger: Mapping[str, Any]) -> bool:
+    """True only when schema validation passes AND every span is really covered.
+
+    Checks: each span has exactly one coverage row; mapped/unresolved rows name
+    at least one existing requirement; each requirement's source spans exist.
+    Pure function: any malformed input returns False rather than raising.
+    """
     try:
         validate_ledger(ledger)
+        spans = ledger["spans"]
+        span_ids = [str(row["id"]) for row in spans]
+        span_id_set = set(span_ids)
+        requirements = ledger["requirements"]
+        requirement_ids = {str(row["id"]) for row in requirements}
+        coverage_rows = ledger["coverage_dispositions"]
+
+        rows_per_span: dict[str, int] = {}
+        for row in coverage_rows:
+            key = str(row["span_id"])
+            rows_per_span[key] = rows_per_span.get(key, 0) + 1
+        if any(rows_per_span.get(sid, 0) != 1 for sid in span_ids):
+            return False
+        if any(key not in span_id_set for key in rows_per_span):
+            return False
+
+        for row in coverage_rows:
+            if row.get("disposition") not in {"mapped", "unresolved"}:
+                continue
+            refs = row.get("requirement_refs") or []
+            if not refs:
+                return False
+            if any(str(ref.get("id")) not in requirement_ids for ref in refs):
+                return False
+
+        for req in requirements:
+            sources = req.get("source_span_ids") or []
+            if any(str(sid) not in span_id_set for sid in sources):
+                return False
     except Exception:  # schema validators use their own ValidationError type
         return False
     return True

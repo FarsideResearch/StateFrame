@@ -37,6 +37,9 @@
 ## 0.7.23 (2026-11-17)
 
 - Security: test-selector arguments could be parsed as options; now separated with --
+## Unreleased
+
+- Requirements ledger: plain requested work such as "Sort results by timestamp." or "Focus: Reject stale lease tokens" is kept as unresolved host work instead of being dropped as context, and coverage_complete now checks that every span has one coverage row and that requirement refs and source spans exist. Unresolved work still never blocks completion. Tests: `tests/test_requirements_ledger_imperative_spans.py`.
 
 ## 0.7.22 (2026-11-16)
 
