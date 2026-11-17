@@ -41,6 +41,7 @@
 
 - Requirements ledger: plain requested work such as "Sort results by timestamp." or "Focus: Reject stale lease tokens" is kept as unresolved host work instead of being dropped as context, and coverage_complete now checks that every span has one coverage row and that requirement refs and source spans exist. Unresolved work still never blocks completion. Tests: `tests/test_requirements_ledger_imperative_spans.py`.
 - Obligation seeds keep every requirement clause whole and no longer stop at 256 items. Only displayed text is bounded now, and the work-record render says how many open obligation steps are hidden.
+- Subframes: a requirement with no refs that the child did not list by id now reaches every child with source `global` instead of being silently dropped, so unbound requirements stay owned; ref-bound clauses still reach only the children whose paths or symbols they name. Tests: `tests/test_parallel_projection.py`.
 
 ## 0.7.22 (2026-11-16)
 

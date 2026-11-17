@@ -4,11 +4,13 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from kernel_parallel_admission import DirectorySnapshot, admit
 from kernel_parallel_contracts import canonical_signature
 from kernel_parallel_projection import project_unit, render_unit_task
 from kernel_parallel_records import (CheckRecipe, ConsumeSpec, ExportSpec, ParallelLimits,
-                                     ParallelRequest, RequirementClause, UnitContract, UnitSpec)
+                                     ParallelRecordError, ParallelRequest, RequirementClause, UnitContract, UnitSpec)
 
 
 def fixture(tmp_path):
@@ -105,3 +107,47 @@ def test_digest_matches_fresh_process(tmp_path):
     result = subprocess.run([sys.executable, '-I', str(script)], text=True, capture_output=True)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == spec.digest()
+
+
+def test_global_clause_without_refs_reaches_every_unit(tmp_path):
+    snapshot, req, admission = fixture(tmp_path)
+    clauses = (RequirementClause('R2', 'planner obligation', 'planner', ()),
+               RequirementClause('R9', 'Keep the public API backward compatible', 'planner', ()))
+    for unit_id in ('a', 'b'):
+        spec = project_unit(admission, req, unit_id, snapshot, parent_seed='seed', policy_digest='policy',
+                            failure_projection='', requirements=clauses)
+        by_id = {clause.id: clause for clause in spec.requirement_clauses}
+        assert 'R9' in by_id, f'global requirement was dropped from unit {unit_id!r}'
+        assert by_id['R9'].source == 'global'
+        assert by_id['R9'].refs == ()
+        assert 'Requirement R9: Keep the public API backward compatible' in render_unit_task(spec)
+
+
+def test_ref_clause_for_another_units_file_stays_excluded(tmp_path):
+    snapshot, req, admission = fixture(tmp_path)
+    clauses = (RequirementClause('R2', 'planner obligation', 'planner', ()),
+               RequirementClause('R8', 'only a.py matters here', 'intersect', ('a.py',)))
+    owner = project_unit(admission, req, 'a', snapshot, parent_seed='seed', policy_digest='policy',
+                         failure_projection='', requirements=clauses)
+    other = project_unit(admission, req, 'b', snapshot, parent_seed='seed', policy_digest='policy',
+                         failure_projection='', requirements=clauses)
+    assert 'R8' in [clause.id for clause in owner.requirement_clauses]
+    assert 'R8' not in [clause.id for clause in other.requirement_clauses]
+    assert 'only a.py matters here' not in render_unit_task(other)
+
+
+def test_clause_listed_by_id_keeps_planner_source(tmp_path):
+    snapshot, req, admission = fixture(tmp_path)
+    clauses = (RequirementClause('R2', 'planner obligation', 'planner', ()),)
+    spec = project_unit(admission, req, 'b', snapshot, parent_seed='seed', policy_digest='policy',
+                        failure_projection='', requirements=clauses)
+    assert [(clause.id, clause.source, clause.refs) for clause in spec.requirement_clauses] == [
+        ('R2', 'planner', ())]
+
+
+def test_global_requirement_clause_schema(tmp_path):
+    clause = RequirementClause('R9', 'Keep the API stable', 'global', ())
+    assert RequirementClause.from_json(clause.to_json()) == clause
+    raw = {**clause.to_json(), 'source': 'bogus'}
+    with pytest.raises(ParallelRecordError):
+        RequirementClause.from_json(raw)

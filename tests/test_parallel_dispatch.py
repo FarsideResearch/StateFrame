@@ -532,8 +532,11 @@ def test_context_carries_parent_requirement_clauses_and_structured_refs(tmp_path
                               host=host, store_root=run / "parallel" / "parallel_1")
     assert result.admission.status == "ADMITTED"
     spec = UnitSpec.from_json(json.loads(Path(host.launched["a"]["spec_path"]).read_text()))
+    # R2 has no refs and is not listed by id for unit a: it is global, so it stays owned by every child.
     assert [(item.id, item.text, item.refs) for item in spec.requirement_clauses] == [
-        ("R1", "Keep a.py compatible", ("a.py::VALUE",))]
+        ("R1", "Keep a.py compatible", ("a.py::VALUE",)),
+        ("R2", "Preserve b.py", ())]
+    assert [item.source for item in spec.requirement_clauses] == ["intersect", "global"]
     intent = json.loads((run / "parallel" / "parallel_1" / "intent.json").read_text())
     assert intent["requirements_digest"] == hashlib.sha256(
         json.dumps([item.to_json() for item in actual.requirements],

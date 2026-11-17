@@ -483,7 +483,7 @@ class AdmissionResult(Record):
 class RequirementClause(Record):
     id: str
     text: str
-    source: Literal['planner', 'intersect']
+    source: Literal['planner', 'intersect', 'global']
     refs: tuple[str, ...]
 
     def __post_init__(self) -> None:

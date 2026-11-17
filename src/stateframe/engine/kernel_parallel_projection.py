@@ -57,6 +57,9 @@ def project_unit(admission: AdmissionResult, request: ParallelRequest, unit_id: 
     for clause in requirements:
         if clause.id in contract.requirement_ids:
             clauses[clause.id] = RequirementClause(clause.id, clause.text, clause.source, clause.refs)
+        elif not clause.refs:
+            # Unbound never means irrelevant: a ref-less requirement stays owned by every child.
+            clauses[clause.id] = RequirementClause(clause.id, clause.text, 'global', ())
         elif any(ref.partition('::')[0] in relevant_paths or ref in consumed_symbols for ref in clause.refs):
             clauses[clause.id] = RequirementClause(clause.id, clause.text, 'intersect', clause.refs)
     execution_id = _identity(request.call_id, unit_id)
