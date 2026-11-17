@@ -2062,6 +2062,8 @@ def _probe_routes(options: RunOptions, printer=print, *, resume_roles: dict | No
                         sources[route_field] = table.sources[name][route_field]
                 yield f"{request_role} (unit {unit_class})", settings, sources
 
+    from .engine.kernel_routing_schema import routing_v2
+    schema_v2 = routing_v2()
     for role, settings, sources in chain(
             ((role, settings, table.sources[role]) for role, settings in table.roles.items()),
             effective_unit_routes()):
@@ -2115,12 +2117,15 @@ def _probe_routes(options: RunOptions, printer=print, *, resume_roles: dict | No
                         (selected is None or _slot_id(entry) == selected)]
         sizes = [entry["n_ctx"] for entry in slot_entries if type(entry.get("n_ctx")) is int]
         configured_context = int(settings.get("context_tokens") or options._context_tokens)
-        if configured_context < options._context_tokens:
+        # MR-6(a): under schema 2 only main-frame routes must match the run frame; other routes
+        # (decide2, subframes) must fit their own configured context. Schema 1 is unchanged.
+        own_frame = schema_v2 and not routes.is_main_frame_route(role)
+        if not own_frame and configured_context < options._context_tokens:
             raise RunError(f"route {role}.context_tokens={configured_context} is smaller than this run's "
                            f"{options._context_tokens:,}-token frame; raise it or lower STATEFRAME_CONTEXT_TOKENS")
         explicit = bool(options._context_env.get(CONTEXT_TOKENS_ENV))
-        need = options._context_tokens if explicit else configured_context
-        if sizes and (min(sizes) < need or explicit and any(size != need for size in sizes)):
+        need = options._context_tokens if explicit and not own_frame else configured_context
+        if sizes and (min(sizes) < need or explicit and not own_frame and any(size != need for size in sizes)):
             size = min(sizes)
             raise RunError(f"route {role} model {endpoint.model} has a {size:,}-token slot; this run's frames "
                            f"need {need:,} ({options._prompt_budget:,} prompt + reply). Give {role} a model "

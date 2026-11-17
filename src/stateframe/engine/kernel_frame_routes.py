@@ -4,16 +4,21 @@ The last closed action is a checkpoint participant owned by the child.  A plan
 request is selected only before any action, or after the latest action was a
 run_tests call with an aggregate FAIL and *all* canonical check receipts bound
 to the current workspace revision.  Other actions always replace the record.
+Under routing schema 2 a plan lease also stays open through read-kind actions
+(see PLAN_LEASE); schema 1 never consults it.
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import ipaddress
 import json
 import os
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Any, Mapping
 from urllib.parse import urlsplit, urlunsplit
+
+from kernel_routing_schema import routing_v2
 
 SCHEMA = "stateframe-routes/1"
 SPEC_READERS = ("STATEFRAME_ROUTE_SCOPE", "STATEFRAME_ROUTE_UNIT_CLASS", "STATEFRAME_ROUTE_SLOT")
@@ -80,7 +85,26 @@ ROUTES_ACTIVE = False
 _overrides: dict[str, tuple[str, ...]] = {}
 _baseline: dict[str, object] | None = None
 LAST_CLOSED_ACTION: dict[str, object] = {}
+# Routing v2 (MR-5): withheld edit/finish proposals awaiting the next provider request, bound to a revision.
+PRESERVED_PROPOSALS: list[dict[str, object]] = []
 ACCOUNTING: dict[str, int] = {"physical": 0, "accepted": 0, "discarded": 0}
+# MR-4 (routing schema 2 only). Read-kind frame tools that keep a plan lease open. These are the
+# router's _READ_ACTIONS lowercased; tests/test_frame_routes_plan_lease.py pins the match.
+LEASE_READ_ACTIONS = frozenset({
+    "read", "read_file", "read_requested_file", "refresh_read", "recall_evidence",
+    "mechanical_read", "grep",
+})
+# open: True from start and after a qualifying FAIL run_tests; closed by the first non-read action.
+# by_fail/revision: a FAIL-opened lease only holds while the revision it was opened on is current.
+PLAN_LEASE: dict[str, object] = {}
+
+
+def _reset_plan_lease() -> None:
+    PLAN_LEASE.clear()
+    PLAN_LEASE.update(open=True, by_fail=False, revision=None)
+
+
+_reset_plan_lease()
 
 
 def install(spec: object, *, baseline: Mapping[str, object] | None = None) -> None:
@@ -90,6 +114,8 @@ def install(spec: object, *, baseline: Mapping[str, object] | None = None) -> No
         _roles, _overrides, _baseline = None, {}, None
         ROUTES_ACTIVE = False
         LAST_CLOSED_ACTION.clear()
+        _reset_plan_lease()
+        PRESERVED_PROPOSALS.clear()
         ACCOUNTING.update(physical=0, accepted=0, discarded=0)
         return
     if not isinstance(spec, dict) or spec.get("schema") != SCHEMA:
@@ -119,6 +145,8 @@ def install(spec: object, *, baseline: Mapping[str, object] | None = None) -> No
     _baseline = dict(baseline) if baseline is not None else None
     ROUTES_ACTIVE = True
     LAST_CLOSED_ACTION.clear()
+    _reset_plan_lease()
+    PRESERVED_PROPOSALS.clear()
     ACCOUNTING.update(physical=0, accepted=0, discarded=0)
 
 
@@ -175,6 +203,8 @@ def role_for_request(revision: object = None, *, request_kind: str | None = None
             return "edit"
     if request_kind == "decide2":
         return "decide2"
+    if routing_v2() and _plan_lease_holds(revision):
+        return "plan"
     if not LAST_CLOSED_ACTION:
         return "plan"
     row = LAST_CLOSED_ACTION
@@ -196,11 +226,30 @@ def close_action(record: Mapping[str, object], *, revision: object = None,
                        len(receipts) == len(receipt_ids) and
                        {row.get("receipt_id") for row in receipts} == set(receipt_ids) and
                        all(item.get("revision") == revision for item in receipts))
+    qualifying_fail = bool(record.get("tool") == "run_tests" and canonical.get("status") == "FAIL"
+                           and all_current and ids and receipt_ids)
     LAST_CLOSED_ACTION.clear()
     LAST_CLOSED_ACTION.update(action=record.get("tool"), call_id=record.get("tool_call_id"),
                               execution_ids=ids, check_receipt_ids=receipt_ids,
                               status=canonical.get("status"), revision=revision,
                               all_receipts_current=all_current)
+    if routing_v2():
+        _advance_plan_lease(record.get("tool"), qualifying_fail=qualifying_fail, revision=revision)
+
+
+def _plan_lease_holds(revision: object) -> bool:
+    if PLAN_LEASE.get("open") is not True:
+        return False
+    return PLAN_LEASE.get("by_fail") is False or PLAN_LEASE.get("revision") == revision
+
+
+def _advance_plan_lease(action: object, *, qualifying_fail: bool, revision: object) -> None:
+    """Reads keep the lease as it is; a qualifying FAIL opens it; any other action closes it."""
+    if qualifying_fail:
+        PLAN_LEASE.clear()
+        PLAN_LEASE.update(open=True, by_fail=True, revision=revision)
+    elif action not in LEASE_READ_ACTIONS:
+        PLAN_LEASE.update(open=False)
 
 
 def classify_calls(calls: object, *, custom_writes: set[str] | frozenset[str] = frozenset()) -> str:
@@ -230,14 +279,18 @@ def forced_leg_options(capture: object) -> dict[str, object]:
     return {"forced_route": route.role, "frozen_route_capture": frozen}
 
 
+def _well_formed(calls: list) -> bool:
+    return not any(not isinstance(call, dict) or not isinstance(call.get("function"), dict)
+                   or not isinstance(call["function"].get("name"), str)
+                   or not isinstance(call["function"].get("arguments"), str)
+                   for call in calls)
+
+
 def escalation_target(answering: Route | None, calls: object,
                       *, custom_writes: set[str] | frozenset[str] = frozenset()) -> str | None:
     if answering is None or not isinstance(calls, list) or not calls:
         return None
-    if any(not isinstance(call, dict) or not isinstance(call.get("function"), dict)
-           or not isinstance(call["function"].get("name"), str)
-           or not isinstance(call["function"].get("arguments"), str)
-           for call in calls):
+    if not _well_formed(calls):
         return None
     role = classify_calls(calls, custom_writes=custom_writes)
     if role not in {"edit", "finish"}:
@@ -250,6 +303,71 @@ class RouteEscalation(Exception):
     def __init__(self, target: str, calls: list[dict]) -> None:
         self.target = target
         self.calls = calls
+
+
+def route_split(answering: Route | None, calls: object, *,
+                custom_writes: set[str] | frozenset[str] = frozenset()
+                ) -> tuple[list[dict], list[dict], str | None]:
+    """Routing v2 (MR-5): split a batch into calls that run on the answering route and withheld calls.
+
+    Returns (kept, withheld, target). Only edit/finish calls whose role resolves to another
+    endpoint/model are withheld; read-kind calls always stay. target is None when nothing escalates,
+    and then kept is the whole batch. Callers use this only under routing_v2().
+    """
+    if answering is None or not isinstance(calls, list) or not _well_formed(calls):
+        return (list(calls) if isinstance(calls, list) else []), [], None
+    kept: list[dict] = []
+    withheld: list[dict] = []
+    targets: set[str] = set()
+    for call in calls:
+        role = classify_calls([call], custom_writes=custom_writes)
+        if role in {"edit", "finish"}:
+            target = resolve(role)
+            if (target.endpoint, target.model) != (answering.endpoint, answering.model):
+                withheld.append(call)
+                targets.add(role)
+                continue
+        kept.append(call)
+    if not withheld:
+        return list(calls), [], None
+    return kept, withheld, "edit" if "edit" in targets else "finish"
+
+
+def _proposal_digest(calls: list[dict]) -> str:
+    return hashlib.sha256(json.dumps(calls, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def preserve_proposal(journal: Any, *, request_id: object, target_role: str,
+                      calls: list[dict], revision: object) -> None:
+    """Routing v2 (MR-5): keep a withheld proposal, bound to the revision it was made against."""
+    snapshot = copy.deepcopy(list(calls))
+    digest = _proposal_digest(snapshot)
+    PRESERVED_PROPOSALS.append({"calls": snapshot, "target_role": target_role, "revision": revision})
+    journal.emit("route_proposal_preserved", request_id=request_id, target_role=target_role,
+                 revision=revision, call_names=[(call.get("function") or {}).get("name") for call in snapshot],
+                 proposal_digest=digest, dispatch=False)
+
+
+def has_preserved_proposals() -> bool:
+    return bool(PRESERVED_PROPOSALS)
+
+
+def take_preserved_messages(current_revision: object) -> list[dict[str, str]]:
+    """Consume withheld proposals as user messages for the next request; stale ones are marked."""
+    items = list(PRESERVED_PROPOSALS)
+    PRESERVED_PROPOSALS.clear()
+    messages: list[dict[str, str]] = []
+    for item in items:
+        body = json.dumps(item["calls"], sort_keys=True, indent=2)
+        proposed = item["revision"]
+        if proposed == current_revision:
+            head = f"A previous step proposed these changes against revision {proposed}; apply them if still correct, or revise:"
+        else:
+            head = (f"A previous step proposed these changes against revision {proposed}, which is stale "
+                    f"(the workspace is now at revision {current_revision}); re-check them against the "
+                    "current state before applying, or revise:")
+        messages.append({"role": "user", "content": f"{head}\n{body}"})
+    return messages
 
 
 def unclassified_dispatcher(names: set[str] | frozenset[str]) -> set[str]:

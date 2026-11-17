@@ -24,6 +24,8 @@ from enum import Enum
 from itertools import islice
 from urllib.parse import urlparse
 
+from kernel_routing_schema import routing_v2
+
 
 MODE_ENV = "STATEFRAME_MODEL_ROUTER"
 CONFIG_ENV = "STATEFRAME_MODEL_ROUTER_CONFIG"
@@ -175,6 +177,12 @@ _SUCCESS_STATUSES = frozenset({
     "ACCEPTED", "APPLIED", "COMMITTED", "COMPLETED", "DONE", "GREEN", "OK",
     "PASS", "PASSED", "SUCCESS", "SUCCEEDED",
 })
+# MR-8 (schema 2 only): verifying success is the only thing that clears failure memory.
+# An APPLIED edit proves the write landed, not that it is right.
+_VERIFYING_ACTIONS = frozenset({
+    "RUN_TESTS", "TEST", "PYTEST", "VERIFY", "VERIFY_CURRENT_SOURCE", "MECHANICAL_VERIFY",
+})
+_TERMINAL_STATUSES = frozenset({"DONE", "COMMITTED"})
 
 
 def _mapping(value: object) -> Mapping[str, object] | None:
@@ -675,6 +683,26 @@ def _receipt_is_successful(row: Mapping[str, object]) -> bool:
             and _row_status(row) in _SUCCESS_STATUSES)
 
 
+def _receipt_verifies_success(row: Mapping[str, object]) -> bool:
+    """MR-8 v2: a successful verification or terminal completion, not any applied write.
+
+    Verifying: a passing test/check receipt. Terminal: DONE/COMMITTED status.
+    Uses the same meaningful + success-status gates as ``_receipt_is_successful``.
+    """
+    if not _receipt_is_successful(row):
+        return False
+    return _row_status(row) in _TERMINAL_STATUSES or _row_action(row) in _VERIFYING_ACTIONS
+
+
+def _read_reveals_new_evidence(row: Mapping[str, object]) -> bool:
+    """MR-8 v2: a read row that the producer flagged as returning new evidence.
+
+    Reads are never meaningful by action name, so this takes only the producer's explicit
+    ``meaningful_action`` flag, the same branch ``_receipt_is_meaningful`` honours first.
+    """
+    return row.get("meaningful_action") is True
+
+
 def _failure_token(row: Mapping[str, object], *, hypothesis: bool = False) -> str | None:
     names = (
         ("hypothesis_id", "hypothesis_digest", "rejected_hypothesis_id")
@@ -746,14 +774,20 @@ def _host_signal_projection_uncached(runtime: object | None,
     counterexample_counts: dict[str, int] = {}
     hypothesis_counts: dict[str, int] = {}
     reads_since_action = 0
+    schema_v2 = routing_v2()
     for row in evidence_rows:
         action = _row_action(row)
         status = _row_status(row)
         if action in _READ_ACTIONS:
-            reads_since_action += 1
+            if schema_v2 and _read_reveals_new_evidence(row):
+                reads_since_action = 0
+            else:
+                reads_since_action += 1
         elif action in _DISCRIMINATING_ACTIONS or _receipt_is_meaningful(row):
             reads_since_action = 0
-        if _receipt_is_successful(row):
+        clears_failure_memory = (_receipt_verifies_success(row) if schema_v2
+                                 else _receipt_is_successful(row))
+        if clears_failure_memory:
             # A successful host action makes earlier rejected attempts stale
             # for escalation.  Keep only the current consecutive failure
             # streak in this relevant, revision-bound stream.
@@ -856,7 +890,7 @@ def host_signal_projection(runtime: object | None, frame: Mapping[str, object]) 
     a new receipt, replacement collection, or new frame recomputes the full
     safety projection.
     """
-    token = (id(frame), _projection_input_token(runtime, frame))
+    token = (id(frame), _projection_input_token(runtime, frame), routing_v2())
     cached = getattr(runtime, "_model_router_projection_cache", None) if runtime is not None else None
     if isinstance(cached, Mapping) and cached.get("token") == token:
         result = cached.get("result")
@@ -1121,10 +1155,7 @@ class EngineAdapter:
         """
         if self.tokenizer != "utf8-byte-conservative-v1":
             raise ValueError("unsupported selected tokenizer")
-        encoded = json.dumps(
-            value, sort_keys=True, separators=(",", ":"),
-            ensure_ascii=False, default=str).encode("utf-8")
-        return max(1, len(encoded))
+        return max(1, len(_wire_text(value).encode("utf-8")))
 
     def render_handoff(self, handoff: Mapping[str, object]) -> str:
         """Render only the public handoff into a provider message."""
@@ -1690,10 +1721,64 @@ def _request_input_capacity(endpoint: EndpointConfig, body: Mapping[str, object]
     return max(0, capacity - _output_reservation(body))
 
 
+def _wire_text(value: object) -> str:
+    """Canonical JSON wire text shared by the byte bound and the exact counter."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
+
+
 def _estimate_request(body: Mapping[str, object], *, endpoint: EndpointConfig | None = None) -> int:
     """Count with the selected endpoint adapter, never the global host estimator."""
     adapter = endpoint.adapter if endpoint is not None else EngineAdapter()
     return adapter.estimate_tokens(body)
+
+
+TOKEN_FALLBACK_EVENT = "token_estimate_fallback"
+_TOKEN_METERS: dict[str, object] = {}
+
+
+def exact_token_count(body: Mapping[str, object], endpoint: EndpointConfig) -> int | None:
+    """Exact whole-body count from the engine's request tokenizer, or None when unavailable.
+
+    Reuses RequestTokenMeter (llama.cpp /tokenize at the endpoint's tokenize URL). measure_subframe_cap is
+    side-effect free for run-level diet state; it reports method "tokenize" only for a real tokenizer count,
+    and "calibrated_bytes" when the tokenizer did not answer, which is treated as unavailable here.
+    """
+    if not endpoint.url:
+        return None
+    from kernel_request_diet import RequestTokenMeter, resolve_tokenize_url
+    tokenize_url = resolve_tokenize_url(endpoint=endpoint.url)
+    if tokenize_url is None:
+        return None
+    meter = _TOKEN_METERS.get(tokenize_url)
+    if meter is None:
+        meter = _TOKEN_METERS.setdefault(tokenize_url, RequestTokenMeter(endpoint=tokenize_url))
+    tokens, method = meter.measure_subframe_cap(body, tokens_per_byte=1.0)
+    return tokens if method == "tokenize" else None
+
+
+def estimate_request_tokens(body: Mapping[str, object], endpoint: EndpointConfig | None = None, *,
+                            emit: object = None, journaled: set[str] | None = None) -> int:
+    """Admission count for the selected endpoint (MR-6b).
+
+    Schema 1 returns the byte bound unchanged. Schema 2 returns the exact whole-body count when the
+    endpoint's tokenizer answers; otherwise the byte bound, journaling token_estimate_fallback once per endpoint.
+    """
+    from kernel_routing_schema import routing_v2
+    if endpoint is None or not routing_v2():
+        return _estimate_request(body, endpoint=endpoint)
+    reason = "exact_counter_unavailable"
+    try:
+        exact = exact_token_count(body, endpoint)
+    except (OSError, TimeoutError, ValueError, TypeError):
+        exact = None
+        reason = "exact_counter_error"
+    if exact is not None:
+        return max(1, exact)
+    if callable(emit) and journaled is not None and endpoint.name not in journaled:
+        journaled.add(endpoint.name)
+        emit(TOKEN_FALLBACK_EVENT, endpoint=endpoint.name,
+             tokenizer=endpoint.adapter.tokenizer, reason=reason)
+    return _estimate_request(body, endpoint=endpoint)
 
 
 def _completed_receipt(frame: Mapping[str, object]) -> tuple[str | None, bool]:
@@ -1778,6 +1863,7 @@ class ModelRouter:
             endpoint.model_id for endpoint in self.config.endpoints
         ) | ({self.base_model} if self.base_model else set())
         self.journal = journal
+        self._token_fallback_endpoints: set[str] = set()
         if self.mode == "off":
             # The replay switch belongs to the router's enabled profile.  Do
             # not import or validate it on the byte-identical OFF path.
@@ -2293,6 +2379,10 @@ class ModelRouter:
         setattr(capture, "model_router_prepared", self.mode == "on")
         return prepared, prepared_tools
 
+    def _estimate(self, body: Mapping[str, object], endpoint: EndpointConfig) -> int:
+        return estimate_request_tokens(body, endpoint, emit=self._emit,
+                                       journaled=self._token_fallback_endpoints)
+
     def validate_final_preparation(self, capture: object,
                                    messages: Sequence[Mapping[str, object]], tools: object,
                                    *, capacity_tokens: int | None = None) -> None:
@@ -2303,8 +2393,8 @@ class ModelRouter:
         if not isinstance(decision, RouteDecision):
             return
         selected_capacity = self._bounded_capacity(decision.endpoint, capacity_tokens)
-        estimate = _estimate_request(
-            {"messages": list(messages), "tools": tools}, endpoint=decision.endpoint)
+        estimate = self._estimate(
+            {"messages": list(messages), "tools": tools}, decision.endpoint)
         if estimate > selected_capacity:
             raise RouterBudgetError(estimate, selected_capacity)
 
@@ -2319,7 +2409,7 @@ class ModelRouter:
         capacity = _request_input_capacity(decision.endpoint, body)
         if capacity is None:  # defensive: _bounded_capacity above is authoritative
             raise ValueError("selected endpoint input capacity is unavailable")
-        estimate = _estimate_request(body, endpoint=decision.endpoint)
+        estimate = self._estimate(body, decision.endpoint)
         setattr(capture, "model_router_input_capacity", capacity)
         setattr(capture, "model_router_request_estimate", estimate)
         if estimate > capacity:

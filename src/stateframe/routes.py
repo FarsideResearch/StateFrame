@@ -18,6 +18,9 @@ from .engine.kernel_safe_paths import safe_expanduser, safe_home
 
 SCHEMA = "stateframe-routes/1"
 ROLES = ("read", "plan", "edit", "finish", "decide2", "unit")
+# Roles that drive the run's own frame. decide2 is an advisory side call and unit/unit.<class> are
+# subframes with their own frame; a "<role> (unit <class>)" label is a subframe overlay of a role.
+MAIN_FRAME_ROLES = frozenset({"read", "plan", "edit", "finish"})
 FIELDS = ("endpoint", "model", "api_key_env", "temperature", "top_p", "top_k", "min_p",
           "max_tokens", "timeout_s", "slot", "context_tokens", "tokenizer", "allow_remote",
           "cost_input_per_mtok", "cost_cached_input_per_mtok", "cost_output_per_mtok")
@@ -64,6 +67,11 @@ class RouteTable:
                     result.update({key: value for key, value in self.roles[name].items()
                                    if self.sources[name].get(key) != "default"})
         return result
+
+
+def is_main_frame_route(role: str) -> bool:
+    """True only for a main-frame role; subframe labels like "read (unit x)" are never main."""
+    return role in MAIN_FRAME_ROLES
 
 
 def valid_role(role: str) -> bool:
