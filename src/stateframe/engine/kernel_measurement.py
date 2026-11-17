@@ -945,8 +945,8 @@ def _safe_timeout_endpoint(endpoint: str) -> str:
 
 
 REQUEST_TIMEOUT_LIMIT_NOTE = (
-    "limit: model request timeout, default 300s socket / 420s wall; override "
-    "REACT_REQUEST_TIMEOUT_S (socket; wall = +120s) or STATEFRAME_PER_REQUEST_TIMEOUT_S (both)")
+    "limit: model request stalled, default 300s without response bytes and no total limit; set "
+    "STATEFRAME_PER_REQUEST_TIMEOUT_S (or REACT_REQUEST_TIMEOUT_S) to add a per-request limit")
 
 
 def journal_provider_request_timeout(

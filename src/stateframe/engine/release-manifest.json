@@ -393,7 +393,7 @@
   "kernel_lossless_store_paging.py": "70e7b7f1ad0c6dcea88eeb27ccc7c3cac22b00f37b2e83779708e9b513ed7f2f",
   "kernel_mcp_driver.py": "936f285f1f9a6abd539d5f953bccd845ac09a75141bae6e35883568cc9d4086e",
   "kernel_mcp_tools.py": "6bcd77dc0a32e0b02ccdcd9f0d7b4c30f483fd26b22685ebcc4622cecc877b1d",
-  "kernel_measurement.py": "0f2a186a9d7297b9b92a81d46b74a95cee95488419fb5626be8037714715e732",
+  "kernel_measurement.py": "1291ec96d4ab44bb75f406faaca4bb5d4a64092119e2371a62bb737d019ef478",
   "kernel_mechanism_admission.py": "f8fcbf4afb8775a2cebadccbe43f337c6eddb8835145551b9ae59433b85beb0c",
   "kernel_memfix_history.py": "e953ac3b6b7c74b053564dcc48d61071d0f9a39c1c0c3126145209a3139a131a",
   "kernel_memory_isolation.py": "f40c54c9e8286484a14a83c602a1b190c8759a3e450ec118b419fbc3f25d55d9",
