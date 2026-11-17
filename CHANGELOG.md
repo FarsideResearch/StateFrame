@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Tests: fail-loud triage batches 3 and 4 for guarded effects, execution policy, test artifact policy, edit, evidence and tool kernel modules, re-pointed to current lines.
+
 ## 0.7.35 (2026-11-17)
 
 - Routing schema 2 also applies a route change that only touches settings (temperature, sampling, max tokens, slot, API key): it counts as a route change like a new model or endpoint, and the request that carries a withheld proposal runs on the proposal's target route. Tests: `tests/test_routing_v2_settings_escalation.py`, `tests/test_route_proposal_preservation.py`.
