@@ -24,7 +24,6 @@ PROFILE_ONLY = {
     "STATEFRAME_HOST_CLOSURE",
     "STATEFRAME_RESULTS_DIR",
     "STATEFRAME_CODE_BOOKMARKS",
-    "STATEFRAME_READ_LOCKOUT",
     "STATEFRAME_ROUTEBUDGET_MODE",
     "STATEFRAME_HTTP_GZIP",
     "STATEFRAME_PLAIN_GZIP",
@@ -32,6 +31,7 @@ PROFILE_ONLY = {
     "STATEFRAME_PROVIDER_LIVENESS_S",
     "STATEFRAME_PUBLIC_CHECK_CPU_SECONDS",
     "STATEFRAME_PROVIDER_INDEX_MAX_FILES",
+    "STATEFRAME_EDITREADY",
     "STATEFRAME_BOUNDARY_CHECKS",
     "STATEFRAME_RESULTS_DIR",
     "STATEFRAME_LOCALIZE_MAX_FILES",
@@ -43,6 +43,12 @@ EXAMPLES = {"STATEFRAME_MY_SWITCH"}
 TEST_FIXTURE_ONLY = {"STATEFRAME_RECORDED_WIRE"}
 # Switches removed from the product; older CHANGELOG entries still name them.
 RETIRED = {"STATEFRAME_EDIT_NTURN_RUN_BUDGET_SECONDS"}
+# Removed switches: no engine code reads them and no profile sets them. Older CHANGELOG entries still name them as
+# history, so they are exempt from the check. Nothing may register them (see test_retired_switch_is_not_registered_anywhere).
+RETIRED_SWITCHES = {"STATEFRAME_READ_LOCKOUT"}
+# Internal repair-probe inputs set by the runner child (runner.py:1231, _child.py:1641), not user switches;
+# only named in a historical rename note in CHANGELOG.md.
+INTERNAL_PROBE_INPUTS = {"STATEFRAME_SOURCE_REPO_PRIMARY", "STATEFRAME_SOURCE_REPO_SECONDARY"}
 PREFIXES = {"STATEFRAME_ROUTE_"}
 NAME = re.compile(r"STATEFRAME_[A-Z0-9_]+")
 
@@ -70,7 +76,10 @@ def unsupported(documented: dict[str, list[str]], allowlist, product: set[str]) 
     """Documented names a user could export to no effect, with the reason."""
     problems = []
     for name, sentences in sorted(documented.items()):
-        if name in EXAMPLES or name in PREFIXES or name in allowlist or name in TEST_FIXTURE_ONLY or name in RETIRED:
+        if (name in EXAMPLES or name in PREFIXES or name in allowlist or name in TEST_FIXTURE_ONLY
+                or name in RETIRED or name in INTERNAL_PROBE_INPUTS):
+            continue
+        if name in RETIRED_SWITCHES:
             continue
         if name in PROFILE_ONLY:
             if not any("profile" in sentence.lower() for sentence in sentences):
@@ -84,6 +93,14 @@ def unsupported(documented: dict[str, list[str]], allowlist, product: set[str]) 
 
 def test_every_documented_switch_takes_effect():
     assert unsupported(_documented(), runner.OPT_IN_SWITCHES, _product_reads()) == []
+
+
+def test_retired_switch_is_not_registered_anywhere():
+    for name in RETIRED_SWITCHES:
+        assert name not in runner.OPT_IN_SWITCHES
+        assert name not in runner.engine_switches()
+        assert name not in _product_reads()
+        assert unsupported({name: [f"Set {name}=on in a custom profile."]}, {}, set()) == []
 
 
 def test_test_fixture_variables_are_never_product_switches():
@@ -245,3 +262,10 @@ def test_engine_only_settings_require_profile_guidance(name):
     assert unsupported({name: [f"Set {name}=on in the shell."]}, {}, set()) == [
         f"{name}: profile-only switch, but no doc sentence says to set it in a profile"]
     assert unsupported({name: [f"Set {name}=on in a custom profile."]}, {}, set()) == []
+
+
+def test_internal_probe_inputs_skip_but_unrelated_names_still_fail():
+    documented = {name: [f"Set {name} in the shell."] for name in INTERNAL_PROBE_INPUTS}
+    documented["STATEFRAME_UNRELATED_SWITCH"] = ["Set `STATEFRAME_UNRELATED_SWITCH` in the shell."]
+    problems = unsupported(documented, runner.OPT_IN_SWITCHES, set())
+    assert [p.split(":", 1)[0] for p in problems] == ["STATEFRAME_UNRELATED_SWITCH"]

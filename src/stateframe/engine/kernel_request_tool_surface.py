@@ -126,11 +126,6 @@ def _request_tool_floor_schemas(
                          if name != "skill_load" or name in base_by_name or name in current_by_name])
     if unit_policy is None and "list_files" in base_by_name:
         floor_names.append("list_files")
-    from kernel_code_bookmarks import enabled as bookmarks_enabled
-    if bookmarks_enabled() and getattr(runtime, "_read_lockout_notice", None):
-        from kernel_read_lockout import _source_access
-        floor_names = [name for name in floor_names
-                       if _source_access(runtime, base_by_name.get(name, {})) != "source_reader"]
 
     journal = getattr(runtime, "journal", None)
     run_id = getattr(journal, "run_id", None)
@@ -663,8 +658,7 @@ def author_final_tool_surface(
         if stabilize_cache_tools:
             from kernel_cache_layout_candidate import prepare_stable_tools
             final_tools = prepare_stable_tools(capture, runtime, final_tools, body)
-        from kernel_read_lockout import filter_tools as filter_locked_reads
-        final_tools = filter_locked_reads(runtime, final_tools)
+        final_tools = list(final_tools)
         if os.environ.get("STATEFRAME_MUTATIONS", "off") in {"prebuilt", "authored"}:
             from kernel_mutate_runtime import schema_for_level, service as mutation_service
             if "mutate" not in _tool_names(final_tools):

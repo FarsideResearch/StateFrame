@@ -200,28 +200,6 @@ def test_missing_startup_edit_scope_still_recommends_site(tmp_path):
     assert [site["path"] for site in state["open_sites"]] == ["pkg/app.py"]
 
 
-def test_framefit5_request_carries_bounded_read_lockout_line(tmp_path, monkeypatch):
-    from kernel_read_lockout import append_frame_line
-
-    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
-    monkeypatch.setenv("STATEFRAME_READ_LOCKOUT", "on")
-    messages, context, runtime = _frame_request(tmp_path, "pkg/app.py", ["pkg/app.py"])
-    state = build_typed_state(messages, context, runtime)
-    prepared = [{"role": "system", "content": "rules"}, messages[0],
-                {"role": "user", "content": _serialize_state_message(
-                    {"state": {"framefit5": state}})}]
-    runtime._read_lockout_notice = (
-        "Read lockout: pkg/app.py was re-read unchanged; failing assertion: "
-        "assert VALUE == 2; read is unavailable for this request.")
-    append_frame_line(runtime, prepared)
-    assembled = assemble_framefit5_request(
-        prepared, prepared[:2], live_frame=state, runtime=runtime,
-        host_text_messages=prepared)
-    notices = [row["content"] for row in assembled
-               if str(row.get("content", "")).startswith("[Read lockout] ")]
-    assert notices == ["[Read lockout] " + runtime._read_lockout_notice]
-
-
 def test_inventory_uses_next_original_candidate_after_forbidden(tmp_path, monkeypatch):
     import kernel_remaining_sites
 
@@ -577,34 +555,6 @@ def test_qualified_request_journals_unresolved_bookmark_drop(tmp_path, monkeypat
             "path": paths[0], "symbol": "missing", "reason": "unresolved_symbol",
             "dispatch": False} in events
     assert "missing not resolved in current source" not in json.dumps(body)
-
-
-def test_final_send_replans_if_locked_source_is_not_delivered(tmp_path, monkeypatch):
-    from kernel_frame_optional_allocation import FrameAllocationReplanNeeded
-
-    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
-    monkeypatch.setenv("STATEFRAME_READ_LOCKOUT", "on")
-    root = tmp_path / "workspace"
-    (root / "pkg").mkdir(parents=True)
-    (root / "pkg/__init__.py").write_text("VALUE = 1\n")
-    runtime = _runtime_with_product(root)
-    events = []
-    runtime.journal.emit = lambda kind, **fields: events.append({"kind": kind, **fields})
-    runtime._read_lockout_state = {
-        "remaining": 2, "streak": 2, "paths": {"pkg/__init__.py": "sha256:current"},
-        "failure": ("check-1",), "evaluated": "request-1", "counted": "request-1",
-        "projected_after": "request-1",
-    }
-    runtime._read_lockout_notice = "locked source"
-    messages = [{"role": "user", "content": "Fix value."}]
-    context = build_action_context(messages, workspace_root=root)
-    context["journal_receipt_records"] = []
-    runtime._framefit_action_context = context
-    with pytest.raises(FrameAllocationReplanNeeded, match="locked repair source absent"):
-        _qualified_fixture_request(runtime, {}, messages, context, baseline=False,
-                                   monkeypatch=monkeypatch, validate=False)
-    assert runtime._read_lockout_state["remaining"] == 0
-    assert events[-1]["reason_code"] == "SOURCE_NOT_VISIBLE"
 
 
 def test_recorded_t2_request14_state_activates_current_failure_bookmarks(

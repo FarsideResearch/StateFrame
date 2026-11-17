@@ -1,4 +1,4 @@
-"""The live request menu bounds repeated reads that returned no source bytes."""
+"""Code bookmark replay, bookmarks-off bytes, and progress-watch batch accounting."""
 
 from __future__ import annotations
 
@@ -13,14 +13,12 @@ from types import SimpleNamespace
 import pytest
 
 from _timeouts import scaled
-from kernel_read_lockout import append_frame_line
 from kernel_read_exec import dispatch_live_read, execute_read, record_serialized_read_pages
 from kernel_request_tool_surface import _apply_request_tool_floor, _request_tool_floor_schemas
 from kernel_agent_schemas import BUILTIN_SCHEMAS
-from kernel_stateframe_framefit5 import _is_framefit5_host_context_panel
 from kernel_reread_result_truth import checkpoint_replay, restore_replay
 from kernel_stateframe_runtime import StateFrameRuntime
-from kernel_tool_call_loop_breaker import UnboundedProgressWatch, stop_unbounded_no_progress
+from kernel_tool_call_loop_breaker import UnboundedProgressWatch
 
 
 TOOLS = [
@@ -30,11 +28,6 @@ TOOLS = [
                  "grep", "file_delete", "file_move", "shell", "authored_check",
                  "done", "file_create")
 ]
-
-
-@pytest.fixture(autouse=True)
-def _opt_in_lockout(monkeypatch):
-    monkeypatch.setenv("STATEFRAME_READ_LOCKOUT", "on")
 
 
 def _names(tools):
@@ -118,133 +111,24 @@ def _live_read(runtime, request_id, path, arguments):
         bolt=runtime.owner, policy=None, resolved_path=path)
 
 
-def test_probe_state_next_request_has_no_read_and_factual_frame_line(tmp_path, monkeypatch):
-    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
-    runtime, events = _trigger(tmp_path)
-    menu = _menu(runtime, "probe-request-15")
-    assert "read" not in _names(menu)
-    assert {"edit", "str_replace", "file_create", "run_tests", "authored_check", "done"} <= set(_names(menu))
-    frame = [{"role": "user", "content": "[StateFrame]\ncurrent state"}]
-    append_frame_line(runtime, frame)
-    assert frame[0]["content"] == "[StateFrame]\ncurrent state"
-    assert "pkg/service.py were re-read unchanged" in frame[1]["content"]
-    assert "assert 'BatchResult' in batch.__all__" in frame[1]["content"]
-    assert "read is unavailable for this request" in frame[1]["content"]
-    assert _is_framefit5_host_context_panel(frame[1])
-    assert not _is_framefit5_host_context_panel({"role": "user", "content": frame[1]["content"]})
-    assert [row["reason_code"] for row in events if row["kind"] == "read_lockout_decision"] == [
-        "UNCHANGED_READ_REQUEST"]
-    assert "read" not in _names(_menu(runtime, "probe-request-15"))
-    assert len(events) == 1
-
-
-@pytest.mark.parametrize("kind", ("edit", "test"))
-def test_edit_or_test_releases_read_immediately(tmp_path, monkeypatch, kind):
-    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
-    runtime, events = _trigger(tmp_path)
-    _menu(runtime, "probe-request-15")
-    runtime.owner._receipts.append({"request_id": "probe-request-15", "kind": kind,
-                                    "result_class": "APPLIED" if kind == "edit" else "FAIL"})
-    assert "read" in _names(_menu(runtime, "probe-request-16"))
-    assert events[-1]["reason_code"] == "NEW_EVIDENCE"
-
-
-def test_lockout_caps_at_two_requests(tmp_path, monkeypatch):
-    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
-    runtime, events = _trigger(tmp_path)
-    assert "read" not in _names(_menu(runtime, "probe-request-15"))
-    assert "read" not in _names(_menu(runtime, "probe-request-16"))
-    assert "read" in _names(_menu(runtime, "probe-request-17"))
-    assert events[-1]["reason_code"] == "REQUEST_CAP"
-
-
-def test_unseen_or_changed_source_never_triggers(tmp_path, monkeypatch):
-    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
-    runtime, _events = _trigger(tmp_path)
-    (tmp_path / "pkg/unseen.py").write_text("NEW = 1\n")
-    _read(runtime, "probe-request-15", "pkg/unseen.py", unchanged=False)
-    assert "read" in _names(_menu(runtime, "probe-request-15"))
-
-    runtime, events = _trigger(tmp_path)
-    (tmp_path / "pkg/service.py").write_text("value = 2\n")
-    assert "read" in _names(_menu(runtime, "probe-request-15"))
-    assert not [row for row in events if row["kind"] == "read_lockout_decision"]
-
-
-def test_checkpoint_restores_same_menu_decision(tmp_path, monkeypatch):
-    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
-    runtime, _events = _trigger(tmp_path)
-    original = _names(_menu(runtime, "probe-request-15"))
-    snapshot = json.loads(json.dumps(checkpoint_replay(runtime)))
-    resumed, _ = _runtime(tmp_path)
-    resumed.owner._receipts = list(runtime.owner._receipts)
-    resumed.current_request_id = runtime.current_request_id
-    restore_replay(resumed, snapshot)
-    assert _names(_menu(resumed, "probe-request-15")) == original
-    assert resumed._read_lockout_notice == runtime._read_lockout_notice
-
-
-def test_legacy_lockout_checkpoint_resumes_unlocked(tmp_path, monkeypatch):
-    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
-    runtime, _ = _trigger(tmp_path)
-    _menu(runtime, "probe-request-15")
-    old = dict(checkpoint_replay(runtime)["read_lockout"])
-    old["schema"] = "stateframe-read-lockout/1"
-    del old["counted"]
-    resumed, _ = _runtime(tmp_path)
-    from kernel_read_lockout import restore
-    restore(resumed, old)
-    assert resumed._read_lockout_state["remaining"] == 0
-    assert resumed._read_lockout_state["streak"] == 0
-    assert "read" in _names(_menu(resumed, "probe-request-16"))
-
-
-def test_production_base_menu_projects_lockout(tmp_path, monkeypatch):
-    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
-    monkeypatch.setenv("STATEFRAME_LEAN", "on")
-    runtime, _events = _trigger(tmp_path)
-    del runtime._base_tool_menu
-    menu = _menu(runtime, "probe-request-15")
-    assert "read" not in _names(menu)
-    assert {"edit", "str_replace", "run_tests", "done"} <= set(_names(menu))
-
-
-def test_changed_after_trigger_or_deferred_source_releases(tmp_path, monkeypatch):
-    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
-    runtime, events = _trigger(tmp_path)
-    _menu(runtime, "probe-request-15")
-    (tmp_path / "pkg/service.py").write_text("value = 3\n")
-    assert "read" in _names(_menu(runtime, "probe-request-15"))
-    assert events[-1]["reason_code"] == "FRESH_READ_REQUIRED"
-
-    runtime, events = _trigger(tmp_path)
-    runtime._request_deferred_source_paths = ("pkg/unseen.py",)
-    assert "read" in _names(_menu(runtime, "probe-request-15"))
-    assert not events
-
-
 def test_bookmark_kill_switch_keeps_menu_bytes(tmp_path, monkeypatch):
     monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "off")
     runtime, events = _trigger(tmp_path)
     expected = json.dumps(TOOLS, sort_keys=True)
     assert json.dumps(_menu(runtime, "probe-request-15"), sort_keys=True) == expected
     assert not events
-    assert not hasattr(runtime, "_read_lockout_state")
 
 
-def test_default_lockout_off_leaves_menu_journal_and_checkpoint_untouched(tmp_path, monkeypatch):
-    monkeypatch.delenv("STATEFRAME_READ_LOCKOUT", raising=False)
+def test_default_leaves_menu_and_events_untouched(tmp_path):
     runtime, events = _trigger(tmp_path)
     assert _names(_menu(runtime, "probe-request-15")) == _names(TOOLS)
     assert not events
-    assert not hasattr(runtime, "_read_lockout_state")
-    assert "read_lockout" not in checkpoint_replay(runtime)
+
 
 def test_bookmarks_off_repeated_read_matches_release_bytes(tmp_path, monkeypatch):
     import importlib.util
 
     monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "off")
-    monkeypatch.setenv("STATEFRAME_READ_LOCKOUT", "off")
     monkeypatch.setenv("STATEFRAME_DELIVER_REQUESTED_BYTES", "on")
     baseline_source = subprocess.check_output([
         "git", "show", "v0.2.1:src/stateframe/engine/kernel_read_exec.py",
@@ -279,148 +163,6 @@ def test_bookmarks_off_repeated_read_matches_release_bytes(tmp_path, monkeypatch
         return replies
 
     assert run(sys.modules[execute_read.__module__]) == run(baseline)
-
-
-
-
-def test_live_read_receipt_marks_only_the_exact_unchanged_notice(tmp_path, monkeypatch):
-    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
-    monkeypatch.setenv("STATEFRAME_DELIVER_REQUESTED_BYTES", "on")
-    path = tmp_path / "module.py"
-    path.write_text("VALUE = 1\n")
-    measurement = SimpleNamespace(
-        owner=SimpleNamespace(workspace_revision=1), retained=None,
-        step_ledger=None, _code_bookmarks_active=True,
-        _frame_budget_request_count=13,
-        journal=SimpleNamespace(emit=lambda *_args, **_kwargs: None),
-    )
-    status, first, _ = execute_read(
-        tmp_path, path, path.name, path.name, 0,
-        args={"path": path.name}, measurement=measurement, step=1, delivery={})
-    assert status == "OK"
-    record_serialized_read_pages(measurement, [{"role": "tool", "content": first}], 13)
-    measurement._frame_budget_request_count = 14
-
-    class Owner:
-        def __init__(self):
-            self._receipts = []
-
-        def receipt(self, kind, intent, fingerprint, result, **fields):
-            self._receipts.append({"kind": kind, "intent": intent,
-                                   "fingerprint": fingerprint, "result_class": result,
-                                   **fields})
-
-    owner = Owner()
-    result, observation, _source, delivery = dispatch_live_read(
-        tmp_path, path, path.name, path.name, 0,
-        args={"path": path.name}, measurement=measurement, step=2,
-        bolt=owner, policy=None, resolved_path=path.name)
-    assert result == "OK"
-    assert "unchanged since request 13" in observation
-    assert delivery["unchanged_since_request"] is True
-    assert owner._receipts[-1]["delivery"]["unchanged_since_request"] is True
-    assert delivery["requested_bytes_delivered"] == 0
-    path.write_text("VALUE = 2\n")
-    _result, observation, _source, delivery = dispatch_live_read(
-        tmp_path, path, path.name, path.name, 0,
-        args={"path": path.name}, measurement=measurement, step=3,
-        bolt=owner, policy=None, resolved_path=path.name)
-    assert "VALUE = 2" in observation
-    assert delivery["unchanged_since_request"] is False
-    assert delivery["requested_bytes_delivered"] > 0
-
-
-def test_dispatched_fresh_ranges_and_new_file_cannot_start_lockout(tmp_path, monkeypatch):
-    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
-    monkeypatch.setenv("STATEFRAME_DELIVER_REQUESTED_BYTES", "on")
-    runtime, events = _runtime(tmp_path)
-    for path in ("pkg/batch/contracts.py", "pkg/service.py", "pkg/new.py"):
-        target = tmp_path / path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text("ONE = 1\nTWO = 2\nTHREE = 3\n")
-    for number, path, arguments in (
-            (1, "pkg/batch/contracts.py", {"path": "pkg/batch/contracts.py", "start_line": 1, "end_line": 1}),
-            (2, "pkg/batch/contracts.py", {"path": "pkg/batch/contracts.py", "start_line": 2, "end_line": 2}),
-            (3, "pkg/new.py", {"path": "pkg/new.py"}),
-            (4, "pkg/service.py", {"path": "pkg/service.py"})):
-        request = f"request-{number}"
-        _menu(runtime, request)
-        result, observation, _source, delivery = _live_read(runtime, request, path, arguments)
-        assert result == "OK" and "=" in observation
-        assert delivery["unchanged_since_request"] is False
-        assert delivery["requested_bytes_delivered"] > 0
-        assert "read" in _names(_menu(runtime, f"request-{number + 1}"))
-    assert not [row for row in events if row["kind"] == "read_lockout_decision"]
-
-
-@pytest.mark.parametrize("result", ["REJECTED", "FAILED", "NO_OP"])
-def test_dispatched_rejected_edit_does_not_release_lock(tmp_path, monkeypatch, result):
-    from kernel_bolt import KernelBolt
-
-    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
-    runtime, events = _trigger(tmp_path)
-    assert "read" not in _names(_menu(runtime, "probe-request-15"))
-    bolt = KernelBolt.__new__(KernelBolt)
-    bolt.root = tmp_path
-    bolt._receipts = runtime.owner._receipts
-    bolt.run_id = "pin-rejected"
-    bolt.current_step = 15
-    bolt.workspace_revision = 1
-    bolt.current_request_id = "probe-request-15"
-    bolt.audit_journal = runtime.journal
-    bolt.measurement = None
-    runtime.owner = bolt
-    bolt.receipt("edit", "replace_fn pkg/service.py", "pkg/service.py",
-                 result, detail="edit was not applied", target_path="pkg/service.py")
-    assert bolt._receipts[-1]["request_id"] == "probe-request-15"
-    assert bolt.workspace_revision == 1
-    assert "read" not in _names(_menu(runtime, "probe-request-16"))
-    assert [row["reason_code"] for row in events if row["kind"] == "read_lockout_decision"] == [
-        "UNCHANGED_READ_REQUEST"]
-    assert "read" in _names(_menu(runtime, "probe-request-17"))
-
-
-@pytest.mark.parametrize("menu", [
-    ("read", "done"), ("read", "edit", "done"),
-    ("read", "run_tests", "done"), ("read", "edit", "run_tests", "done"),
-])
-def test_lockout_needs_visible_editable_source_and_repair_route(tmp_path, monkeypatch, menu):
-    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
-    runtime, _events = _trigger(tmp_path.resolve())
-    selected = [tool for tool in TOOLS if tool["function"]["name"] in menu]
-    runtime.current_request_id = "probe-request-15"
-    names = _names(StateFrameRuntime.tool_menu(runtime, selected, []))
-    assert ("read" not in names) == ("edit" in menu and "run_tests" in menu)
-    runtime._code_bookmark_carry[0]["read_only"] = True
-    runtime._code_bookmark_carry[1]["read_only"] = True
-    assert "read" in _names(StateFrameRuntime.tool_menu(runtime, selected, []))
-
-
-def test_other_mode_or_hidden_source_never_locks(tmp_path, monkeypatch):
-    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
-    runtime, _ = _trigger(tmp_path)
-    runtime.stateframe_framefit_mode = "off"
-    assert "read" in _names(_menu(runtime, "probe-request-15"))
-    runtime, _ = _trigger(tmp_path)
-    runtime._code_bookmark_carry = []
-    assert "read" in _names(_menu(runtime, "probe-request-15"))
-
-
-def test_progress_watch_pauses_idle_charge_during_lockout_without_reset(tmp_path, monkeypatch):
-    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
-    runtime, _events = _trigger(tmp_path)
-    _menu(runtime, "probe-request-15")
-    watch = UnboundedProgressWatch(threshold=2)
-    watch.observe(runtime.binding(), runtime.owner._receipts, boundary=0)
-    watch.streak = 1
-    assert not stop_unbounded_no_progress(runtime, watch, boundary=10)
-    assert watch.streak == 1
-    assert not stop_unbounded_no_progress(runtime, watch, boundary=11)
-    assert watch.streak == 1
-    _menu(runtime, "probe-request-16")
-    _menu(runtime, "probe-request-17")
-    assert stop_unbounded_no_progress(runtime, watch, boundary=12)
-    assert watch.streak == 2
 
 
 def test_resumed_dispatch_preserves_failure_identity_and_request_bytes(tmp_path, monkeypatch):
@@ -466,7 +208,6 @@ def test_resumed_dispatch_preserves_failure_identity_and_request_bytes(tmp_path,
     def wire(runtime):
         menu = _menu(runtime, "request-two")
         messages = [{"role": "user", "content": "[StateFrame]\ncurrent state"}]
-        append_frame_line(runtime, messages)
         result, observation, _source, delivery = _live_read(
             runtime, "request-two", "pkg/service.py",
             {"path": "pkg/service.py", "start_line": 1, "end_line": 1})
@@ -574,23 +315,6 @@ os._exit(0)
     assert b"VALUE = 2" in changed_bytes and changed_count > 0
 
 
-def test_final_capability_floor_cannot_reintroduce_locked_read(tmp_path, monkeypatch):
-    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
-    runtime, _events = _trigger(tmp_path)
-    _menu(runtime, "probe-request-15")
-    runtime.available_tools = TOOLS
-    names, schemas, _digest = _request_tool_floor_schemas(runtime, TOOLS)
-    assert "read" not in names
-    assert "read" not in schemas
-    assert "skill_load" not in names
-    assert {"edit", "str_replace", "run_tests", "done"} <= set(names)
-
-    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "off")
-    names, schemas, _digest = _request_tool_floor_schemas(runtime, TOOLS)
-    assert "read" in names and "read" in schemas
-    assert "skill_load" not in names
-
-
 def test_capability_floor_with_selected_skill_and_mcp_tool(tmp_path, monkeypatch):
     monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "off")
     runtime, _events = _runtime(tmp_path)
@@ -609,47 +333,6 @@ def test_capability_floor_with_selected_skill_and_mcp_tool(tmp_path, monkeypatch
     assert schemas["skill_load"] == skill_schema
 
 
-def test_dynamic_workspace_reader_is_removed_while_locked(tmp_path, monkeypatch):
-    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
-    runtime, _events = _trigger(tmp_path)
-    dynamic = {"type": "function", "function": {"name": "mcp_repo__source_read",
-               "parameters": {"type": "object"}}}
-    runtime._workspace_tool_capabilities = {"mcp_repo__source_read": "source_reader"}
-    runtime.current_request_id = "probe-request-15"
-    offered = StateFrameRuntime.tool_menu(runtime, [*TOOLS, dynamic], [])
-    assert "mcp_repo__source_read" not in _names(offered)
-    assert "read" not in _names(offered)
-    assert {"edit", "run_tests"} <= set(_names(offered))
-
-
-def test_unclassified_dynamic_tool_prevents_lockout(tmp_path, monkeypatch):
-    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
-    runtime, events = _trigger(tmp_path)
-    dynamic = {"type": "function", "function": {"name": "skill_workspace_reader",
-               "parameters": {"type": "object"}}}
-    runtime.current_request_id = "probe-request-15"
-    offered = StateFrameRuntime.tool_menu(runtime, [*TOOLS, dynamic], [])
-    assert {"read", "skill_workspace_reader"} <= set(_names(offered))
-    assert not any(row["reason_code"] == "UNCHANGED_READ_REQUEST" for row in events)
-
-
-def test_late_unclassified_reader_releases_lockout_and_builtin_cannot_be_overridden(
-        tmp_path, monkeypatch):
-    from kernel_read_lockout import filter_tools
-
-    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
-    runtime, _events = _trigger(tmp_path)
-    _menu(runtime, "probe-request-15")
-    assert runtime._read_lockout_notice
-    runtime._workspace_tool_capabilities = {"read": "other"}
-    assert "read" not in _names(filter_tools(runtime, TOOLS))
-    dynamic = {"type": "function", "function": {"name": "mcp_repo__new_reader",
-               "parameters": {"type": "object"}}}
-    released = filter_tools(runtime, [*TOOLS, dynamic])
-    assert {"read", "mcp_repo__new_reader"} <= set(_names(released))
-    assert runtime._read_lockout_notice is None
-
-
 def test_inactive_replay_keeps_bookmark_state_and_menu(tmp_path, monkeypatch):
     monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
     runtime, _ = _runtime(tmp_path)
@@ -664,36 +347,6 @@ def test_inactive_replay_keeps_bookmark_state_and_menu(tmp_path, monkeypatch):
     restore_replay(resumed, snapshot)
     assert resumed._code_bookmarks_active is False
     assert _names(_menu(runtime, "request-15")) == _names(_menu(resumed, "request-15"))
-
-
-def test_mixed_provider_batch_cannot_count_as_unchanged_reads(tmp_path, monkeypatch):
-    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
-    runtime, events = _runtime(tmp_path)
-    (tmp_path / "module.py").write_text("value = 1\n")
-    _menu(runtime, "request-14")
-    _read(runtime, "request-14", "module.py")
-    runtime.owner._receipts.append({"request_id": "request-14",
-                                    "kind": "edit", "result_class": "APPLIED"})
-    assert "read" in _names(_menu(runtime, "request-15"))
-    _read(runtime, "request-15", "module.py")
-    assert "read" not in _names(_menu(runtime, "request-16"))
-    assert [row["reason_code"] for row in events] == ["UNCHANGED_READ_REQUEST"]
-
-
-def test_locked_menu_is_enforced_at_dispatch(tmp_path, monkeypatch):
-    from kernel_completion_owner import request_menu_action_admissible
-
-    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
-    runtime, _ = _trigger(tmp_path)
-    names = _names(_menu(runtime, "probe-request-15"))
-    runtime._completion_owner_request_contract = {
-        "request_id": "probe-request-15", "advertised_actions": names,
-    }
-    for tool in ("read", "grep", "shell", "list_files", "where_defined",
-                 "who_calls", "references"):
-        assert tool not in names
-        assert not request_menu_action_admissible(runtime, tool, "probe-request-15")
-    assert request_menu_action_admissible(runtime, "edit", "probe-request-15")
 
 
 def test_watch_charges_one_unchanged_native_batch_and_restores_tail(monkeypatch):
@@ -771,19 +424,3 @@ def test_bookmarks_off_watch_snapshot_uses_release_schema(monkeypatch):
     assert "batch_tail_pending" not in snapshot
     assert "seen_filter" not in snapshot
     assert UnboundedProgressWatch.from_snapshot(snapshot).snapshot() == snapshot
-
-
-def test_same_path_with_two_revisions_is_not_one_unchanged_batch(tmp_path):
-    from kernel_read_lockout import _request_reads
-
-    runtime, _events = _runtime(tmp_path)
-    source = tmp_path / "module.py"
-    source.write_text("value = 1\n")
-    current = "sha256:" + hashlib.sha256(source.read_bytes()).hexdigest()
-    rows = [{"kind": "read", "result_class": "OK", "target_path": "module.py",
-             "delivery": {"unchanged_since_request": True,
-                          "requested_bytes_delivered": 0,
-                          "effective_range": {"start_line": 1, "end_line": 1},
-                          "revision": revision}}
-            for revision in ("sha256:" + "a" * 64, current)]
-    assert _request_reads(runtime, rows) is None

@@ -908,12 +908,7 @@ def project_request_menu(runtime: object, selected: Sequence[dict],
         if name and name not in before_floor:
             decisions[name] = Decision(name, True, "capability_floor")
             allowed.add(name)
-    from kernel_read_lockout import filter_tools as filter_locked_reads
-    offered = filter_locked_reads(runtime, offered)
-    if getattr(runtime, "_read_lockout_notice", None):
-        allowed.discard("read")
-        if "read" in decisions:
-            decisions["read"] = Decision("read", False, "read_lockout")
+    offered = list(offered)
     names = [_name(tool) for tool in offered]
     before = [_name(tool) for tool in selected]
     if getattr(runtime, "stateframe_post_green_work_menu_mode", "off") == "on":
@@ -950,8 +945,7 @@ def project_request_menu(runtime: object, selected: Sequence[dict],
             "engaged": engaged,
             "rules": {name: decision.rule for name, decision in sorted(decisions.items())},
         })
-    from kernel_read_lockout import filter_tools as filter_locked_reads
-    offered = filter_locked_reads(runtime, offered)
+    offered = list(offered)
     names = [_name(tool) for tool in offered]
     # Freeze the exact serialized schema and allow-set that this request will
     # dispatch.  Preview calls only replace this snapshot; they never consume
@@ -1050,8 +1044,6 @@ def finalize_wire_menu_authority(
             tools[:] = project_candidate_tools(
                 runtime, tools, full_tools=full_tools,
             )
-        from kernel_read_lockout import filter_tools as filter_locked_reads
-        tools[:] = filter_locked_reads(runtime, tools)
 
     names: list[str] = []
     seen: set[str] = set()

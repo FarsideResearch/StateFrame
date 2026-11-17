@@ -9,7 +9,6 @@ from types import SimpleNamespace
 
 from kernel_read_exec import dispatch_live_read, execute_read
 from kernel_final_wire_allocation import publish_code_bookmark_transition
-from kernel_read_lockout import append_frame_line
 from kernel_request_tool_surface import _request_tool_floor_schemas
 from kernel_stateframe_runtime import StateFrameRuntime, note_provider_request
 from kernel_tool_call_loop_breaker import UnboundedProgressWatch, stop_unbounded_no_progress
@@ -83,7 +82,6 @@ def _menu(runtime, case):
     messages = [{"role": "user", "content": "[StateFrame] " + json.dumps(case["frame"],
                  sort_keys=True, separators=(",", ":"))}]
     messages.extend({"role": "user", "content": text} for text in case["source_messages"])
-    append_frame_line(runtime, messages)
     names = [tool["function"]["name"] for tool in tools]
     runtime.available_tools = offered
     final_names, _schemas, _digest = _request_tool_floor_schemas(runtime, offered)
@@ -135,7 +133,6 @@ def _dispatch(runtime, case, index):
 
 def _replay(tmp_path, monkeypatch):
     monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
-    monkeypatch.delenv("STATEFRAME_READ_LOCKOUT", raising=False)
     monkeypatch.setenv("STATEFRAME_DELIVER_REQUESTED_BYTES", "on")
     recorded = _recorded()
     cases = recorded["cases"]
@@ -185,7 +182,6 @@ def test_recorded_bm6diag_default_read_survives_request_16(tmp_path, monkeypatch
     assert [row[1] for row in counters] == [23, 24, 25, 26]
     assert watch.streak < watch.threshold
     assert runtime.system_outcome is None
-    assert not [row for row in events if row["kind"] == "read_lockout_decision"]
     assert [len(case["calls"]) for case in cases] == [10, 1, 9, 10]
     assert [len(case["receipts"]) for case in cases] == [10, 1, 9, 9]
 

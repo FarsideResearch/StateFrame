@@ -18,6 +18,12 @@ HOST_ONLY_SWITCHES = frozenset({"STATEFRAME_ENV_SEED"})
 # Compatibility spellings are normalized at public boundaries, not registered
 # engine switches. Keep this exemption exact and guarded by the namespace tests.
 DEPRECATED_SWITCH_ALIASES = frozenset({"STATEFRAME_ROUTE_BUDGET"})
+# Removed switches: a host that still exports one is told it is ignored, never refused.
+# The source scanner skips this table by name so these keys never register as readers.
+RETIRED_SWITCHES = {
+    "STATEFRAME_READ_LOCKOUT": "removed in this release: the engine never hides read routes",
+}
+RETIRED_TABLE_NAME = "RETIRED_SWITCHES"
 
 
 class StateFrameSwitchPreflightError(RuntimeError):
@@ -82,7 +88,9 @@ class _SwitchReaderVisitor(ast.NodeVisitor):
             if switches:
                 for target in node.targets:
                     for name in _target_names(target):
-                        self.container_switches[name] = switches
+                        # Retired names are listed for reporting only; they are not readers.
+                        if name != RETIRED_TABLE_NAME:
+                            self.container_switches[name] = switches
         self.generic_visit(node)
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
@@ -95,7 +103,9 @@ class _SwitchReaderVisitor(ast.NodeVisitor):
             switches = _literal_container_switches(value)
             if switches:
                 for name in _target_names(node.target):
-                    self.container_switches[name] = switches
+                    # Retired names are listed for reporting only; they are not readers.
+                    if name != RETIRED_TABLE_NAME:
+                        self.container_switches[name] = switches
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
@@ -258,15 +268,18 @@ def unconsumed_stateframe_switches(
     """Report configured STATEFRAME keys absent from the release-derived reader registry."""
     selected_environment = environment if environment is not None else os.environ
     registered, registry_digest = release_stateframe_switches(root)
-    unknown = sorted(
+    configured = [
         str(name) for name in selected_environment
         if str(name).startswith("STATEFRAME_") and str(name) not in registered
-    )
+    ]
+    retired = sorted(name for name in configured if name in RETIRED_SWITCHES)
+    unknown = sorted(name for name in configured if name not in RETIRED_SWITCHES)
     return {
         "schema": SCHEMA,
         "registry_digest": registry_digest,
         "registered_switch_count": len(registered),
         "unknown_switches": unknown,
+        "retired_switches": retired,
     }
 
 
@@ -277,8 +290,17 @@ def enforce_stateframe_switch_registry(
     """Journal a typed run-start refusal before any provider request on registry drift."""
     detail = unconsumed_stateframe_switches(environment, root=root)
     unknown = detail["unknown_switches"]
+    retired = detail["retired_switches"]
+    emit = getattr(journal, "emit", None)
+    if retired and callable(emit):
+        # One informational row per run: the host keeps running, the operator sees why.
+        emit("retired_switch_ignored",
+             producer="kernel_release_switch_registry",
+             dispatch=False, registry_schema=detail["schema"],
+             registry_digest=detail["registry_digest"],
+             retired_switches=retired,
+             reasons={name: RETIRED_SWITCHES[name] for name in retired})
     if unknown:
-        emit = getattr(journal, "emit", None)
         if callable(emit):
             emit("stateframe_switch_preflight_refused",
                  producer="kernel_release_switch_registry",
@@ -292,7 +314,8 @@ def enforce_stateframe_switch_registry(
 
 
 __all__ = [
-    "REGISTRY_FILE", "SCHEMA", "StateFrameSwitchPreflightError", "build_registry_document",
+    "REGISTRY_FILE", "RETIRED_SWITCHES", "SCHEMA", "StateFrameSwitchPreflightError",
+    "build_registry_document",
     "enforce_stateframe_switch_registry", "release_stateframe_switches",
     "unconsumed_stateframe_switches", "write_registry",
 ]

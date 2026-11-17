@@ -22,9 +22,7 @@ def test_shipped_profile_numbers_repeated_read_and_charges_batch_once(tmp_path, 
     assert switches["STATEFRAME_F4"] == "on"
     assert switches["STATEFRAME_FRAMEFIT"] == "on"
     assert switches["STATEFRAME_CODE_BOOKMARKS"] == "on"
-    assert switches["STATEFRAME_READ_LOCKOUT"] == "off"
-    for name in ("STATEFRAME_CODE_BOOKMARKS", "STATEFRAME_DELIVER_REQUESTED_BYTES",
-                 "STATEFRAME_READ_LOCKOUT"):
+    for name in ("STATEFRAME_CODE_BOOKMARKS", "STATEFRAME_DELIVER_REQUESTED_BYTES"):
         monkeypatch.setenv(name, switches[name])
 
     source = tmp_path / "module.py"
@@ -120,7 +118,6 @@ def test_watch_remembers_more_than_4096_read_identities_after_checkpoint(monkeyp
 
 def test_bookmarks_off_watch_matches_release_eviction_and_snapshot_bytes(monkeypatch):
     monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "off")
-    monkeypatch.setenv("STATEFRAME_READ_LOCKOUT", "off")
     watch = UnboundedProgressWatch(threshold=32)
     release_seen = {}
     revision = "sha256:" + hashlib.sha256(b"same source").hexdigest()

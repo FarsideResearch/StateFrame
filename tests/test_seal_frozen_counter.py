@@ -69,7 +69,6 @@ def test_prefit_menu_binding_defers_final_proof_until_after_fit(monkeypatch):
     import kernel_completion_owner
     import kernel_done_is_submit_authority
     import kernel_final_wire_budget
-    import kernel_read_lockout
     import kernel_request_tool_surface
 
     monkeypatch.setenv("STATEFRAME_TOOL_MENU_MEMO", "off")
@@ -78,7 +77,6 @@ def test_prefit_menu_binding_defers_final_proof_until_after_fit(monkeypatch):
     monkeypatch.delenv("SF_LAB_DETFIX3", raising=False)
     monkeypatch.setattr(kernel_done_is_submit_authority, "enabled", lambda _runtime: False)
     monkeypatch.setattr(kernel_done_is_submit_authority, "candidate_exists", lambda _runtime: False)
-    monkeypatch.setattr(kernel_read_lockout, "filter_tools", lambda _runtime, tools: list(tools))
     monkeypatch.setattr(kernel_completion_owner, "bind_final_tool_surface",
                         lambda *_args, **_kwargs: True)
 

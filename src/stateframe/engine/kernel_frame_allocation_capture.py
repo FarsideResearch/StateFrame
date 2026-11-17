@@ -2017,20 +2017,12 @@ def _finalize_frame_candidate(
     reason = ("activated" if active else
               "capacity_dropped" if collected_bookmark_count and not final_bookmarks else
               "no_delivery" if collected_bookmark_count else bookmark_decision["reason"])
-    from kernel_read_lockout import final_source_visible, release as release_read_lockout
     visible_bookmarks = ([row for row in final_bookmarks if isinstance(row, Mapping)
                           and row.get("path") in visible_bookmarked_paths]
                          if isinstance(final_bookmarks, list) else [])
     visible_bookmarks.extend(row for row in collected_bookmarks
                              if row.get("path") in carried_whole_paths
                              and row not in visible_bookmarks)
-    if (getattr(runtime, "_read_lockout_notice", None)
-            and not final_source_visible(runtime, visible_bookmarks, candidate["tools"])):
-        # The prior request's visible bookmark was only provisional. Rebuild an
-        # unrestricted request before a provider sees a completion-only trap.
-        from kernel_frame_optional_allocation import FrameAllocationReplanNeeded
-        release_read_lockout(runtime, "SOURCE_NOT_VISIBLE")
-        raise FrameAllocationReplanNeeded("locked repair source absent from final request")
     journal = getattr(capture, "journal", getattr(runtime, "journal", None))
     emit = getattr(journal, "emit", None)
     from kernel_code_bookmarks import enabled as bookmarks_enabled
