@@ -1,6 +1,6 @@
 {
  "dropped_lab_only": 1,
- "file_count": 848,
+ "file_count": 849,
  "files": {
   "architecture/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "architecture/domain_ids.py": "b0aefd60ec4b876a45ff77f2badfdf12a4902af02cbb6506398b46da368106fd",
@@ -193,7 +193,7 @@
   "kernel_crosssession.py": "0b91310c1d862e02d4a74f53fd09eade0f64e9d48b3a47cac8c4917e941c0ddd",
   "kernel_custom_tools.py": "1ea3cdb78f5f94b974ddcd3371df1a89329c68027f291d954898bf1e8766b3d0",
   "kernel_cutoff_rule.py": "e9096f9a12f09cc35a3fe97f7ed614125d86222abd875143719beefde8f680da",
-  "kernel_decide2.py": "41d629f6e50c74f7815d5835a3c2ebdf178aecda9c75821987567eada98b7f51",
+  "kernel_decide2.py": "5a835c0f596deea1391282e0c5ed391f8686f20b32b4880ecd1b472caaf0b46d",
   "kernel_decide2_ladder.py": "2d1ba2a23f81da209bbff1834777eb6a853d4be95a4ef63751c41159c59799e3",
   "kernel_decision_api.py": "13deabd44e1482386acbe4482c773984761adacc784f3b394213ce474a112916",
   "kernel_decision_cache.py": "c023d0db350bc5f25b44bac8f0ce2b66dc3cd6b868eeaa6f08fdb133b429cb32",
@@ -402,6 +402,7 @@
   "kernel_menu_composer.py": "371cd4e8ebbdff97873dc9fb20a18fe1961f6dd599d83a4dd1d5245cb0c41b0c",
   "kernel_micrograph_wire.py": "9c9a038fd9bf4a27c2c14ad529c8832e754a03fc151f5dcbdd64e1978b0bf72c",
   "kernel_model_hopping_comparison.py": "9764882f794cf4b8743fd0042747b704e1e8ff4bb8d1c545683b2d62e0e87ee4",
+  "kernel_model_ids.py": "7527e0fd33e04a32fdd82c0f841c1b8ad9ffd98e5d2947754f757331776aa608",
   "kernel_model_policy.py": "5a0c6b8f20126127f3416a61c7a08f5d1a5cc68abfa0e3062b4a11a9d14905b9",
   "kernel_model_profile.py": "0d705c53c5c43fd3e67978f157474b2aab1abad235e1ea266e10a08b6c450ae3",
   "kernel_mutate_broker.py": "515a9f6c77c200b28028e055f0efae06a514792f8a200937cb193b204b47c942",
@@ -812,7 +813,7 @@
   "protected_tree_guard.py": "bd5bec6033b7f4e0bfaaf108e40a4686c36e0d5e5f4a9429aa33975c0af17846",
   "realtask_benchmark.py": "76bb5bca535d77fc6fb2b07409265bb56228b0cf0a7d7cd55592a2e6b329d328",
   "realtask_worker_receipts.py": "7f358362d2b839957f2541961ce11b6e65bcb26fa60e5f3d28de22144d47421f",
-  "release-manifest.json": "ab5eac962063b0e8adf179a9323d1b85f1de4f6051c2222ee84432c762e7accb",
+  "release-manifest.json": "5bb57c59fd2a56e717c6c38436cabd80b913f2d06aff115a8a2fbdffe674deab",
   "sampler_config.py": "1549b3a60e0ebc8fbbad8ed5256f52477cd1bb2491a8da350c64c01e01c81b2d",
   "sf_launch.py": "0e0d792f923a3cbcb68cd22cbb06c7f14dcfc470c8b7c24ed78eacd79990ea5c",
   "sf_mutate_boot.py": "a213bba08b5171f830ba8c1afbcfbcf66b7768ab15961e167a9bcba368d97786",
@@ -822,7 +823,7 @@
   "spec_exec.py": "0a80d5488bc812718b4608e086c12c1b8999604cd075f01217eb9bf172424768",
   "swarm/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "swarm/client2.py": "fa141060de5346b46678660fe770c8adcef6b30f579417a52c013d3219d08c70",
-  "switch-registry.json": "49ea31aaa3abbfed1e6e3261199ecf0696d032bf105bdb67210eb761c87c46bb",
+  "switch-registry.json": "c4f8110ca6b0846954581851e9d0a995538d2fdcba046e9cfada9cc89fdb7714",
   "symbol_registry.py": "28986ae33ad691dd89c201130e1982334d56542c2e162d7fc9ff5b59073ea15f",
   "sys1/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "sys1/adapter.py": "633e61b3fcd43dc6a07d628a3c8eb4d4d1e54e53de078cbe9dd74ed677847ab1",
@@ -4784,7 +4785,7 @@
  "release_listed_but_absent_in_source": [],
  "release_manifest": "37f11a29d4ceccbc5ea3aa95d1e60249e41b93974fe1da74e347ccfad28f1374",
  "schema": "stateframe-engine-source/1",
- "shipped_hash": "e8092c32aff70283bccf17c4e0558297dfddd9e266c3acdcb005c4949d9e2108",
+ "shipped_hash": "d3d8e60a0099c0057a6e9a693c0aa12aac130ee16ad92b2d6b45847ee5e16783",
  "source_hash": "1a75f27c6197deed9df5acd441902846aced5fd358729dab308577e184a077c4",
  "source_tree": "37f11a29d4ceccbc5ea3aa95d1e60249e41b93974fe1da74e347ccfad28f1374"
 }
