@@ -17,6 +17,7 @@ from typing import Mapping
 
 import kernel_frame_routes as _frame_routes
 from kernel_frame_routes import require_local
+from kernel_routing_schema import routing_v2
 
 SOURCE_STATIC_ROUTE = "static_route"
 SOURCE_MODEL_ROUTER = "model_router"
@@ -55,9 +56,24 @@ def _model_router(meter: object) -> object | None:
     return router
 
 
+def _runtime_of(meter: object) -> object | None:
+    """The runtime that owns this request, found the way kernel_measurement finds it."""
+    try:
+        from kernel_pilot import ACTIVE_RUNTIME
+        runtime = ACTIVE_RUNTIME.get()
+    except (ImportError, LookupError):
+        runtime = None
+    return runtime if runtime is not None else getattr(meter, "completion_owner_runtime", None)
+
+
 def _remember(meter: object, decision: RouteDecision) -> None:
     """Cache the decision on the request capture and journal it once per request_id."""
     setattr(meter, "route_decision", decision)
+    if routing_v2():
+        # MR-3: the model policy follows the decided deployment (policy_for_runtime).
+        runtime = _runtime_of(meter)
+        if runtime is not None:
+            setattr(runtime, "selected_model", decision.model)
     if getattr(meter, "_route_decision_journaled", None) == decision.request_id:
         return
     setattr(meter, "_route_decision_journaled", decision.request_id)
@@ -137,17 +153,45 @@ def decide_route(meter: object, body: dict[str, object], endpoint: str,
     return decision, final_body, final_endpoint, final_key
 
 
+def _reapply_router_adaptation(meter: object, cached: RouteDecision, body: dict[str, object],
+                               endpoint: str, key: str) -> dict[str, object]:
+    """Re-run the router's body adaptation on a cached second build, pinned to the decision.
+
+    ``prepare_call`` also proposes a destination; that proposal is discarded and the cached
+    model, endpoint and key stay in force. A proposal that differs is journaled once per request.
+    """
+    router = _model_router(meter)
+    if router is None:
+        return body
+    prepared = router.prepare_call(meter, body, endpoint, key)  # type: ignore[attr-defined]
+    adapted = dict(prepared.body)
+    wanted_model = str(adapted.get("model", ""))
+    drifted = wanted_model != cached.model or str(prepared.endpoint) != cached.endpoint
+    if drifted and getattr(meter, "_route_drift_journaled", None) != cached.request_id:
+        setattr(meter, "_route_drift_journaled", cached.request_id)
+        meter.journal.emit(  # type: ignore[attr-defined]
+            "route_drift_pinned", request_id=cached.request_id, wanted_model=wanted_model,
+            kept_model=cached.model, dispatch=False)
+    # prepare_call stamped its own proposal on the capture; restore the decided values.
+    setattr(meter, "model_router_effective_endpoint", cached.endpoint)
+    setattr(meter, "model_router_effective_model_id", cached.model)
+    return adapted
+
+
 def resolve_route_decision(meter: object, body: dict[str, object], endpoint: str, key: str, *,
                            recovery_prepared: bool) -> tuple[RouteDecision, dict[str, object], str, str]:
     """Per-request entry point: reuse the cached decision or decide once.
 
-    A second body build for the same request_id reuses the cached decision and does not run
-    the router again. A recovery replay reuses the cached decision too; without one (replay in a
+    A second body build for the same request_id reuses the cached decision and does not
+    re-decide. A cached model-router decision re-applies the router's body adaptation (its
+    proposed model, endpoint and key are discarded). A recovery replay reuses the cached decision too; without one (replay in a
     new process) the already-routed body is taken as-is and marked ``SOURCE_RECOVERED``.
     """
     request_id = str(getattr(meter, "request_id", ""))
     cached = getattr(meter, "route_decision", None)
     if isinstance(cached, RouteDecision) and cached.request_id == request_id:
+        if routing_v2() and not recovery_prepared and cached.source == SOURCE_MODEL_ROUTER:
+            body = _reapply_router_adaptation(meter, cached, body, endpoint, key)
         body["model"] = cached.model
         if not recovery_prepared:
             router = _model_router(meter)

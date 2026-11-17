@@ -22,6 +22,7 @@ STATIC_BASE = "http://127.0.0.1:9000/v1"
 STATIC_URL = STATIC_BASE + "/chat/completions"  # Route.endpoint appends the path
 ROUTER_URL = "http://127.0.0.1:9100/v1"
 CALLER_URL = "http://127.0.0.1:8000/v1"
+OTHER_ROUTER_URL = "http://127.0.0.1:9101/v1"
 
 
 class FakeJournal:
@@ -137,7 +138,8 @@ def test_repeat_build_for_same_request_reuses_decision_without_rerunning_router(
                                                          recovery_prepared=False)
 
     assert second is first
-    assert router.prepare_calls == 1
+    # The second build re-applies body adaptation only (prepare_call, no re-decision).
+    assert router.prepare_calls == 2
     assert endpoint == ROUTER_URL and key == "router-secret"
     assert body["model"] == "router-model"
 
@@ -260,3 +262,167 @@ def test_seal_hook_is_gated_on_routing_v2_in_measurement():
 def test_routing_schema_switch_is_registered_in_release_registry():
     names, _digest = switch_registry.release_stateframe_switches(Path(measurement.__file__).parent)
     assert ROUTING_SCHEMA_ENV in names
+
+
+class DriftingRouter:
+    """Stub whose first prepare_call decides; later calls adapt the body and drift.
+
+    The adapted field (max_tokens) must survive a cached second build. The drifted model and
+    endpoint must not replace the decision. ``applied=False`` models the default source.
+    """
+
+    def __init__(self, *, applied: bool = True) -> None:
+        self.applied = applied
+        self.prepare_calls = 0
+
+    def prepare_call(self, capture: object, body: dict, endpoint: str, key: str) -> SimpleNamespace:
+        self.prepare_calls += 1
+        drifted = self.prepare_calls > 1
+        adapted = copy.deepcopy(dict(body))
+        adapted["model"] = "drifted-model" if drifted else "router-model"
+        adapted["max_tokens"] = 256
+        return SimpleNamespace(
+            body=adapted, endpoint=OTHER_ROUTER_URL if drifted else ROUTER_URL,
+            key="router-secret", applied=self.applied,
+            decision=SimpleNamespace(endpoint=SimpleNamespace(api_key_env="ROUTER_KEY")),
+        )
+
+    def validate_final_request(self, capture: object, body: dict) -> None:
+        return None
+
+
+def test_cached_model_router_build_keeps_adapted_body_and_pins_decided_route(v2_routes):
+    router = DriftingRouter()
+    meter = FakeMeter(router=router)
+    first, first_body, _, _ = resolve_route_decision(meter, _body(), CALLER_URL, "caller-key",
+                                                     recovery_prepared=False)
+    assert first_body["max_tokens"] == 256
+
+    second, body, endpoint, key = resolve_route_decision(meter, _body(), CALLER_URL, "caller-key",
+                                                         recovery_prepared=False)
+
+    assert second is first
+    assert body["max_tokens"] == 256  # router body adaptation re-applied to the fresh build
+    assert body["model"] == "router-model"  # decided model kept, not the drifted one
+    assert (endpoint, key) == (ROUTER_URL, "router-secret")
+    assert meter.journal.named("route_drift_pinned") == [{
+        "request_id": "req-1", "wanted_model": "drifted-model", "kept_model": "router-model",
+        "dispatch": False}]
+
+
+def test_route_drift_is_journaled_once_per_request(v2_routes):
+    meter = FakeMeter(router=DriftingRouter())
+    for _ in range(3):
+        resolve_route_decision(meter, _body(), CALLER_URL, "caller-key", recovery_prepared=False)
+
+    assert router_drift_count(meter) == 1
+
+
+def router_drift_count(meter: FakeMeter) -> int:
+    return len(meter.journal.named("route_drift_pinned"))
+
+
+def test_cached_model_router_build_without_drift_journals_nothing(v2_routes):
+    router = FakeRouter()
+    meter = FakeMeter(router=router)
+    resolve_route_decision(meter, _body(), CALLER_URL, "caller-key", recovery_prepared=False)
+    _, body, endpoint, _ = resolve_route_decision(meter, _body(), CALLER_URL, "caller-key",
+                                                  recovery_prepared=False)
+
+    assert router.prepare_calls == 2
+    assert body["model"] == "router-model" and endpoint == ROUTER_URL
+    assert meter.journal.named("route_drift_pinned") == []
+
+
+def test_cached_static_route_build_never_calls_router_prepare(v2_routes):
+    router = FakeRouter()
+    meter = FakeMeter(router=router, frame_route=_static_route())
+    resolve_route_decision(meter, _body(), CALLER_URL, "caller-key", recovery_prepared=False)
+    _, body, endpoint, _ = resolve_route_decision(meter, _body(), CALLER_URL, "caller-key",
+                                                  recovery_prepared=False)
+
+    assert router.prepare_calls == 0
+    assert body["model"] == "static-model" and endpoint == STATIC_URL
+    assert meter.journal.named("route_drift_pinned") == []
+
+
+def test_cached_default_route_build_never_calls_router_prepare(v2_routes):
+    router = DriftingRouter(applied=False)
+    meter = FakeMeter(router=router)
+    first, _, _, _ = resolve_route_decision(meter, _body(), ROUTER_URL, "caller-key",
+                                            recovery_prepared=False)
+    assert first.source == route_decision.SOURCE_DEFAULT
+
+    second, body, _, _ = resolve_route_decision(meter, _body(), ROUTER_URL, "caller-key",
+                                                recovery_prepared=False)
+
+    assert second is first
+    assert router.prepare_calls == 1
+    assert body["model"] == "router-model"
+    assert meter.journal.named("route_drift_pinned") == []
+
+
+def test_recovered_decision_is_journaled_with_source_recovered(v2_routes):
+    meter = FakeMeter(router=FakeRouter())
+    prepared = {"model": "already-routed", "messages": []}
+
+    resolve_route_decision(meter, dict(prepared), ROUTER_URL, "k", recovery_prepared=True)
+    resolve_route_decision(meter, dict(prepared), ROUTER_URL, "k", recovery_prepared=True)
+
+    records = meter.journal.named("route_decision")
+    assert len(records) == 1
+    assert records[0]["source"] == "recovered"
+    assert records[0]["model"] == "already-routed"
+    assert records[0]["dispatch"] is False
+
+
+class RuntimeStub(SimpleNamespace):
+    """Runtime-like object; the meter reaches it through ``completion_owner_runtime``."""
+
+
+def test_v2_decision_sets_selected_model_on_runtime(v2_routes):
+    runtime = RuntimeStub(model_name="launch-a")
+    meter = FakeMeter(router=FakeRouter())
+    meter.completion_owner_runtime = runtime
+
+    decide_route(meter, _body(), CALLER_URL, "caller-key")
+
+    assert runtime.selected_model == "router-model"
+
+
+def test_v2_decision_selects_policy_model_over_launch_served(v2_routes, monkeypatch):
+    from kernel_model_policy import policy_for_runtime
+
+    for key in ("STATEFRAME_MODEL_NAME", "DS_MODEL", "STATEFRAME_SERVED_MODEL", "SERVED_MODEL"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("DS_SERVED_MODEL", "launch-a")
+    runtime = RuntimeStub(model_name="launch-a",
+                          model_router_allowed_models=("launch-a", "router-model"))
+    meter = FakeMeter(router=FakeRouter())
+    meter.completion_owner_runtime = runtime
+
+    decide_route(meter, _body(), CALLER_URL, "caller-key")
+    policy = policy_for_runtime(runtime)
+
+    assert policy.model_name == "router-model"
+    assert policy.served_model_name == ""
+
+
+def test_schema_1_decision_leaves_runtime_selection_and_policy_untouched(monkeypatch):
+    from kernel_model_policy import policy_for_runtime
+
+    monkeypatch.setenv(ROUTING_SCHEMA_ENV, "1")
+    for key in ("STATEFRAME_MODEL_NAME", "DS_MODEL", "STATEFRAME_SERVED_MODEL", "SERVED_MODEL"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("DS_SERVED_MODEL", "launch-a")
+    runtime = RuntimeStub(model_name="launch-a",
+                          model_router_allowed_models=("launch-a", "router-model"))
+    meter = FakeMeter(router=FakeRouter())
+    meter.completion_owner_runtime = runtime
+
+    resolve_route_decision(meter, _body(), CALLER_URL, "caller-key", recovery_prepared=False)
+    policy = policy_for_runtime(runtime)
+
+    assert not hasattr(runtime, "selected_model")
+    assert policy.model_name == "launch-a"  # legacy launch-served-wins
+    assert meter.journal.named("route_drift_pinned") == []
