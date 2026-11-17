@@ -22,6 +22,7 @@ import time
 from typing import Callable, Mapping, Protocol, Sequence
 
 if __package__:
+    from .kernel_fanout_continuation import WRITER_DETAIL_FIELDS, WRITER_SCOPE_FIELDS, WRITER_UNIT_FIELDS
     from .kernel_parallel_admission import DirectorySnapshot, _definitions, _safe_path, admit, rescan_proposal, scan_coupling
     from .kernel_parallel_contracts import _module_map, project_interface, verify_contracts
     from .kernel_parallel_projection import project_unit
@@ -37,6 +38,7 @@ if __package__:
     from .kernel_journal_store import journal_paths, open_journal
     from .kernel_exec_tracker import ProcessTable, _boot_id, load_tolerant_seconds
 else:
+    from kernel_fanout_continuation import WRITER_DETAIL_FIELDS, WRITER_SCOPE_FIELDS, WRITER_UNIT_FIELDS
     from kernel_parallel_admission import DirectorySnapshot, _definitions, _safe_path, admit, rescan_proposal, scan_coupling
     from kernel_parallel_contracts import _module_map, project_interface, verify_contracts
     from kernel_parallel_projection import project_unit
@@ -1412,10 +1414,30 @@ def action_receipt_summary(result: ParallelResult, request: ParallelRequest | No
     return summary, omitted
 
 
-_PARALLEL_DISPOSITION_ID_FIELDS = ("id", "status")
-_PARALLEL_DISPOSITION_DETAIL_FIELDS = (
-    "id", "reason", "changed_files", "contract_ok", "check_status", "requests",
-)
+_PARALLEL_DISPOSITION_ID_FIELDS = WRITER_UNIT_FIELDS
+_PARALLEL_DISPOSITION_DETAIL_FIELDS = WRITER_DETAIL_FIELDS
+_PARALLEL_DISPOSITION_SCOPE_FIELDS = WRITER_SCOPE_FIELDS
+_DISPOSITION_SCOPE_MAX_PATHS = 8
+
+
+def _record_unit_scope(
+        scope_by_id: dict[str, list[object]], unit: UnitContract, public_text: Callable[[object], str],
+) -> bool:
+    """Store the owned paths and check selectors a continuation pin needs; return True when clipped."""
+    truncated = False
+
+    def bounded(values: Sequence[str]) -> list[str]:
+        nonlocal truncated
+        truncated |= len(values) > _DISPOSITION_SCOPE_MAX_PATHS
+        kept = []
+        for value in values[:_DISPOSITION_SCOPE_MAX_PATHS]:
+            text, was_truncated = _bounded_disposition_text(public_text(value), 128)
+            truncated |= was_truncated
+            kept.append(text)
+        return kept
+
+    scope_by_id[unit.id] = [unit.id, bounded(unit.owns), bounded(unit.check.selectors)]
+    return truncated
 
 
 def _bounded_disposition_text(value: object, byte_limit: int) -> tuple[str, bool]:
@@ -1487,6 +1509,7 @@ def render_parallel_disposition(
 
     status_by_id: dict[str, str] = {}
     detail_by_id: dict[str, list[object]] = {}
+    scope_by_id: dict[str, list[object]] = {}
     if result.admission.status == "REFUSED":
         for unit in unit_contracts:
             reason = refusal.reason if refusal is not None else "ADMISSION_REFUSED"
@@ -1496,6 +1519,7 @@ def render_parallel_disposition(
             detail_by_id[unit.id] = [
                 unit.id, bounded_reason, [], None, "NOT_RUN", 0,
             ]
+            data_truncated |= _record_unit_scope(scope_by_id, unit, public_text)
         ordered_ids = [unit.id for unit in unit_contracts]
     else:
         if request is None:
@@ -1521,6 +1545,7 @@ def render_parallel_disposition(
                 unit.id, reason, changed_files, outcome.contract_ok, outcome.check,
                 outcome.usage.requests,
             ]
+            data_truncated |= _record_unit_scope(scope_by_id, unit, public_text)
         failed = [unit.id for unit in request.units if status_by_id[unit.id] not in {
             "COMMITTED", "COMMITTED_UNVERIFIED", "CANCELLED",
         }]
@@ -1546,6 +1571,9 @@ def render_parallel_disposition(
         "unit_details_fields": list(_PARALLEL_DISPOSITION_DETAIL_FIELDS),
         "units": [],
         "unit_details": [],
+        # Additive: owned paths and check selectors for continuation pins; older readers ignore it.
+        "unit_scope_fields": list(_PARALLEL_DISPOSITION_SCOPE_FIELDS),
+        "unit_scopes": [],
     }
     item: dict[str, object] = {
         "schema": PARALLEL_DISPOSITION_SCHEMA,
@@ -1598,6 +1626,18 @@ def render_parallel_disposition(
             update_truncation(len(detail_rows) - retained_details)
         else:
             retained_details += 1
+
+    # Scopes come last so a tight budget drops pins before it drops committed facts.
+    for row in section["unit_details"]:
+        scope = scope_by_id.get(str(row[0]))
+        if scope is None:
+            data_truncated = True
+            continue
+        section["unit_scopes"].append(scope)
+        if _disposition_wire_bytes(item) > MAX_PARALLEL_DISPOSITION_BYTES:
+            section["unit_scopes"].pop()
+            data_truncated = True
+            break
 
     update_truncation(len(detail_rows) - retained_details)
     if _disposition_wire_bytes(item) > MAX_PARALLEL_DISPOSITION_BYTES:
