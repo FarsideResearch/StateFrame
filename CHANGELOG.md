@@ -3,7 +3,7 @@
 ## Unreleased
 
 - Checkpoints: a file rewritten with the same size and modification time is now captured instead of reusing the previous snapshot's copy.
-- Checkpoints: unchanged files are shared with earlier checkpoints instead of copied, so each checkpoint adds only the bytes that changed.
+- Checkpoints: unchanged files are shared with earlier checkpoints instead of copied, so each checkpoint adds only the bytes that changed. Restored files keep the exact modification time they had when the checkpoint was taken.
 
 ## 0.7.38 (2026-11-17)
 

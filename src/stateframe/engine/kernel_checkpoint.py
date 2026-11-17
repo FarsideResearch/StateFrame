@@ -2615,6 +2615,7 @@ def _snapshot_tree(source: Path, target: Path, relative: str, pool: Path, manife
             store.mkdir(mode=0o700, parents=True, exist_ok=True)
             known = _POOL_KNOWN.setdefault(str(store), {
                 name: _pool_identity(store / name) for name in os.listdir(store)})
+        live_infos = {entry.name: entry.stat(follow_symlinks=False) for entry in entries}
         for name in names:
             cached = known.get(name)
             identity, _cloned = _capture_snapshot_file(
@@ -2622,6 +2623,9 @@ def _snapshot_tree(source: Path, target: Path, relative: str, pool: Path, manife
             if cached is not None and cached != identity:
                 raise CheckpointError("pooled file identity changed during checkpoint capture")
             known[name] = identity
+            # A pool file is shared by every checkpoint holding these bytes, so its own mtime is the
+            # first capture's; the live mtime of this checkpoint is recorded for restore.
+            _note_mtime(f"{relative}/{name}", live_infos[name])
         manifests[relative] = [[name, known[name][0]] for name in names]
         return
     if source.is_dir() and not source.is_symlink():
@@ -2677,10 +2681,22 @@ def _note_new_bytes(count: int) -> None:
 
 
 def _note_mode(key: str, info: os.stat_result) -> None:
-    """Record the live mode of a captured file so restore can give the copy back its exact mode."""
+    """Record the live mode and mtime_ns of a captured file so restore can give the copy both back.
+
+    The mtime matters because stored objects are shared by content: a stored copy carries the mtime
+    of the first capture of those bytes, not the live file's mtime at this checkpoint.
+    """
     modes = _SAVE.get("copy_modes")
     if isinstance(modes, dict):
         modes[key] = stat.S_IMODE(info.st_mode)
+    _note_mtime(key, info)
+
+
+def _note_mtime(key: str, info: os.stat_result) -> None:
+    """Record a live file's mtime_ns under its checkpoint key (meta "file_mtime_ns"); no-op outside a save."""
+    mtimes = _SAVE.get("copy_mtimes")
+    if isinstance(mtimes, dict):
+        mtimes[key] = info.st_mtime_ns
 
 
 def _live_digest(path: Path, info: os.stat_result) -> tuple[int, str]:
@@ -2923,6 +2939,12 @@ def _capture_run_file(source: Path, target: Path, relative: str) -> None:
     """Store one top-level or worker run file through the content-addressed store on the save path."""
     objects = _SAVE.get("snapshot_objects")
     if not isinstance(objects, Path):
+        try:
+            info = os.lstat(source)
+        except OSError:
+            info = None  # the capture below reports the missing or unreadable source
+        if info is not None and stat.S_ISREG(info.st_mode):
+            _note_mode(relative, info)
         _capture_snapshot_file(source, target)
         return
     try:
@@ -3444,8 +3466,9 @@ def _save_into(payload, ctx, step, run_dir, root, final, tmp, clocks, started, c
     new_pool_files: list[Path] = []
     durable_inodes: set[tuple[int, int]] = set()
     file_modes: dict[str, int] = {}
+    file_mtimes: dict[str, int] = {}
     bytes_new = [0]
-    _SAVE.update(copy_modes=file_modes, bytes_new=bytes_new, counts=copied,
+    _SAVE.update(copy_modes=file_modes, copy_mtimes=file_mtimes, bytes_new=bytes_new, counts=copied,
                  durable_inodes=durable_inodes)
     for name in entries:
         source, destination = run_dir / name, tmp / "run" / name
@@ -3502,6 +3525,7 @@ def _save_into(payload, ctx, step, run_dir, root, final, tmp, clocks, started, c
         "file_chunks": file_chunks,
         "file_sha256": file_digests,
         "file_modes": file_modes,
+        "file_mtime_ns": file_mtimes,
         "link_fallback": copied.get("link_fallback", 0),
         "bytes_new": bytes_new[0] + len(manifest_bytes),
         "blob_count": sum(len(names) for names in manifests.values()),
@@ -4219,6 +4243,7 @@ def _restore_files(checkpoint: Path, run_dir: Path, meta: dict) -> None:
     for name in meta["entries"]:
         _clone(checkpoint / "run" / name, run_dir / name)
     manifest = checkpoint / MANIFEST_FILE
+    pool_sources: dict[str, Path] = {}
     if manifest.is_file():
         for relative, files in json.loads(manifest.read_bytes()).items():
             store = checkpoint.parent / POOL_DIR / relative.replace("/", "__")
@@ -4227,6 +4252,7 @@ def _restore_files(checkpoint: Path, run_dir: Path, meta: dict) -> None:
             for row in files:
                 name = row[0]
                 _clone(store / name, live / name)
+                pool_sources[f"{relative}/{name}"] = store / name
     _restore_modes(run_dir, meta)
     for relative, rows in meta.get("file_chunks", {}).items():
         if (not relative.startswith("worker/measurement-runs/")
@@ -4260,6 +4286,56 @@ def _restore_files(checkpoint: Path, run_dir: Path, meta: dict) -> None:
                         or raw.hexdigest() != raw_sha or output.tell() != end):
                     raise CheckpointError(f"audit journal chunk checksum mismatch: {relative}")
         shutil.copystat(checkpoint / "run" / relative, destination)
+    # Last: the journal placeholders above are rewritten, and their copystat would reset the mtime.
+    _restore_mtimes(checkpoint, run_dir, meta, pool_sources)
+
+
+def _restore_mtimes(checkpoint: Path, run_dir: Path, meta: dict,
+                    pool_sources: dict[str, Path] | None = None) -> None:
+    """Give each restored file the mtime_ns it had when checkpointed (meta "file_mtime_ns").
+
+    Only the private copy in ``run_dir`` is touched. A file that is not a single-link inode, or that
+    shares an inode with its stored source (the checkpoint's run copy, or the blob pool file for pooled
+    blobs), is replaced by a private copy before utime, so os.utime never reaches a shared object. A
+    missing or malformed record is ignored and restore continues (old checkpoints keep their behavior).
+    """
+    recorded = meta.get("file_mtime_ns")
+    if not isinstance(recorded, dict):
+        return
+    entries = set(meta.get("entries", ()))
+    for key, mtime_ns in recorded.items():
+        parts = key.split("/") if isinstance(key, str) else []
+        if (type(mtime_ns) is not int or not -(1 << 63) < mtime_ns < (1 << 63)
+                or not parts or parts[0] not in entries or any(part in ("", ".", "..") for part in parts)):
+            _warn_once("file_mtime_ns", "checkpoint mtime record has an invalid entry; mtimes not restored")
+            continue
+        target = run_dir.joinpath(*parts)
+        try:
+            info = os.lstat(target)
+            source = (pool_sources or {}).get(key, checkpoint / "run" / key)
+            stored = os.lstat(source)
+            if not stat.S_ISREG(info.st_mode):
+                continue
+            if info.st_nlink != 1 or os.path.samestat(info, stored):
+                _replace_with_private_copy(target)
+            os.utime(target, ns=(mtime_ns, mtime_ns), follow_symlinks=False)
+        except OSError:
+            _warn_once("file_mtime_restore", "could not restore a checkpointed file mtime; continuing")
+
+
+def _replace_with_private_copy(path: Path) -> None:
+    """Swap ``path`` for a fresh single-link copy with the same bytes, mode and times."""
+    descriptor, temporary = tempfile.mkstemp(prefix=".mtime-", suffix=".tmp", dir=path.parent)
+    os.close(descriptor)
+    try:
+        shutil.copy2(path, temporary, follow_symlinks=False)
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
 
 
 _ABSENT = object()
