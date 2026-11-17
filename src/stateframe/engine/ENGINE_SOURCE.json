@@ -1,6 +1,6 @@
 {
  "dropped_lab_only": 1,
- "file_count": 846,
+ "file_count": 847,
  "files": {
   "architecture/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "architecture/domain_ids.py": "b0aefd60ec4b876a45ff77f2badfdf12a4902af02cbb6506398b46da368106fd",
@@ -589,6 +589,7 @@
   "kernel_ripple_inline.py": "b174ff361af90e4de1d1f95f198bd321cb79fd96e044ef3efecf6f6639c86181",
   "kernel_ripple_preview.py": "9b1ccea8e8f5ac550187bc3336ce456ab6ee03330d03de960e6c4b7448007775",
   "kernel_route_budget.py": "3798cb758abb454f784e3fb66f1c70bb5aef679303a4551b785f0419c8444cd4",
+  "kernel_routing_schema.py": "e89f4c85bc694e5b80005701d8732517951efd2490e91d6df4e906b686575b90",
   "kernel_row_role.py": "0af442881ef4530f3e2ad9bb4d3eb72a9fd68cdd4dadbb13bcf73e5a1e27a391",
   "kernel_run_env.py": "4fb1155a70a145b29efaac240ad15c67b1082d148f2de525e234c17771c6f48b",
   "kernel_run_vitals.py": "80614beec25ba9c5d780b36f298875216ab8f178991956e1acde9b69c28ec34d",
@@ -4782,7 +4783,7 @@
  "release_listed_but_absent_in_source": [],
  "release_manifest": "37f11a29d4ceccbc5ea3aa95d1e60249e41b93974fe1da74e347ccfad28f1374",
  "schema": "stateframe-engine-source/1",
- "shipped_hash": "ac00c71428d8ac3c729c8ca1d780266c88f41d3d1088053b3454b2f61b124238",
+ "shipped_hash": "eef4482413a6a306bee5ef792740d22cdc92a2c193f58a20a09dbdd5b0cdb8ea",
  "source_hash": "1a75f27c6197deed9df5acd441902846aced5fd358729dab308577e184a077c4",
  "source_tree": "37f11a29d4ceccbc5ea3aa95d1e60249e41b93974fe1da74e347ccfad28f1374"
 }
