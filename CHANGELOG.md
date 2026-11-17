@@ -1,8 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.7.26 (2026-11-17)
 
-- Security: a verification selector that contains a line break (LF or CR, after trimming surrounding blank lines) is refused before any whitespace collapse, fallback or allowlist match, so a line-joined command can no longer pass as a check target. Tests: `tests/test_verification_selector_blank_lines.py`.
+- Security: verification selectors containing a line break are now refused before matching
+
 ## 0.7.25 (2026-11-17)
 
 - Fixed: a mutation sensitivity receipt reloaded from its own saved form keeps its `variant_id` (the loader reads the flat field it writes, and still accepts the nested shape).
