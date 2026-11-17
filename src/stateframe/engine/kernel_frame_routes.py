@@ -87,6 +87,9 @@ _baseline: dict[str, object] | None = None
 LAST_CLOSED_ACTION: dict[str, object] = {}
 # Routing v2 (MR-5): withheld edit/finish proposals awaiting the next provider request, bound to a revision.
 PRESERVED_PROPOSALS: list[dict[str, object]] = []
+# Routing v2 (MR-7): target role of the proposal the current request carries. Set when the carry is
+# consumed (that happens before the request is prepared), cleared when the next action closes.
+CARRY_TARGET: dict[str, str] = {}
 ACCOUNTING: dict[str, int] = {"physical": 0, "accepted": 0, "discarded": 0}
 # MR-4 (routing schema 2 only). Read-kind frame tools that keep a plan lease open. These are the
 # router's _READ_ACTIONS lowercased; tests/test_frame_routes_plan_lease.py pins the match.
@@ -116,6 +119,7 @@ def install(spec: object, *, baseline: Mapping[str, object] | None = None) -> No
         LAST_CLOSED_ACTION.clear()
         _reset_plan_lease()
         PRESERVED_PROPOSALS.clear()
+        CARRY_TARGET.clear()
         ACCOUNTING.update(physical=0, accepted=0, discarded=0)
         return
     if not isinstance(spec, dict) or spec.get("schema") != SCHEMA:
@@ -147,6 +151,7 @@ def install(spec: object, *, baseline: Mapping[str, object] | None = None) -> No
     LAST_CLOSED_ACTION.clear()
     _reset_plan_lease()
     PRESERVED_PROPOSALS.clear()
+    CARRY_TARGET.clear()
     ACCOUNTING.update(physical=0, accepted=0, discarded=0)
 
 
@@ -196,6 +201,12 @@ def resolve(role: str, *, forced_by: str | None = None) -> Route:
 
 
 def role_for_request(revision: object = None, *, request_kind: str | None = None) -> str:
+    if routing_v2() and request_kind != "decide2" and PRESERVED_PROPOSALS:
+        # MR-7: the request that carries a withheld proposal runs on the proposal's target route.
+        # Oldest entry first; this outranks the plan lease and the legacy role logic below.
+        return str(PRESERVED_PROPOSALS[0]["target_role"])
+    if routing_v2() and request_kind != "decide2" and CARRY_TARGET.get("role"):
+        return CARRY_TARGET["role"]
     if os.environ.get("STATEFRAME_MUTATIONS", "off") in {"prebuilt", "authored"}:
         from kernel_mutate_runtime import service as mutation_service
         _mutations = mutation_service()
@@ -218,6 +229,7 @@ def role_for_request(revision: object = None, *, request_kind: str | None = None
 def close_action(record: Mapping[str, object], *, revision: object = None,
                  canonical: Mapping[str, object] | None = None,
                  receipts: list[Mapping[str, object]] | None = None) -> None:
+    CARRY_TARGET.clear()
     canonical = canonical or {}
     ids = list(canonical.get("execution_ids") or [])
     receipt_ids = list(canonical.get("check_receipt_ids") or [])
@@ -296,7 +308,17 @@ def escalation_target(answering: Route | None, calls: object,
     if role not in {"edit", "finish"}:
         return None
     target = resolve(role)
-    return role if (target.endpoint, target.model) != (answering.endpoint, answering.model) else None
+    # MR-7: settings-only differences (temperature, credential, slot, ...) escalate too. The caller
+    # re-prepares the leg on the target role, which applies the target settings. A new marker value
+    # would need react_repair.py changes (forced_route -> resolve), so the role itself is returned.
+    return role if _route_differs(target, answering) else None
+
+
+def _route_differs(target: Route, answering: Route) -> bool:
+    """Routing v2 compares the full route identity (MR-7); v1 keeps the legacy (endpoint, model) pair."""
+    if routing_v2():
+        return route_identity(target) != route_identity(answering)
+    return (target.endpoint, target.model) != (answering.endpoint, answering.model)
 
 
 class RouteEscalation(Exception):
@@ -310,8 +332,8 @@ def route_split(answering: Route | None, calls: object, *,
                 ) -> tuple[list[dict], list[dict], str | None]:
     """Routing v2 (MR-5): split a batch into calls that run on the answering route and withheld calls.
 
-    Returns (kept, withheld, target). Only edit/finish calls whose role resolves to another
-    endpoint/model are withheld; read-kind calls always stay. target is None when nothing escalates,
+    Returns (kept, withheld, target). Only edit/finish calls whose role resolves to another route
+    (see _route_differs: full identity under v2) are withheld; read-kind calls always stay. target is None when nothing escalates,
     and then kept is the whole batch. Callers use this only under routing_v2().
     """
     if answering is None or not isinstance(calls, list) or not _well_formed(calls):
@@ -323,7 +345,7 @@ def route_split(answering: Route | None, calls: object, *,
         role = classify_calls([call], custom_writes=custom_writes)
         if role in {"edit", "finish"}:
             target = resolve(role)
-            if (target.endpoint, target.model) != (answering.endpoint, answering.model):
+            if _route_differs(target, answering):
                 withheld.append(call)
                 targets.add(role)
                 continue
@@ -356,6 +378,8 @@ def take_preserved_messages(current_revision: object) -> list[dict[str, str]]:
     """Consume withheld proposals as user messages for the next request; stale ones are marked."""
     items = list(PRESERVED_PROPOSALS)
     PRESERVED_PROPOSALS.clear()
+    if items and routing_v2():
+        CARRY_TARGET["role"] = str(items[0]["target_role"])
     messages: list[dict[str, str]] = []
     for item in items:
         body = json.dumps(item["calls"], sort_keys=True, indent=2)
@@ -374,19 +398,47 @@ def unclassified_dispatcher(names: set[str] | frozenset[str]) -> set[str]:
     return set(names) - WRITE - DONE - READ
 
 
-def apply_body(body: dict[str, object], route: Route, *, default_endpoint: str) -> None:
+BODY_FIELDS = ("model", "temperature", "top_p", "top_k", "min_p", "max_tokens")
+
+
+def applied_settings(route: Route) -> dict[str, object]:
+    """The settings a route puts on a leg: body fields apply_body writes, slot, and api_key_env.
+
+    Single source for apply_body and the routing v2 identity, so the comparison and the application
+    cannot drift. A body field equal to the baseline (or unset) is omitted, since apply_body never writes it.
+    """
     settings = route.settings
-    for field in ("model", "temperature", "top_p", "top_k", "min_p", "max_tokens"):
+    applied: dict[str, object] = {}
+    for field in BODY_FIELDS:
         inherited = (_baseline or {}).get(field)
         if route.role == "decide2":
             inherited = {"model": "decision-tier", "temperature": 0.0,
                          "max_tokens": 384}.get(field, inherited)
-        if settings.get(field) is not None and (_baseline is None or settings[field] != inherited):
-            if field == "max_tokens" and type(body.get(field)) is int:
-                body[field] = min(body[field], settings[field])
-            else:
-                body[field] = settings[field]
+        value = settings.get(field)
+        if value is not None and (_baseline is None or value != inherited):
+            applied[field] = value
     slot = settings.get("slot")
+    if slot is not None:
+        applied["slot"] = slot
+    applied["api_key_env"] = settings.get("api_key_env")
+    return applied
+
+
+def route_identity(route: Route) -> dict[str, object]:
+    """Routing v2 (MR-7): full effective identity of a leg: endpoint, model and applied settings."""
+    return {"endpoint": route.endpoint, "model": route.model, **applied_settings(route)}
+
+
+def apply_body(body: dict[str, object], route: Route, *, default_endpoint: str) -> None:
+    applied = applied_settings(route)
+    for field in BODY_FIELDS:
+        if field not in applied:
+            continue
+        if field == "max_tokens" and type(body.get(field)) is int:
+            body[field] = min(body[field], applied[field])
+        else:
+            body[field] = applied[field]
+    slot = applied.get("slot")
     if route.endpoint != default_endpoint and slot is None:
         body.pop("id_slot", None)
         body.pop("cache_prompt", None)
