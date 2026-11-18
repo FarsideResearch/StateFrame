@@ -115,12 +115,62 @@ def _action_path(action: Action, explicit_path: object = None) -> str:
     return _normal_path(match.group(0)) if match else ""
 
 
+def _span_suffix(value: object) -> str:
+    """The ``@start-end`` span of a read path, kept distinct from the bare path."""
+    match = re.search(r"@\d+(?:-\d+)?$", _text(value).replace("\\", "/"))
+    return match.group(0) if match else ""
+
+
 def _result_class(action: Action, explicit_result: object = None) -> str:
     if explicit_result is not None:
         return _text(explicit_result).upper()
     if isinstance(action, Mapping):
         return _text(action.get("result_class", action.get("result", ""))).upper()
     return ""
+
+
+def is_undelivered_read(delivery: object) -> bool:
+    """True when a read's requested bytes never arrived (budget miss, withheld, or empty page).
+
+    Proof-backed reuse stubs (REUSED_PROVEN) and non-delivery failures are not undelivered.
+    Shared by the read budget and the no-progress watch so both agree on one definition.
+    """
+    receipt: Mapping[str, object] = delivery if isinstance(delivery, Mapping) else {}
+    status = receipt.get("delivery_status")
+    count = receipt.get("requested_bytes_delivered", 0)
+    if status == "WITHHELD":
+        return True
+    return status == "DELIVERED" and not (type(count) is int and count > 0)
+
+
+def read_governor_action(
+        path: str, *, turn: int, read_ok: bool, delivery: Mapping[str, object] | None,
+        deliver_requested: bool, observation: str,
+) -> dict[str, object]:
+    """Governor action for one read, built from the executor's delivery receipt.
+
+    Only a re-read of bytes the model already received is budgeted. A read whose
+    requested bytes never arrived (budget miss, size limit, withheld or empty page)
+    is ``undelivered``: it spends no budget and is never refused, because the model
+    cannot act on bytes it was never given. A proof-backed reuse stub keeps its
+    budgeted, path-less shape, so repeated re-reads still reach the budget.
+    """
+    action: dict[str, object] = {"kind": "read", "path": path, "turn": turn}
+    if not deliver_requested:
+        action["content_digest"] = hashlib.sha256(
+            observation.encode("utf-8", "replace")).hexdigest()[:32]
+        return action
+    receipt: Mapping[str, object] = delivery if isinstance(delivery, Mapping) else {}
+    status = receipt.get("delivery_status")
+    count = receipt.get("requested_bytes_delivered", 0)
+    has_bytes = type(count) is int and count > 0
+    if read_ok and status == "DELIVERED" and has_bytes:
+        action["content_digest"] = str(receipt.get("requested_bytes_sha256") or "")
+    elif is_undelivered_read(receipt):
+        action["undelivered"] = True
+    else:
+        action["path"] = ""
+    return action
 
 
 def _fingerprint(action: Action) -> str:
@@ -262,6 +312,7 @@ class IdleGovernor:
         self._denials = 0
         self._resets = 0
         self._recovery_reads = 0
+        self._undelivered_reads = 0
         self._read_paths: set[str] = set()
         self._trace: list[dict[str, object]] = []
         self._last_receipt: IdleDecisionReceipt | None = None
@@ -295,6 +346,11 @@ class IdleGovernor:
     def recovery_reads(self) -> int:
         """Reads of content not currently shown; exempt from the budget."""
         return self._recovery_reads
+
+    @property
+    def undelivered_reads(self) -> int:
+        """Reads whose requested bytes never arrived; spend no budget, never refused."""
+        return self._undelivered_reads
 
     @property
     def last_warning(self) -> str | None:
@@ -382,6 +438,13 @@ class IdleGovernor:
         if not _is_non_product_action(action):
             return GovernorDecision.ALLOW, "IDLE_ALLOWED", "", False
 
+        # The model received none of the requested bytes (budget miss, size limit, empty
+        # page): nothing was re-read, so it neither counts toward the budget nor marks
+        # the path delivered. The receipt stays visible under its own event.
+        if kind == "read" and isinstance(action, Mapping) and action.get("undelivered") is True:
+            self._undelivered_reads += 1
+            return GovernorDecision.ALLOW, "IDLE_UNDELIVERED", "", False
+
         # A read is "novel" when its key (path, plus the delivered-content digest when
         # the caller supplies one) has never been DELIVERED. Only re-reads of already
         # delivered, unchanged bytes are budgeted: a first read of a path, a read of
@@ -393,7 +456,9 @@ class IdleGovernor:
         read_key = ""
         if kind == "read" and action_path:
             digest = _text(action.get("content_digest", "")) if isinstance(action, Mapping) else ""
-            read_key = action_path + ("#" + digest if digest else "")
+            # The span is part of the key: a different range of a delivered file is novel.
+            span = _span_suffix(action.get("path")) if isinstance(action, Mapping) else ""
+            read_key = action_path + span + ("#" + digest if digest else "")
             novelty_escape = read_key not in self._read_paths
         exempt = bool(action.get("exempt")) if isinstance(action, Mapping) else False
 
@@ -496,6 +561,7 @@ class IdleGovernor:
             "n2": self.n2,
             **self.census(),
             **({"recovery_reads": self._recovery_reads} if self._recovery_reads else {}),
+            **({"undelivered_reads": self._undelivered_reads} if self._undelivered_reads else {}),
         }
 
 
@@ -513,7 +579,7 @@ CENSUS_SPEC = OrganCensusSpec(
     trigger=_idle_governor_trigger,
     fire_events=frozenset({"IDLE_WARNING", "IDLE_DENIED", "IDLE_GOVERNED"}),
     suppression_events=frozenset({"IDLE_ALLOWED", "IDLE_NOVELTY_ESCAPE", "IDLE_RESET",
-                                "IDLE_RECOVERY"}),
+                                "IDLE_RECOVERY", "IDLE_UNDELIVERED"}),
     dedup_events=frozenset(),
     challenge_once_events=frozenset({"IDLE_WARNING"}),
 )
@@ -570,6 +636,8 @@ __all__ = [
     "REFUSAL",
     "SCHEMA",
     "WARNING_TEMPLATE",
+    "is_undelivered_read",
     "load_receipts",
+    "read_governor_action",
     "replay_receipts",
 ]

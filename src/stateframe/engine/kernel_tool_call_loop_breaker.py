@@ -452,6 +452,12 @@ class UnboundedProgressWatch:
                 continue
             if kind in {"read", "grep", "search"} and result in {"FAIL", "FAILED", "RED"}:
                 continue
+            # A read that delivered none of its requested bytes is no-progress evidence:
+            # its path/range identity must not reset the stall streak.
+            if kind == "read":
+                from kernel_idle_governor import is_undelivered_read
+                if is_undelivered_read(receipt.get("delivery")):
+                    continue
             identity = self._identity(binding, receipt, kind, result, revision)
             if identity is not None and self._new(identity):
                 progress = True
