@@ -7,6 +7,7 @@ body model overridden by the journal. Schema 1 never reads the journal.
 """
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -269,6 +270,15 @@ def test_credentialed_wanted_endpoint_is_stripped_in_drift_event(v2):
     assert "pw-secret" not in repr(record) and "k=abc" not in repr(record)
 
 
+def _persisted_head(events_path) -> str:
+    """The trusted head as resume reads it: the last record on disk (see capability_release_runner)."""
+    from kernel_measurement import open_journal
+
+    with open_journal(events_path, binary=True) as source:
+        lines = source.read().splitlines()
+    return json.loads(lines[-1])["record_hash"]
+
+
 def test_cross_process_reopened_journal_replays_decision(v2, tmp_path):
     """Write the decision, close, reopen the same events.jsonl as resume does, replay in a fresh meter."""
     from kernel_continuation_journal import ContinuationJournal as Journal2
@@ -277,9 +287,9 @@ def test_cross_process_reopened_journal_replays_decision(v2, tmp_path):
     writer = ContinuationJournal(tmp_path, "frp-cross", manifest)
     resolve_route_decision(Meter(writer, router=Router()), _body(), CALLER_URL, "caller-key",
                            recovery_prepared=False)
-    head = writer._head  # the trusted head resume is anchored to
     events_path = writer.path
-    writer.close()
+    writer.close()  # close() may append telemetry rows, so the head is read after it
+    head = _persisted_head(events_path)
 
     reopened = Journal2.resume(events_path, task_id="frp-cross", manifest=manifest,
                                expected_head=head)
