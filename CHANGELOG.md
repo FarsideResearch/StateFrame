@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.40 (2026-11-17)
 
 - Continuation: a source-read detour now keeps its own read range as its completion check. Before, the child inherited the suspended parent's acceptance, so the returned source could be judged against the wrong check.
 
