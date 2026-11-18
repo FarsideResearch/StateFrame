@@ -7,6 +7,7 @@ import os
 import re
 from collections.abc import Mapping, Sequence
 
+from kernel_evidence_pin import neutralize_pin_body
 from kernel_request_source_window import MODEL_WINDOW_MARKER, WINDOW_MARKER
 
 MODE_ENV = "STATEFRAME_REFUSAL_COMPACT"
@@ -872,6 +873,10 @@ def render_evidence_pin(
         lines.append("requirements:")
     else:
         lines.append("requirements=NO REQUIREMENT ROWS RECORDED")
+    # Body text quotes runtime, task and file data: neutralize marker literals so the block ends where the host wrote it.
+    lines = [lines[0], *(neutralize_pin_body(line) for line in lines[1:])]
+    requirement_lines = [neutralize_pin_body(line) for line in requirement_lines]
+    retrieval_handle = neutralize_pin_body(retrieval_handle)
     full_candidate = [*lines, *requirement_lines, EVIDENCE_END]
     if _pin_bytes(full_candidate) <= EVIDENCE_MAX_BYTES:
         return "\n".join(full_candidate)
@@ -911,7 +916,7 @@ def render_evidence_pin(
         bounded_lines = [
             EVIDENCE_START,
             "pin_truncated=true; core_evidence_omitted=true",
-            "check_output_receipt=" + _clip(full_output_handle or "none", 180),
+            neutralize_pin_body("check_output_receipt=" + _clip(full_output_handle or "none", 180)),
             "requirements_omitted_ids=" + ",".join(omitted_ids or ("none",)),
             "requirements_retrieval_handle=" + retrieval_handle,
             "retrieval_action=" + retrieval_action,
