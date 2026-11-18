@@ -246,8 +246,25 @@ class ToolCallLoopBreaker:
         return notice
 
 
+# Mask recognizable runtime noise, preserving ordinary numbers, source
+# coordinates, assertion values, versions, exit codes and content hashes.
+_VOLATILE_OUTPUT = (
+    (re.compile(r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?\b"), "<timestamp>"),
+    (re.compile(r"(?im)^Date: [^\r\n]+"), "Date: <timestamp>"),
+    (re.compile(r"\b(pid|ppid)\s*[:=]\s*\d+\b", re.I), r"\1=<process>"),
+    (re.compile(r"\b(elapsed|duration)\s*[:=]\s*\d+(?:\.\d+)?\s*(?:ms|s|seconds?)\b", re.I), r"\1=<time>"),
+    (re.compile(r"(?<!\w)/(?:tmp|var/tmp)/tmp[\w.-]+"), "/tmp/<temporary>"),
+    (re.compile(r"\b((?:request|trace|span|correlation)[_-]?id)\s*[:=]\s*(?:0x)?[0-9a-f]+\b", re.I), r"\1=<id>"),
+    (re.compile(r"\bport\s*[:=]\s*\d{1,5}\b", re.I), "port=<port>"),
+    (re.compile(r"(https?://(?:127\.0\.0\.1|localhost|\[::1\])):\d{1,5}\b", re.I), r"\1:<port>"),
+)
+
+
 def _digest(value: object) -> str:
-    return hashlib.sha256(str(value).encode("utf-8")).hexdigest()
+    text = str(value)
+    for pattern, replacement in _VOLATILE_OUTPUT:
+        text = pattern.sub(replacement, text)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 class UnboundedProgressWatch:
@@ -498,8 +515,15 @@ class UnboundedProgressWatch:
     def _identity(binding: Mapping[str, object], receipt: Mapping[str, object],
                   kind: str, result: str, revision: object) -> object:
         if kind in _OUTPUT_KINDS:
-            return (kind, revision, receipt.get("fingerprint"), receipt.get("target"),
-                    _digest(receipt.get("detail", "")))
+            # Raw output also feeds the legacy fingerprint; including it would
+            # bypass normalization. New producers retain the full output digest
+            # before clipping detail; old receipts fall back to their preview.
+            output_digest = receipt.get("progress_output_digest")
+            if (not isinstance(output_digest, str)
+                    or re.fullmatch(r"[0-9a-f]{64}", output_digest) is None):
+                output_digest = _digest(receipt.get("detail", ""))
+            return (kind, revision, receipt.get("target"), result, receipt.get("exit_code"),
+                    output_digest)
         if kind == "read" and result == "HOST_OBSERVED":
             # Host-observed reads carry no target_path; identity is the observed target and its output.
             return ("read-observed", receipt.get("target"), _digest(receipt.get("detail", "")))

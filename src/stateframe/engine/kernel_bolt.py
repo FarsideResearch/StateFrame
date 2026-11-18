@@ -1365,6 +1365,11 @@ class KernelBolt:
         # Baseline organs consume the exact legacy record. The experimental retry
         # history has its own canonical identity and cannot alter baseline advice.
         legacy_retry_record = dict(rec)
+        if kind in {"shell", "web", "web_fetch", "web_search", "fetch"}:
+            # Progress uses normalized full output, preserving semantic changes
+            # beyond the display preview without trusting the raw fingerprint.
+            from kernel_tool_call_loop_breaker import _digest
+            rec["progress_output_digest"] = _digest(receipt_detail)
         if kind in {"grep", "search"} and result_set_digest is not None:
             rec["result_set_digest"] = result_set_digest
         if (kind == "test" and test_output is not None
