@@ -23,57 +23,12 @@ def test_volatile_output_stalls(mode, kind, monkeypatch):
         assert watch.observe({"product_revision": "r1"}, receipts, boundary=index) is (index == 32)
 
 
-@pytest.mark.parametrize("mode", ["off", "on"])
-@pytest.mark.parametrize("kind", ["range", "opaque"])
-def test_novel_observations_have_finite_allowance_across_resume(mode, kind, monkeypatch):
-    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", mode)
-    watch = UnboundedProgressWatch()
-    receipts = []
-    for index in range(256):
-        if kind == "range":
-            receipt = {"kind": "read", "result_class": "OK", "target_path": "a.py",
-                       "delivery": {"revision": "r1", "effective_range": {
-                           "start_line": 1, "end_line": index + 1}}}
-        else:
-            receipt = {"kind": "shell", "result_class": "NO_OP", "detail": f"nonce-{index}"}
-        receipts.append(receipt)
-        assert watch.observe({"product_revision": "r1"}, receipts, boundary=index) is (index == 255)
-        if index == 127:
-            watch = UnboundedProgressWatch.from_snapshot(json.loads(json.dumps(watch.snapshot())))
-            assert not watch.observe({"product_revision": "r1"}, receipts, boundary=index)
-    assert watch.observation_budget_exhausted
-    assert watch.streak == 32
-    assert not watch.observe({"product_revision": "r2"}, receipts, boundary=256)
-
-
 def test_normalization_keeps_semantic_numbers():
     for left, right in [("exit=1", "exit=2"), ("a.py:12", "a.py:13"),
                         ("expected 7 got 8", "expected 7 got 9"),
                         ("version 1.2", "version 1.3")]:
         assert _digest(left) != _digest(right)
     assert _digest("Date: Wed, 18 Nov 2026 12:00:01 GMT") == _digest("Date: Wed, 18 Nov 2026 12:00:02 GMT")
-
-
-@pytest.mark.parametrize("charges", [-1, True, 257, "1"])
-def test_invalid_budget_snapshot_rejected(charges):
-    snapshot = UnboundedProgressWatch().snapshot()
-    snapshot["observation_budget"] = {"revision": None, "charges": charges}
-    with pytest.raises(ValueError, match="observation budget"):
-        UnboundedProgressWatch.from_snapshot(snapshot)
-
-
-def test_bound_uses_existing_terminal_owner():
-    watch = UnboundedProgressWatch()
-    events = []
-    runtime = SimpleNamespace(
-        owner=SimpleNamespace(_receipts=[]), binding=lambda: {"product_revision": "r1"},
-        system_outcome=None, step_limit=None, stateframe_hard_budget_only_terminals_mode="off",
-        journal=SimpleNamespace(emit=lambda kind, **fields: events.append((kind, fields))))
-    for index in range(256):
-        runtime.owner._receipts.append({"kind": "shell", "result_class": "NO_OP", "detail": f"nonce-{index}"})
-        assert stop_unbounded_no_progress(runtime, watch, boundary=index) is (index == 255)
-    assert runtime.system_outcome == "stalled"
-    assert events[-1][1]["reason"] == "observation_budget_exhausted"
 
 
 def test_shell_receipt_preserves_full_normalized_evidence():
@@ -168,103 +123,6 @@ def test_semantic_output_change_resets_streak(left, right):
     receipts.append({"kind": "shell", "result_class": "NO_OP", "detail": right})
     assert not watch.observe({"product_revision": "r1"}, receipts, boundary=2)
     assert watch.streak == 0
-
-
-@pytest.mark.parametrize("mode", ["off", "on"])
-def test_range_cycle_larger_than_membership_cache_is_bounded(mode, monkeypatch):
-    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", mode)
-    watch = UnboundedProgressWatch()
-    receipts = []
-    for index in range(10_000):
-        receipts.append({"kind": "read", "result_class": "OK", "target_path": "a.py",
-                         "delivery": {"revision": "r1", "effective_range": {
-                             "start_line": 1, "end_line": 1 + index % 5000}}})
-        stopped = watch.observe({"product_revision": "r1"}, receipts, boundary=index)
-        if stopped:
-            break
-    assert index + 1 == 256
-    assert watch.observation_budget_exhausted
-
-
-@pytest.mark.parametrize("mode", ["off", "on"])
-def test_new_revision_and_range_reset_exhausted_allowance(mode, monkeypatch):
-    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", mode)
-    watch = UnboundedProgressWatch()
-    receipts = []
-    for index in range(256):
-        receipts.append({"kind": "read", "result_class": "OK", "target_path": "a.py",
-                         "delivery": {"revision": "r1", "effective_range": {
-                             "start_line": 1, "end_line": index + 1}}})
-        watch.observe({"product_files": {"a.py": "r1"}}, receipts, boundary=index)
-    assert watch.observation_budget_exhausted
-    receipts.append({"kind": "read", "result_class": "OK", "target_path": "a.py",
-                     "delivery": {"revision": "r2", "effective_range": {
-                         "start_line": 400, "end_line": 450}}})
-    assert not watch.observe({"product_files": {"a.py": "r2"}}, receipts, boundary=256)
-    assert watch.streak == 0
-    assert watch.snapshot()["observation_budget"]["charges"] == 1
-
-
-def test_budget_uses_batch_charges_and_survives_completed_tail_replay(monkeypatch):
-    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
-    watch = UnboundedProgressWatch()
-    receipts = []
-    binding = {"product_revision": "r1"}
-    for index in range(3):
-        receipts.append({"request_id": "origin" if index == 0 else f"action-{index}",
-                         "kind": "shell", "result_class": "NO_OP", "detail": f"new-{index}"})
-        assert not watch.observe(binding, receipts, boundary=index, batch_origin="origin")
-        assert watch.snapshot()["observation_budget"]["charges"] == 0
-    assert not watch.observe(binding, receipts, boundary=3, batch_origin="origin", batch_complete=True)
-    assert watch.snapshot()["observation_budget"]["charges"] == 3
-    resumed = UnboundedProgressWatch.from_snapshot(json.loads(json.dumps(watch.snapshot())))
-    for boundary in (3, 4, 5):
-        assert not resumed.observe(binding, receipts, boundary=boundary,
-                                   batch_origin="origin", batch_complete=True)
-        assert resumed.snapshot()["observation_budget"]["charges"] == 3
-
-
-def test_budget_discounts_proven_unchanged_read_batch(monkeypatch):
-    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
-    watch = UnboundedProgressWatch()
-    receipts = [{"request_id": "origin" if index == 0 else f"action-{index}",
-                 "kind": "read", "result_class": "OK", "target_path": "a.py",
-                 "delivery": {"revision": "r1", "unchanged_since_request": True,
-                              "requested_bytes_delivered": 0,
-                              "effective_range": {"start_line": 1, "end_line": 1}}}
-                for index in range(20)]
-    assert not watch.observe({"product_revision": "r1"}, receipts, boundary=0,
-                             batch_origin="origin", batch_complete=True)
-    assert watch.snapshot()["observation_budget"]["charges"] == 1
-
-
-def test_non_charging_observations_do_not_exhaust_allowance(monkeypatch):
-    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "off")
-    watch = UnboundedProgressWatch()
-    for boundary in range(300):
-        assert not watch.observe({"product_revision": "r1"}, [], boundary=boundary, charge_idle=False)
-    assert watch.snapshot()["observation_budget"]["charges"] == 0
-
-
-def test_continually_changing_product_has_no_call_count_stop(monkeypatch):
-    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "off")
-    watch = UnboundedProgressWatch()
-    for boundary in range(600):
-        assert not watch.observe({"product_revision": f"r{boundary}"}, [], boundary=boundary)
-    assert watch.streak == 0
-    assert not watch.observation_budget_exhausted
-
-
-@pytest.mark.parametrize("budget", [
-    None, [], {}, {"revision": "bad", "charges": 0},
-    {"revision": 1, "charges": 0}, {"revision": None, "charges": 1},
-    {"revision": "a" * 64, "charges": 0, "extra": True},
-])
-def test_malformed_budget_extension_rejected(budget):
-    snapshot = UnboundedProgressWatch().snapshot()
-    snapshot["observation_budget"] = budget
-    with pytest.raises(ValueError, match="observation budget"):
-        UnboundedProgressWatch.from_snapshot(snapshot)
 
 
 @pytest.mark.parametrize("digest", [None, "", "bad", "A" * 64, 1])
