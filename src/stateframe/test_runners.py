@@ -228,6 +228,7 @@ def verification_evidence_for_tests(source: str | None, kind: str, command: tupl
                                     repo: Path | None = None) -> tuple[str | None, str | None, bool]:
     """Sole authority for a final test source and its human verification label."""
     evidence = bool(source == "tests" and declared and passed and
+                    (repo is None or has_discovered_test_files(repo)) and
                     command_runs_tests(kind, command, set(), output=output, repo=repo))
     if evidence:
         return "tests", "verified by tests", True
@@ -262,6 +263,11 @@ def repository_paths(repo: Path) -> set[str]:
         files.extend((Path(root) / name).relative_to(repo).as_posix()
                      for name in names if not (Path(root) / name).is_symlink())
     return set(files)
+
+
+def has_discovered_test_files(repo: Path) -> bool:
+    """Return whether generic test discovery finds any test file in the repository."""
+    return any(is_test_file(path) for path in repository_paths(repo))
 
 
 def discover_check(repo: Path) -> tuple[str | None, str, bool]:

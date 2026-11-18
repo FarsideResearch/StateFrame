@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fixed: the project test interpreter handoff is no longer described as a shell override. The guide now records CLI selection precedence and explains that `--test-python` selects an alternate project interpreter.
+- Fixed: a positive generic runner receipt is labeled as test verification only when test discovery finds files; a command with a positive receipt and no discovered tests remains a check command.
 ## 0.7.62 (2026-11-18)
 
 - Fixed: `inspect --frame` now shows the full typed state carried by cache-layout requests, including public checks, completion permission and submission state.

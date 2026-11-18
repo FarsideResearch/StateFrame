@@ -218,6 +218,8 @@ class TestVerificationAuthority(unittest.TestCase):
                                      ("jest --runInBand", True)):
                 with self.subTest(script=script):
                     (repo / "package.json").write_text(json.dumps({"scripts": {"test": script}}))
+                    if expected:
+                        (repo / "sample.test.cjs").write_text("\n")
                     output = ("# pass 1\n# fail 0\n" if script.startswith("node") else
                               "Tests: 3 passed, 3 total\n")
                     source, _, evidence = verification_evidence_for_tests(
