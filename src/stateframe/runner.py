@@ -252,6 +252,44 @@ def _keep_committed_mutation_effects(run_dir: Path, candidate: dict[str, bytes |
     return result, kept
 
 
+DELIVERY_REFUSED = "DELIVERY_REFUSED"
+
+
+def _apply_sealed_candidate(work: workcopy.WorkCopy, candidate: dict[str, bytes | None],
+                            declared: set[str], printer) -> tuple[list[str], list[str], str | None]:
+    """Apply the in-scope part of a sealed candidate and report what was refused.
+
+    Returns (written, dropped_paths, candidate_error). Out-of-scope changes to existing baseline files
+    are never applied, but the in-scope edits still are: refusing the whole candidate loses work.
+    A non-empty candidate_error keeps checks not-run, the exit at 2 and --in-place unapplied.
+    Exceptions propagate to the caller.
+    """
+    dropped_paths = _dropped_existing_candidate_paths(work, candidate, declared)
+    if not dropped_paths:
+        return workcopy.apply_files(work, candidate, declared=declared), [], None
+    printer("warning: candidate changes outside edit scope were dropped: " + ", ".join(dropped_paths))
+    in_scope = {path: data for path, data in candidate.items() if path not in dropped_paths}
+    written = workcopy.apply_files(work, in_scope, declared=declared)
+    return written, dropped_paths, "sealed candidate changed existing files outside edit scope"
+
+
+def _refuse_submitted_delivery(summary: dict) -> None:
+    """Never report SUBMITTED when the sealed candidate was not delivered.
+
+    engine_terminal stays untouched for forensics. Call after exit_code/succeeded are computed so the
+    exit code logic is unchanged.
+    """
+    if not summary.get("candidate_error") or summary.get("engine_result") != "SUBMITTED":
+        return
+    summary["delivery_refusal"] = {
+        "engine_result": "SUBMITTED",
+        "reason_code": "CANDIDATE_OUT_OF_SCOPE" if summary.get("candidate_paths_dropped")
+        else "CANDIDATE_NOT_DELIVERED",
+        "detail": summary["candidate_error"],
+    }
+    summary["engine_result"] = DELIVERY_REFUSED
+
+
 def checkpoint_resume_off(spec: dict) -> bool:
     """An explicit current or recorded opt-out blocks restore and all later saves."""
     current = os.environ.get("STATEFRAME_CHECKPOINT", "").strip().lower()
@@ -4214,13 +4252,8 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
             # Committed mutation edits are authorized by the mutation write grant, not the edit scope.
             candidate, mutation_kept = _keep_committed_mutation_effects(run_dir, candidate)
             declared.update(mutation_kept)
-            dropped_paths = _dropped_existing_candidate_paths(work, candidate, declared)
-            if dropped_paths:
-                candidate_error = "sealed candidate changed existing files outside edit scope"
-                printer("warning: candidate changes outside edit scope were dropped: "
-                        + ", ".join(dropped_paths))
-            else:
-                written = workcopy.apply_files(work, candidate, declared=declared)
+            written, dropped_paths, candidate_error = _apply_sealed_candidate(
+                work, candidate, declared, printer)
     except RunDeadlineExceeded:
         raise
     except (RunError, workcopy.WorkCopyError, OSError, ValueError) as error:
@@ -4314,6 +4347,10 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
             options.test_cmd, options.check_cmd, options.check_source, options.runner_kind)))
     summary["exit_code"] = outcomes.exit_code(summary)
     summary["succeeded"] = succeeded(summary)
+    _refuse_submitted_delivery(summary)
+    if summary.get("engine_result") == DELIVERY_REFUSED:
+        printer(f"delivery refused: {summary['delivery_refusal']['reason_code']}: "
+                f"{summary['delivery_refusal']['detail']}")
     if options.in_place and changed_files:
         if summary["succeeded"]:
             try:

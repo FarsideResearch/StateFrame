@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fixed: when a sealed candidate also changed existing files outside the edit scope, the run dropped every edit and still reported `SUBMITTED` while exiting 2. The in-scope edits are now applied to the working copy and `final.diff` (the out-of-scope changes are still refused, checks stay not run and `--in-place` does not apply), and the summary reports `engine_result: DELIVERY_REFUSED` with a typed `delivery_refusal` (`CANDIDATE_OUT_OF_SCOPE` or `CANDIDATE_NOT_DELIVERED`); the engine's own terminal record is unchanged.
+
 ## 0.7.49 (2026-11-18)
 
 - Changed: when a hook's execution capability cannot be built, the refusal now names the probe step that failed and the exception class and symbolic errno, for example `hook execution capability unavailable (PermissionError errno=EACCES at platform_roots)`. The same detail is stored on the hook record as `capability_probe`. Before this, the refusal gave no cause, so an intermittent failure could not be traced. Refusal behavior is unchanged: the hook still refuses and nothing runs. The detail never includes message text or paths.
