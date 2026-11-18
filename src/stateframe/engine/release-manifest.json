@@ -336,7 +336,7 @@
   "kernel_history_spool.py": "dc5ee9a3b503b84af2fb716b1e10c29f0b2ffc3da3b6704431cf55f67bc577de",
   "kernel_history_state_tail.py": "499071e95b86d3d4c594c7889191e0e38944b6771ac4cc0eec58767e706cdbbc",
   "kernel_hook_driver.py": "79ae6c466b4e92adcd3edbe792dff6f59e9c0c514a04a410df96cf84ee90744f",
-  "kernel_hook_exec.py": "949bf5c2cb42718198eea9e613983eb1c095e2e90ef2f678e054184ce60da688",
+  "kernel_hook_exec.py": "d2bcad1172f5835c472883f3bb9c70026412e71152edc0f6a294303a1a40bf57",
   "kernel_hook_wiring.py": "4016a15714ff1be61b9dad9b132ffb37c10ded9849faa703116ad9740983461f",
   "kernel_hooks.py": "5e9938ea60e83b43ee7ea9bdc318e35e2a7b6a458b5e37a957f15246a56fc63a",
   "kernel_host_authorship.py": "89a16840d2a5c64066d8b0e8d0e19a4467e865f50e2e8873d4057c3b159cfed9",

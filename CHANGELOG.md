@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Changed: when a hook's execution capability cannot be built, the refusal now names the probe step that failed and the exception class and symbolic errno, for example `hook execution capability unavailable (PermissionError errno=EACCES at platform_roots)`. The same detail is stored on the hook record as `capability_probe`. Before this, the refusal gave no cause, so an intermittent failure could not be traced. Refusal behavior is unchanged: the hook still refuses and nothing runs. The detail never includes message text or paths.
+
 ## 0.7.48 (2026-11-18)
 
 - Fixed: releases 0.7.43 to 0.7.47 changed default-off request bytes. Any run with a check sent an extra empty `sanitized_addopts` key inside the test artifact policy, even with every switch off. This release restores the earlier bytes: the key is written only when it has entries, and a resumed run still restores it. Tests: `tests/test_artifact_policy_addopts_roundtrip.py`; the pinned off-byte tests in `tests/test_working_set_cutover.py`, `tests/test_working_set_stable_wire.py` and `tests/test_working_set_false_claims.py` pass again.

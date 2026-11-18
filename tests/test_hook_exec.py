@@ -1,10 +1,12 @@
 import base64
+import errno
 import hashlib
 import json
 import os
 import stat
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -25,7 +27,13 @@ from kernel_hook_exec import (
     HookRunner,
     HookTape,
 )
-from kernel_hooks import build_payload, create_bundle, event_id, load_hook_files
+from kernel_hooks import (
+    BundledFile,
+    build_payload,
+    create_bundle,
+    event_id,
+    load_hook_files,
+)
 
 
 def setup_runner(
@@ -1009,6 +1017,94 @@ def test_capability_construction_failure_has_capability_error_code(tmp_path, mon
     record = json.loads((runner.records_dir / "records.jsonl").read_text().splitlines()[-1])
     assert record["error_code"] == "capability"
     assert record["skipped"] == "capability"
+    assert record["capability_probe"] == {"step": "unknown", "error": "ValueError", "errno": None}
+
+
+def _raise_on_call(monkeypatch, module, name, *, nth, error):
+    """Replace module.name so its nth call raises; earlier and later calls run the real probe."""
+    real = getattr(module, name)
+    calls = []
+
+    def probe(*args, **kwargs):
+        calls.append(None)
+        if len(calls) == nth:
+            raise error
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(module, name, probe)
+
+
+def _probe_case(hook, script, name):
+    """(hook, patched name, nth call) that reaches each capability probe step."""
+    cases = {
+        "system_roots": (hook, "_system_roots", 1),
+        "interpreter_roots": (hook, "python_runtime_read_roots", 1),
+        "platform_roots": (hook, "_macos_developer_roots", 1),
+        "hook_roots": (replace(hook, executable=sys.executable), "python_runtime_read_roots", 2),
+        "bundle_shebang_roots": (replace(hook, files=(script,)), "_shebang", 1),
+        "network_roots": (replace(hook, network="full"), "_network_roots", 1),
+        "capability_construct": (hook, "ExecCapability", 1),
+    }
+    return cases[name]
+
+
+@pytest.mark.parametrize(
+    "step",
+    [
+        "system_roots", "interpreter_roots", "platform_roots", "hook_roots",
+        "bundle_shebang_roots", "network_roots", "capability_construct",
+    ],
+)
+@pytest.mark.parametrize("kind", ["os_error_eacces", "value_error"])
+def test_capability_probe_failure_reports_step_class_and_errno_only(
+    tmp_path, monkeypatch, step, kind,
+):
+    if kind == "os_error_eacces":
+        error = PermissionError(errno.EACCES, "denied /marker/private/path")
+        expected = f"PermissionError errno=EACCES at {step}"
+    else:
+        error = ValueError("symlink read root /marker/private/path lacks authority")
+        expected = f"ValueError at {step}"
+    runner, _ = setup_runner(tmp_path)
+    hook = runner.hooks.definitions[0]
+    script = BundledFile(source="script.py", relative="script.py", sha256="0" * 64, executable=True)
+    case_hook, name, nth = _probe_case(hook, script, step)
+    scratch = runner.scratch_root / "probe"
+    scratch.mkdir()
+    _raise_on_call(monkeypatch, kernel_hook_exec, name, nth=nth, error=error)
+
+    with pytest.raises(kernel_hook_exec.CapabilityProbeError) as raised:
+        runner._capability(case_hook, scratch)
+
+    detail = raised.value.describe()
+    assert raised.value.step == step
+    assert detail == expected
+    assert "marker" not in detail and "private" not in detail and str(tmp_path) not in detail
+
+
+def test_capability_refusal_names_failing_probe_without_path_text(tmp_path, monkeypatch):
+    runner, _ = setup_runner(tmp_path)
+    calls = fake_session(monkeypatch)
+    _raise_on_call(
+        monkeypatch, kernel_hook_exec, "_macos_developer_roots", nth=1,
+        error=PermissionError(errno.EACCES, f"denied {tmp_path}/private"),
+    )
+
+    result = runner.run_event(
+        "pre_tool", boundary="pre_tool:capability", data={}, match={"tool": "shell"}
+    )
+
+    reason = "hook execution capability unavailable (PermissionError errno=EACCES at platform_roots)"
+    assert result.decision == "deny"
+    assert result.runs[0].outcome.error_code == "capability"
+    assert result.runs[0].outcome.reason == reason
+    assert result.reason == reason
+    assert str(tmp_path) not in result.reason
+    assert calls == []
+    record = json.loads((runner.records_dir / "records.jsonl").read_text().splitlines()[-1])
+    assert record["capability_probe"] == {
+        "step": "platform_roots", "error": "PermissionError", "errno": "EACCES",
+    }
 
 
 @pytest.mark.parametrize("stage", ["constructor", "configure"])
