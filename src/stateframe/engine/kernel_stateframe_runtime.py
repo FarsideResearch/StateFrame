@@ -44,6 +44,7 @@ from kernel_v30_token_contracts import install_telemetry_patch, sanitize_final_a
 from kernel_pilot import ACTIVE_PARENT, ACTIVE_RUNTIME, ActionJournal, ParentMeter
 from kernel_sidekick import Sidekick
 import kernel_host_authorship as _host_authorship
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 from kernel_stateframe_envelope import normalize_stateframe_messages
 from kernel_evictfix_mode import enabled as evictfix_enabled, journal_mode as journal_evictfix_mode
 from kernel_verdict import (
@@ -14517,9 +14518,10 @@ class StateFrameRuntime:
 
     @_host_phase("pre_dispatch")
     def start_action(self, kind: str, arguments: dict, *, charge_dispatch: bool = True) -> str | None:
-        if kind in {"edit", "str_replace", "file_create", "file_delete", "file_move", "shell", "replace_module", "write", "replace"}:
-            # Do this before any pre-dispatch binding read.  Non-mutating
-            # actions deliberately retain the current revision cache.
+        if kind in {"edit", "str_replace", "file_create", "file_delete", "file_move", "shell", "replace_module", "write", "replace", *PROTOCOL_EDIT_TOOL_NAMES}:
+            # Do this before any pre-dispatch binding read.  Protocol edits publish
+            # product bytes too, so they advance the epoch like legacy edits.
+            # Non-mutating actions deliberately retain the current revision cache.
             self._invalidate_binding_cache()
         try:
             from kernel_qgates import guard_action as qgate_guard, handle_action as qgate_handle
