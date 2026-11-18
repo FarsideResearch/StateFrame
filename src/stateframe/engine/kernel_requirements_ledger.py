@@ -255,20 +255,58 @@ def _ticket_segments(text: str) -> tuple[tuple[int, int, str], ...]:
     return tuple(segments)
 
 
-_TASK_METADATA_LABEL = re.compile(r"(?<![A-Za-z0-9_])(?:#{1,6}\s*)?(Title|Symptom|Focus)\s*:", re.IGNORECASE)
+_TASK_METADATA_MENTION = re.compile(r"\b(Title|Symptom|Focus)\s*:", re.IGNORECASE)
+_TASK_METADATA_LABEL = re.compile(
+    r"^\s*(?:(?:[-+*]|\d+[.)])\s+)?(?:#{1,6}\s*)?(Title|Symptom|Focus)\s*:",
+    re.IGNORECASE,
+)
 
 
-def _task_metadata_label(text: str) -> str | None:
-    """Return labels that describe a task instead of stating a verifiable requirement.
+def _task_metadata_label(text: str, *, source_prefix: str = "") -> str | None:
+    """Recognize a standalone descriptive field, conservatively retaining mixed work.
 
-    A ``Focus:`` line that carries words after the label states work, so it is
-    classified like any other clause instead of being kept as advisory text.
+    The source prefix prevents sentence extraction and soft wraps from inventing
+    field boundaries. Delimited or wrapped field/action content is ambiguous:
+    keep its exact span as work instead of guessing where a title ends. This
+    structural guard applies to arbitrary verbs, including unknown actions.
     """
-    match = _TASK_METADATA_LABEL.search(text)
+    match = _TASK_METADATA_LABEL.match(text)
     if match is None:
         return None
+    # A physical line start inside quoted content is not a field boundary.
+    quote = ""
+    escaped = False
+    for index, char in enumerate(source_prefix):
+        if escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif quote:
+            if char == quote:
+                quote = ""
+        elif char in "\"'`":
+            if (char == "'" and index > 0 and index + 1 < len(source_prefix)
+                    and source_prefix[index - 1].isalnum() and source_prefix[index + 1].isalnum()):
+                continue
+            quote = char
+    if quote:
+        return None
+    prefix_lines = source_prefix.rsplit("\n", 2)
+    if prefix_lines[-1].strip():
+        return None
+    if len(prefix_lines) > 1:
+        previous = prefix_lines[-2].strip()
+        explicit_marker = re.match(r"\s*(?:[-+*]|\d+[.)]|#{1,6})\s+", text)
+        if (previous and not previous.endswith((".", "!", "?", ":"))
+                and not _TASK_METADATA_LABEL.match(previous) and not explicit_marker):
+            return None
     label = match.group(1).lower()
-    if label == "focus" and any(ch.isalpha() for ch in text[match.end():]):
+    body = text[match.end():].strip()
+    if label == "focus" and any(ch.isalnum() for ch in body):
+        return None
+    if (_is_normative(body)
+            or re.search(r"[\r\n,;:/|()]\s*\S|[.!?]\s+\S|\s[-–—]\s|\b(?:and|then|also|but)\b", body,
+                         flags=re.IGNORECASE)):
         return None
     return label
 
@@ -665,7 +703,8 @@ def parse_ticket_once(ticket_source_id: str, ticket_text: str, *, path: str = "t
             "start_byte": start,
             "end_byte": end,
             "quote": quote,
-            "task_metadata_label": _task_metadata_label(quote),
+            "task_metadata_label": _task_metadata_label(
+                quote, source_prefix=ticket_text.encode("utf-8")[:start].decode("utf-8")),
         }
         rows.append(row)
     _TICKET_CACHE[key] = tuple(copy.deepcopy(rows))

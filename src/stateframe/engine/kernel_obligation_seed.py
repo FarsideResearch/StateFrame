@@ -31,7 +31,6 @@ _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _PATH = re.compile(r"(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.py")
 _BACKTICK = re.compile(r"`([^`]+)`")
 _WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-_TASK_METADATA_LABEL = re.compile(r"(?<![A-Za-z0-9_])(?:#{1,6}\s*)?(Title|Symptom|Focus)\s*:", re.IGNORECASE)
 _SENTENCE = re.compile(r"[^.!?\n]+(?:[.!?]+|$)", re.MULTILINE)
 _DIAGNOSTIC_LINE = re.compile(r"(?:^|\s)(?:at\s+)?[A-Za-z0-9_./-]+:\d+(?:\s+in\s+\w+)?\s*$",
                                re.IGNORECASE)
@@ -471,12 +470,20 @@ def extract_obligations(brief: str, manifest: object = None) -> tuple[Obligation
     # submissions can disclose them without turning them into host blockers.
     tagged_candidates: list[tuple[str, str | None]] = []
     extract = _candidate_clauses if enabled() else _legacy_candidate_clauses
-    for line in brief.splitlines() or [brief]:
-        label = _TASK_METADATA_LABEL.search(line)
-        if label:
+    from kernel_requirements_ledger import _TASK_METADATA_MENTION, _task_metadata_label
+    source_offset = 0
+    previous_field = False
+    for raw_line in brief.splitlines(keepends=True) or [brief]:
+        line = raw_line.rstrip("\r\n")
+        label = _task_metadata_label(line, source_prefix=brief[:source_offset])
+        mentioned = bool(_TASK_METADATA_MENTION.search(line))
+        continuation = previous_field and bool(line[:1].isspace())
+        source_offset += len(raw_line)
+        previous_field = mentioned or continuation
+        if mentioned or continuation:
             clause = " ".join(line.split())
             if clause:
-                tagged_candidates.append((clause, label.group(1).lower()))
+                tagged_candidates.append((clause, label))
             continue
         tagged_candidates.extend((clause, None) for clause in extract(line))
     for clause, source_label in tagged_candidates:
