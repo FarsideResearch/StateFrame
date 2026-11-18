@@ -697,10 +697,10 @@ def _receipt_verifies_success(row: Mapping[str, object]) -> bool:
 def _read_reveals_new_evidence(row: Mapping[str, object]) -> bool:
     """MR-8 v2: a read row that the producer flagged as returning new evidence.
 
-    Reads are never meaningful by action name, so this takes only the producer's explicit
-    ``meaningful_action`` flag, the same branch ``_receipt_is_meaningful`` honours first.
+    The producer sets ``new_evidence`` on the read row. It is deliberately not
+    ``meaningful_action``: a read must not become a committed or completed action receipt.
     """
-    return row.get("meaningful_action") is True
+    return row.get("new_evidence") is True
 
 
 def _failure_token(row: Mapping[str, object], *, hypothesis: bool = False) -> str | None:
