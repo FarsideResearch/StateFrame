@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fixed: a submitted run's result was rejected when untouched binary files (for example .dbf test fixtures) were re-encoded during capture and so looked changed outside the edit scope, which also dropped the run's real edits. Candidates now capture files byte for byte.
 - Tests: acceptance fixtures that wait for a checkpoint now fail fast with the engine's reason and the child's exit code instead of waiting out the timeout.
 - Fixed the bundled example determinism guard to compare request hashes after a completed engine run even if the host refuses candidate delivery.
 
