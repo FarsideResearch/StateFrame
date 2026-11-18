@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.43 (2026-11-17)
 
 - Fixed: the test artifact policy now saves its replayed pytest addopts (`sanitized_addopts`) and reads them back on reload, so a resumed run rebuilds the same pytest command. Payloads written before this change load with no addopts; a malformed value is ignored.
 
