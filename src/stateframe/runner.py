@@ -253,18 +253,22 @@ def _keep_committed_mutation_effects(run_dir: Path, candidate: dict[str, bytes |
 
 
 DELIVERY_REFUSED = "DELIVERY_REFUSED"
+CANDIDATE_CHECKS_STALE_ERROR = "candidate changed while host checks ran; checks are stale"
 
 
 def _apply_sealed_candidate(work: workcopy.WorkCopy, candidate: dict[str, bytes | None],
-                            declared: set[str], printer) -> tuple[list[str], list[str], str | None]:
+                            declared: set[str], printer, *,
+                            dropped_paths: list[str] | None = None
+                            ) -> tuple[list[str], list[str], str | None]:
     """Apply the in-scope part of a sealed candidate and report what was refused.
 
     Returns (written, dropped_paths, candidate_error). Out-of-scope changes to existing baseline files
     are never applied, but the in-scope edits still are: refusing the whole candidate loses work.
-    A non-empty candidate_error keeps checks not-run, the exit at 2 and --in-place unapplied.
+    A non-empty candidate_error keeps verification unaccepted, the exit at 2 and --in-place unapplied.
     Exceptions propagate to the caller.
     """
-    dropped_paths = _dropped_existing_candidate_paths(work, candidate, declared)
+    if dropped_paths is None:
+        dropped_paths = _dropped_existing_candidate_paths(work, candidate, declared)
     if not dropped_paths:
         return workcopy.apply_files(work, candidate, declared=declared), [], None
     printer("warning: candidate changes outside edit scope were dropped: " + ", ".join(dropped_paths))
@@ -274,17 +278,22 @@ def _apply_sealed_candidate(work: workcopy.WorkCopy, candidate: dict[str, bytes 
 
 
 def _refuse_submitted_delivery(summary: dict) -> None:
-    """Never report SUBMITTED when the sealed candidate was not delivered.
+    """Refuse SUBMITTED when delivery failed or its host-check evidence is stale.
 
     engine_terminal stays untouched for forensics. Call after exit_code/succeeded are computed so the
     exit code logic is unchanged.
     """
     if not summary.get("candidate_error") or summary.get("engine_result") != "SUBMITTED":
         return
+    if summary["candidate_error"] == CANDIDATE_CHECKS_STALE_ERROR:
+        reason_code = "CHECKS_STALE"
+    elif summary.get("candidate_paths_dropped"):
+        reason_code = "CANDIDATE_OUT_OF_SCOPE"
+    else:
+        reason_code = "CANDIDATE_NOT_DELIVERED"
     summary["delivery_refusal"] = {
         "engine_result": "SUBMITTED",
-        "reason_code": "CANDIDATE_OUT_OF_SCOPE" if summary.get("candidate_paths_dropped")
-        else "CANDIDATE_NOT_DELIVERED",
+        "reason_code": reason_code,
         "detail": summary["candidate_error"],
     }
     summary["engine_result"] = DELIVERY_REFUSED
@@ -4272,8 +4281,10 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
             # Committed mutation edits are authorized by the mutation write grant, not the edit scope.
             candidate, mutation_kept = _keep_committed_mutation_effects(run_dir, candidate)
             declared.update(mutation_kept)
-            written, dropped_paths, candidate_error = _apply_sealed_candidate(
-                work, candidate, declared, printer)
+            # Preserve detected scope violations even if applying retained files raises.
+            dropped_paths = _dropped_existing_candidate_paths(work, candidate, declared)
+            written, _, candidate_error = _apply_sealed_candidate(
+                work, candidate, declared, printer, dropped_paths=dropped_paths)
     except RunDeadlineExceeded:
         raise
     except (RunError, workcopy.WorkCopyError, OSError, ValueError) as error:
@@ -4293,7 +4304,7 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
             if candidate_digest(work.copy) == digest:
                 after["candidate_sha256"] = digest
             else:
-                candidate_error = "candidate changed while host checks ran; checks are stale"
+                candidate_error = CANDIDATE_CHECKS_STALE_ERROR
         except KeyboardInterrupt:
             cancelled = True
     changed_files = workcopy.changed_files(work)

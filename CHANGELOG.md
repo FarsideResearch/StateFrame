@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fixed: a sealed candidate that changed existing out-of-scope files no longer loses its in-scope edits while still reporting `SUBMITTED`. Retained edits reach the working copy and `final.diff` when possible, and detected dropped paths survive apply failures. The summary reports `DELIVERY_REFUSED` with `CANDIDATE_OUT_OF_SCOPE`, `CHECKS_STALE`, or `CANDIDATE_NOT_DELIVERED`; stale checks stay unaccepted, exit remains 2, `--in-place` is blocked, and the engine terminal is unchanged.
 ## 0.7.54 (2026-11-18)
 
 - Scope lock: literal deltas pair lines by difflib alignment, never by index. A replace block pairs only when both sides have equal length, and a window over `_DIFF_PAIR_BUDGET` (1 << 20 equal-line pairs) reports no literal deltas, so one inserted line in a large repetitive file no longer yields spurious deltas. Shared helper: `aligned_line_pairs` in `kernel_aha10_honest_loop.py`, used by `typed_literal_changes` and the scope-lock mixed-value fallback. Tests: `tests/test_scope_lock_literal_pairing.py`.
