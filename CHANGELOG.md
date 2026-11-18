@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fix: work copy creation, change manifests, candidate digests, and test discovery now raise typed path-specific errors when a directory cannot be scanned. Incomplete trees can no longer appear as deletions, empty digests, or missing checks.
+
 ## 0.7.67 (2026-11-18)
 
 - Changed: Python analyzer trees now share a 24 MiB source-byte LRU with a 16,384-entry backstop; the boot symbol registry and coordinated-change validation reuse read-only cached trees. Oversized sources parse without evicting warm entries.

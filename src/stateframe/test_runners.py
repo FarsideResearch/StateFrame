@@ -12,6 +12,10 @@ from pathlib import Path, PurePosixPath
 from .workcopy import IGNORE_DIRS
 
 
+class TestDiscoveryError(ValueError):
+    pass
+
+
 PYTEST_PATTERNS = ("test_*.py", "conftest.py")
 PYTEST_DISCOVERY_PATTERNS = ("test_*.py", "*_test.py")
 DECLARED_TEST_SOURCE = "tests"
@@ -257,7 +261,13 @@ def lock_initial_failing_tests(row: dict[str, object], before: dict[str, object]
 def repository_paths(repo: Path) -> set[str]:
     """List source files without following links or generated dependency trees."""
     files = []
-    for root, dirs, names in os.walk(repo, followlinks=False):
+
+    def scan_error(error: OSError) -> None:
+        path = error.filename or repo
+        detail = error.strerror or str(error)
+        raise TestDiscoveryError(f"cannot scan test discovery directory {path}: {detail}") from error
+
+    for root, dirs, names in os.walk(repo, followlinks=False, onerror=scan_error):
         dirs[:] = sorted(name for name in dirs if name not in IGNORE_DIRS
                          and not (Path(root) / name).is_symlink())
         files.extend((Path(root) / name).relative_to(repo).as_posix()

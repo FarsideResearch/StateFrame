@@ -59,6 +59,10 @@ class MergeConflictError(WorkCopyError):
         self.conflicts = conflicts
 
 
+class WorkCopyScanError(WorkCopyError):
+    pass
+
+
 @dataclass
 class Limits:
     max_files: int = 5000
@@ -117,7 +121,13 @@ def create(original: Path, destination: Path, limits: Limits | None = None) -> W
     work = WorkCopy(original=original, copy=destination)
     total = 0
     destination.mkdir(parents=True)
-    for directory, dirnames, filenames in os.walk(original, followlinks=False):
+
+    def scan_error(error: OSError) -> None:
+        path = error.filename or original
+        detail = error.strerror or str(error)
+        raise WorkCopyScanError(f"cannot scan repository directory {path}: {detail}") from error
+
+    for directory, dirnames, filenames in os.walk(original, followlinks=False, onerror=scan_error):
         here = Path(directory)
         dirnames[:] = sorted(d for d in dirnames
                              if not _ignored(d, True) and not (here / d).is_symlink())
@@ -127,7 +137,10 @@ def create(original: Path, destination: Path, limits: Limits | None = None) -> W
             if _ignored(name, False) or source.is_symlink():
                 work.skipped.append(rel)
                 continue
-            size = source.stat().st_size
+            try:
+                size = source.stat().st_size
+            except OSError as error:
+                raise WorkCopyScanError(f"cannot inspect repository file {source}: {error}") from error
             if size > limits.max_file_bytes:
                 work.skipped.append(rel)
                 continue
@@ -136,7 +149,10 @@ def create(original: Path, destination: Path, limits: Limits | None = None) -> W
                 raise WorkCopyError(
                     f"repository is larger than the run limits ({limits.max_files} files, "
                     f"{limits.max_total_bytes // (1024 * 1024)} MB); point --repo at a smaller tree")
-            data = source.read_bytes()
+            try:
+                data = source.read_bytes()
+            except OSError as error:
+                raise WorkCopyScanError(f"cannot read repository file {source}: {error}") from error
             target = destination / rel
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)
@@ -151,12 +167,27 @@ def changed_files(work: WorkCopy) -> dict[str, str]:
     """relative path -> 'modified' | 'added' | 'deleted' in the copy versus the baseline."""
     changes: dict[str, str] = {}
     current: dict[str, str] = {}
-    for path in work.copy.rglob("*"):
-        if path.is_file() and not path.is_symlink():
-            rel = path.relative_to(work.copy).as_posix()
-            if any(part in IGNORE_DIRS for part in Path(rel).parts[:-1]) or _ignored(path.name, False):
+
+    def scan_error(error: OSError) -> None:
+        path = error.filename or work.copy
+        detail = error.strerror or str(error)
+        raise WorkCopyScanError(f"cannot scan working copy directory {path}: {detail}") from error
+
+    for directory, dirnames, filenames in os.walk(work.copy, followlinks=False, onerror=scan_error):
+        here = Path(directory)
+        dirnames[:] = sorted(name for name in dirnames
+                             if not _ignored(name, True) and not (here / name).is_symlink())
+        for name in sorted(filenames):
+            path = here / name
+            if path.is_symlink() or _ignored(name, False):
                 continue
-            current[rel] = _sha(path.read_bytes())
+            if not path.is_file():
+                continue
+            rel = path.relative_to(work.copy).as_posix()
+            try:
+                current[rel] = _sha(path.read_bytes())
+            except OSError as error:
+                raise WorkCopyScanError(f"cannot read working copy file {path}: {error}") from error
     for rel, digest in current.items():
         if rel not in work.baseline:
             changes[rel] = "added"

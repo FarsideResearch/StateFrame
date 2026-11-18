@@ -3446,13 +3446,27 @@ def candidate_digest(root: Path) -> str:
     """Bind host checks to the materialized candidate, including unchanged context files."""
     # Tool litter the checks themselves write (.pytest_cache, __pycache__) is not candidate content.
     manifest = {}
-    for p in root.rglob("*"):
-        rel = p.relative_to(root)
-        if (not p.is_file() or p.is_symlink()
-                or any(workcopy._ignored(part, True) for part in rel.parts[:-1])
-                or workcopy._ignored(rel.name, False)):
-            continue
-        manifest[rel.as_posix()] = hashlib.sha256(p.read_bytes()).hexdigest()
+    def scan_error(error: OSError) -> None:
+        path = error.filename or root
+        detail = error.strerror or str(error)
+        raise workcopy.WorkCopyScanError(f"cannot scan candidate directory {path}: {detail}") from error
+
+    for directory, dirnames, filenames in os.walk(root, followlinks=False, onerror=scan_error):
+        here = Path(directory)
+        dirnames[:] = sorted(name for name in dirnames
+                             if not workcopy._ignored(name, True) and not (here / name).is_symlink())
+        for name in sorted(filenames):
+            path = here / name
+            if path.is_symlink() or workcopy._ignored(name, False):
+                continue
+            if not path.is_file():
+                continue
+            rel = path.relative_to(root)
+            try:
+                data = path.read_bytes()
+            except OSError as error:
+                raise workcopy.WorkCopyScanError(f"cannot read candidate file {path}: {error}") from error
+            manifest[rel.as_posix()] = hashlib.sha256(data).hexdigest()
     return hashlib.sha256(json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
