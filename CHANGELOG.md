@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fixed: protocol edits (`edit_source`, `rewrite_source`) now pass the pytest collection guard that legacy edits already passed. Before, a protocol write could change `pytest.ini`, `sitecustomize.py`, a root plugin module or a test `__init__.py` and skip the refusal.
 ## 0.7.69 (2026-11-18)
 
 - Fixed: system Python remains available for repository tests when StateFrame itself runs on system Python. Only StateFrame's own virtual environment is excluded from the PATH fallback.
