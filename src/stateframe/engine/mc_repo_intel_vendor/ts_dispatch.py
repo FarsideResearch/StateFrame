@@ -1,8 +1,5 @@
-"""Tree-sitter dispatch boundaries and language-neutral source outlines.
-
-Pinned companion of the vendored ``call_graph.py``. It announces runtime
-dispatch boundaries instead of inventing static edges, and exposes the shared
-outline contract used by qprobe and the kernel adapter; neither path raises.
+"""Non-throwing dispatch boundaries and outlines for qprobe and the kernel adapter.
+Pinned companion of ``call_graph.py``; announces runtime boundaries without inventing static edges.
 """
 
 from __future__ import annotations
@@ -11,8 +8,11 @@ import ast
 import contextvars
 import logging
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock
+from types import ModuleType
 from typing import Callable, Iterable, Mapping
 
 from .call_graph import DispatchBoundary, _scan_failed_boundary
@@ -119,7 +119,7 @@ def _node_text(source: bytes, node) -> str:
 def _scan_ts(source: str, relpath: str, line_offset: int = 0) -> list[DispatchBoundary]:
     from .ts_extract import _parse
     try:
-        import tree_sitter_language_pack as tslp
+        tslp = _language_pack()
     except ImportError:
         return []
     lower = relpath.lower()
@@ -385,7 +385,7 @@ def detect_language(relpath: str, source: str = "") -> str:
 
 
 def _parse_source(language: str, source: str):
-    import tree_sitter_language_pack as tslp
+    tslp = _language_pack()
 
     parser = tslp.get_parser(_PARSER_NAME.get(language, language))
     try:
@@ -1087,7 +1087,7 @@ def _offset_outline_lines(value: object, line_offset: int) -> None:
 
 def _vue_grammar_available() -> bool:
     try:
-        import tree_sitter_language_pack as tslp
+        tslp = _language_pack()
         return "vue" in {str(name).casefold() for name in tslp.available_languages()}
     except Exception:  # noqa: BLE001 - optional grammar probe
         return False
@@ -1537,8 +1537,7 @@ def outline_source(source: str, relpath: str = "") -> dict[str, object]:
     text = str(source)
     language, detection = _detected_language(str(relpath), text)
     if language == "vue":
-        outline = _vue_outline(text, str(relpath), detection)
-        return _reported_outline(outline)
+        return _reported_outline(_vue_outline(text, str(relpath), detection))
     if language == "unknown":
         structure = _structure_outline(text, str(relpath))
         if structure is not None:
@@ -1547,9 +1546,10 @@ def outline_source(source: str, relpath: str = "") -> dict[str, object]:
     if spec is None:
         return _reported_outline(_lexical_outline(
             text, str(relpath), language, detection, "unsupported-language"))
+    if language == "python" and _language_pack_missing():
+        return _python_ast_fallback(text, str(relpath), detection)
     try:
-        tree = _parse_source(language, text)
-        root = _root_node(tree)
+        root = _root_node(_parse_source(language, text))
         has_syntax_error = root is not None and _node_has_error(root)
     except Exception as exc:  # noqa: BLE001 - outline is an analysis boundary
         logger.debug("outline parse failed for %s: %s", relpath, type(exc).__name__)
@@ -1715,7 +1715,7 @@ def structural_spans(source: str, relpath: str = "") -> dict[str, object]:
 
 def _python_outline_parser_identity() -> tuple[str, str, str]:
     try:
-        import tree_sitter_language_pack as tslp
+        tslp = _language_pack()
 
         tslp.get_parser(_PARSER_NAME.get("python", "python"))
     except Exception:
@@ -1741,7 +1741,7 @@ def outline_capability_key(relpath: str, source: str = "") -> str:
         parser, capability, version = _python_outline_parser_identity()
         return f"{language}:{parser}:{capability}:{version}:{detection}:{implementation}"
     try:
-        import tree_sitter_language_pack as tslp
+        tslp = _language_pack()
 
         tslp.get_parser(_PARSER_NAME.get(language, language))
     except Exception as exc:  # noqa: BLE001 - capability is evidence, not a parse failure
@@ -1760,6 +1760,41 @@ def outline_file(file: str | Path) -> dict[str, object]:
         return _reported_outline(_lexical_outline(
             "", str(path), language, detection, type(exc).__name__))
     return outline_source(source, str(path))
+
+
+# The engine owns a fresh interpreter per run. Keep optional-pack import results
+# here, but leave individual grammar lookups and parser instances uncached.
+_LANGUAGE_PACK: ModuleType | None = None
+_LANGUAGE_PACK_FAILURE: tuple[type[ImportError], tuple[object, ...]] | None = None
+_LANGUAGE_PACK_LOCK = Lock()
+
+
+def _language_pack_missing() -> bool:
+    """Allow an explicitly installed grammar adapter to supersede a failed import."""
+    return (_LANGUAGE_PACK_FAILURE is not None
+            and sys.modules.get("tree_sitter_language_pack") is None)
+
+
+def _language_pack() -> ModuleType:
+    """Probe the optional import once, including concurrent first callers."""
+    global _LANGUAGE_PACK, _LANGUAGE_PACK_FAILURE
+    with _LANGUAGE_PACK_LOCK:
+        installed = sys.modules.get("tree_sitter_language_pack")
+        if installed is not None:
+            return installed
+        if _LANGUAGE_PACK is not None:
+            return _LANGUAGE_PACK
+        if _LANGUAGE_PACK_FAILURE is not None:
+            error_type, args = _LANGUAGE_PACK_FAILURE
+            raise error_type(*args)
+        try:
+            import tree_sitter_language_pack as pack
+        except ImportError as exc:
+            # Retain the failure type/arguments without holding a source traceback.
+            _LANGUAGE_PACK_FAILURE = type(exc), exc.args
+            raise
+        _LANGUAGE_PACK = pack
+        return pack
 
 
 __all__ = [
