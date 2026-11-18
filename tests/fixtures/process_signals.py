@@ -351,7 +351,7 @@ def wait_for_checkpoint_saved(run_dir: Path, *, deadline: float, minimum: int = 
             returncode = process.poll()
             if returncode is not None:
                 raise AssertionError(
-                    f"{what}: child process exited with code {returncode} before checkpoint save "
+                    f"{what}: child process exited with exit code {returncode} before checkpoint save "
                     f"in {run_dir}; saw {saved}/{minimum} saves; last event: {last_event!r}"
                 )
         if failure_seen:
