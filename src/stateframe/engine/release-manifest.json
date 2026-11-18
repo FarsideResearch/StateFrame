@@ -462,6 +462,7 @@
   "kernel_parallel_meter.py": "8a5b94d56db8d4814d17f131350f0eeb1fe8650677fca57afc282037f3b42755",
   "kernel_parallel_projection.py": "9dcc7fc8f7e4340293a4f95ccccfc69bfd7e8d2b4d761bcea9dc1f65590ae70a",
   "kernel_parallel_records.py": "9d62fcf6b07570df692ae87d935a340a289e42515791f3bcdbe2fed3bf6d9de1",
+  "kernel_parallel_retirement.py": "6ef17dac6fc73acb263d433bc7640ebc7e4f42c975adf1f2b596ac4eb84a8186",
   "kernel_parallel_suggest.py": "9f61adbe17c9e99f058b2fde357b03e74a6737b0c6175346788ac92b3d0836bb",
   "kernel_parallel_txn.py": "65e5ab6701e05634f03749d8fc0e62712d99046634f70e521641cda6367b9c26",
   "kernel_parse_cache.py": "b7b66cbf3eae8326361a453ba5fb2881dfe9ea5be8c41187fec5b9eca47bd033",
