@@ -13,6 +13,7 @@ from .workcopy import IGNORE_DIRS
 
 
 PYTEST_PATTERNS = ("test_*.py", "conftest.py")
+PYTEST_DISCOVERY_PATTERNS = ("test_*.py", "*_test.py")
 DECLARED_TEST_SOURCE = "tests"
 GENERIC_PATTERNS = (
     "test_*.py", "*_test.py", "conftest.py", "*.test.*", "*.spec.*",
@@ -29,6 +30,12 @@ def is_test_file(path: str) -> bool:
     name = PurePosixPath(path).name
     return any(fnmatch.fnmatchcase(path, pattern) if "/" in pattern else
                fnmatch.fnmatchcase(name, pattern) for pattern in TEST_PATTERNS)
+
+
+def is_pytest_test_file(path: str) -> bool:
+    """Whether the basename matches pytest's conventional test-module patterns."""
+    name = PurePosixPath(path).name
+    return any(fnmatch.fnmatchcase(name, pattern) for pattern in PYTEST_DISCOVERY_PATTERNS)
 
 
 def judging_test_paths(paths: tuple[str, ...], command: tuple[str, ...],
@@ -258,13 +265,14 @@ def repository_paths(repo: Path) -> set[str]:
 
 
 def discover_check(repo: Path) -> tuple[str | None, str, bool]:
-    """Return a conservative build check only when the repository has no tests.
+    """Use pytest only when a conventionally named Python test module exists.
 
-    The final boolean says whether any test file exists. Discovery never runs a
-    project command and never infers a test script from a build script.
+    The broader test-resource inventory still protects fixtures and other files
+    under test directories. The final boolean here means pytest has a test-module
+    candidate, not merely that the repository contains test resources.
     """
     paths = repository_paths(repo)
-    has_tests = any(is_test_file(path) for path in paths)
+    has_tests = any(is_pytest_test_file(path) for path in paths)
     if has_tests:
         return None, "tests", True
     if any(name in paths for name in ("pyproject.toml", "setup.cfg", "setup.py")):

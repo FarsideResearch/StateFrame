@@ -595,10 +595,10 @@ def test_no_test_check_discovery(tmp_path, files, expected, source):
     assert discover_check(tmp_path) == (expected, source, False)
 
 
-def test_discovery_never_uses_build_when_tests_exist(tmp_path):
+def test_discovery_uses_declared_build_when_no_pytest_modules_exist(tmp_path):
     (tmp_path / "package.json").write_text('{"scripts":{"build":"echo pass"}}')
     (tmp_path / "app.test.js").write_text("test('value', () => {});\n")
-    assert discover_check(tmp_path) == (None, "tests", True)
+    assert discover_check(tmp_path) == ("npm run build", "build", False)
 
 
 def test_test_file_and_judging_path_detection():

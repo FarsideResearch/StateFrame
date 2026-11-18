@@ -1,6 +1,4 @@
-"""A repository over the editable-file limit starts without --target/--edit when the task or its
-chosen checks point at the files. When they point at nothing, the whole product set is the scope
-(scope_source fallback_full) and the row is unscoped, so the run never refuses before turn 1."""
+"""Large repositories infer a narrow edit scope or require explicit file flags."""
 from pathlib import Path
 
 import pytest
@@ -9,7 +7,6 @@ from stateframe import task_row
 from stateframe.task_row import (
     AUTO_SCOPE_LIMIT,
     DECLARE_ALL_LIMIT,
-    SCOPE_FALLBACK_FULL,
     SCOPE_INFERRED,
     TaskRowError,
     auto_scope,
@@ -60,25 +57,25 @@ def test_test_command_operand_steers_the_scope(tmp_path):
     assert sorted(row["files"]) == ["app/pricing.py", "app/rates.py"]
 
 
-def test_nothing_to_go_on_falls_back_to_full_repo(tmp_path):
+def test_nothing_to_go_on_requires_explicit_scope(tmp_path):
     work = _large_repo(tmp_path)
-    row = build_row(work, task="Discounts are charged wrong.")
-    # Nothing named or inferred: every product file is editable, unscoped, and visibly so.
-    assert row["scope_source"] == SCOPE_FALLBACK_FULL
-    assert row["scoped_edits"] is False
-    assert len(row["files"]) == len(list((tmp_path / "repo").rglob("*.py"))) - 1  # minus tests/test_pricing.py
-    assert "app/pricing.py" in row["files"] and "pkg/mod_000.py" in row["files"]
-    assert "tests/test_pricing.py" in row["public_tests"]
-    assert row["entry"]["path"]
+    with pytest.raises(TaskRowError, match="pass --target or --edit"):
+        build_row(work, task="Discounts are charged wrong.")
 
 
 def test_broad_check_selection_does_not_steer(tmp_path):
     work = _large_repo(tmp_path, extra_tests=task_row.AUTO_SCOPE_CHECK_LIMIT)
-    row = build_row(work, task="Discounts are charged wrong.", runner_kind="generic",
+    with pytest.raises(TaskRowError, match="pass --target or --edit"):
+        build_row(work, task="Discounts are charged wrong.", runner_kind="generic",
+                  test_command=("python", "-m", "pytest", "tests/"))
+
+
+def test_named_task_path_still_scopes_broad_check_selection(tmp_path):
+    work = _large_repo(tmp_path, extra_tests=task_row.AUTO_SCOPE_CHECK_LIMIT)
+    row = build_row(work, task="Fix pkg/mod_000.py.", runner_kind="generic",
                     test_command=("python", "-m", "pytest", "tests/"))
-    # A broad selector infers nothing, so the row falls back to the whole product set.
-    assert row["scope_source"] == SCOPE_FALLBACK_FULL
-    assert row["scoped_edits"] is False
+    assert row["scope_source"] == SCOPE_INFERRED
+    assert list(row["files"]) == ["pkg/mod_000.py"]
 
 
 def test_explicit_flags_win_over_the_automatic_scope(tmp_path):
@@ -121,8 +118,8 @@ def test_named_file_is_recorded_as_inferred_scope(tmp_path):
     assert row["scope_source"] == SCOPE_INFERRED
 
 
-def test_regression_6800_file_repo_with_unnamed_task_does_not_refuse(tmp_path):
-    """Bug: a 6,800-file repo whose task names no file was refused before turn 1 ("pass --target").
+def test_6800_file_repo_with_unnamed_task_requires_explicit_scope(tmp_path):
+    """Build a real large row and require a target when neither task nor check locates the work.
 
     Built on disk (not mocked) so the real copy, text scan and row assembly run end to end.
     """
@@ -136,9 +133,5 @@ def test_regression_6800_file_repo_with_unnamed_task_does_not_refuse(tmp_path):
     # The copy step has its own file ceiling (Limits.max_files=5000); lift it here so the test
     # exercises the task-row path rather than the copy refusal, which is a separate limit.
     work = create(repo, tmp_path / "copy", Limits(max_files=7000))
-    row = build_row(work, task="Make the numbers add up.")
-    assert row["scope_source"] == SCOPE_FALLBACK_FULL
-    assert row["scoped_edits"] is False
-    assert len(row["files"]) == 6800
-    assert row["entry"]["path"] in row["files"]
-    assert row["test_path"] == "tests/test_values.py"
+    with pytest.raises(TaskRowError, match="pass --target or --edit"):
+        build_row(work, task="Make the numbers add up.")
