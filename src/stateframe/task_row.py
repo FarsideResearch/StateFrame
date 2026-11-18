@@ -13,14 +13,14 @@ import posixpath
 import re
 from pathlib import Path, PurePosixPath
 
-from .workcopy import WorkCopy
-from .test_runners import is_test_file, judging_test_paths, protected_paths, validate_patterns
+from .workcopy import WorkCopy, WorkCopyError
+from .test_runners import (discover_pytest_paths, is_test_file, judging_test_paths,
+                           protected_paths, validate_patterns)
 
 TEXT_SUFFIXES = {
     ".py", ".pyi", ".txt", ".md", ".rst", ".toml", ".cfg", ".ini", ".json", ".yaml", ".yml",
     ".csv", ".sql", ".html", ".css", ".js", ".ts", ".sh", ".in",
 }
-TEST_FILE = re.compile(r"(^|/)(test_[^/]*\.py|[^/]*_test\.py)$")
 TASK_PATH = re.compile(r"(?<![\w./-])(?:(?:[\w.-]+/)+[\w.-]*|[\w.-]+\.[\w-]+)")
 TASK_ACTION = re.compile(r"\b(build|create|write|produce|save|generate|add|read|load|use)\b",
                          re.IGNORECASE)
@@ -34,9 +34,16 @@ class TaskRowError(ValueError):
     pass
 
 
-def discover_checks(files: dict[str, str]) -> list[str]:
-    """pytest-style test files in the repository, sorted."""
-    return sorted(path for path in files if TEST_FILE.search(path))
+def discover_checks(files: dict[str, str], *, repo: Path | None = None) -> list[str]:
+    """Runnable Python test paths in the repository, sorted."""
+    return list(discover_pytest_paths(files, repo=repo))
+
+
+def _text_files(work: WorkCopy) -> dict[str, str]:
+    try:
+        return work.text_files()
+    except WorkCopyError as error:
+        raise TaskRowError(f"cannot prepare repository text: {error}") from error
 
 
 def _imported_modules(source: str) -> list[str]:
@@ -256,19 +263,23 @@ def build_row(work: WorkCopy, *, task: str, checks: list[str] | None = None,
             work, task=task, checks=checks, target=target, task_id=task_id,
             edit_paths=edit_paths, test_command=test_command,
             protected_test_globs=protected_test_globs, protect_tests=protect_tests)
-    texts = {path: text for path, text in work.text_files().items()
-             if Path(path).suffix in TEXT_SUFFIXES or Path(path).name in {"Makefile", "setup.py"}}
     if not task.strip():
         raise TaskRowError("--task is empty")
     checks = [repo_relative(path) for path in checks or []]
     target = repo_relative(target) if target else target
     edit_paths = [repo_relative(path) for path in edit_paths or []] or edit_paths
-    declared_checks = checks if checks else discover_checks(texts)
-    if not declared_checks:
-        raise TaskRowError("no test files found; pass --check <path> for at least one pytest file")
-    missing = [path for path in declared_checks if path not in texts]
+    declared_checks = checks if checks else discover_checks(work.baseline, repo=work.copy)
+    missing = [path for path in declared_checks if path not in work.baseline]
     if missing:
         raise TaskRowError("check file(s) not found in the repository: " + ", ".join(missing))
+    texts = {path: text for path, text in _text_files(work).items()
+             if Path(path).suffix in TEXT_SUFFIXES or Path(path).name in {"Makefile", "setup.py"}}
+    if not declared_checks:
+        raise TaskRowError("no test files found; pass --check <path> for at least one pytest file")
+    unreadable = [path for path in declared_checks if path not in texts]
+    if unreadable:
+        raise TaskRowError("check file(s) could not be decoded or read from the working copy: "
+                           + ", ".join(unreadable))
     public_tests = {path: texts[path] for path in declared_checks}
     test_files = {path for path in texts if is_test_file(path)}
     if protect_tests == "all":
@@ -363,7 +374,7 @@ def _build_generic_row(work: WorkCopy, *, task: str, checks: list[str] | None,
     if not task.strip():
         raise TaskRowError("--task is empty")
     patterns = validate_patterns(list(protected_test_globs))
-    texts = {path: text for path, text in work.text_files().items()
+    texts = {path: text for path, text in _text_files(work).items()
              if Path(path).suffix in TEXT_SUFFIXES | {
                  ".jsx", ".tsx", ".mjs", ".cjs", ".mts", ".cts", ".go", ".rs",
                  ".c", ".h", ".cc", ".cpp", ".hpp",

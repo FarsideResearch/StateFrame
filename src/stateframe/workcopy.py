@@ -15,6 +15,7 @@ import secrets
 import shutil
 import stat
 import sys
+import tokenize
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -79,12 +80,21 @@ class WorkCopy:
     snapshot: Path | None = None  # immutable copy of the start state (diff baseline), if the run made one
 
     def text_files(self) -> dict[str, str]:
-        """Every UTF-8 text file in the copy, keyed by POSIX relative path."""
+        """Text files in the copy, keyed by POSIX relative path."""
         out: dict[str, str] = {}
         for rel in sorted(self.baseline):
+            path = self.copy / rel
             try:
-                out[rel] = (self.copy / rel).read_text(encoding="utf-8")
-            except (UnicodeDecodeError, OSError):
+                if path.suffix.lower() in {".py", ".pyi"}:
+                    with tokenize.open(path) as source:
+                        out[rel] = source.read()
+                else:
+                    out[rel] = path.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError, SyntaxError) as error:
+                if path.suffix.lower() in {".py", ".pyi"}:
+                    raise WorkCopyError(
+                        f"cannot decode or read Python source file {rel} in the working copy"
+                    ) from error
                 continue
         return out
 

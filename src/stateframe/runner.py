@@ -4077,8 +4077,12 @@ def _run(options: RunOptions, started: float, printer=print) -> dict[str, object
             options.check_source = "command"
         elif options.test_cmd:
             options.check_source = DECLARED_TEST_SOURCE
+        elif options.runner_kind == "pytest" or (options.runner_kind == "auto" and options.checks):
+            options.runner_kind = "pytest"
+            options.check_source = DECLARED_TEST_SOURCE
         else:
-            detected, source, has_tests = discover_check(options.repo)
+            discovered_tests: list[str] = []
+            detected, source, has_tests = discover_check(options.repo, pytest_paths=discovered_tests)
             if detected:
                 options.test_cmd = detected
                 options.runner_kind = "generic"
@@ -4088,6 +4092,8 @@ def _run(options: RunOptions, started: float, printer=print) -> dict[str, object
                 options.check_source = "none"
             else:
                 options.check_source = DECLARED_TEST_SOURCE
+                if not options.checks:
+                    options.checks = discovered_tests
         options.runner_kind, command_argv = parse_command(options.test_cmd, options.runner_kind)
         if options.runner_kind == "generic" and not command_argv and options.check_source != "none":
             raise ValueError("a generic runner requires --test-cmd")
