@@ -201,6 +201,34 @@ def _byte_span(text: str, start_char: int, end_char: int) -> tuple[int, int, str
     return start, end, quote
 
 
+def _byte_spans_from_chars(text: str, char_spans: Sequence[tuple[int, int]]) -> tuple[tuple[int, int, str], ...]:
+    """Convert ordered character spans to UTF-8 offsets with one forward scan."""
+    result: list[tuple[int, int, str]] = []
+    char_cursor = 0
+    byte_cursor = 0
+    for start_char, end_char in char_spans:
+        if not (0 <= start_char <= end_char <= len(text)):
+            raise LedgerError("invalid character span")
+        if start_char < char_cursor:
+            # Keep compatibility with unusual overlapping span providers. The
+            # normal sentence providers return ordered, disjoint ranges.
+            start_byte, end_byte, quote = _byte_span(text, start_char, end_char)
+            result.append((start_byte, end_byte, quote))
+            if end_char > char_cursor:
+                byte_cursor += len(text[char_cursor:end_char].encode("utf-8"))
+                char_cursor = end_char
+            continue
+        byte_cursor += len(text[char_cursor:start_char].encode("utf-8"))
+        start_byte = byte_cursor
+        quote = text[start_char:end_char]
+        if not quote:
+            raise LedgerError("ledger spans must contain text")
+        byte_cursor += len(quote.encode("utf-8"))
+        result.append((start_byte, byte_cursor, quote))
+        char_cursor = end_char
+    return tuple(result)
+
+
 def exact_span(source: str, start_byte: int, end_byte: int) -> str:
     """Host-slice and verify a half-open UTF-8 byte span."""
     raw = source.encode("utf-8")
@@ -218,19 +246,13 @@ def _ticket_segments(text: str) -> tuple[tuple[int, int, str], ...]:
     """Split only at sentence/newline boundaries; never at conjunctions."""
     if os.environ.get("STATEFRAME_ORACLE_GROUNDING", "off").strip().lower() == "on":
         from kernel_oracle_grounding import extract_ticket_spans
-        segments = []
-        for start_char, end_char, _clause in extract_ticket_spans(text):
-            start_byte, end_byte, quote = _byte_span(text, start_char, end_char)
-            segments.append((start_byte, end_byte, quote))
-        return tuple(segments)
+        spans = [(start_char, end_char) for start_char, end_char, _clause in extract_ticket_spans(text)]
+        return _byte_spans_from_chars(text, spans)
     if os.environ.get("STATEFRAME_REQUIREMENT_ALIGNMENT", "off").strip().lower() == "on":
         from kernel_requirement_alignment import extract_ticket_spans
-        segments = []
-        for start_char, end_char, _sentence in extract_ticket_spans(text):
-            start_byte, end_byte, quote = _byte_span(text, start_char, end_char)
-            segments.append((start_byte, end_byte, quote))
-        return tuple(segments)
-    segments: list[tuple[int, int, str]] = []
+        spans = [(start_char, end_char) for start_char, end_char, _sentence in extract_ticket_spans(text)]
+        return _byte_spans_from_chars(text, spans)
+    spans: list[tuple[int, int]] = []
     # A line is the safest unit for Markdown briefs: a semicolon or ``and``
     # remains in the same source span and therefore cannot become a stronger
     # pair of requirements.  Sentence punctuation inside a line is split only
@@ -250,9 +272,8 @@ def _ticket_segments(text: str) -> tuple[tuple[int, int, str], ...]:
         # Keep a wrapped paragraph together where a line clearly continues
         # without terminal punctuation.  The public briefs use one normative
         # sentence per line, so this conservative choice is deterministic.
-        start_byte, end_byte, quote = _byte_span(text, start, end)
-        segments.append((start_byte, end_byte, quote))
-    return tuple(segments)
+        spans.append((start, end))
+    return _byte_spans_from_chars(text, spans)
 
 
 _TASK_METADATA_MENTION = re.compile(r"\b(Title|Symptom|Focus)\s*:", re.IGNORECASE)
@@ -262,7 +283,79 @@ _TASK_METADATA_LABEL = re.compile(
 )
 
 
-def _task_metadata_label(text: str, *, source_prefix: str = "") -> str | None:
+class _MetadataPrefixState:
+    """Incremental quote and line-boundary context for one source prefix."""
+
+    __slots__ = (
+        "_quote", "_escaped", "_pending_apostrophe", "_apostrophe_prev_alnum",
+        "_last_char_alnum", "_previous_line", "_has_previous_line",
+        "_current_line_parts", "_current_line_has_non_whitespace", "characters_scanned",
+    )
+
+    def __init__(self) -> None:
+        self._quote = ""
+        self._escaped = False
+        self._pending_apostrophe = False
+        self._apostrophe_prev_alnum = False
+        self._last_char_alnum = False
+        self._previous_line = ""
+        self._has_previous_line = False
+        self._current_line_parts: list[str] = []
+        self._current_line_has_non_whitespace = False
+        self.characters_scanned = 0
+
+    @property
+    def quote_open(self) -> bool:
+        # A trailing apostrophe opens a quote until a following character can
+        # prove it is an apostrophe inside a word.
+        return bool(self._quote or self._pending_apostrophe)
+
+    @property
+    def previous_line(self) -> str:
+        return self._previous_line
+
+    @property
+    def has_previous_line(self) -> bool:
+        return self._has_previous_line
+
+    @property
+    def current_line_has_non_whitespace(self) -> bool:
+        return self._current_line_has_non_whitespace
+
+    def advance(self, text: str) -> None:
+        self.characters_scanned += len(text)
+        for char in text:
+            if self._pending_apostrophe:
+                if not (self._apostrophe_prev_alnum and char.isalnum()):
+                    self._quote = "'"
+                self._pending_apostrophe = False
+            if self._escaped:
+                self._escaped = False
+            elif char == "\\":
+                self._escaped = True
+            elif self._quote:
+                if char == self._quote:
+                    self._quote = ""
+            elif char in '"`':
+                self._quote = char
+            elif char == "'":
+                self._pending_apostrophe = True
+                self._apostrophe_prev_alnum = self._last_char_alnum
+
+            if char == "\n":
+                self._previous_line = "".join(self._current_line_parts)
+                self._current_line_parts = []
+                self._current_line_has_non_whitespace = False
+                self._has_previous_line = True
+            else:
+                self._current_line_parts.append(char)
+                if not char.isspace():
+                    self._current_line_has_non_whitespace = True
+            self._last_char_alnum = char.isalnum()
+
+
+def _task_metadata_label(text: str, *, source_prefix: str = "",
+                         prefix_state: _MetadataPrefixState | None = None) -> str | None:
     """Recognize a standalone descriptive field, conservatively retaining mixed work.
 
     The source prefix prevents sentence extraction and soft wraps from inventing
@@ -274,30 +367,36 @@ def _task_metadata_label(text: str, *, source_prefix: str = "") -> str | None:
     if match is None:
         return None
     # A physical line start inside quoted content is not a field boundary.
-    quote = ""
-    escaped = False
-    for index, char in enumerate(source_prefix):
-        if escaped:
-            escaped = False
-        elif char == "\\":
-            escaped = True
-        elif quote:
-            if char == quote:
-                quote = ""
-        elif char in "\"'`":
-            if (char == "'" and index > 0 and index + 1 < len(source_prefix)
-                    and source_prefix[index - 1].isalnum() and source_prefix[index + 1].isalnum()):
-                continue
-            quote = char
-    if quote:
-        return None
-    prefix_lines = source_prefix.rsplit("\n", 2)
-    if prefix_lines[-1].strip():
-        return None
-    if len(prefix_lines) > 1:
-        previous = prefix_lines[-2].strip()
+    if prefix_state is None:
+        quote = ""
+        escaped = False
+        for index, char in enumerate(source_prefix):
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif quote:
+                if char == quote:
+                    quote = ""
+            elif char in "\"'`":
+                if (char == "'" and index > 0 and index + 1 < len(source_prefix)
+                        and source_prefix[index - 1].isalnum() and source_prefix[index + 1].isalnum()):
+                    continue
+                quote = char
+        if quote:
+            return None
+        prefix_lines = source_prefix.rsplit("\n", 2)
+        if prefix_lines[-1].strip():
+            return None
+        previous = prefix_lines[-2].strip() if len(prefix_lines) > 1 else ""
+    else:
+        if prefix_state.quote_open or prefix_state.current_line_has_non_whitespace:
+            return None
+        previous = (prefix_state.previous_line.strip()
+                    if prefix_state.has_previous_line else "")
+    if previous:
         explicit_marker = re.match(r"\s*(?:[-+*]|\d+[.)]|#{1,6})\s+", text)
-        if (previous and not previous.endswith((".", "!", "?", ":"))
+        if (not previous.endswith((".", "!", "?", ":"))
                 and not _TASK_METADATA_LABEL.match(previous) and not explicit_marker):
             return None
     label = match.group(1).lower()
@@ -696,17 +795,22 @@ def parse_ticket_once(ticket_source_id: str, ticket_text: str, *, path: str = "t
     if cached is not None:
         return copy.deepcopy(cached)
     spans = _ticket_segments(ticket_text)
+    encoded = ticket_text.encode("utf-8")
+    prefix_state = _MetadataPrefixState()
+    previous_end = 0
     rows: list[dict[str, Any]] = []
     for index, (start, end, quote) in enumerate(spans, 1):
+        prefix_state.advance(encoded[previous_end:start].decode("utf-8"))
         row = {
             "span_index": index,
             "start_byte": start,
             "end_byte": end,
             "quote": quote,
-            "task_metadata_label": _task_metadata_label(
-                quote, source_prefix=ticket_text.encode("utf-8")[:start].decode("utf-8")),
+            "task_metadata_label": _task_metadata_label(quote, prefix_state=prefix_state),
         }
         rows.append(row)
+        prefix_state.advance(quote)
+        previous_end = end
     _TICKET_CACHE[key] = tuple(copy.deepcopy(rows))
     count_key = (str(ticket_source_id), sha256_text(ticket_text))
     _PARSE_COUNTS[count_key] = _PARSE_COUNTS.get(count_key, 0) + 1

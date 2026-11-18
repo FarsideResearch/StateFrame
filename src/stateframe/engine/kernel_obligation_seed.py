@@ -536,17 +536,20 @@ def extract_obligations(brief: str, manifest: object = None, *,
     # submissions can disclose them without turning them into host blockers.
     tagged_candidates: list[tuple[str, str | None, SourceSpan]] = []
     extract = _candidate_clauses if enabled() else _legacy_candidate_clauses
-    from kernel_requirements_ledger import _TASK_METADATA_MENTION, _task_metadata_label, _ticket_segments
+    from kernel_requirements_ledger import (
+        _MetadataPrefixState, _TASK_METADATA_MENTION, _task_metadata_label, _ticket_segments,
+    )
     encoded = brief.encode("utf-8")
     source_hash = hashlib.sha256(encoded).hexdigest()
+    prefix_state = _MetadataPrefixState()
     previous_field = False
     previous_end = 0
     for start_byte, end_byte, text in _ticket_segments(brief):
-        prefix = encoded[:start_byte].decode("utf-8")
-        label = _task_metadata_label(text, source_prefix=prefix)
+        raw_gap = encoded[previous_end:start_byte].decode("utf-8")
+        gap = raw_gap.replace("\r\n", "\n").replace("\r", "\n")
+        prefix_state.advance(raw_gap)
+        label = _task_metadata_label(text, prefix_state=prefix_state)
         mentioned = bool(_TASK_METADATA_MENTION.search(text))
-        gap = encoded[previous_end:start_byte].decode("utf-8")
-        gap = gap.replace("\r\n", "\n").replace("\r", "\n")
         continuation = previous_field and not re.search(r"\n\s*\n", gap)
         previous_field = mentioned or continuation
         previous_end = end_byte
@@ -559,6 +562,7 @@ def extract_obligations(brief: str, manifest: object = None, *,
                                 start_byte + len(text[:left].encode("utf-8")),
                                 start_byte + len(text[:right].encode("utf-8")))
             tagged_candidates.append((clause, label, origin))
+        prefix_state.advance(text)
     for clause, source_label, origin in tagged_candidates:
         symbols = _clause_symbols(clause, files)
         mentioned_files = _clause_files(clause, files, symbols)

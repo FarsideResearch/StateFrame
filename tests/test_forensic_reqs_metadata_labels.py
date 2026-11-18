@@ -20,6 +20,38 @@ def parser_modes(request, monkeypatch):
     ledger.clear_cache()
 
 
+def test_metadata_prefix_scans_are_linear_for_many_short_lines(monkeypatch):
+    monkeypatch.setenv("STATEFRAME_REQUIREMENT_ALIGNMENT", "off")
+    monkeypatch.setenv("STATEFRAME_ORACLE_GROUNDING", "off")
+    monkeypatch.setenv(seed.MODE_ENV, "on")
+    brief = "\n".join(["Keep audit events."] * 5_000)
+    original = ledger._task_metadata_label
+    scanned = 0
+    state_counts = {}
+
+    def counted(text, *, source_prefix="", prefix_state=None):
+        nonlocal scanned
+        if prefix_state is None:
+            scanned += len(source_prefix)
+        else:
+            state_id = id(prefix_state)
+            current = prefix_state.characters_scanned
+            scanned += current - state_counts.get(state_id, 0)
+            state_counts[state_id] = current
+        if prefix_state is None:
+            return original(text, source_prefix=source_prefix)
+        return original(text, source_prefix=source_prefix, prefix_state=prefix_state)
+
+    monkeypatch.setattr(ledger, "_task_metadata_label", counted)
+    ledger.clear_cache()
+    rows = ledger.parse_ticket_once("linear-scan-ticket", brief, revision="linear-v1")
+    obligations = seed.extract_obligations(brief)
+
+    assert len(rows) == 5_000
+    assert len(obligations) == 5_000
+    assert scanned <= 4 * len(brief), f"metadata prefix scanning visited {scanned} characters"
+
+
 @pytest.mark.parametrize(("text", "action"), [
     ("Delete entries with Title: expired.", "Delete entries"),
     ("Encrypt entries with Symptom: exposed.", "Encrypt entries"),
