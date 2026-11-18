@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import NoReturn
 
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
+
 MODE_ENV = "STATEFRAME_UNIFIED_STOP"
 DECLARED_PATH_DONE_GATE_ENV = "STATEFRAME_DECLARED_PATH_DONE_GATE"
 POLICY_VERSION = "stateframe-unified-stop/2"
@@ -53,7 +55,7 @@ NEVER_ADMIT_UNCERTIFIED_CODES = TERMINAL_CODES | WITNESSED_VIOLATION_CODES
 NON_WAIVABLE_CODES = frozenset({"SHIP_TREE_SMOKE"})
 # Edit-class tools: a menu offering one of these can repair a violated clause.
 REPAIR_TOOLS = frozenset({"edit", "str_replace", "write", "file_create", "replace",
-                          "replace_module"})
+                          "replace_module", *PROTOCOL_EDIT_TOOL_NAMES})
 
 # The provider inventory (verified in the earlier run lane report) is documentation only.  The
 # providers WIRED here are the three above; the rest stay independent legacy gates whose
