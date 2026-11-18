@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fixed: offline sandboxed commands can read the system's public CA certificates (never `/etc/ssl/private`). Debian's bundled pip loads them on import, so building a run env failed inside the sandbox on Debian and Ubuntu and checks then ran a bare `python` that does not exist.
+
 ## 0.7.64 (2026-11-18)
 
 - Fixed: share stat-identity file digests between green-lock and workspace binding to avoid re-reading unchanged product files each turn; reject raced hashes and workspace snapshots, recheck timestamp safety, evict failed lookups, independently verify seeded digests, and discard digest observations on clock rollback and checkpoint restore.
