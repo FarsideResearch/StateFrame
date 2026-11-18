@@ -14,13 +14,20 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
+
 
 EVENT_SCHEMA = "stateframe-qgates/1"
 FLAG = "STATEFRAME_QGATES"
 TOOL_NAME = "question_gate"
 CHECK_ROUTE = "REPROFIRST_WITNESS_CHECK"
 GATES = ("intake", "before_first_product_edit", "first_green", "before_done")
-EDIT_KINDS = frozenset({"edit", "str_replace", "file_create", "replace_module", "write", "replace"})
+# Legacy edit names plus protocol edit tools (edit_source/rewrite_source). guard_action
+# keys off this set, so protocol edits must be here or they bypass the first-edit gate.
+EDIT_KINDS = frozenset({
+    "edit", "str_replace", "file_create", "replace_module", "write", "replace",
+    *PROTOCOL_EDIT_TOOL_NAMES,
+})
 CHECK_KINDS = frozenset({"reproduce", "probe", "witness_check", "run_tests", "test"})
 BUDGETS = {
     "max_answer_submissions": 12,
