@@ -54,8 +54,11 @@ Public contract:
 """
 import ast
 import itertools
+import logging
 import re
 import textwrap
+
+logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------- budget
 MAX_EVALS = 200          # witness rows evaluated per candidate (hard ceiling)
@@ -836,7 +839,11 @@ def family_witness(span_lines, mut):
         return False, False, ""
     except Unsupported:
         return False, False, ""
-    except Exception:                       # a witness bug must never kill a fix
+    except Exception as error:              # a witness bug must never kill a fix
+        # Fall through to the boolean judges, but say so: a probe bug otherwise
+        # reads exactly like "this family does not apply".
+        logger.warning("contact-family witness failed: %s; falling back to the boolean "
+                       "judges", type(error).__name__)
         return False, False, ""
 
 
@@ -986,26 +993,47 @@ def _intent_oracle_enabled(cfg):
     return bool(getattr(facts, "intent_oracle", False))
 
 
+def _mark_intent_oracle_error(muts, survivors, evidence, error_name):
+    """Copy of `evidence` with the oracle failure recorded on each surviving row."""
+    surv_ids = {id(s) for s in survivors}
+    marked = []
+    for i, ev in enumerate(evidence):
+        mut = muts[i] if i < len(muts or []) else None
+        if mut is not None and id(mut) in surv_ids:
+            ev = dict(ev)
+            ev["intent_oracle"] = None
+            ev["intent_oracle_error"] = error_name
+        marked.append(ev)
+    return marked
+
+
 def _apply_intent_oracle(span_lines, muts, survivors, evidence):
     """ADDITIVE HOOK (knob: facts.intent_oracle). Consults intent_oracle to kill
     survivors that contradict the function's own docstring contract.
 
-    Contract with this module's fail-open law: any exception, any missing module,
-    zero expectations, or fewer than two survivors leaves BOTH `survivors` and
-    `evidence` exactly as they were. The oracle can only ever remove candidates it
+    Contract with this module's fail-open law: any exception or missing module
+    leaves `survivors` exactly as they were (the failure is recorded on evidence,
+    see below). The oracle can only ever remove candidates it
     positively discriminated against a passing sibling, so it can never empty the
     list. Evidence rows gain `intent_oracle` / `intent_line` fields. For a row the
     oracle KILLED, and only for such a row, `survived` flips to False and `reason`
     is EXTENDED (never replaced — the witness-replay reason stays readable, so the
     certificate always shows both judges).
+
+    When the oracle itself fails, `survivors` stay as they were (fail-open), and every
+    surviving row is marked `intent_oracle=None` with `intent_oracle_error` naming the
+    exception type, so the certificate still shows that judge and why it was silent.
     """
     try:
         import intent_oracle
         fn_source = "\n".join(span_lines or [])
         res = intent_oracle.discriminate(survivors, fn_source, span_lines)
         lines = intent_oracle.render_evidence(res)
-    except Exception:
-        return survivors, evidence
+    except Exception as error:
+        logger.warning("intent oracle failed during witness replay: %s; survivors kept",
+                       type(error).__name__)
+        return survivors, _mark_intent_oracle_error(muts, survivors, evidence,
+                                                    type(error).__name__)
     by_line = {}
     for cand, line in zip(res.get("candidates") or [], lines or []):
         by_line[id(cand)] = line
@@ -1120,7 +1148,9 @@ def is_mirror_candidate(cls, mut):
         rule = (_default_idiom_mirror if cls == "bool_flip"
                 else _positive_predicate_mirror)
         why = rule(old_line, new_line)
-    except Exception:                       # a pre-filter bug must never kill a fix
+    except Exception as error:              # a pre-filter bug must never kill a fix
+        logger.warning("mirror pre-filter %s failed: %s; candidate kept", cls,
+                       type(error).__name__)
         return False, ""
     return (True, why) if why else (False, "")
 
@@ -1290,7 +1320,9 @@ def filter_candidates(task_text, span_lines, muts, cfg=None):
                 instruction. With the knob on, surviving rows additionally carry
                 `intent_oracle` (bool) and `intent_line` (a short menu-ready
                 verdict string), and candidates that contradict the function's own
-                docstring contract are removed. See intent_oracle.py.
+                docstring contract are removed. If the oracle fails, surviving
+                rows carry `intent_oracle` None plus `intent_oracle_error`.
+                See intent_oracle.py.
 
     Contract: UNSUPPORTED ALWAYS SURVIVES. The only eliminations are
       (1) an empty truth-table delta (the candidate provably changes nothing), and

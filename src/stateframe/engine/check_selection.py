@@ -1,6 +1,7 @@
 """Shared public check selection and pristine test overlay for shipped grading."""
 from __future__ import annotations
 
+import logging
 import os
 import pathlib
 import re
@@ -13,6 +14,8 @@ sys.path.insert(0, str(_ENGINE))
 from kernel_safe_paths import safe_expanduser
 from build_test_path import resolve_build_test_path
 from probes import react_repair as rr
+
+logger = logging.getLogger(__name__)
 
 def _swebench_workspace(d):
     """Find the cached base/gold worktree for one SWE-bench row."""
@@ -112,12 +115,16 @@ def overlay_fix_tests(root: pathlib.Path, d) -> int:
     # rewards); replacement is two-sided-verified. Applied after nothing (before
     # the git overlay would be fine too — apply_corpus_fixes writes its own filename),
     # and fail_to_pass_ids() prefers its selector so preflight+grading ask ITS question.
+    # Package-qualified import: the bare module name only resolves once some other
+    # module has put engine/probes on sys.path, so it must not be relied on here.
     try:
-        from apply_corpus_fixes import apply_corpus_fixes as _acf
-        _n = _acf(root, d)
+        from probes import apply_corpus_fixes as _corpus
+        _n = _corpus.apply_corpus_fixes(root, d)
     except Exception as _e:                                            # noqa: BLE001
         print(f"  [corpus-fix] overlay failed for {d.get('fn')}: {type(_e).__name__}",
               flush=True)
+        logger.warning("corpus fix overlay failed for %s: %s", d.get("fn"),
+                       type(_e).__name__)
         _n = 0
     if _n and d.get("repo") != "secondary":
         return _n
@@ -186,12 +193,15 @@ def fail_to_pass_ids(d) -> list[str]:
     # E387: a registered replacement oracle outranks the fix commit's own tests
     # (which are absent or dishonest for exactly these tasks).
     try:
-        from apply_corpus_fixes import corpus_fix_for as _cff
-        _fix = _cff(d)
+        from probes import apply_corpus_fixes as _corpus
+        _fix = _corpus.corpus_fix_for(d)
         if _fix is not None:
             return [_fix.selector]
-    except Exception:                                                  # noqa: BLE001
-        pass
+    except Exception as error:                                         # noqa: BLE001
+        # Fail open to the commit-derived selector, but never silently: the grade
+        # then answers a different question than the registered corpus oracle.
+        logger.warning("corpus fix lookup failed for %s: %s; using the commit-derived "
+                       "check selector", d.get("fn"), type(error).__name__)
     if d.get("repo") != "secondary" or not d.get("sha"):
         return []
     if not is_commit_id(d["sha"]):
