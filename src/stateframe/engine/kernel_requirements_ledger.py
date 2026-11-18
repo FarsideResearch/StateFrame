@@ -978,6 +978,14 @@ def _default_schema_path() -> Path:
     return here.parent / SCHEMA_PATH
 
 
+def _requirement_key(row: Mapping[str, object]) -> tuple[str, int]:
+    """Read an exact versioned identity, even without optional schema validation."""
+    ident, version = row.get("id"), row.get("version")
+    if not isinstance(ident, str) or not ident or type(version) is not int or version < 1:
+        raise LedgerError("requirement references need a non-empty id and positive integer version")
+    return ident, version
+
+
 def validate_ledger(ledger: Mapping[str, Any], schema_path: str | Path | None = None) -> bool:
     """Validate JSON shape plus host-only exact-span/reference invariants."""
     if not isinstance(ledger, Mapping):
@@ -1014,12 +1022,20 @@ def validate_ledger(ledger: Mapping[str, Any], schema_path: str | Path | None = 
     for row in ledger.get("spans", ()):
         if any(str(context) not in span_ids for context in row.get("context_span_ids", ())):
             raise LedgerError(f"unknown context span in {row.get('id')}")
-    requirement_ids = {str(row.get("id")): row for row in ledger.get("requirements", ())
-                       if isinstance(row, Mapping)}
+    requirements_by_key = {}
+    for req in ledger.get("requirements", ()):
+        if not isinstance(req, Mapping):
+            raise LedgerError("requirement rows must be mappings")
+        key = _requirement_key(req)
+        if key in requirements_by_key:
+            raise LedgerError(f"duplicate requirement key: {key}")
+        requirements_by_key[key] = req
     binding_ids = {str(row.get("id")) for row in ledger.get("bindings", ())
                    if isinstance(row, Mapping)}
-    for req in requirement_ids.values():
-        if not set(req.get("source_span_ids", ())).issubset(span_ids):
+    for req in requirements_by_key.values():
+        owned = req.get("source_span_ids")
+        if (not isinstance(owned, Sequence) or isinstance(owned, (str, bytes, bytearray))
+                or not owned or any(not isinstance(sid, str) or sid not in span_ids for sid in owned)):
             raise LedgerError(f"requirement references unknown span: {req.get('id')}")
         for provenance_key in ("scenario_provenance", "oracle_provenance"):
             provenance = req.get(provenance_key)
@@ -1041,12 +1057,30 @@ def validate_ledger(ledger: Mapping[str, Any], schema_path: str | Path | None = 
         if not set(req.get("check_refs", ()) and [ref.get("id") for ref in req.get("check_refs", ())]
                    or ()).issubset({str(row.get("id")) for row in ledger.get("checks", ()) if isinstance(row, Mapping)}):
             raise LedgerError(f"requirement references unknown check: {req.get('id')}")
-    covered = [str(row.get("span_id")) for row in ledger.get("coverage_dispositions", ())
-               if isinstance(row, Mapping)]
+    coverage_rows = ledger.get("coverage_dispositions", ())
+    if any(not isinstance(row, Mapping) for row in coverage_rows):
+        raise LedgerError("coverage rows must be mappings")
+    covered = [str(row.get("span_id")) for row in coverage_rows]
     if set(covered) != span_ids or len(covered) != len(set(covered)):
         raise LedgerError("coverage dispositions must cover each span exactly once")
-    if any(str(row.get("span_id")) not in span_ids for row in ledger.get("coverage_dispositions", ())):
-        raise LedgerError("coverage references an unknown span")
+    ownership_edges = set()
+    for row in coverage_rows:
+        sid = row.get("span_id")
+        refs = row.get("requirement_refs")
+        if (not isinstance(refs, Sequence) or isinstance(refs, (str, bytes, bytearray))
+                or (row.get("disposition") in {"mapped", "unresolved"} and not refs)):
+            raise LedgerError("mapped and unresolved coverage must reference requirements")
+        for ref in refs:
+            if not isinstance(ref, Mapping):
+                raise LedgerError("coverage requirement references must be mappings")
+            key = _requirement_key(ref)
+            req = requirements_by_key.get(key)
+            if req is None or sid not in req["source_span_ids"]:
+                raise LedgerError(f"coverage must reference the owning requirement and version: {sid}, {key}")
+            ownership_edges.add((sid, key))
+    for key, req in requirements_by_key.items():
+        if any((sid, key) not in ownership_edges for sid in req["source_span_ids"]):
+            raise LedgerError(f"requirement source spans must reference their owner in coverage: {key}")
     coordination = ledger.get("coordination")
     if coordination is not None:
         if not isinstance(coordination, Mapping):
@@ -1345,43 +1379,12 @@ def reopen_dirty_requirements(
 
 
 def coverage_complete(ledger: Mapping[str, Any]) -> bool:
-    """True only when schema validation passes AND every span is really covered.
+    """True only when shape, exact spans and versioned ownership validate.
 
-    Checks: each span has exactly one coverage row; mapped/unresolved rows name
-    at least one existing requirement; each requirement's source spans exist.
     Pure function: any malformed input returns False rather than raising.
     """
     try:
         validate_ledger(ledger)
-        spans = ledger["spans"]
-        span_ids = [str(row["id"]) for row in spans]
-        span_id_set = set(span_ids)
-        requirements = ledger["requirements"]
-        requirement_ids = {str(row["id"]) for row in requirements}
-        coverage_rows = ledger["coverage_dispositions"]
-
-        rows_per_span: dict[str, int] = {}
-        for row in coverage_rows:
-            key = str(row["span_id"])
-            rows_per_span[key] = rows_per_span.get(key, 0) + 1
-        if any(rows_per_span.get(sid, 0) != 1 for sid in span_ids):
-            return False
-        if any(key not in span_id_set for key in rows_per_span):
-            return False
-
-        for row in coverage_rows:
-            if row.get("disposition") not in {"mapped", "unresolved"}:
-                continue
-            refs = row.get("requirement_refs") or []
-            if not refs:
-                return False
-            if any(str(ref.get("id")) not in requirement_ids for ref in refs):
-                return False
-
-        for req in requirements:
-            sources = req.get("source_span_ids") or []
-            if any(str(sid) not in span_id_set for sid in sources):
-                return False
     except Exception:  # schema validators use their own ValidationError type
         return False
     return True
