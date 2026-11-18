@@ -523,6 +523,7 @@
   "kernel_questions.py": "835bddaa29e864efeb2a8dff1779aa2b0dddf40b9f1295ad71d6d0a98ddc7acb",
   "kernel_raising_h_packets.py": "e459fc4bb46d678f52ac9aa168d1783db46701fdec9d0655c4334a69192579e4",
   "kernel_read_admission.py": "f5ea2a55e9ebc008173e7d88e02fc68130f2c50aefa916f05a6eb489ec10738a",
+  "kernel_read_evidence.py": "25300f96a310672b5105a5dc88d5c654eb0d8144a7510233b203c2329ced5125",
   "kernel_read_exec.py": "a1b759d57716914197c9fe088c75a18b1c316603da76430c9e4045800bd285a3",
   "kernel_read_fixes.py": "40ba622629a00745c241605cf7ffd58e546346c3a26f6f283feaa76f3784526c",
   "kernel_read_newline_fix.py": "3c709ffa3565a473942dbf0692b68d106c45dd4f64a6c7dd63a30138f4e76b56",
