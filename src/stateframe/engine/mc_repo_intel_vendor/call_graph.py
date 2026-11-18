@@ -453,76 +453,57 @@ def _empty_properties(length: int = 0) -> dict:
 
 
 def _complexity_properties(node: ast.AST, short_name: str) -> dict:
-    """Static metrics for one Python function/method body. Never raises.
+    metrics = _FunctionMetrics(node, short_name)
 
-    * cyclomatic         — 1 + branch points (if/loop/except/assert/comprehension,
-                           plus each extra operand of a boolean operator).
-    * max_loop_depth     — deepest nesting of for/while INSIDE this def.
-    * calls_in_loops     — call sites that execute once per iteration.
-    * recursive          — a direct self-call (`f()` or `self.f()` inside `f`).
-    * unguarded_recursion— recursion with NO visible base case (a real hang risk).
-                           A base case counts either way it is normally written:
-                           the self-call sits under a conditional, OR the body
-                           has a conditional early exit (`if …: return/raise`)
-                           before it. Missing the second form would flag every
-                           textbook `factorial` — a guard that cries wolf on
-                           correct code is a guard people learn to ignore.
-    * linear_scan_in_loop— hint: work compounds per iteration (a call inside a
-                           loop, or nested iteration). Deliberately broad — the
-                           `hotspots` deep-loops list uses the stricter depth>=2.
-    """
-    length = max(
-        1, int(getattr(node, "end_lineno", getattr(node, "lineno", 1)) or 1)
-        - int(getattr(node, "lineno", 1) or 1) + 1
-    )
-    props = _empty_properties(length)
-    # Set when the body contains a conditional exit (`if …: return/raise`) — the
-    # early-return spelling of a base case.
-    conditional_exit = False
-    bare_self_call = False
-
-    def _walk(n: ast.AST, loop_depth: int, guard_depth: int) -> None:
-        nonlocal conditional_exit, bare_self_call
-        for child in ast.iter_child_nodes(n):
-            if isinstance(child, _PY_NESTED_SCOPES):
-                continue  # the nested def gets its own SymbolDef + properties
-            if isinstance(child, _PY_BRANCH_NODES) or (
-                _PY_MATCH_CASE is not None and isinstance(child, _PY_MATCH_CASE)
-            ):
-                props["cyclomatic"] += 1
-            if isinstance(child, ast.BoolOp):
-                props["cyclomatic"] += max(0, len(child.values) - 1)
-
-            is_loop = isinstance(child, _PY_LOOP_NODES)
-            child_loop_depth = loop_depth + 1 if is_loop else loop_depth
-            if is_loop and child_loop_depth > props["max_loop_depth"]:
-                props["max_loop_depth"] = child_loop_depth
-
-            if isinstance(child, (ast.Return, ast.Raise)) and guard_depth > 0:
-                conditional_exit = True
-
-            if isinstance(child, ast.Call):
-                if loop_depth >= 1:
-                    props["calls_in_loops"] += 1
-                if _call_short_name(child.func) == short_name:
-                    props["recursive"] = True
-                    if guard_depth == 0:
-                        bare_self_call = True
-
-            _walk(
-                child, child_loop_depth,
-                guard_depth + (1 if isinstance(child, _PY_GUARD_NODES) else 0),
-            )
+    def walk(parent, loop, guard):
+        for child in ast.iter_child_nodes(parent):
+            if not isinstance(child, _PY_NESTED_SCOPES):
+                walk(child, *metrics.observe(child, loop, guard))
 
     try:
-        _walk(node, 0, 0)
-    except RecursionError:  # pragma: no cover - pathologically deep source
+        walk(node, 0, 0)
+    except RecursionError:
         logger.debug("call_graph: recursion limit computing properties for %s", short_name)
-    props["unguarded_recursion"] = bool(bare_self_call and not conditional_exit)
-    props["linear_scan_in_loop"] = (
-        props["calls_in_loops"] > 0 or props["max_loop_depth"] >= 2
-    )
-    return props
+    metrics.finish()
+    return metrics.properties
+
+
+class _FunctionMetrics:
+    """Fold complexity into the graph walk while keeping nested scopes independent."""
+
+    def __init__(self, node: ast.AST, name: str):
+        first = getattr(node, "lineno", 1)
+        last = getattr(node, "end_lineno", first) or 1
+        self.properties = _empty_properties(max(1, last - first + 1))
+        self.name = name
+        self.conditional_exit = False
+        self.bare_self_call = False
+
+    def observe(self, node: ast.AST, loop: int, guard: int) -> tuple[int, int]:
+        props = self.properties
+        if isinstance(node, _PY_BRANCH_NODES) or (
+                _PY_MATCH_CASE is not None and isinstance(node, _PY_MATCH_CASE)):
+            props["cyclomatic"] += 1
+        if isinstance(node, ast.BoolOp):
+            props["cyclomatic"] += max(0, len(node.values) - 1)
+        if isinstance(node, _PY_LOOP_NODES):
+            loop += 1
+            props["max_loop_depth"] = max(props["max_loop_depth"], loop)
+        if isinstance(node, (ast.Return, ast.Raise)) and guard:
+            self.conditional_exit = True
+        if isinstance(node, ast.Call):
+            if loop:
+                props["calls_in_loops"] += 1
+            if _call_short_name(node.func) == self.name:
+                props["recursive"] = True
+                if not guard:
+                    self.bare_self_call = True
+        return loop, guard + isinstance(node, _PY_GUARD_NODES)
+
+    def finish(self):
+        props = self.properties
+        props["unguarded_recursion"] = self.bare_self_call and not self.conditional_exit
+        props["linear_scan_in_loop"] = bool(props["calls_in_loops"] or props["max_loop_depth"] >= 2)
 
 
 # ── Extraction records ───────────────────────────────────────────────────────
@@ -614,6 +595,10 @@ class _FileExtract:
     # defs/calls and a warm build reports coverage without re-parsing anything.
     status: str = COVERAGE_INDEXED
     status_reason: str = ""
+
+    # Stored beside the graph entry so its filesystem-dependent table can be
+    # resolved against the current checkout, even if only a sibling changed.
+    import_records: list | None = field(default=None, repr=False, compare=False)
 
     def to_dict(self) -> dict:
         return {
@@ -795,6 +780,8 @@ class _FileVisitor(ast.NodeVisitor):
         self._class_stack: list[str] = []  # class names (for method detection)
         self._func_depth = 0
 
+    _properties = staticmethod(_complexity_properties)
+
     def _qual(self, name: str) -> str:
         return ".".join(self._scope + [name]) if self._scope else name
 
@@ -836,7 +823,7 @@ class _FileVisitor(ast.NodeVisitor):
             kind="method" if is_method else "function",
             is_entrypoint=_is_entrypoint(node, node.name),
             signature=_signature_from_node(node, is_method=is_method),
-            properties=_complexity_properties(node, node.name),
+            properties=self._properties(node, node.name),
         ))
         self._scope.append(node.name)
         self._func_depth += 1
@@ -872,7 +859,7 @@ class _FileVisitor(ast.NodeVisitor):
                 kind="method" if is_method else "function",
                 is_entrypoint=_is_entrypoint(lam, name),
                 signature=_signature_from_node(lam, is_method=is_method),
-                properties=_complexity_properties(lam, name),
+                properties=self._properties(lam, name),
             ))
             self._scope.append(name)
             self._func_depth += 1
@@ -952,7 +939,18 @@ class _FileVisitor(ast.NodeVisitor):
         return None, False, None
 
 
-def _build_import_table(tree: ast.AST, repo_root: Path, file_dir: Path) -> dict[str, str]:
+def _valid_import_records(records):
+    return isinstance(records, list) and all(
+        isinstance(row, list) and len(row) == 3
+        and (row[0] is None or isinstance(row[0], str))
+        and (row[1] is None or type(row[1]) is int and 0 <= row[1] <= _MAX_PARSE_BYTES)
+        and isinstance(row[2], list)
+        and all(isinstance(alias, list) and len(alias) == 2 and isinstance(alias[0], str)
+                and (alias[1] is None or isinstance(alias[1], str)) for alias in row[2])
+        for row in records)
+
+
+def _build_import_table(tree, repo_root: Path, file_dir: Path) -> dict[str, str]:
     """Map local module aliases to the relpath of the imported source file (if local)."""
     table: dict[str, str] = {}
 
@@ -968,46 +966,48 @@ def _build_import_table(tree: ast.AST, repo_root: Path, file_dir: Path) -> dict[
                     return None
         return None
 
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names or []:
-                rel = _resolve(alias.name.split("."))
+    for module, level, aliases in _import_records(tree):
+        if level is None:
+            for name, asname in aliases:
+                rel = _resolve(name.split("."))
                 if rel:
-                    table[alias.asname or alias.name.split(".")[0]] = rel
-        elif isinstance(node, ast.ImportFrom):
+                    table[asname or name.split(".")[0]] = rel
+        else:
             # `from pkg.mod import thing` — alias `thing` may itself be a submodule file.
             base_parts: Optional[list[str]] = None
-            if node.level == 0 and node.module:
-                base_parts = node.module.split(".")
-            elif node.level and node.level > 0:
+            if level == 0 and module:
+                base_parts = module.split(".")
+            elif level and level > 0:
                 parent = file_dir
-                for _ in range(node.level - 1):
+                for _ in range(level - 1):
+                    if parent == parent.parent:
+                        break
                     parent = parent.parent
                 try:
                     rel_parent = parent.relative_to(repo_root)
-                    base_parts = list(rel_parent.parts) + (node.module.split(".") if node.module else [])
+                    base_parts = list(rel_parent.parts) + (module.split(".") if module else [])
                 except ValueError:
                     base_parts = None
             if base_parts is not None:
                 base_file = _resolve(base_parts)
-                for alias in node.names or []:
-                    local = alias.asname or alias.name
+                for name, asname in aliases:
+                    local = asname or name
                     # Case A: the imported name is itself a submodule/file
                     # (`from pkg import submod as m` then `m.func()`).
-                    rel = _resolve(base_parts + [alias.name])
+                    rel = _resolve(base_parts + [name])
                     if rel:
                         table[local] = rel
                     elif base_file:
                         # Case B: a plain symbol imported from a module file —
                         # encode the target file + the ORIGINAL declared name.
                         # The def in that file is indexed under its own name
-                        # (`alias.name`), not the local binding, so a bare
+                        # (`name`), not the local binding, so a bare
                         # call using a RENAMED import (`import X as y; y()`)
                         # needs the original name to find it
                         # (see _resolve_callee step 2b / _decode_import_entry).
                         table[local] = (
-                            base_file if local == alias.name
-                            else f"{base_file}::{alias.name}"
+                            base_file if local == name
+                            else f"{base_file}::{name}"
                         )
     return table
 
@@ -1031,22 +1031,37 @@ def _extract_source(source: str, relpath: str) -> list[SymbolDef]:
     return visitor.defs
 
 
-def _extract_file(file_path: Path, repo_root: Path) -> _FileExtract:
-    """Parse one Python file into defs + calls + import table. Never raises.
+def _extract_file(file_path: Path, repo_root: Path, *, source=None, index=None) -> _FileExtract:
+    """Build fresh graph records, resolving imports against the current workspace.
 
-    A failure is recorded as a coverage STATUS on the returned extract rather
-    than swallowed into an indistinguishable empty result — "no symbols here"
-    and "this file never parsed" are different answers (rule).
+    The shared rows describe syntax only. Resolution can change when a sibling
+    appears even if this file's bytes stay identical. Finalization annotates
+    calls with confidence and strategy, so it needs its own mutable records.
+    A caller holding the hashed bytes can supply their decoded source directly.
     """
+    from . import python_index
+
     try:
-        source = file_path.read_text(encoding="utf-8", errors="replace")
-        relpath = str(file_path.relative_to(repo_root))
+        if source is None:
+            source = file_path.read_text(encoding="utf-8", errors="replace")
+        relpath = file_path.relative_to(repo_root).as_posix()
     except (OSError, ValueError) as exc:
         return _FileExtract(defs=[], calls=[], import_table={},
                             status=COVERAGE_SKIPPED,
                             status_reason=f"unreadable: {type(exc).__name__}")
     try:
-        tree = ast.parse(source, filename=str(file_path))
+        if index is None:
+            with python_index.open_index(repo_root) as cache:
+                record, imports = cache.get(source, relpath, "graph")
+        else:
+            record, imports = index.get(source, relpath, "graph")
+        extract = _FileExtract.from_dict(record)
+        extract.import_records = imports
+        extract.import_table = _build_import_table(imports, repo_root, file_path.parent)
+        return extract
+    except python_index.TraversalDepthError:
+        # Preserve the original visitor's partial-coverage boundary for deep modules.
+        return _deep_file(source, relpath, repo_root, file_path)
     except SyntaxError as exc:
         return _FileExtract(defs=[], calls=[], import_table={},
                             status=COVERAGE_SKIPPED,
@@ -1055,21 +1070,6 @@ def _extract_file(file_path: Path, repo_root: Path) -> _FileExtract:
         return _FileExtract(defs=[], calls=[], import_table={},
                             status=COVERAGE_SKIPPED,
                             status_reason=f"parse failed: {type(exc).__name__}")
-
-    import_table = _build_import_table(tree, repo_root, file_path.parent)
-    visitor = _FileVisitor(relpath, import_table)
-    try:
-        visitor.visit(tree)
-    except RecursionError:
-        # The tree parsed but the walk bailed — a genuinely PARTIAL extract.
-        return _FileExtract(defs=visitor.defs, calls=visitor.calls,
-                            variables=visitor.variables,
-                            import_table=import_table,
-                            status=COVERAGE_PARSE_PARTIAL,
-                            status_reason="walk hit the recursion limit")
-    return _FileExtract(defs=visitor.defs, calls=visitor.calls,
-                        variables=visitor.variables, import_table=import_table)
-
 
 # ── Content-hash cache ───────────────────────────────────────────────────────
 
@@ -2526,6 +2526,35 @@ def build_graph(
         return graph
 
 
+def _import_records(tree_or_records):
+    """Accept the original AST API and the persisted, source-only import rows."""
+    if isinstance(tree_or_records, ast.AST):
+        from .python_index import import_record
+        return (import_record(node) for node in ast.walk(tree_or_records)
+                if isinstance(node, (ast.Import, ast.ImportFrom)))
+    return tree_or_records
+
+
+def _deep_file(source, relpath, repo_root, file_path):
+    from .python_index import parse
+
+    tree = parse(source, filename=relpath)
+    imports = list(_import_records(tree))
+    import_table = _build_import_table(imports, repo_root, file_path.parent)
+    visitor = _FileVisitor(relpath, import_table)
+    try:
+        visitor.visit(tree)
+    except RecursionError:
+        # The tree parsed but the walk bailed — a genuinely PARTIAL extract.
+        return _FileExtract(defs=visitor.defs, calls=visitor.calls,
+                            variables=visitor.variables,
+                            import_table=import_table,
+                            import_records=imports, status=COVERAGE_PARSE_PARTIAL,
+                            status_reason="walk hit the recursion limit")
+    return _FileExtract(defs=visitor.defs, calls=visitor.calls,
+                        variables=visitor.variables, import_table=import_table, import_records=imports)
+
+
 def _build_graph_uncached(repo_path: str, *, use_cache: bool = True) -> CodeGraph:
     """The real build (no in-process memo). See build_graph."""
     graph = CodeGraph()
@@ -2548,45 +2577,67 @@ def _build_graph_uncached(repo_path: str, *, use_cache: bool = True) -> CodeGrap
         graph.coverage[rel] = FileCoverage(
             file=rel, status=COVERAGE_EXCLUDED, reason=reason)
 
-    for src_file in source_files:
-        relpath = str(src_file.relative_to(root))
-        if relpath == _CACHE_FILENAME:
-            continue
-        try:
-            raw = src_file.read_bytes()
-        except OSError as exc:
+    from .python_index import open_index
+
+    with open_index(root, persistent=use_cache) as index:
+        for src_file in source_files:
+            relpath = str(src_file.relative_to(root))
+            if relpath == _CACHE_FILENAME:
+                continue
+            try:
+                raw = src_file.read_bytes()
+            except OSError as exc:
+                graph.coverage[relpath] = FileCoverage(
+                    file=relpath, status=COVERAGE_SKIPPED,
+                    reason=f"unreadable: {type(exc).__name__}")
+                continue
+            digest = _hash_bytes(raw)
+
+            entry = cache.get(relpath)
+            extract = _cached_extract(entry, digest)
+            stale = entry is not None and extract is None
+            python_file = src_file.suffix.lower() == ".py" and len(raw) <= _MAX_PARSE_BYTES
+            if python_file and extract is not None and extract.status != COVERAGE_SKIPPED:
+                records = entry.get("python_imports")
+                if _valid_import_records(records):
+                    extract.import_records = records
+                    extract.import_table = _build_import_table(records, root, src_file.parent)
+                else:
+                    # An otherwise valid legacy entry lacks import descriptions.
+                    # Upgrading its metadata does not make the file stale.
+                    stale = "python_imports" in entry
+                    extract = None
+            if extract is None:
+                if python_file:
+                    # Match read_text's universal newlines, using the bytes already hashed.
+                    source = raw.decode("utf-8", "replace").replace("\r\n", "\n").replace("\r", "\n")
+                    extract = _extract_file(src_file, root, source=source, index=index)
+                else:
+                    extract = _extract_any_file(src_file, root, repo_files)
+                # Any invalid persisted row is a miss; rebuilding it restores the
+                # complete, current shape without making cache damage fatal.
+                if stale:
+                    graph.rebuilt_files.add(relpath)
+            new_cache[relpath] = {
+                "hash": digest,
+                "extractor_version": _EXTRACTOR_VERSION,
+                "extract": extract.to_dict(),
+            }
+            if extract.import_records is not None:
+                new_cache[relpath]["python_imports"] = extract.import_records
+            graph.file_hashes[relpath] = digest
+
             graph.coverage[relpath] = FileCoverage(
-                file=relpath, status=COVERAGE_SKIPPED,
-                reason=f"unreadable: {type(exc).__name__}")
-            continue
-        digest = _hash_bytes(raw)
+                file=relpath, status=extract.status, reason=extract.status_reason,
+                symbols=len(extract.defs),
+            )
 
-        entry = cache.get(relpath)
-        extract = _cached_extract(entry, digest)
-        if extract is None:
-            extract = _extract_any_file(src_file, root, repo_files)
-            # Any invalid persisted row is a miss; rebuilding it restores the
-            # complete, current shape without making cache damage fatal.
-            if entry is not None:
-                graph.rebuilt_files.add(relpath)
-        new_cache[relpath] = {
-            "hash": digest,
-            "extractor_version": _EXTRACTOR_VERSION,
-            "extract": extract.to_dict(),
-        }
-        graph.file_hashes[relpath] = digest
-
-        graph.coverage[relpath] = FileCoverage(
-            file=relpath, status=extract.status, reason=extract.status_reason,
-            symbols=len(extract.defs),
-        )
-
-        file_import_tables[relpath] = extract.import_table
-        for d in extract.defs:
-            graph._index_def(d)
-        for v in extract.variables:
-            graph._index_variable(v)
-        graph.calls.extend(extract.calls)
+            file_import_tables[relpath] = extract.import_table
+            for d in extract.defs:
+                graph._index_def(d)
+            for v in extract.variables:
+                graph._index_variable(v)
+            graph.calls.extend(extract.calls)
 
     # The type-resolution layer keeps its OWN content-hash cache (a separate
     # file, its own version) so a warm build re-asks nothing — and so a change

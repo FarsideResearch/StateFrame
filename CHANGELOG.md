@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Python files now share one indexing pass for the call graph, coordinated-change ledger and symbol registry. Fresh runs reuse unchanged file facts from the StateFrame home cache.
 - Changed: Python analyzer trees now share a 24 MiB source-byte LRU with a 16,384-entry backstop; the boot symbol registry and coordinated-change validation reuse read-only cached trees. Oversized sources parse without evicting warm entries.
 ## 0.7.66 (2026-11-18)
 
