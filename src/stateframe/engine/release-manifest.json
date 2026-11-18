@@ -798,6 +798,7 @@
   "mc_repo_intel_vendor/__init__.py": "15957974cb56bac76c83cf2454aa61cefadc4f9fe0f516d662e2524306c9c20d",
   "mc_repo_intel_vendor/call_graph.py": "e94546f51fafff11b7e2c7dd12f14729cea58e60ed92b3d983dc86461df71e78",
   "mc_repo_intel_vendor/lsp_resolve.py": "bebeed6657c54e060a61a9bef4140949429aeb7445e5ed1d27974051f6b43198",
+  "mc_repo_intel_vendor/python_index.py": "6b8d8ee17b62d5d5f2c4b20eeaa5996c2cd5767b2ed5a3fa3061db463f3dd8da",
   "mc_repo_intel_vendor/repo_map.py": "8b22fb66b11f6cd7b15936d4955207f853fe5fbf1264d73b61947266f774ad3b",
   "mc_repo_intel_vendor/ts_dispatch.py": "d77e4c77649d0d16ece44a365cd561448801dcb751b9a5134f918d338ca5d44c",
   "mc_repo_intel_vendor/ts_extract.py": "37dbd0e2e86cf51293d916ad02ed2f6966724b655bdba6ac04d91396393569a0",
