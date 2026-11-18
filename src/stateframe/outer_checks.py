@@ -329,8 +329,10 @@ def run(command: str, cwd: Path, *, python: str, timeout_s: float | None = None,
     if execution_stop is not None:
         if not execution_stop["cleanup_ok"]:
             raise OuterCheckError("outer check containment unverified after execution stop")
+        # Keep the timeout flag for callers of the outer adapter. The typed
+        # cause distinguishes an inactivity timeout from a user deadline.
         result.update(passed=False,
-                      timed_out=execution_stop["cause"] == "user_deadline",
+                      timed_out=execution_stop["cause"] in {"no_progress", "user_deadline"},
                       execution_stop=execution_stop, outcome=execution_stop_outcome(execution_stop),
                       termination_reason=execution_stop["cause"], execution_complete=False,
                       reached_observation=False)
@@ -488,12 +490,10 @@ def _helper() -> int:
                 cleanup_ok = False
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, previous_alarm)
-        if scratch is not None:
-            try:
-                scratch.cleanup()
-            except OSError:
-                cleanup_ok = False
+        # Acknowledge process containment before removing the scratch tree.
         print(json.dumps({"cleanup_ok": cleanup_ok}), flush=True)
+        if scratch is not None:
+            scratch.cleanup()
     return 0
 
 

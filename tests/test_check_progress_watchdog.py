@@ -441,6 +441,7 @@ def test_outer_parent_liveness_protocol_deadline_and_cleanup(tmp_path, monkeypat
                 assert clock.now > 3600
             else:
                 assert result["passed"] is False
+                assert result["timed_out"] is True
                 assert result["execution_stop"]["cause"] == ("user_deadline" if mode == "deadline" else "no_progress")
                 assert result["execution_stop"]["cleanup_ok"] is True
         assert state["spec"]["deadline"] == {"deadline": 1.5, "inherited_writer": 3}.get(mode)
@@ -531,7 +532,9 @@ def test_receipts_reject_malformed_terminal_metadata(field, value):
                             typed_observation={"execution_stop": stop})
 
 
-def test_helper_transports_selected_settings_and_reports_completed_copy_work(tmp_path, monkeypatch):
+@pytest.mark.parametrize("scratch_removal_fails", [False, True])
+def test_helper_transports_selected_settings_and_reports_completed_copy_work(
+        tmp_path, monkeypatch, scratch_removal_fails):
     import os
     import signal
     from stateframe import outer_checks
@@ -539,6 +542,14 @@ def test_helper_transports_selected_settings_and_reports_completed_copy_work(tmp
     source.mkdir()
     (source / "check.py").write_text("print('done')\n")
     captured = io.StringIO()
+    remove_scratch = outer_checks.tempfile.TemporaryDirectory.cleanup
+
+    def cleanup(scratch):
+        assert json.loads(captured.getvalue().splitlines()[-1]) == {"cleanup_ok": True}
+        remove_scratch(scratch)
+        if scratch_removal_fails:
+            raise OSError("scratch removal failed")
+
     spec = {"command": "check", "cwd": str(source), "deadline": None,
             "stall_seconds": 17.0, "cpu_seconds": 3.5, "test_env": {},
             "pytest_plugins": None, "test_python": None, "runner_kind": "generic"}
@@ -556,12 +567,17 @@ def test_helper_transports_selected_settings_and_reports_completed_copy_work(tmp
     monkeypatch.setattr(policy, "run_sandboxed", run)
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(spec)))
     monkeypatch.setattr(sys, "stdout", captured)
+    monkeypatch.setattr(outer_checks.tempfile.TemporaryDirectory, "cleanup", cleanup)
     original_spawn = policy.sandboxed_popen
     original_kill_group = policy._kill_group
     previous_term = signal.getsignal(signal.SIGTERM)
     old_env, old_path = dict(os.environ), list(sys.path)
     try:
-        assert outer_checks._helper() == 0
+        if scratch_removal_fails:
+            with pytest.raises(OSError, match="scratch removal failed"):
+                outer_checks._helper()
+        else:
+            assert outer_checks._helper() == 0
     finally:
         signal.signal(signal.SIGTERM, previous_term)
         os.environ.clear()
