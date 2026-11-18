@@ -295,6 +295,11 @@ def _strict_openai_error(body: object) -> str | None:
     return None
 
 
+def _step_tools(step: dict) -> list[str]:
+    """Tool names one scripted response carries: the step's tool, then any ``also`` calls in order."""
+    return [step["tool"], *(extra["tool"] for extra in step.get("also", []))]
+
+
 class ScriptStepUnavailable(RuntimeError):
     """A required scripted action is missing from the offered tool menu."""
 
@@ -302,6 +307,11 @@ class ScriptStepUnavailable(RuntimeError):
 class Script:
     def __init__(self, document: dict) -> None:
         self.model = str(document.get("model") or "scripted")
+        # Extra model ids served by /v1/models, so route tables can name several models on one endpoint.
+        extra_models = document.get("models") or []
+        if not isinstance(extra_models, list) or not all(isinstance(m, str) and m for m in extra_models):
+            raise ValueError("models must be a list of non-empty strings")
+        self.served_models = list(dict.fromkeys([self.model, *extra_models]))
         strict_openai = document.get("strict_openai", False)
         if not isinstance(strict_openai, bool):
             raise ValueError("strict_openai must be a boolean")
@@ -320,6 +330,11 @@ class Script:
                 raise ValueError(f"script step {index} required must be a boolean")
             if "repeat" in step and not isinstance(step["repeat"], bool):
                 raise ValueError(f"script step {index} repeat must be a boolean")
+            also = step.get("also", [])
+            if not isinstance(also, list) or not all(
+                    isinstance(extra, dict) and isinstance(extra.get("tool"), str) and extra["tool"]
+                    for extra in also):
+                raise ValueError(f"script step {index} also must be a list of tool calls")
             delay = step.get("delay_s", 0)
             if type(delay) not in (int, float) or not 0 <= delay <= 30:
                 raise ValueError(f"script step {index} delay_s must be between 0 and 30")
@@ -369,7 +384,7 @@ class Script:
             while self.position < len(self.steps):
                 index = self.position
                 step = self.steps[index]
-                if step["tool"] in offered:
+                if all(name in offered for name in _step_tools(step)):
                     if not step.get("repeat", False):
                         self.position += 1
                     self._states[index] = "consumed"
@@ -459,7 +474,8 @@ def make_handler(script: Script):
                         "model_path": "scripted-endpoint",
                     })
             elif self.path.rstrip("/") == "/v1/models":
-                self._send(200, {"object": "list", "data": [{"id": script.model, "object": "model"}]})
+                self._send(200, {"object": "list", "data": [
+                    {"id": name, "object": "model"} for name in script.served_models]})
             elif self.path.rstrip("/") == "/slots" and script.slots:
                 with script.lock:
                     script.slots_calls += 1
@@ -527,15 +543,17 @@ def make_handler(script: Script):
                 return
             if step.get("delay_s"):
                 time.sleep(float(step["delay_s"]))
-            call = {"id": f"call_{len(script.requests)}", "type": "function",
-                    "function": {"name": step["tool"],
-                                 "arguments": json.dumps(step.get("arguments") or {})}}
+            calls = [{"id": f"call_{len(script.requests)}" if index == 0 else f"call_{len(script.requests)}_{index}",
+                      "type": "function",
+                      "function": {"name": scripted["tool"],
+                                   "arguments": json.dumps(scripted.get("arguments") or {})}}
+                     for index, scripted in enumerate([step, *step.get("also", [])])]
             self._send(200, {
                 "id": f"chatcmpl-{len(script.requests)}", "object": "chat.completion",
                 "model": script.model,
                 "choices": [{"index": 0, "finish_reason": "tool_calls",
                              "message": {"role": "assistant", "content": "",
-                                         "tool_calls": [call]}}],
+                                         "tool_calls": calls}}],
                 "usage": _usage(body),
             })
 

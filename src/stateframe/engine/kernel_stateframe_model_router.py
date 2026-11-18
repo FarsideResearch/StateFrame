@@ -2011,11 +2011,18 @@ class ModelRouter:
                 and callable(getattr(self.journal, "emit", None))):
             self.journal.emit(kind, **fields)
 
+    def _launch_policy_models(self) -> frozenset[str]:
+        """Model ids a launch may select: router endpoints, the base model, and under routing v2 the route table's models."""
+        if not routing_v2():
+            return self.allowed_model_ids
+        from kernel_frame_routes import route_model_ids
+        return self.allowed_model_ids | route_model_ids()
+
     def _execution_policy(self, runtime: object | None, endpoint: EndpointConfig):
         from kernel_model_policy import execution_policy_for
 
         if runtime is not None:
-            setattr(runtime, "model_router_allowed_models", self.allowed_model_ids)
+            setattr(runtime, "model_router_allowed_models", self._launch_policy_models())
         actual_model = (
             (getattr(runtime, "model_name", None)
              or getattr(runtime, "model", None)
