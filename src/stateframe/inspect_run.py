@@ -72,7 +72,9 @@ def overview(run: Path) -> str:
                      f"{'PASS' if (summary.get('tests_after') or {}).get('passed') else 'FAIL'}  "
                      f"files changed: {', '.join(summary.get('files_changed') or []) or 'none'}")
         problems = summary.get("problems")
-        if isinstance(problems, dict):
+        if isinstance(problems, dict) and problems.get("unknown"):
+            lines.append(f"problems: unknown ({problems['unknown']})")
+        elif isinstance(problems, dict):
             lines.append(f"problems: {problems.get('errors', 0)} errors, {problems.get('warnings', 0)} warnings")
     lines.append(f"{'send':>4}  {'bytes':>7}  {'frame B':>7}  {'msgs':>4}  {'roles':<10} "
                  f"{'prompt':>7}  {'cached':>7}  action")
