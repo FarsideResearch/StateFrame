@@ -40,7 +40,7 @@ def test_unavailable_pack_is_probed_once_per_run(monkeypatch, error_type):
         ("pkg/valid.py", "import os\nclass Service:\n    def run(self):\n        return 1\n"),
         ("pkg/empty.py", ""),
         ("pkg/broken.py", "def unfinished(:\n"),
-        ("script", "#!/usr/bin/python3\r\ndef café():\r\n    return 'é'\r\n"),
+        ("script", "#!/usr/bin/env python3\r\ndef café():\r\n    return 'é'\r\n"),
     ]
     # Each fresh module represents the fresh interpreter that owns an engine run.
     for _ in range(2):
