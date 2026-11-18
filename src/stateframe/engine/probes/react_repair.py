@@ -832,14 +832,16 @@ def _source_snapshot(root: pathlib.Path, paths: Sequence[str]) -> dict[str, str 
 
 def _seal_sources_preserving_binary(root: pathlib.Path,
                                     sources: Mapping[str, str | None]) -> dict[str, str | bytes | None]:
-    """Preserve non-UTF-8 product bytes when sealing a candidate."""
+    """Preserve exact on-disk bytes, including UTF-8 files with CR/CRLF."""
     candidate: dict[str, str | bytes | None] = dict(sources)
     for path, source in sources.items():
         if source is None:
             continue
         raw = (root / path).read_bytes()
         try:
-            raw.decode("utf-8")
+            # Text snapshots normalize newlines; decode raw bytes without that
+            # translation so UTF-8-compatible binary files also round-trip.
+            candidate[path] = raw.decode("utf-8")
         except UnicodeDecodeError:
             candidate[path] = raw
     return candidate
