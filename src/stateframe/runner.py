@@ -1287,12 +1287,17 @@ def check(module, distribution, attribute=None):
 
 schema = check("jsonschema", "jsonschema")
 yaml = check("yaml", "PyYAML")
+install_error = None
 try:  # the product's per-language grammar packages, exposed under the pack's module name
     from stateframe import ts_grammars
     adapter = ts_grammars.install_as_language_pack()
-except Exception:
-    adapter = False
-repo_map = check("tree_sitter_language_pack", "tree-sitter-language-pack", "get_parser")
+except Exception as error:
+    adapter, install_error = False, type(error).__name__
+if install_error is not None:
+    # Never fall back to an importable bundle: only the audited grammar packages are ever used.
+    repo_map = {"enabled": False, "detail": "grammar install failed: " + install_error}
+else:
+    repo_map = check("tree_sitter_language_pack", "tree-sitter-language-pack", "get_parser")
 if adapter:
     working = []
     for name in ts_grammars.available_languages():
@@ -2523,13 +2528,28 @@ def _resolved_log_level(options: RunOptions) -> str:
 def _problems_summary(run_dir: Path, options: RunOptions | None = None) -> dict[str, object]:
     """summary.json "problems": counts by cause, first occurrence. Logging only."""
     level = _resolved_log_level(options) if options is not None else "warn"
+    path = run_dir / PROBLEMS_FILE
+    # The merge treats an unreadable file as empty; report unknown instead of a clean 0/0.
+    if path.exists():
+        try:
+            with open(path, "rb"):
+                pass
+        except OSError as error:
+            return _unknown_problems(level, "problems file unreadable: " + type(error).__name__)
     try:
-        return _reason_log.problems_from_file(run_dir / PROBLEMS_FILE, log_level=level)
-    except Exception:
-        return {"errors": 0, "warnings": 0, "by_cause": {}, "log_level": level}
+        return _reason_log.problems_from_file(path, log_level=level)
+    except Exception as error:
+        return _unknown_problems(level, "problems merge failed: " + type(error).__name__)
+
+
+def _unknown_problems(level: str, reason: str) -> dict[str, object]:
+    return {"errors": None, "warnings": None, "by_cause": {}, "log_level": level, "unknown": reason}
 
 
 def _print_problems(problems: dict[str, object], printer, log_level: str) -> None:
+    if problems.get("unknown"):
+        printer(f"[stateframe] problems: unknown ({problems['unknown']})")
+        return
     by_cause = problems.get("by_cause") or {}
     if not by_cause:
         if log_level in {"info", "debug"}:

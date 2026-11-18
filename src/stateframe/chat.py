@@ -311,6 +311,9 @@ def _print_problems_line(summary_path: Path, printer) -> None:
     problems = summary.get("problems") if isinstance(summary, dict) else None
     if not isinstance(problems, dict):
         return
+    if problems.get("unknown"):
+        printer(f"[stateframe] problems: unknown ({problems['unknown']})")
+        return
     errors, warnings = problems.get("errors", 0), problems.get("warnings", 0)
     if isinstance(errors, int) and isinstance(warnings, int) and (errors or warnings):
         printer(f"[stateframe] problems: {errors} ERROR, {warnings} WARN (see summary.json \"problems\")")
