@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fixed: a repeated read-only call suppressed by the host now settles as not applied without granting source credit, so continuation no longer blocks on an unknown effect.
 - Fixed: the project test interpreter handoff is no longer described as a shell override. The guide now records CLI selection precedence and explains that `--test-python` selects an alternate project interpreter.
 - Fixed: a positive generic runner receipt is labeled as test verification only when test discovery finds files; a command with a positive receipt and no discovered tests remains a check command.
 ## 0.7.62 (2026-11-18)
