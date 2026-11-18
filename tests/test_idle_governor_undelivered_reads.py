@@ -226,3 +226,17 @@ def test_empty_page_stream_reaches_no_progress_stop():
 def test_fresh_delivered_ranges_still_count_as_progress():
     stop = _run_until_stop(lambda t: _read_receipt("ok.py", "DELIVERED", 12, 1 + t * 5, 5 + t * 5))
     assert stop is None, "delivered new ranges are real progress and must not trip the stop"
+
+
+@pytest.mark.parametrize("content", ["x", "\n", "\r\n", "﻿", "é"])
+def test_builder_boundary_one_delivered_unit_counts_as_delivered(content):
+    """Boundary: zero delivered bytes is undelivered; a single delivered byte/char is a real delivery."""
+    from kernel_idle_governor import read_governor_action
+    from kernel_read_exec import _record_requested_byte_delivery
+
+    delivery: dict[str, object] = {}
+    _record_requested_byte_delivery(delivery, status="DELIVERED", content=content)
+    action = read_governor_action("b.py@1-1", turn=3, read_ok=True, delivery=delivery,
+                                  deliver_requested=True, observation="")
+    assert "undelivered" not in action
+    assert action["path"] == "b.py@1-1" and action.get("content_digest")
