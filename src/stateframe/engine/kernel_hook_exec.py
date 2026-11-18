@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import base64
+import errno
 import fnmatch
 import hashlib
 import json
 import os
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path, PurePosixPath
 import shutil
@@ -58,6 +60,89 @@ class HookContainmentError(RuntimeError):
 
 class HookReplayRefused(BaseException):
     """A recorded hook cannot be replayed faithfully."""
+
+
+# Fixed probe steps of HookRunner._capability. Each names one block that can fail
+# on the host (filesystem stat/resolve, interpreter discovery, validation).
+_CAPABILITY_STEPS = (
+    "system_roots",
+    "interpreter_roots",
+    "platform_roots",
+    "hook_roots",
+    "bundle_shebang_roots",
+    "network_roots",
+    "capability_construct",
+    "unknown",
+)
+
+
+class CapabilityProbeError(Exception):
+    """A capability probe failed.
+
+    Carries the step name, the exception class and the symbolic errno only. Message text and
+    paths are never kept, so the refusal and the record cannot leak host layout.
+    """
+
+    def __init__(self, step: str, error: BaseException):
+        super().__init__(step)
+        self.step = step
+        self.error_name = type(error).__name__
+        code = getattr(error, "errno", None) if isinstance(error, OSError) else None
+        self.errno_name = None if code is None else errno.errorcode.get(code, str(code))
+
+    def describe(self) -> str:
+        if self.errno_name is None:
+            return f"{self.error_name} at {self.step}"
+        return f"{self.error_name} errno={self.errno_name} at {self.step}"
+
+    def record(self) -> dict:
+        return {"step": self.step, "error": self.error_name, "errno": self.errno_name}
+
+
+@contextmanager
+def _capability_probe(step: str):
+    """Relabel a probe's OSError/ValueError so the refusal names the failing step."""
+    try:
+        yield
+    except (OSError, ValueError) as error:
+        raise CapabilityProbeError(step, error) from error
+
+
+def _system_roots() -> list[Path]:
+    """Read-only system directories present on this host."""
+    return [
+        Path(p)
+        for p in (
+            "/usr",
+            "/bin",
+            "/sbin",
+            "/lib",
+            "/lib64",
+            "/System",
+            "/Library/Apple",
+            "/private/var/select",
+        )
+        if Path(p).exists()
+    ]
+
+
+def _network_roots() -> list[Path]:
+    """Resolver, name-service and TLS configuration for network=full hooks."""
+    roots: list[Path] = []
+    for name in (
+        "/etc/hosts",
+        "/etc/resolv.conf",
+        "/etc/nsswitch.conf",
+        "/etc/ssl",
+        "/etc/pki",
+    ):
+        path = Path(name)
+        if path.exists():
+            roots.append(path)
+            # ExecCapability requires symlinked roots' resolved targets
+            # to have explicit read authority as well.
+            roots.append(path.resolve(strict=True))
+    return roots
 
 
 class _HookSessionSetupError(RuntimeError):
@@ -509,20 +594,10 @@ class HookRunner:
         self.driver = Path(__file__).with_name("kernel_hook_driver.py").resolve()
 
     def _capability(self, hook: HookDefinition, scratch: Path) -> ExecCapability:
-        roots = [
-            Path(p)
-            for p in (
-                "/usr",
-                "/bin",
-                "/sbin",
-                "/lib",
-                "/lib64",
-                "/System",
-                "/Library/Apple",
-                "/private/var/select",
-            )
-            if Path(p).exists()
-        ]
+        # Every host-dependent block runs under a named probe so a failure says which one.
+        roots: list[Path] = []
+        with _capability_probe("system_roots"):
+            roots.extend(_system_roots())
         roots.extend(
             (
                 Path(sys.base_prefix),
@@ -531,40 +606,33 @@ class HookRunner:
                 self.bundle_dir / str(hook.source_index),
             )
         )
-        roots.extend(python_runtime_read_roots(Path(sys.executable)))
-        roots.extend(_macos_developer_roots())
-        system_gitconfig = Path("/etc/gitconfig")
-        if sys.platform == "darwin" and system_gitconfig.is_file():
-            roots.extend(symlink_hops(system_gitconfig))
-        if hook.executable:
-            roots.extend(python_runtime_read_roots(Path(hook.executable)))
-        for item in hook.files:
-            if item.executable:
-                path = self.bundle_dir / str(hook.source_index) / item.relative
-                interpreter = _shebang(path)
-                if interpreter:
-                    roots.extend(python_runtime_read_roots(interpreter))
-        for prefix in (Path("/opt/homebrew"), Path("/usr/local")):
-            if (prefix / "Cellar").is_dir():
-                roots.extend(
-                    p
-                    for name in ("Cellar", "opt", "lib")
-                    if (p := prefix / name).is_dir()
-                )
+        with _capability_probe("interpreter_roots"):
+            roots.extend(python_runtime_read_roots(Path(sys.executable)))
+        with _capability_probe("platform_roots"):
+            roots.extend(_macos_developer_roots())
+            system_gitconfig = Path("/etc/gitconfig")
+            if sys.platform == "darwin" and system_gitconfig.is_file():
+                roots.extend(symlink_hops(system_gitconfig))
+            for prefix in (Path("/opt/homebrew"), Path("/usr/local")):
+                if (prefix / "Cellar").is_dir():
+                    roots.extend(
+                        p
+                        for name in ("Cellar", "opt", "lib")
+                        if (p := prefix / name).is_dir()
+                    )
+        with _capability_probe("hook_roots"):
+            if hook.executable:
+                roots.extend(python_runtime_read_roots(Path(hook.executable)))
+        with _capability_probe("bundle_shebang_roots"):
+            for item in hook.files:
+                if item.executable:
+                    path = self.bundle_dir / str(hook.source_index) / item.relative
+                    interpreter = _shebang(path)
+                    if interpreter:
+                        roots.extend(python_runtime_read_roots(interpreter))
         if hook.network == "full":
-            for name in (
-                "/etc/hosts",
-                "/etc/resolv.conf",
-                "/etc/nsswitch.conf",
-                "/etc/ssl",
-                "/etc/pki",
-            ):
-                path = Path(name)
-                if path.exists():
-                    roots.append(path)
-                    # ExecCapability requires symlinked roots' resolved targets
-                    # to have explicit read authority as well.
-                    roots.append(path.resolve(strict=True))
+            with _capability_probe("network_roots"):
+                roots.extend(_network_roots())
         executable_dir = (
             Path(hook.executable).parent
             if hook.executable
@@ -585,16 +653,17 @@ class HookRunner:
         if sys.platform == "darwin" and not Path("/etc/gitconfig").is_file():
             # Same rule as the shell capability: an absent file outside the read roots yields EPERM, not ENOENT.
             env["GIT_CONFIG_NOSYSTEM"] = "1"
-        return ExecCapability(
-            "hook",
-            self.workspace,
-            hook.writes == "changed",
-            tuple(roots),
-            (scratch,),
-            hook.network,
-            env,
-            ExecLimits(wall_seconds=hook.timeout + 10, output_bytes=256 << 10),
-        )
+        with _capability_probe("capability_construct"):
+            return ExecCapability(
+                "hook",
+                self.workspace,
+                hook.writes == "changed",
+                tuple(roots),
+                (scratch,),
+                hook.network,
+                env,
+                ExecLimits(wall_seconds=hook.timeout + 10, output_bytes=256 << 10),
+            )
 
     def _bundle_unchanged(self, hook: HookDefinition) -> bool:
         for item in hook.files:
@@ -1276,9 +1345,13 @@ class HookRunner:
                 else:
                     try:
                         cap = self._capability(hook, scratch)
-                    except (OSError, ValueError) as error:
+                    except CapabilityProbeError as error:
                         cap = None
                         cap_error = error
+                    except (OSError, ValueError) as error:
+                        # Raised outside any named probe (not expected; kept fail-closed).
+                        cap = None
+                        cap_error = CapabilityProbeError("unknown", error)
                     else:
                         cap_error = None
                 labels = {
@@ -1398,7 +1471,8 @@ class HookRunner:
                         elif cap_error is not None:
                             outcome = _error_outcome(
                                 "capability",
-                                "hook execution capability unavailable",
+                                "hook execution capability unavailable "
+                                f"({cap_error.describe()})",
                             )
                             skipped = "capability"
                         else:
@@ -1536,6 +1610,11 @@ class HookRunner:
                             "skipped": skipped,
                             "decision": outcome.decision,
                             "error_code": outcome.error_code,
+                            **(
+                                {"capability_probe": cap_error.record()}
+                                if cap_error is not None
+                                else {}
+                            ),
                             "exit_code": outcome.exit_code,
                             "signal": outcome.signal,
                             "timed_out": outcome.timed_out,
