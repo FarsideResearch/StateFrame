@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.49 (2026-11-18)
 
 - Changed: when a hook's execution capability cannot be built, the refusal now names the probe step that failed and the exception class and symbolic errno, for example `hook execution capability unavailable (PermissionError errno=EACCES at platform_roots)`. The same detail is stored on the hook record as `capability_probe`. Before this, the refusal gave no cause, so an intermittent failure could not be traced. Refusal behavior is unchanged: the hook still refuses and nothing runs. The detail never includes message text or paths.
 
