@@ -236,7 +236,9 @@ Watch for:
 - **Smaller side roles are allowed.** A role that never builds the main frame may have a smaller context than the run, as long as it fits its own setting. The main-frame role keeps the start check above. Token counts use the selected server's exact tokenizer when it has one; otherwise the conservative byte count, with `token_estimate_fallback` journaled once per endpoint.
 - **Failure memory needs proof.** Only a passing test run or check, or a finished run, clears the router's memory of earlier failures. An edit that applied but was not yet tested no longer does.
 
-Resume: these journal records are audit only. A resumed run re-decides each route, and a proposal withheld when the run stopped is not restored; that step is asked again on its target route.
+Resume: a resumed run, even in a new process, reuses each request's journaled route decision (same model and endpoint; the key is read again from the named variable, never from the journal). If the rebuilt request names a different model or endpoint, the journaled one wins and `route_drift_pinned` records both. A proposal withheld when the run stopped is not restored; that step is asked again on its target route.
+
+Under schema 2 a read that returns content the run has not seen before (a new file, a changed revision or a new line range) counts as new evidence and resets the router's count of reads without progress. Models named in your routes file are always accepted by the router, so a step carried to the `edit` route is never refused for using that route's model.
 
 ## Profiles and switches
 
