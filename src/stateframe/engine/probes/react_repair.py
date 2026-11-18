@@ -13738,6 +13738,11 @@ def work(d, *, resume=None):
 
                 def _ep_not_editable(relative: str) -> str | None:
                     _ep_path = root / relative
+                    # Same hook-file guard as the legacy edit tools (_hook_gate): hook definitions and
+                    # bundled inputs are read-only no matter which edit protocol carries the write.
+                    if (_hook_wiring_for_run is not None
+                            and _hook_wiring_for_run.protected(_ep_path)):
+                        return "REFUSED HOOK_FILE: hook definition or bundled input is read-only"
                     if protected_test_path(_ep_path, baseline_tests):
                         return "NOT_EDITABLE: protected public test paths are immutable"
                     if multifile:
