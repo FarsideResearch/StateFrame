@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.7.46 (2026-11-18)
 
 - Fixed: a mutation that replaced an existing file no longer gets reverted when the run finishes. The finish applied the model's sealed candidate, which still held the old bytes, over the committed mutation edit (in the workspace, and in the repo with `--in-place`). A committed edit is now kept; if the model also changed that file, the run journals a `mutation_candidate_conflict` row and keeps the mutation's version.
