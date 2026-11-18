@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added: exact decimal helpers for the data workspace (`kernel_data_exact.py`): strict plain-decimal parsing, int-only sums and rational means, and a native int64 sum safety bound. Nothing calls them yet; the catalog tests stay pending (strict xfail).
 ## 0.7.75 (2026-11-19)
 
 - Timed-out Jedi lookups no longer hold the interpreter open. Engine teardown after completion or cancellation bounds output draining and worker cleanup while preserving the published result.
