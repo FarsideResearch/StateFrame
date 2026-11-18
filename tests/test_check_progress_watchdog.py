@@ -414,7 +414,7 @@ def test_outer_parent_liveness_protocol_deadline_and_cleanup(tmp_path, monkeypat
     monkeypatch.setattr(outer_watch.os, "getloadavg", lambda: (0, 0, 0))
     family = object()
     monkeypatch.setattr(outer_watch, "LaunchProgressSampler", lambda child: SimpleNamespace(
-        family=family, sample=lambda: snapshot(state["turn"] if mode == "cpu" else 0)))
+        family=family, snapshot=lambda: snapshot(state["turn"] if mode == "cpu" else 0)))
 
     def sweep(proc, recorded_family, **kwargs):
         assert proc is child and state["exited"] and recorded_family is family

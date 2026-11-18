@@ -169,7 +169,7 @@ class LaunchProgressSampler:
         self.family = Descendants(process.pid, self.table, self.identity)
         self.previous: ProgressSnapshot | None = None
 
-    def sample(self) -> ProgressSnapshot | None:
+    def snapshot(self) -> ProgressSnapshot | None:
         try:
             if self.identity is None:
                 return None

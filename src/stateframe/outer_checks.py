@@ -245,7 +245,7 @@ def run(command: str, cwd: Path, *, python: str, timeout_s: float | None = None,
                         cause = "user_deadline"
                     elif now >= next_sample:
                         next_sample = now + 0.5
-                        if watchdog.observe(now, sampler.sample(), completed_work=packets.completed_work):
+                        if watchdog.observe(now, sampler.snapshot(), completed_work=packets.completed_work):
                             cause = watchdog.stop_cause
                     if cause is not None:
                         # Recheck completion at the boundary before signalling.

@@ -1262,7 +1262,7 @@ def check_process_progress(process: subprocess.Popen[bytes], now: float) -> Prog
     if sampler is None:
         sampler = LaunchProgressSampler(process)
         process._stateframe_check_sampler = sampler
-    return sampler.sample()
+    return sampler.snapshot()
 
 
 def _kill_check_family(process: subprocess.Popen[bytes], *, cause: str, why: str) -> bool:

@@ -220,7 +220,7 @@ def test_launch_sampler_recovers_or_refuses_persistent_telemetry_gaps(monkeypatc
         sampler.previous = watchdog.ProgressSnapshot({(42, root.start): 10, (43, (11, 0)): 1})
     watch = watchdog.CheckWatchdog(watchdog.CheckWatchdogConfig(2))
     for turn in range(80):
-        if watch.observe(turn / 2, sampler.sample()):
+        if watch.observe(turn / 2, sampler.snapshot()):
             break
     else:
         pytest.fail("the check remained unsupervised")
@@ -359,6 +359,6 @@ def test_unstamped_launch_recovers_only_while_its_child_is_pinned(monkeypatch):
                         lambda process: tracker.LaunchIdentity(42, None, None))
     process = SimpleNamespace(pid=42, returncode=None, _waitpid_lock=threading.Lock())
     sampler = watchdog.LaunchProgressSampler(process)
-    assert sampler.sample() is None
+    assert sampler.snapshot() is None
     visible = True
-    assert sampler.sample() == watchdog.ProgressSnapshot({(42, root.start): 10})
+    assert sampler.snapshot() == watchdog.ProgressSnapshot({(42, root.start): 10})
