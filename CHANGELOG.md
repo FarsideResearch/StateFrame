@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fixed: the read budget no longer refuses a read whose requested source never arrived (the source budget or a size limit withheld it), so the model can still obtain that code. Such reads do not count as progress, so a run that only keeps re-reading withheld code still stops as stalled. A different line range of a file already read now counts as new rather than as a repeat.
+
 ## 0.7.57 (2026-11-18)
 
 - Fixed: the edit handle map (`STATEFRAME_EDIT_PROTOCOL=handles`) no longer gives handles at the current file revision for text the model read before the file changed on disk. A read receipt that names an older revision now masks that window, so a stale read is not presented as current and an edit against it is refused. Only receipts the engine writes count, so file or model text that quotes a receipt cannot vouch for stale lines.

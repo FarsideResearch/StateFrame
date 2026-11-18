@@ -14810,7 +14810,7 @@ def work(d, *, resume=None):
             if _igv is not None:
                 try:
                     from kernel_idle_governor import (
-                        GovernorDecision, post_execution_observation,
+                        GovernorDecision, post_execution_observation, read_governor_action,
                     )
                     from kernel_gate_switches import deliver_requested_bytes_enabled
                     _atoks = line.split()
@@ -14824,27 +14824,17 @@ def work(d, *, resume=None):
                             # Budget only re-reads of already-delivered unchanged bytes:
                             # the digest of THIS read's output is the novelty key, and a
                             # path the request lists as required-but-missing is exempt.
+                            # read_governor_action maps the delivery receipt; reads that
+                            # delivered no requested bytes are undelivered and spend nothing.
+                            _gaction = read_governor_action(
+                                _gpath, turn=step, read_ok=(_read_result == "OK"),
+                                delivery=_read_delivery, deliver_requested=_deliver_requested,
+                                observation=str(obs))
                             if _deliver_requested:
                                 _successful_source_delivery = (
                                     _read_result == "OK"
                                     and _read_delivery.get("delivery_status") == "DELIVERED"
                                 )
-                                _requested_byte_count = _read_delivery.get(
-                                    "requested_bytes_delivered", 0)
-                                _has_requested_bytes = (
-                                    type(_requested_byte_count) is int
-                                    and _requested_byte_count > 0
-                                )
-                                if _successful_source_delivery and _has_requested_bytes:
-                                    _gaction["content_digest"] = str(
-                                        _read_delivery.get("requested_bytes_sha256") or "")
-                                else:
-                                    # Empty pages and proof-backed stubs add no
-                                    # source-byte novelty to the read budget.
-                                    _gaction["path"] = ""
-                            else:
-                                _gaction["content_digest"] = hashlib.sha256(
-                                    str(obs).encode("utf-8", "replace")).hexdigest()[:32]
                             _gaction["exempt"] = _read_path_is_deferred_required(
                                 measurement, _gpath)
                             # Recovery: a span that is not in the request the model just
