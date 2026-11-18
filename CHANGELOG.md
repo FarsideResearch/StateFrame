@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Tests: the F-B parent identity fixture keeps its exact 43-consumer, one-comparison, 5,000-read budget; elapsed time is diagnostic because filesystem latency and suite load vary.
 - Completion routing, tool menus, and provider validation share one parent product comparison per workspace generation, avoiding repeated reads of editable files.
 ## 0.7.70 (2026-11-18)
 
