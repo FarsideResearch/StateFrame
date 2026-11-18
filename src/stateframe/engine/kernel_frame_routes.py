@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 from urllib.parse import urlsplit, urlunsplit
 
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 from kernel_routing_schema import routing_v2
 
 SCHEMA = "stateframe-routes/1"
@@ -27,7 +28,8 @@ FIELDS = frozenset({"endpoint", "model", "api_key_env", "temperature", "top_p", 
                     "allow_remote", "cost_input_per_mtok", "cost_cached_input_per_mtok",
                     "cost_output_per_mtok"})
 WRITE = frozenset({"edit", "str_replace", "insert_before", "replace_module", "file_create",
-                   "file_delete", "file_move", "authored_check", "write", "restore_candidate"})
+                   "file_delete", "file_move", "authored_check", "write", "restore_candidate",
+                   *PROTOCOL_EDIT_TOOL_NAMES})
 DONE = frozenset({"done"})
 READ = frozenset({"grep", "list_files", "file_list", "read", "probe", "recall", "references",
                   "where_defined", "who_calls", "read_check_receipt", "run_tests", "git",

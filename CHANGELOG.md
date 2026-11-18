@@ -114,6 +114,7 @@
 ## Unreleased
 
 - Fixed: `edit_source` and `rewrite_source` now pass the before-first-product-edit question gate (`STATEFRAME_QGATES=on`). The gate's edit set listed only legacy edit names, so protocol edits skipped it until the gate was answered.
+- Fixed: `edit_source` and `rewrite_source` now count as edits for the per-step model route. A reply from the read model that only edits through handles is re-asked of the edit model, as legacy `edit` replies already were. Before, the route gate (`kernel_frame_routes.WRITE`) did not list the protocol tools.
 
 ## 0.7.47 (2026-11-18)
 
