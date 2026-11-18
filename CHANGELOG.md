@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.53 (2026-11-18)
 
 - Fixed: grammar capability probes surface installation failures, and unreadable or failed problems logs remain marked unknown in summaries.
 
