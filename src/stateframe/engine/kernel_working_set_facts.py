@@ -133,7 +133,12 @@ def _update_frame(frame, snapshot, full):
             fact["delivery_notice"] = notice
             notices[path] = notice
 
-    sites = list(frame.get("open_sites", ()))
+    # Location-encoded inventory rows are exact range receipts or read routes, not
+    # source carriers: stamping delivery flags onto them would break the receipt
+    # that expand_location_inventory re-derives. Only the resident frontier is truth-checked.
+    from kernel_open_site_capacity import LOCATION_MODE
+    encoded = frame.get("site_inventory_encoding") == LOCATION_MODE
+    sites = [] if encoded else list(frame.get("open_sites", ()))
     if isinstance(frame.get("next_site"), dict):
         sites.append(frame["next_site"])
     for site in sites:
