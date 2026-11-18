@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fixed the bundled example determinism guard to compare request hashes after a completed engine run even if the host refuses candidate delivery.
+
 ## 0.7.71 (2026-11-18)
 
 - Completion routing, tool menus, and provider validation share one parent product comparison per workspace generation, avoiding repeated reads of editable files.
