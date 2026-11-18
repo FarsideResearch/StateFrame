@@ -3,8 +3,8 @@
 Live steps were re-parsing the same public sources tens of thousands of times
 (41M ``ast.walk`` calls over three steps).  This module memoizes
 ``ast.parse`` and analyzer-derived maps keyed by ``(filename, sha256(source))``
-so an unchanged file is parsed once per process, while ANY content change is a
-different key (a stale entry can never hide an edit).
+so an unchanged file can reuse its retained tree, while ANY content change is
+a different key (a stale entry can never hide an edit).
 
 Contract for callers:
   * Trees returned by :func:`parse` are SHARED.  Treat them as read-only; a
@@ -14,7 +14,8 @@ Contract for callers:
   * A ``SyntaxError`` is never cached; it is re-raised exactly as
     ``ast.parse`` raises it, on every call.
 
-Bounded: least-recently-used eviction at :data:`MAX_TREES` /
+Bounded: least-recently-used tree eviction at :data:`MAX_TREE_SOURCE_BYTES`,
+with :data:`MAX_TREES` as a count backstop; derived maps have
 :data:`MAX_DERIVED` entries.  Thread-safe.
 """
 from __future__ import annotations
@@ -29,12 +30,16 @@ from collections.abc import Callable, Hashable
 from pathlib import Path
 from typing import TypeVar
 
-MAX_TREES = 256
+# Tracemalloc on three engine modules measured 33-51 AST bytes per source byte.
+# 24 MiB of source targets about 1.2 GiB of retained ASTs, not a hard heap bound.
+MAX_TREE_SOURCE_BYTES = 24 * 1024 * 1024
+MAX_TREES = 16_384  # backstop for tiny/empty sources that barely use the byte budget
 MAX_DERIVED = 4096  # several analyzers x ~1k-file repos must not thrash each other
 
 _T = TypeVar("_T")
 _LOCK = threading.RLock()
-_TREES: "OrderedDict[tuple[str, str], ast.Module]" = OrderedDict()
+_TREES: OrderedDict[tuple[str, str], tuple[ast.Module, int]] = OrderedDict()
+_TREE_SOURCE_BYTES = 0
 _DERIVED: "OrderedDict[tuple[Hashable, str, str], object]" = OrderedDict()
 _STATS = {"tree_hits": 0, "tree_misses": 0, "derived_hits": 0, "derived_misses": 0}
 
@@ -53,22 +58,33 @@ def _remember(store: OrderedDict, key: object, value: object, limit: int) -> Non
 
 def parse(source: str, filename: str = "<unknown>") -> ast.Module:
     """``ast.parse(source, filename=filename)``, shared per content (read-only tree)."""
+    global _TREE_SOURCE_BYTES
     if not isinstance(source, str):
         return ast.parse(source, filename=filename)
-    key = (str(filename), source_digest(source))
+    data = source.encode("utf-8", "surrogatepass")
+    source_bytes = len(data)
+    key = (str(filename), source_digest(data))
     with _LOCK:
-        tree = _TREES.get(key)
-        if tree is not None:
+        entry = _TREES.get(key)
+        if entry is not None:
             _TREES.move_to_end(key)
             _STATS["tree_hits"] += 1
-            return tree
+            return entry[0]
     tree = ast.parse(source, filename=filename)  # SyntaxError propagates, never cached
     with _LOCK:
         _STATS["tree_misses"] += 1
         existing = _TREES.get(key)
         if existing is not None:  # a concurrent parse won; keep one shared tree
-            return existing
-        _remember(_TREES, key, tree, MAX_TREES)
+            _TREES.move_to_end(key)
+            return existing[0]
+        # A single oversized file must not flush the warm working set.
+        if source_bytes > MAX_TREE_SOURCE_BYTES or MAX_TREES <= 0:
+            return tree
+        _TREES[key] = (tree, source_bytes)
+        _TREE_SOURCE_BYTES += source_bytes
+        while len(_TREES) > MAX_TREES or _TREE_SOURCE_BYTES > MAX_TREE_SOURCE_BYTES:
+            _, (_, evicted_bytes) = _TREES.popitem(last=False)
+            _TREE_SOURCE_BYTES -= evicted_bytes
     return tree
 
 
@@ -131,8 +147,10 @@ def gc_paused():
 
 
 def clear() -> None:
+    global _TREE_SOURCE_BYTES
     with _LOCK:
         _TREES.clear()
+        _TREE_SOURCE_BYTES = 0
         _DERIVED.clear()
         for name in _STATS:
             _STATS[name] = 0
@@ -140,8 +158,9 @@ def clear() -> None:
 
 def stats() -> dict[str, int]:
     with _LOCK:
-        return {**_STATS, "trees": len(_TREES), "derived": len(_DERIVED)}
+        return {**_STATS, "trees": len(_TREES), "derived": len(_DERIVED),
+                "tree_source_bytes": _TREE_SOURCE_BYTES}
 
 
-__all__ = ["MAX_DERIVED", "MAX_TREES", "clear", "derived", "derived_source", "gc_paused", "parse", "parse_file",
+__all__ = ["MAX_DERIVED", "MAX_TREES", "MAX_TREE_SOURCE_BYTES", "clear", "derived", "derived_source", "gc_paused", "parse", "parse_file",
            "source_digest", "stats"]

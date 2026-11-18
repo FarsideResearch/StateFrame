@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Changed: Python analyzer trees now share a 24 MiB source-byte LRU with a 16,384-entry backstop; the boot symbol registry and coordinated-change validation reuse read-only cached trees. Oversized sources parse without evicting warm entries.
 ## 0.7.66 (2026-11-18)
 
 - Typed evidence pin on the wire: the pin body neutralizes marker text when built (`kernel_evidence_pin.py`), and the wire check requires the exact typed pin to be the only well-formed `[EVIDENCEPIN]` block, so a stray start marker in task or tool text no longer swallows the real pin (`kernel_completion_owner._wire_pin_is_typed`). Tests: `tests/test_evidence_pin_wire_markers.py`, `tests/test_t4_host_marker_injection.py`.

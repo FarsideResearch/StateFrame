@@ -1706,7 +1706,7 @@ def _validate_file(source: str, relative: str) -> str | None:
     suffix = Path(relative).suffix.lower()
     if suffix == ".py":
         try:
-            ast.parse(source, filename=relative)
+            _parse_cache.parse(source, filename=relative)
         except SyntaxError as error:
             return f"Python syntax error at line {error.lineno}: {error.msg}"
         return None
@@ -1756,7 +1756,7 @@ def _python_import_failures(root: Path, overlays: Mapping[str, str],
         if source is None:
             continue
         try:
-            tree = ast.parse(source, filename=relative)
+            tree = _parse_cache.parse(source, filename=relative)
         except SyntaxError:
             continue
         names: set[str] = set()

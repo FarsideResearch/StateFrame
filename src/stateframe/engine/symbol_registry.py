@@ -42,6 +42,7 @@ import json
 import pathlib
 import sys
 
+import kernel_parse_cache as _parse_cache
 import kernel_workspace_truth as _workspace_truth
 
 
@@ -62,9 +63,10 @@ class SymbolRegistry:
         for p in root.rglob("*.py"):
             if any(s in p.parts for s in skip):
                 continue
+            rel = p.relative_to(root).as_posix()
             try:
                 src = p.read_text(errors="strict")
-                tree = ast.parse(src)
+                tree = _parse_cache.parse(src, filename=rel)
             except (SyntaxError, UnicodeDecodeError, OSError):
                 # A file we cannot parse is an UNKNOWN, never a "does not exist". Counted so
                 # the registry can report its own blind spots rather than answering
@@ -72,7 +74,6 @@ class SymbolRegistry:
                 self.files_failed += 1
                 continue
             self.files_scanned += 1
-            rel = str(p.relative_to(root))
             self._walk(tree, rel, None)
         return self
 
