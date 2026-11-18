@@ -659,7 +659,9 @@ def test_progressing_check_preserves_entire_request_bodies_and_healthy_receipts(
     from test_hook_wiring_parity import _run_checkout, _write_launchers
     from tools.pinned_tree import pinned_tree
 
-    baseline = pinned_tree("77a95c6a8957ab46661f3620505c43894b5eaa15", tmp_path_factory)
+    # Compare the watchdog with its 0.7.50 base, which already omits empty
+    # sanitized_addopts from the test artifact policy in the request.
+    baseline = pinned_tree("96c675e7a23e0a5deee21108b4d5945eb681e857", tmp_path_factory)
     repo = _progressing_discount_repo(tmp_path / "repo")
     launcher, wrapper = tmp_path / "launcher.py", tmp_path / "child.py"
     _write_launchers(launcher, wrapper)

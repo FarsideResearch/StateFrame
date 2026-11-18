@@ -386,14 +386,13 @@ def _helper() -> int:
             process_cleaned = True
         return cleaned
 
-    policy.sandboxed_popen = tracked_spawn
-    policy._kill_group = tracked_kill_group
-
     def stop(signum, frame):
         raise InterruptedError("outer check cancelled by parent")
 
     signal.signal(signal.SIGTERM, stop)
     try:
+        policy.sandboxed_popen = tracked_spawn
+        policy._kill_group = tracked_kill_group
         policy.require_capabilities()
         scratch = tempfile.TemporaryDirectory(prefix="stateframe-tests-", dir=Path(spec["cwd"]).parent)
         copy = Path(scratch.name) / "repo"
@@ -466,6 +465,7 @@ def _helper() -> int:
         print(json.dumps({"error": str(error)}), flush=True)
         return 2
     finally:
+        policy.sandboxed_popen = original_spawn
         policy._kill_group = original_kill_group
         def cleanup_timeout(_signum, _frame):
             raise TimeoutError("outer check process cleanup exceeded its budget")

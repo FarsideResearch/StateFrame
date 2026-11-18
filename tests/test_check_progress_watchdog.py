@@ -533,6 +533,7 @@ def test_receipts_reject_malformed_terminal_metadata(field, value):
 
 def test_helper_transports_selected_settings_and_reports_completed_copy_work(tmp_path, monkeypatch):
     import os
+    import signal
     from stateframe import outer_checks
     source = tmp_path / "repo"
     source.mkdir()
@@ -555,13 +556,19 @@ def test_helper_transports_selected_settings_and_reports_completed_copy_work(tmp
     monkeypatch.setattr(policy, "run_sandboxed", run)
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(spec)))
     monkeypatch.setattr(sys, "stdout", captured)
+    original_spawn = policy.sandboxed_popen
+    original_kill_group = policy._kill_group
+    previous_term = signal.getsignal(signal.SIGTERM)
     old_env, old_path = dict(os.environ), list(sys.path)
     try:
         assert outer_checks._helper() == 0
     finally:
+        signal.signal(signal.SIGTERM, previous_term)
         os.environ.clear()
         os.environ.update(old_env)
         sys.path[:] = old_path
+    assert policy.sandboxed_popen is original_spawn
+    assert policy._kill_group is original_kill_group
     packets = [json.loads(line) for line in captured.getvalue().splitlines()]
     assert any(packet.get("progress", {}).get("kind") == "copy" for packet in packets)
     assert packets[-1] == {"cleanup_ok": True}
