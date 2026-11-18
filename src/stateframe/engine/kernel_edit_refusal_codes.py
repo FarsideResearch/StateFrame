@@ -33,10 +33,11 @@ class RefusalCode(str, enum.Enum):
     TOO_MANY_EDITS = "TOO_MANY_EDITS"
     PARSE_BREAK = "PARSE_BREAK"
     NOT_EDITABLE = "NOT_EDITABLE"
+    EDIT_CONFLICT = "EDIT_CONFLICT"
 
 
 REFUSAL_CODES: tuple[RefusalCode, ...] = tuple(RefusalCode)
-CODE_COUNT = 12
+CODE_COUNT = 13
 
 # Fixed public sentences. They describe the defect and the repair without naming any
 # handle, path, or request ordinal; those belong to the surrounding request, not here.
@@ -75,6 +76,11 @@ PUBLIC_TEXT: dict[RefusalCode, str] = {
     RefusalCode.NOT_EDITABLE: (
         "This target is not editable: protected path, directory, or outside the "
         "workspace. Nothing was changed."),
+    RefusalCode.EDIT_CONFLICT: (
+        "The file and this edit both changed the same lines since the source was "
+        "delivered, so neither version was applied. Nothing was changed. The conflict "
+        "details name the lines and give the base, your edit, and the current text; "
+        "re-issue the edit against the current text."),
 }
 
 # Any spelling of a request-scoped handle. Public text and fingerprints never carry one.

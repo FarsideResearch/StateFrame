@@ -419,7 +419,7 @@ def test_in_place_apply_receipt_is_durable_before_summary_publication(tmp_path, 
         "runtime_outcome": "completed", "check_outcome": "pass", "artifact": "saved",
     })
     monkeypatch.setattr(runner, "succeeded", lambda _summary: True)
-    monkeypatch.setattr(runner.workcopy, "apply_in_place", lambda _work: ["src.py"])
+    monkeypatch.setattr(runner.workcopy, "apply_in_place", lambda _work, **_kwargs: ["src.py"])
     monkeypatch.setattr(runner, "finish_run_storage", lambda *_args, **_kwargs: {
         "checkpoints": None, "env": None,
     })

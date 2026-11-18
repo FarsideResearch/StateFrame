@@ -21,12 +21,18 @@ import enum
 import json
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+import hashlib
+from dataclasses import dataclass, field
 
 from kernel_paged_source import source_revision
 
 SCHEMA = "stateframe-edit-handle-map/1"
 CURRENT_SOURCE_PREFIX = "[CURRENT SOURCE]"
+# Largest whole-file REWRITE base kept on the record. Mirrors the F4 source working-set
+# byte limit (kernel_stateframe_f4.MAX_SOURCE_WORKING_SET_BYTES); kept as a local literal
+# so this pure module does not import the engine stateframe layer. Above it only the
+# digest survives. SPAN bases are windows the model already received and are always kept.
+MAX_RETAINED_REWRITE_BASE_BYTES = 16_384
 # Same spelling as the refusal catalog HANDLE_PATTERN; kept local so the catalog
 # stays import-free from the engine side until a later unit wires both in.
 HANDLE_PATTERN = re.compile(r"\bq\d+h\d+\b")
@@ -100,6 +106,9 @@ class DeliveredSpan:
     byte_start: int
     byte_end: int
     kind: SpanKind = SpanKind.SPAN
+    # Exact delivered bytes, captured by from_source while the source is in hand. Not part
+    # of span identity; mint_handles moves it onto the HandleRecord base fields.
+    base_text: str | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.path, str) or not self.path:
@@ -132,9 +141,10 @@ class DeliveredSpan:
         first = 1 if start_line is None else start_line
         last = total if end_line is None else end_line
         byte_start, byte_end, total = line_byte_range(source, first, last)
+        base = source.encode("utf-8")[byte_start:byte_end].decode("utf-8")
         return cls(path=path, revision=source_revision(source), start_line=first,
                    end_line=last, total_lines=total, byte_start=byte_start,
-                   byte_end=byte_end, kind=kind)
+                   byte_end=byte_end, kind=kind, base_text=base)
 
     def span_key(self) -> tuple[str, str, int, int, str]:
         return (self.path, self.revision, self.byte_start, self.byte_end, self.kind.value)
@@ -177,6 +187,12 @@ class HandleRecord:
     request_ordinal: int
     ordinal: int
     span: DeliveredSpan
+    # Host-side only: the bytes the model was shown, kept so an edit can still be
+    # reconciled after the file moves. base_text is None when not retained (see
+    # _retained_base). Never serialized into request bytes (as_dict excludes them).
+    base_revision: str | None = None
+    base_text: str | None = field(default=None, repr=False)
+    base_digest: str | None = None
 
     @property
     def path(self) -> str:
@@ -200,7 +216,17 @@ class HandleRecord:
             raise ValueError("source revision does not match this handle")
         return source.encode("utf-8")[self.span.byte_start:self.span.byte_end].decode("utf-8")
 
+    def base_view(self) -> tuple[str | None, str | None, int, int]:
+        """(base_revision, base_text, byte_start, byte_end) of the bytes the model was shown.
+
+        Never raises and never reads the workspace. base_text is None when the base was
+        not retained; base_revision is None for a record minted without a base.
+        """
+        return (self.base_revision, self.base_text, self.span.byte_start, self.span.byte_end)
+
     def as_dict(self) -> dict[str, object]:
+        # Base fields are deliberately absent: this dict is embedded in repair request
+        # bytes, and base retention must not change what the model is sent.
         return {
             "handle": self.handle,
             "request_ordinal": self.request_ordinal,
@@ -329,9 +355,27 @@ def mint_handles(request_ordinal: int, spans: Sequence[DeliveredSpan]) -> Handle
         seen.add(key)
         if revisions.setdefault(span.path, span.revision) != span.revision:
             raise ValueError(f"spans of {span.path!r} disagree on revision within one request")
+        base_revision, base_text, base_digest = _retained_base(span)
         records.append(HandleRecord(handle=handle_name(request_ordinal, index),
-                                    request_ordinal=request_ordinal, ordinal=index, span=span))
+                                    request_ordinal=request_ordinal, ordinal=index, span=span,
+                                    base_revision=base_revision, base_text=base_text,
+                                    base_digest=base_digest))
     return HandleMap(request_ordinal=request_ordinal, records=tuple(records))
+
+
+def _retained_base(span: DeliveredSpan) -> tuple[str | None, str | None, str | None]:
+    """(base_revision, base_text, base_digest) for one delivered span, captured when minted.
+
+    The bytes come from the span captured at delivery, never from a later disk read. A
+    SPAN keeps its bytes (a window the model already received). A REWRITE base is the
+    whole file, so its bytes are kept only up to MAX_RETAINED_REWRITE_BASE_BYTES; above
+    that only the digest is kept and base_view reports text None.
+    """
+    if span.base_text is None:
+        return None, None, None
+    raw_size = len(span.base_text.encode("utf-8"))
+    keep = span.kind is SpanKind.SPAN or raw_size <= MAX_RETAINED_REWRITE_BASE_BYTES
+    return span.revision, (span.base_text if keep else None), source_revision(span.base_text)
 
 
 def append_map_to_final_user_message(messages: Sequence[Mapping[str, object]],

@@ -21,13 +21,13 @@ from kernel_edit_refusal_codes import (  # noqa: E402
 EXPECTED = [
     "STALE_HANDLE", "SOURCE_CHANGED", "UNCOVERED_SOURCE", "OLD_NOT_FOUND",
     "AMBIGUOUS_MATCH", "DISPLAY_MARKER", "OVERLAPPING_EDITS", "MIXED_FILE_BATCH",
-    "EMPTY_OLD_TEXT", "TOO_MANY_EDITS", "PARSE_BREAK", "NOT_EDITABLE",
+    "EMPTY_OLD_TEXT", "TOO_MANY_EDITS", "PARSE_BREAK", "NOT_EDITABLE", "EDIT_CONFLICT",
 ]
 
 
 def test_catalog_is_closed_and_ordered():
     assert [code.value for code in REFUSAL_CODES] == EXPECTED
-    assert len(RefusalCode) == CODE_COUNT == 12
+    assert len(RefusalCode) == CODE_COUNT == 13
     assert set(PUBLIC_TEXT) == set(RefusalCode)
     with pytest.raises(ValueError):
         RefusalCode("SOMETHING_ELSE")
@@ -180,6 +180,7 @@ CATALOG_IMPORTERS = {
     "kernel_edit_source_tool.py",
     "kernel_edit_repair_hook.py",  # builds repair requests from refusal codes
     "kernel_legacy_safe_edit.py",  # maps legacy str_replace refusals onto the same codes
+    "kernel_edit_drift.py",  # COLLAB-DRIFT: produces EDIT_CONFLICT and merges onto the same codes
 }
 
 

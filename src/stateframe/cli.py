@@ -519,6 +519,8 @@ def _print_summary(summary: dict) -> None:
     if "applied_in_place" in summary:
         rows.append(("applied to repo", ", ".join(summary["applied_in_place"]) or
                      summary.get("in_place_skipped", "nothing")))
+    for merged_file in summary.get("merged_in_place") or []:
+        rows.append(("merged with your edits", merged_file))
     parallel = summary.get("parallel")
     if isinstance(parallel, dict):
         measured = parallel.get("measured") or {}

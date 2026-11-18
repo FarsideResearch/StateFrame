@@ -187,10 +187,13 @@ def test_every_catalog_code_is_reachable_from_this_module():
         RefusalCode.DISPLAY_MARKER, RefusalCode.OLD_NOT_FOUND, RefusalCode.UNCOVERED_SOURCE,
         RefusalCode.AMBIGUOUS_MATCH, RefusalCode.OVERLAPPING_EDITS, RefusalCode.PARSE_BREAK,
     }
-    assert reachable == set(RefusalCode)
+    # EDIT_CONFLICT is produced by the COLLAB-DRIFT resolver (kernel_edit_drift), never by the validator.
+    assert reachable | {RefusalCode.EDIT_CONFLICT} == set(RefusalCode)
     text = (ENGINE / "kernel_edit_source_batch.py").read_text(encoding="utf-8")
-    for code in RefusalCode:
+    for code in reachable:
         assert f"RefusalCode.{code.value}" in text
+    drift = (ENGINE / "kernel_edit_drift.py").read_text(encoding="utf-8")
+    assert "RefusalCode.EDIT_CONFLICT" in drift
 
 
 # ---------------------------------------------------------------- all issues at once
@@ -323,5 +326,5 @@ def test_module_is_pure_and_only_tests_import_it():
     for py in ENGINE.rglob("*.py"):
         # Consumers: the edit_source executor and the legacy_safe single-edit route.
         if py.name not in {"kernel_edit_source_batch.py", "kernel_edit_source_tool.py",
-                           "kernel_legacy_safe_edit.py"}:
+                           "kernel_legacy_safe_edit.py", "kernel_edit_drift.py"}:
             assert "kernel_edit_source_batch" not in py.read_text(encoding="utf-8"), py

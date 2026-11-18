@@ -18,15 +18,17 @@ import ast
 import codecs
 import hashlib
 import json
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from kernel_destructive_edit_guard import edit_admission, guard_write
+from kernel_edit_drift import (
+    DriftResult, drift_merge_enabled, plan_replacing, receipt_detail, resolve_edit_batch, resolve_rewrite)
 from kernel_edit_handles import HandleMap, HandleRecord, SpanKind
 from kernel_edit_refusal_codes import Refusal, RefusalCode
 from kernel_edit_source_batch import (
-    UNRESOLVED_PATH, BatchInputError, BatchValidation, CoveredSpan, validate_edit_source_batch)
+    UNRESOLVED_PATH, BatchEdit, BatchInputError, BatchValidation, CoveredSpan, validate_edit_source_batch)
 from kernel_edit_tool_names import EDIT_SOURCE_TOOL, REWRITE_SOURCE_TOOL, is_destructive_edit_tool
 from kernel_paged_source import source_revision
 from kernel_revision_bound_edit import CandidateTransaction, EditAuthority, EditPlanError, validate_source
@@ -60,12 +62,14 @@ class EditOutcome:
     changed_paths: tuple[str, ...]
     generation_id: str | None
     detail: str                      # prose reason when no typed code fits ("" otherwise)
+    # EDIT_CONFLICT only: bounded base/ours/theirs hunks. Absent from the observation when empty.
+    conflict: tuple[Mapping[str, object], ...] = ()
 
     def codes(self) -> tuple[str, ...]:
         return tuple(refusal.code.value for refusal in self.refusals)
 
     def as_dict(self) -> dict[str, object]:
-        return {
+        body: dict[str, object] = {
             "tool": self.tool,
             "status": self.status,
             "path": self.path,
@@ -73,13 +77,16 @@ class EditOutcome:
             "changed_paths": list(self.changed_paths),
             "detail": self.detail,
         }
+        if self.conflict:
+            body["conflict"] = [dict(hunk) for hunk in self.conflict]
+        return body
 
     def observation(self) -> str:
         return json.dumps(self.as_dict(), sort_keys=True, ensure_ascii=False)
 
     def replayed(self) -> "EditOutcome":
         return EditOutcome(self.tool, REPLAYED, self.path, self.refusals, self.changed_paths,
-                           self.generation_id, self.detail)
+                           self.generation_id, self.detail, self.conflict)
 
 
 class EditProtocolRunState:
@@ -155,8 +162,9 @@ def default_write_bytes(path: Path, data: bytes) -> tuple[bool, str | None]:
 
 
 def _rejected(tool: str, *, path: str | None = None, refusals: tuple[Refusal, ...] = (),
-              detail: str = "", generation_id: str | None = None) -> EditOutcome:
-    return EditOutcome(tool, REJECTED, path, refusals, (), generation_id, detail)
+              detail: str = "", generation_id: str | None = None,
+              conflict: tuple[Mapping[str, object], ...] = ()) -> EditOutcome:
+    return EditOutcome(tool, REJECTED, path, refusals, (), generation_id, detail, conflict)
 
 
 def _each_edit(edits: object) -> list[Mapping[str, object]]:
@@ -227,6 +235,53 @@ def _read_current(root: Path, relative: str, read_bytes: ReadBytes,
     return raw, source_revision(raw.decode("utf-8", errors="surrogateescape"))
 
 
+def _has_drift(records: Sequence[HandleRecord | None], revision: str) -> bool:
+    return any(record is not None and record.revision != revision for record in records)
+
+
+def _finish_drift(tool: str, root: Path, relative: str, raw: bytes, revision: str, result: DriftResult,
+                  *, edits: Sequence[BatchEdit], ordinal: int, read_bytes: ReadBytes,
+                  write_bytes: WriteBytes | None, journal: object, extra: str = "") -> EditOutcome:
+    """Turn a merged text into one publish: parse check, one replace plan, the usual authority path."""
+    if not result.ok:
+        return _rejected(tool, path=relative, refusals=result.refusals, conflict=result.conflicts)
+    final = result.text or ""
+    final_bytes = final.encode("utf-8", errors="surrogateescape")
+    check = _parse_check_for(relative)
+    if check is not None:
+        error = check(final_bytes)
+        if error is not None:
+            breaks = tuple(Refusal.build(RefusalCode.PARSE_BREAK, edit_index=index, path=relative,
+                                         old_text=edit.old_text) for index, edit in enumerate(edits))
+            return _rejected(tool, path=relative, refusals=breaks, detail=error)
+    if final_bytes == raw:
+        # Both sides already made this change: nothing to write, nothing to refuse.
+        detail = " ".join(part for part in (receipt_detail(result, revision), extra) if part)
+        return EditOutcome(tool, APPLIED, relative, (), (), None, detail)
+    plan = plan_replacing(raw, final, path=relative, revision=revision, ordinal=ordinal,
+                          authority_ref=AUTHORITY_REF, source_receipt=SOURCE_RECEIPT)
+    if plan is None:
+        return _rejected(tool, path=relative, refusals=(
+            Refusal.build(RefusalCode.SOURCE_CHANGED, edit_index=0, path=relative, old_text=""),))
+    outcome = _publish(tool, root, relative, raw, revision, BatchValidation((), plan, relative),
+                       read_bytes=read_bytes, write_bytes=write_bytes, journal=journal)
+    if outcome.status == APPLIED:
+        detail = " ".join(part for part in (receipt_detail(result, revision), extra) if part)
+        outcome = replace(outcome, detail=detail)
+    return outcome
+
+
+def _drift_edit_source(tool: str, root: Path, relative: str, raw: bytes, revision: str,
+                       edits: list[BatchEdit], state: EditProtocolRunState, *, read_bytes: ReadBytes,
+                       write_bytes: WriteBytes | None, journal: object) -> EditOutcome:
+    records = [state.lookup(edit.handle) for edit in edits]
+    result = resolve_edit_batch(records, edits, raw.decode("utf-8", errors="surrogateescape"),
+                                path=relative, authority_ref=AUTHORITY_REF)
+    ordinal = state.handle_map.request_ordinal if state.handle_map is not None else -1
+    return _finish_drift(tool, root, relative, raw, revision, result, edits=edits, ordinal=ordinal,
+                         read_bytes=read_bytes, write_bytes=write_bytes, journal=journal)
+
+
 def execute_edit_source(root: Path, args: Mapping[str, object], *, state: EditProtocolRunState,
                         read_bytes: ReadBytes, journal: object = None,
                         not_editable: NotEditable | None = None,
@@ -265,6 +320,13 @@ def execute_edit_source(root: Path, args: Mapping[str, object], *, state: EditPr
             return state.remember(key, current)
         raw, revision = current
 
+        if drift_merge_enabled() and _has_drift([state.lookup(edit.get("handle")) for edit in mappings],
+                                                revision):
+            coerced = [BatchEdit.coerce(item, index) for index, item in enumerate(edits)]
+            return state.remember(key, _drift_edit_source(
+                tool, root, relative, raw, revision, coerced, state, read_bytes=read_bytes,
+                write_bytes=write_bytes, journal=journal))
+
         validation = _validate(edits, state, raw, relative, revision)
         if validation.refusals:
             return state.remember(key, _rejected(tool, path=relative, refusals=validation.refusals))
@@ -275,6 +337,26 @@ def execute_edit_source(root: Path, args: Mapping[str, object], *, state: EditPr
         return state.remember(key, _rejected(tool, detail=f"{tool} REJECTED: {error}"))
     except EditPlanError as error:
         return state.remember(key, _rejected(tool, detail=str(error)))
+
+
+def _drift_rewrite(tool: str, root: Path, relative: str, raw: bytes, revision: str, record: HandleRecord,
+                   new_text: str, state: EditProtocolRunState, *, read_bytes: ReadBytes,
+                   write_bytes: WriteBytes | None, journal: object, public_brief: object) -> EditOutcome:
+    """Whole-file rewrite onto a file that moved: merge, then the same shrink guard as the normal path."""
+    result = resolve_rewrite(record, new_text, raw.decode("utf-8", errors="surrogateescape"), path=relative)
+    if not result.ok:
+        return _rejected(tool, path=relative, refusals=result.refusals, conflict=result.conflicts)
+    final = (result.text or "").encode("utf-8", errors="surrogateescape")
+    admission = edit_admission(raw, final)
+    shrink = guard_write(root / relative, final.decode("utf-8", errors="surrogateescape"),
+                         root=root, public_brief=public_brief)
+    if shrink is not None:
+        return _rejected(tool, path=relative, detail=shrink)
+    ordinal = state.handle_map.request_ordinal if state.handle_map is not None else -1
+    edit = BatchEdit(record.handle, record.base_text or "", new_text)
+    return _finish_drift(tool, root, relative, raw, revision, result, edits=[edit], ordinal=ordinal,
+                         read_bytes=read_bytes, write_bytes=write_bytes, journal=journal,
+                         extra=f"admission={admission}")
 
 
 def execute_rewrite_source(root: Path, args: Mapping[str, object], *, state: EditProtocolRunState,
@@ -315,6 +397,10 @@ def execute_rewrite_source(root: Path, args: Mapping[str, object], *, state: Edi
         if isinstance(current, EditOutcome):
             return state.remember(key, current)
         raw, revision = current
+        if revision != record.revision and drift_merge_enabled():
+            return state.remember(key, _drift_rewrite(
+                tool, root, relative, raw, revision, record, new_text, state, read_bytes=read_bytes,
+                write_bytes=write_bytes, journal=journal, public_brief=public_brief))
         if revision != record.revision:
             # The handle's bytes are gone; record.text() would raise.
             return state.remember(key, _rejected(tool, path=relative, refusals=(
