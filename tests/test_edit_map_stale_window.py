@@ -16,6 +16,14 @@ from kernel_paged_source import source_revision
 from test_edit_handles_wire_once import _engine_sends, received  # noqa: F401  (fixture)
 from test_edit_protocol_switch_wiring import RULES, RULES_PATH, _drive
 
+
+@pytest.fixture(autouse=True)
+def _clear_run_binding():
+    """The driven engine run binds module-level edit state; clear it so later tests start unbound."""
+    import kernel_edit_request_map
+    yield
+    kernel_edit_request_map.bind_run(None, None)
+
 B1 = RULES
 # Two ways the disk can change under a read. Both keep some B1 lines verbatim, which is what
 # lets a verbatim scan of the new bytes find "delivered" text.
