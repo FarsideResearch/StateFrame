@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added: exact decimal helpers for the data workspace (`kernel_data_exact.py`): strict plain-decimal parsing, int-only sums and rational means, and a native int64 sum safety bound. Nothing calls them yet.
+- Added: the data workspace SQLite catalog (`kernel_data_catalog.py`) with an 18-table STRICT schema, WAL safety gate, process-wide writer lock, and read-only reader. Engine operations do not use the catalog yet.
 - Added: exact decimal helpers for the data workspace (`kernel_data_exact.py`): strict plain-decimal parsing, int-only sums and rational means, and a native int64 sum safety bound. Nothing calls them yet; the catalog tests stay pending (strict xfail).
 ## 0.7.75 (2026-11-19)
 

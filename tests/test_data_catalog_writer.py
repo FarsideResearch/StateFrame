@@ -11,8 +11,6 @@ import sqlite3
 
 import pytest
 
-pytestmark = pytest.mark.xfail(strict=True, raises=ImportError, reason="DW2: module not implemented yet")
-
 _REQUIRED_TABLES = {"objects", "resources", "snapshots", "datasets", "revisions", "results", "packets", "jobs"}
 _SAFE_SQLITE = (3, 51, 3)
 _UNSAFE_SQLITE = (3, 46, 1)
