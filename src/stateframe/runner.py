@@ -628,11 +628,12 @@ def _verify_stateframe_home_identity(options: RunOptions, home: Path | None = No
         raise RunError("STATEFRAME_HOME_IDENTITY_CHANGED") from error
 
 
-def run_test_cmd(command: str, cwd: Path, timeout_s: float = 900,
+def run_test_cmd(command: str, cwd: Path, timeout_s: float | None = None,
                  test_env: dict[str, str] | None = None, *, python: str = sys.executable,
                  pytest_plugins: str | None = None,
                  deadline: float | None = None, test_python: str | None = None,
-                 runner_kind: str = "pytest", capture_output: bool = False) -> dict[str, object]:
+                 runner_kind: str = "pytest", capture_output: bool = False,
+                 check_settings: dict[str, str] | None = None) -> dict[str, object]:
     """Check a throwaway copy through the engine policy in a fresh interpreter.
 
     ``test_python``: the interpreter the command runs, handed to an engine that reads STATEFRAME_TEST_PYTHON so its
@@ -641,7 +642,8 @@ def run_test_cmd(command: str, cwd: Path, timeout_s: float = 900,
         return outer_checks.run(command, cwd, python=python, timeout_s=timeout_s,
                                 deadline=deadline, test_env=validate_test_env(test_env or {}),
                                 pytest_plugins=pytest_plugins, test_python=test_python,
-                                runner_kind=runner_kind, capture_output=capture_output)
+                                runner_kind=runner_kind, capture_output=capture_output,
+                                **({"check_settings": check_settings} if check_settings is not None else {}))
     except (outer_checks.OuterCheckError, OSError) as error:
         raise RunError(str(error)) from error
 
@@ -888,10 +890,30 @@ HOST_ONLY_SWITCHES = (frozenset({"STATEFRAME_ENV_SEED", "STATEFRAME_KEEP_RUN_ENV
 OPT_IN_RUNNER_DEFAULTS = {"STATEFRAME_EVICTFIX": "legacy"}
 
 
+CHECK_SETTINGS = ("STATEFRAME_CHECK_STALL_SECONDS", "STATEFRAME_PUBLIC_CHECK_CPU_SECONDS")
+
+
+def _check_settings(environment: Mapping[str, str]) -> dict[str, str]:
+    from .engine.kernel_check_watchdog import host_check_cpu_seconds, host_check_stall_seconds
+
+    settings = {name: environment[name] for name in CHECK_SETTINGS if name in environment}
+    for name, read in zip(CHECK_SETTINGS, (host_check_stall_seconds, host_check_cpu_seconds)):
+        try:
+            read(settings)
+        except ValueError as error:
+            raise RunError(f"{name}: {error}") from error
+    return settings
+
+
 def resolve_opt_in_switches(engine_dir: Path = ENGINE_DIR, *,
                             parallel_enabled: bool = True) -> dict[str, str]:
     """The shell switches set by the user, validated and forwarded in the engine spec."""
     chosen = {}
+    for name in CHECK_SETTINGS:
+        if name in os.environ:
+            if name not in engine_switches(engine_dir):
+                raise RunError(f"{name} is set, but this engine does not support it; unset it to run")
+            chosen[name] = os.environ[name]
     for name in OPT_IN_SWITCHES:
         if not parallel_enabled and name.startswith("STATEFRAME_PARALLEL_"):
             continue
@@ -1122,7 +1144,7 @@ SHELL_SETTINGS = frozenset({
     "STATEFRAME_CONTEXT_TOKENS", "STATEFRAME_PROMPT_BUDGET", "STATEFRAME_ROUTES",
     "STATEFRAME_EXEC_RPC_SECONDS", "STATEFRAME_STARTUP_PROBE_SECONDS", PLAIN_WALL_SETTING,
     *PARALLEL_TIMING_SETTINGS,
-    *CHECKPOINT_ENV, *OPT_IN_SWITCHES,
+    *CHECKPOINT_ENV, *OPT_IN_SWITCHES, *CHECK_SETTINGS,
 })
 
 
@@ -1734,6 +1756,7 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
     environment.update(resolve_parallel_timing_env(parallel_enabled=mode != "off"))
     environment.update(opt_in)
     environment.update(options.extra_env)
+    _check_settings(environment)
     if mutation_options is not None:
         environment["STATEFRAME_MUTATIONS"] = mutation_options["level"]
     else:
@@ -1797,7 +1820,7 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
     for name in opt_in:
         if name not in environment:
             continue
-        environment_sources[name] = ("ambient:" + name if os.environ.get(name, "").strip()
+        environment_sources[name] = ("ambient:" + name if name in CHECK_SETTINGS or os.environ.get(name, "").strip()
                                      else "runner:default-" + OPT_IN_RUNNER_DEFAULTS[name])
     if options._cache_slot_degraded:
         environment_sources["STATEFRAME_PROMPT_CACHE"] = "runner:optional-pin-degraded"
@@ -4215,6 +4238,14 @@ def _export_final_diff(work: workcopy.WorkCopy, run_dir: Path,
     return None
 
 
+def _check_summary(check: dict[str, object]) -> dict[str, object]:
+    result = {key: check[key] for key in ("command", "exit_code", "passed", "candidate_sha256") if key in check}
+    if check.get("execution_stop") is not None:
+        result.update({key: check[key] for key in
+                       ("execution_stop", "execution_complete", "termination_reason", "outcome") if key in check})
+    return result
+
+
 def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: workcopy.WorkCopy,
              spec: dict) -> dict[str, object]:
     def atomic_bytes(path: Path, data: bytes) -> None:
@@ -4243,19 +4274,20 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
     test_cmd = options.test_cmd or ("python -m pytest -q " + " ".join(
         shlex.quote(p) for p in spec["public_row"]["public_check_paths"])) \
         if options.runner_kind != "generic" else options.test_cmd
+    check_settings = _check_settings(spec["environment"])
     before = ({"command": None, "exit_code": None, "passed": None, "tail": "no check available"}
               if test_cmd is None else run_test_cmd(
                   test_cmd.replace("python ", shlex.quote(_tests_python(options)) + " ", 1)
                           if test_cmd.startswith("python ") else test_cmd, work.copy,
                           test_env=options.test_env, python=_tests_python(options),
                           pytest_plugins=options.pytest_plugins, deadline=options._deadline,
-                          timeout_s=min(900, _remaining(options)), test_python=_outer_test_python(options),
+                          check_settings=check_settings, test_python=_outer_test_python(options),
                            runner_kind=options.runner_kind,
                            capture_output=options.protect_tests in {"task", "off"}))
-    printer(f"before: {test_cmd or '(none)'} -> "
-            f"{'PASS' if before['passed'] else 'FAIL' if before['passed'] is False else 'NOT RUN'} "
+    printer(f"before: {test_cmd or '(none)'} -> {outcomes.check_label(before)} "
             f"(exit {before['exit_code']})")
-    if options.protect_tests == "task" and before["passed"] is False:
+    before_failed = before["passed"] is False and before.get("execution_complete") is not False
+    if options.protect_tests == "task" and before_failed:
         row = spec["public_row"]
         lock_initial_failing_tests(row, before)
         _write_json_atomic(run_dir / "spec.json", spec)
@@ -4266,7 +4298,7 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
         test_paths = tuple(row.get("test_file_paths") or
                            sorted(path for path in work.baseline if is_test_file(path)))
         failed_output = (str(before.get("output") or before.get("tail") or "")
-                         if before.get("passed") is False else "")
+                         if before_failed else "")
         selection = judging_test_selection(test_paths, check_argv, failed_output=failed_output)
         row["test_wrong_failed_nodes"] = failing_test_nodes(test_paths, failed_output)
         for index, arg in enumerate(check_argv):
@@ -4327,8 +4359,7 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
                                  if test_cmd.startswith("python ") else test_cmd, work.copy,
                                  test_env=options.test_env, python=_tests_python(options),
                                  pytest_plugins=options.pytest_plugins, deadline=options._deadline,
-                                 timeout_s=min(900, _remaining(options)),
-                                  test_python=_outer_test_python(options), runner_kind=options.runner_kind,
+                                 check_settings=check_settings, test_python=_outer_test_python(options), runner_kind=options.runner_kind,
                                   capture_output=True)
             if candidate_digest(work.copy) == digest:
                 after["candidate_sha256"] = digest
@@ -4375,9 +4406,8 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
         "candidate_paths_dropped": dropped_paths,
         "candidate_files_written": written,
         "files_changed": sorted(changed_files),
-        "tests_before": {k: before[k] for k in ("command", "exit_code", "passed")},
-        "tests_after": {k: after[k] for k in ("command", "exit_code", "passed", "candidate_sha256")
-                        if k in after},
+        "tests_before": _check_summary(before),
+        "tests_after": _check_summary(after),
         "runner_kind": spec.get("runner_kind", "pytest"),
         "check_source": options.check_source,
         **({"test_lock_note": spec["public_row"]["test_lock_note"]}

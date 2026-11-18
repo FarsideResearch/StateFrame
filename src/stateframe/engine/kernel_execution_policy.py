@@ -7,8 +7,9 @@ fall back to a raw host process.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
+from enum import Enum
 import errno
 import logging
 import math
@@ -31,6 +32,9 @@ from kernel_exec_tracker import (ContainmentUnverified, Descendants, LaunchIdent
                                  ProcessIdentity, ProcessTable, capture_launch_identity,
                                  child_exited_unreaped, kill_launch_unit,
                                  recorded_launch_identity, signal_launch_group)
+from kernel_check_watchdog import (CheckWatchdog, CheckWatchdogConfig, LaunchProgressSampler,
+                                   SAMPLE_SECONDS, MAX_SAMPLE_GAP, ProgressSnapshot,
+                                   host_check_cpu_seconds, progress_sample)
 from kernel_reason_log import emit_kill, emit_refusal
 from kernel_test_isolation import SandboxReadGrants, isolated_command, sandbox_executable
 from sf_launch import (
@@ -43,9 +47,8 @@ from sf_launch import (
 MAX_WALL_SECONDS = 900.0
 MAX_INPUT_BYTES = 4 * 1024 * 1024
 DEFAULT_CPU_SECONDS = 30.0
-# User checks get RLIMIT_CPU only as a runaway backstop, never as a budget: real suites can
-# legitimately burn many CPU minutes. STATEFRAME_PUBLIC_CHECK_CPU_SECONDS overrides it.
-CHECK_CPU_BACKSTOP_SECONDS = 3600.0
+# Checks have no product CPU budget. A positive host override remains available.
+CHECK_CPU_BACKSTOP_SECONDS = None
 MAX_CPU_SECONDS = 86400.0
 DEFAULT_MEMORY_BYTES = 512 * 1024 * 1024
 DEFAULT_FILE_BYTES = 64 * 1024 * 1024
@@ -68,6 +71,15 @@ _LOGGER = logging.getLogger(__name__)
 _ALLOWED_ENV = frozenset({
     "PATH", "LANG", "LC_ALL", "PYTHONHASHSEED", "PYTEST_DISABLE_PLUGIN_AUTOLOAD",
 })
+
+
+class _UnselectedLimit(Enum):
+    """Distinguish omitted limits from explicit host policy choices."""
+
+    HOST_DEFAULT = "host_default"
+
+
+_UNSELECTED_LIMIT = _UnselectedLimit.HOST_DEFAULT
 
 
 class ExecutionPolicyError(RuntimeError):
@@ -123,6 +135,7 @@ class PolicyResult:
     cpu_limit_seconds: float | None = None
     cpu_seconds_used: float | None = None
     cleanup_finding: str | None = None
+    execution_stop: Mapping[str, object] | None = None
 
 
 def policy_read_grants(result: object) -> SandboxReadGrants | None:
@@ -246,16 +259,20 @@ def _safe_environment(env: Mapping[object, object] | None) -> dict[str, str]:
     return result
 
 
-def check_cpu_backstop_seconds() -> float:
-    """RLIMIT_CPU for a user check: the policy value, else the generous backstop."""
-    raw = os.environ.get("STATEFRAME_PUBLIC_CHECK_CPU_SECONDS", "").strip()
+def check_cpu_backstop_seconds() -> float | None:
+    """Optional explicit host CPU cap; zero disables the product CPU limit."""
     try:
-        value = float(raw) if raw else CHECK_CPU_BACKSTOP_SECONDS
-    except ValueError:
-        value = CHECK_CPU_BACKSTOP_SECONDS
-    if not math.isfinite(value) or value <= 0:
-        value = CHECK_CPU_BACKSTOP_SECONDS
-    return min(value, MAX_CPU_SECONDS)
+        return host_check_cpu_seconds()
+    except ValueError as error:
+        raise ExecutionPolicyError(str(error)) from error
+
+
+def _effective_cpu_limit_seconds(requested: float | None) -> float | None:
+    if requested is None:
+        return None
+    hard = resource.getrlimit(resource.RLIMIT_CPU)[1]
+    selected = math.ceil(requested)
+    return float(selected if hard == resource.RLIM_INFINITY else min(selected, hard))
 
 
 def _limit_value(name: str, requested: float | int, *, maximum: float | int) -> float | int:
@@ -282,11 +299,12 @@ def _lowered_limits(current: tuple[int, int], limit: int) -> tuple[int, int]:
     return new_soft, bound
 
 
-def _resource_preexec(cpu_seconds: float, memory_bytes: int,
+def _resource_preexec(cpu_seconds: float | None, memory_bytes: int,
                       file_bytes: int, nofile: int, nproc: int,
                       cgroup: Path | None = None,
                       memory_report_fd: int | None = None) -> Callable[[], None]:
-    cpu = int(math.ceil(_limit_value("cpu_seconds", cpu_seconds, maximum=MAX_CPU_SECONDS)))
+    cpu = (int(math.ceil(_limit_value("cpu_seconds", cpu_seconds, maximum=MAX_CPU_SECONDS)))
+           if cpu_seconds is not None else None)
     memory = int(_limit_value("memory_bytes", memory_bytes, maximum=4 * 1024 * 1024 * 1024))
     file_limit = int(_limit_value("file_bytes", file_bytes, maximum=64 * 1024 * 1024))
     nofile_limit = int(_limit_value("nofile", nofile, maximum=1024))
@@ -312,9 +330,13 @@ def _resource_preexec(cpu_seconds: float, memory_bytes: int,
                 pass  # The in-namespace RLIMIT_NPROC is mandatory; cgroup is optional.
         # Soft one second under hard: a runaway dies by SIGXCPU, a signal no other limit
         # sends, so the receipt can name RLIMIT_CPU exactly instead of guessing at a SIGKILL.
-        _cpu_soft, cpu_hard = resource.getrlimit(resource.RLIMIT_CPU)
-        cpu_hard = cpu if cpu_hard == resource.RLIM_INFINITY else min(cpu, cpu_hard)
-        resource.setrlimit(resource.RLIMIT_CPU, (max(1, cpu_hard - 1), cpu_hard))
+        if cpu is not None:
+            cpu_soft, cpu_hard = resource.getrlimit(resource.RLIMIT_CPU)
+            cpu_hard = cpu if cpu_hard == resource.RLIM_INFINITY else min(cpu, cpu_hard)
+            soft = min(cpu_hard, max(1, cpu_hard - 1))
+            if cpu_soft != resource.RLIM_INFINITY:
+                soft = min(soft, cpu_soft)
+            resource.setrlimit(resource.RLIMIT_CPU, (soft, cpu_hard))
         _lower_only(resource.RLIMIT_FSIZE, file_limit)
         _lower_only(resource.RLIMIT_CORE, 0)
         resource.setrlimit(resource.RLIMIT_NOFILE,
@@ -404,7 +426,8 @@ def _check_cpu_seconds_used(process: subprocess.Popen[bytes]) -> float | None:
 def _kill_group(process: subprocess.Popen[bytes], family: Descendants | None = None, *,
                 launch_identity: LaunchIdentity | None = None,
                 cause: str = "unspecified",
-                why: str = "kill requested without a stated reason") -> bool:
+                why: str = "kill requested without a stated reason",
+                diagnostic_only: bool = False) -> bool:
     # Defaults keep the monkeypatched signature used by outer_checks.py working.
     # The whole launch unit, not only the group: a bwrap child still setting up its
     # sandbox, or one that already left the group, must not outlive the timeout.
@@ -412,10 +435,12 @@ def _kill_group(process: subprocess.Popen[bytes], family: Descendants | None = N
                 else recorded_launch_identity(process))
     pid = getattr(process, "pid", None)
     emit_kill("exec_policy", target=f"pid {pid}", pid=pid if isinstance(pid, int) else None,
-              why=why, level="WARN", cause_key=f"exec_policy:{cause}")
+              why=why, level="DEBUG" if cause == "completed_check_cleanup" else "WARN",
+              cause_key=f"exec_policy:{cause}", journal=False if diagnostic_only else None)
     # The tracker line is muted (DEBUG): this emit already states the cause. Survivors stay ERROR.
     return not kill_launch_unit(process, family, launch_identity=identity,
-                                reason=cause, log_level="DEBUG")
+                                reason=cause, log_level="DEBUG",
+                                **({"journal": False} if diagnostic_only else {}))
 
 
 class _ProgressTrackingProcessTable:
@@ -792,6 +817,16 @@ class _ResidentMemorySupervisor:
                     # an already-visible memory breach can stop the launch immediately.
                     live = self._track_work(lambda: self._update_family(rows))
                     _note_peak_process_cpu(self.process, live)
+                    if getattr(self.process, "_stateframe_check_watchdog_enabled", False):
+                        sample_at = time.monotonic()
+                        previous_at = getattr(self.process, "_stateframe_check_sample_at", -math.inf)
+                        if sample_at - previous_at >= SAMPLE_SECONDS:
+                            self.process._stateframe_check_sample_at = sample_at
+                            current, baseline = progress_sample(
+                                self.table, live,
+                                getattr(self.process, "_stateframe_check_last_valid_progress", None))
+                            self.process._stateframe_check_last_valid_progress = baseline
+                            self.process._stateframe_check_progress = (sample_at, current)
                     breach = self.table.resident_memory_limit_breach(
                         live, self.memory_bytes)
                     now = time.monotonic()
@@ -942,7 +977,7 @@ def _prepared(command: Sequence[object], root: Path, env: Mapping[object, object
 def sandboxed_popen(command: Sequence[object], root: str | os.PathLike[str], *,
                     env: Mapping[object, object] | None = None,
                     internal_env: Mapping[str, object] | None = None,
-                    cpu_seconds: float = DEFAULT_CPU_SECONDS,
+                    cpu_seconds: float | None = DEFAULT_CPU_SECONDS,
                     memory_bytes: int = DEFAULT_MEMORY_BYTES,
                     file_bytes: int = DEFAULT_FILE_BYTES,
                     nofile: int = DEFAULT_NOFILE,
@@ -1211,12 +1246,40 @@ def _trace_mark(trace: dict[str, int] | None, name: str) -> None:
         trace[name] = time.monotonic_ns()
 
 
-def _collect(process: subprocess.Popen[bytes], input_data: bytes | None, deadline: float,
+def check_process_progress(process: subprocess.Popen[bytes], now: float) -> ProgressSnapshot | None:
+    process._stateframe_check_sample_pending = False
+    supervisor = getattr(process, "_stateframe_memory_supervisor", None)
+    if supervisor is not None:
+        sample = getattr(process, "_stateframe_check_progress", None)
+        if sample is None or not 0 <= now - sample[0] <= MAX_SAMPLE_GAP:
+            return None
+        if sample[0] == getattr(process, "_stateframe_check_progress_consumed_at", None):
+            process._stateframe_check_sample_pending = True
+            return None
+        process._stateframe_check_progress_consumed_at = sample[0]
+        return sample[1]
+    sampler = getattr(process, "_stateframe_check_sampler", None)
+    if sampler is None:
+        sampler = LaunchProgressSampler(process)
+        process._stateframe_check_sampler = sampler
+    return sampler.sample()
+
+
+def _kill_check_family(process: subprocess.Popen[bytes], *, cause: str, why: str) -> bool:
+    supervisor = getattr(process, "_stateframe_memory_supervisor", None)
+    owner = supervisor if supervisor is not None else getattr(process, "_stateframe_check_sampler", None)
+    with getattr(supervisor, "_family_lock", nullcontext()):
+        return _kill_group(process, getattr(owner, "family", None),
+                           cause=cause, why=why, diagnostic_only=True)
+
+
+def _collect(process: subprocess.Popen[bytes], input_data: bytes | None, deadline: float | None,
              output_limit: int, *, observer_fd: int | None = None,
              observer_buffer: bytearray | None = None,
              trace: dict[str, int] | None = None,
              pre_reap_cleanup: Callable[[], None] | None = None,
-             on_leader_reaped: Callable[[], None] | None = None
+             on_leader_reaped: Callable[[], None] | None = None,
+             check_watchdog: CheckWatchdogConfig | None = None
              ) -> tuple[str, str, bool, bool, bool]:
     if input_data is not None and len(input_data) > MAX_INPUT_BYTES:
         raise ExecutionPolicyError("child input exceeds the policy bound")
@@ -1251,16 +1314,23 @@ def _collect(process: subprocess.Popen[bytes], input_data: bytes | None, deadlin
             observer_buffer = None
     _trace_mark(trace, "pipe_drain_start_ns")
     timed_out = False
-    while selector.get_map():
+    watchdog = CheckWatchdog(check_watchdog) if check_watchdog is not None else None
+    next_sample = time.monotonic()
+    post_exit_drain_until = None
+    pipe_cleanup_failed = False
+    while selector.get_map() or (watchdog is not None and not child_exited_unreaped(process)):
         if trace is not None and child_exited_unreaped(process):
             _trace_mark(trace, "child_exit_observed_ns")
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
+        remaining = deadline - time.monotonic() if deadline is not None else 0.05
+        if deadline is not None and remaining <= 0:
             timed_out = not child_exited_unreaped(process)
             if timed_out:
                 group_killed = _kill_group(
                     process, cause="wall_deadline",
                     why="policy wall deadline reached before the child exited")
+            break
+        if post_exit_drain_until is not None and time.monotonic() >= post_exit_drain_until:
+            pipe_cleanup_failed = bool(selector.get_map())
             break
         for key, mask in selector.select(min(remaining, 0.05)):
             stream = key.fileobj
@@ -1302,6 +1372,36 @@ def _collect(process: subprocess.Popen[bytes], input_data: bytes | None, deadlin
             if len(data) > available:
                 truncated = True
             total += len(data)
+        exited = watchdog is not None and child_exited_unreaped(process)
+        if exited and selector.get_map() and post_exit_drain_until is None:
+            group_killed = _kill_check_family(
+                process, cause="completed_check_cleanup",
+                why="check leader exited; cleaning descendants before reaping")
+            if not group_killed:
+                pipe_cleanup_failed = True
+                break
+            post_exit_drain_until = time.monotonic() + 2.0
+        if watchdog is not None and not exited:
+            now = time.monotonic()
+            if now >= next_sample:
+                next_sample = now + SAMPLE_SECONDS
+                current = check_process_progress(process, now)
+                # Drain first, then observe completion, then evaluate inactivity.
+                # Progress at the exact expiry boundary wins.
+                # A poll just before the publisher's next half-second turn
+                # is not a new observation. Wait for it; stale or partial
+                # telemetry still invalidates the evidence window above.
+                pending = (current is None
+                           and getattr(process, "_stateframe_check_sample_pending", False))
+                stalled = False if pending else watchdog.observe(now, current, output_bytes=total)
+                if stalled and not child_exited_unreaped(process):
+                    cause = watchdog.stop_cause
+                    group_killed = _kill_check_family(process, cause=cause,
+                        why=("check made no observed progress for the inactivity window"
+                             if cause == "no_progress" else "check progress telemetry unavailable"))
+                    process.execution_stop = watchdog.stopped(cleanup_ok=group_killed, cause=cause)
+                    pipe_cleanup_failed = not group_killed
+                    break
         if trace is not None and child_exited_unreaped(process):
             _trace_mark(trace, "child_exit_observed_ns")
             # The main runner owns the profile writer. Drain all currently available
@@ -1313,7 +1413,8 @@ def _collect(process: subprocess.Popen[bytes], input_data: bytes | None, deadlin
                 except KeyError:
                     observer_key = None
                 if observer_key is not None:
-                    while True:
+                    # This private observer can retain at most one pipe's backlog.
+                    for _ in range(MAX_PROFILE_OUTPUT_BYTES // 8192 + 1):
                         try:
                             data = os.read(observer_fd, 8192)
                         except (BlockingIOError, OSError):
@@ -1341,9 +1442,12 @@ def _collect(process: subprocess.Popen[bytes], input_data: bytes | None, deadlin
             pass
     selector.close()
     _trace_mark(trace, "pipe_drain_finished_ns")
+    if pipe_cleanup_failed:
+        raise ContainmentUnverified("containment unverified: check output pipes survived cleanup")
     # Stop group members before wait() releases the leader's PID.
-    if not timed_out:
-        until = max(time.monotonic() + 1.0, deadline + 1.0)
+    if not timed_out and not group_killed and getattr(process, "execution_stop", None) is None:
+        until = (max(time.monotonic() + 1.0, deadline + 1.0)
+                 if deadline is not None else time.monotonic())
         while not child_exited_unreaped(process) and time.monotonic() < until:
             time.sleep(.02)
         if not child_exited_unreaped(process):
@@ -1399,19 +1503,30 @@ def run_sandboxed(command: Sequence[object], root: str | os.PathLike[str], *,
                   env: Mapping[object, object] | None = None,
                   internal_env: Mapping[str, object] | None = None,
                   input_data: str | bytes | None = None,
-                  timeout: float = MAX_WALL_SECONDS,
+                  timeout: float | None | _UnselectedLimit = _UNSELECTED_LIMIT,
+                  check_watchdog: CheckWatchdogConfig | None = None,
                   output_limit: int = MAX_OUTPUT_BYTES,
                   readonly_workspace: bool = False,
                   generic_check: bool = False,
-                  cpu_seconds: float = DEFAULT_CPU_SECONDS,
+                  cpu_seconds: float | None | _UnselectedLimit = _UNSELECTED_LIMIT,
                   memory_bytes: int = DEFAULT_MEMORY_BYTES,
                   file_bytes: int = DEFAULT_FILE_BYTES,
                   nofile: int = DEFAULT_NOFILE,
                   nproc: int = DEFAULT_NPROC,
                   observe_pytest: bool = False,
                   pre_reap_cleanup: Callable[[], str | None] | None = None) -> PolicyResult:
-    """Run one bounded child; every failure is a refusal or typed result."""
-    timeout = float(_limit_value("timeout", timeout, maximum=MAX_WALL_SECONDS))
+    """Run a bounded probe or progress-supervised check behind the same containment."""
+    if isinstance(timeout, _UnselectedLimit):
+        timeout = None if check_watchdog is not None else MAX_WALL_SECONDS
+    if timeout is None:
+        if not isinstance(check_watchdog, CheckWatchdogConfig):
+            raise ExecutionPolicyError("unbounded execution requires a check watchdog")
+    else:
+        timeout = float(_limit_value("timeout", timeout, maximum=MAX_WALL_SECONDS))
+    if check_watchdog is not None and not isinstance(check_watchdog, CheckWatchdogConfig):
+        raise ExecutionPolicyError("invalid check watchdog configuration")
+    if isinstance(cpu_seconds, _UnselectedLimit):
+        cpu_seconds = check_cpu_backstop_seconds() if check_watchdog is not None else DEFAULT_CPU_SECONDS
     output_limit = int(_limit_value("output_limit", output_limit, maximum=4 * 1024 * 1024))
     nproc_budget = (int(_limit_value("nproc", nproc, maximum=256))
                     if platform.system() == "Linux" else None)
@@ -1494,7 +1609,9 @@ def run_sandboxed(command: Sequence[object], root: str | os.PathLike[str], *,
     else:
         collect_cleanup = None
     try:
-        deadline = time.monotonic() + timeout
+        deadline = time.monotonic() + timeout if timeout is not None else None
+        if check_watchdog is not None:
+            process._stateframe_check_watchdog_enabled = True
         memory_supervisor = getattr(process, "_stateframe_memory_supervisor", None)
         on_leader_reaped = getattr(memory_supervisor, "notify_leader_reaped", None)
         if callable(on_leader_reaped):
@@ -1503,6 +1620,8 @@ def run_sandboxed(command: Sequence[object], root: str | os.PathLike[str], *,
                 expect_reap()
         collect_options = ({"on_leader_reaped": on_leader_reaped}
                            if callable(on_leader_reaped) else {})
+        if check_watchdog is not None:
+            collect_options["check_watchdog"] = check_watchdog
         if trace is None:
             stdout, stderr, timed_out, truncated, group_killed = _collect(
                 process, payload, deadline, output_limit,
@@ -1593,9 +1712,10 @@ def run_sandboxed(command: Sequence[object], root: str | os.PathLike[str], *,
         memory_limit_samples_skipped=int(getattr(process, "memory_limit_samples_skipped", 0) or 0),
         memory_limit_sample_skip_reason=getattr(process, "memory_limit_sample_skip_reason", None),
         memory_limit_stop_cause=getattr(process, "memory_limit_stop_cause", None),
-        cpu_limit_seconds=float(math.ceil(cpu_seconds)),
+        cpu_limit_seconds=_effective_cpu_limit_seconds(cpu_seconds),
         cpu_seconds_used=_check_cpu_seconds_used(process),
         cleanup_finding=cleanup_finding,
+        execution_stop=getattr(process, "execution_stop", None),
     )
 
 

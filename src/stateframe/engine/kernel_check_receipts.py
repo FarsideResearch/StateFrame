@@ -26,7 +26,7 @@ MAX_PAGE_CHARS = 12000
 _CHECK_RECEIPT_MEMO_LIMIT = 64
 CHECK_OUTCOMES = frozenset({
     "PASS", "BEHAVIOR_FAIL", "INVALID_CHECK", "ENVIRONMENT",
-    "RESOURCE_LIMIT", "NOT_RUN", "UNKNOWN",
+    "RESOURCE_LIMIT", "NO_PROGRESS", "INCOMPLETE", "NOT_RUN", "UNKNOWN",
 })
 MEMORY_LIMIT_MECHANISMS = frozenset({
     "cgroup_memory_max", "rlimit_data", "rlimit_data+rss_supervisor",
@@ -276,6 +276,8 @@ def _selector_scope(selector: str, value: object) -> tuple[str, ...]:
 
 def _execution_termination(exit_code: object, reported: object = None) -> str:
     explicit = _text(reported).strip().upper()
+    if explicit in {"NO_PROGRESS", "TELEMETRY_UNAVAILABLE", "SUPERVISION_ERROR", "USER_DEADLINE", "CANCELLED", "EXTERNAL_SIGNAL"}:
+        return explicit
     if explicit in {"RESOURCE_LIMIT", "KILLED", "SIGKILL", "OUT_OF_MEMORY"}:
         return "RESOURCE_LIMIT"
     if explicit in {"TIMEOUT", "TIMED_OUT", "WALL_TIMEOUT"}:
@@ -388,7 +390,7 @@ def _public_receipt(private: Mapping[str, object], journal: object = None) -> di
         key: value for key, value in private.items()
         if key not in {
             "stdout", "stderr", "assertion_context", "_stateframe_memo_generation",
-            "memory_limit_mechanism",
+            "memory_limit_mechanism", "execution_stop",
         }
     }
     # The stored receipt remains lossless. Recompute visible sizes and preview
@@ -500,6 +502,8 @@ def classify_check_outcome(
     reached assertion into an environment result.
     """
     typed = typed_observation if isinstance(typed_observation, Mapping) else {}
+    from kernel_check_watchdog import execution_stop_outcome, validate_execution_stop
+    execution_stop = validate_execution_stop(typed.get("execution_stop"))
     if outcome is None:
         outcome = typed.get("outcome", typed.get("result"))
     if failure_phase is None:
@@ -521,6 +525,8 @@ def classify_check_outcome(
         isinstance(typed_observation, Mapping)
         and any(_text(typed.get(key)).strip() for key in ("failure_phase", "phase"))
     )
+    if execution_stop is not None:
+        return execution_stop_outcome(execution_stop), "HOST", False
     output = "\n".join(value for value in (stdout, stderr) if isinstance(value, str))
     opening_denial = sandbox_open_denial(output, read_grants)
     if opening_denial is not None:
@@ -557,6 +563,8 @@ def classify_check_outcome(
     )
     # Explicit settled behavior survives incidental termination text. Reach is
     # separate: an UNKNOWN observation that reached its target is still UNKNOWN.
+    if typed_termination == "NO_PROGRESS":
+        return "NO_PROGRESS", "HOST", False
     if selected == "BEHAVIOR_FAIL":
         preserved_phase = phase if phase in {
             "HOST", "EXECUTION", "TIMEOUT", "ASSERTION", "OBSERVATION"} else "ASSERTION"
@@ -655,7 +663,7 @@ def _valid_cgroup_leaf_pattern(value: object) -> bool:
 
 def _emit(runtime: object, receipt: Mapping[str, object], *,
           memory_limit_mechanism: object = None,
-          cgroup_leaf_pattern: object = None) -> None:
+          cgroup_leaf_pattern: object = None, execution_stop: object = None) -> None:
     journal = getattr(runtime, "journal", None)
     emit = getattr(journal, "emit", None)
     if callable(emit):
@@ -685,6 +693,8 @@ def _emit(runtime: object, receipt: Mapping[str, object], *,
                if memory_limit_mechanism in MEMORY_LIMIT_MECHANISMS else {}),
             **({"cgroup_leaf_pattern": cgroup_leaf_pattern}
                if _valid_cgroup_leaf_pattern(cgroup_leaf_pattern) else {}),
+            **({"execution_stop": execution_stop, "exit_code": receipt["exit_code"]}
+               if execution_stop is not None else {}),
             **bookmark_fields,
             summary=receipt["summary"],
             stdout_bytes=receipt["stdout_bytes"],
@@ -769,14 +779,18 @@ def canonical_identity(rows: Sequence[Mapping[str, object]]) -> dict[str, object
 
     Wrappers (owner receipt, test receipt, completion authority, automatic
     result) REFERENCE this; they never re-derive an outcome from exit text.
-    Aggregate: any BEHAVIOR_FAIL -> BEHAVIOR_FAIL; all PASS -> PASS; else the
-    single child's outcome or UNKNOWN.  ``execution_id`` is the latest child.
+    An interrupted aggregate is incomplete. Otherwise a behavior failure
+    settles it, and a pass requires all children to pass.  ``execution_id`` is the latest child.
     """
     children = [row for row in rows if isinstance(row, Mapping) and row.get("execution_id")]
     if not children:
         return {}
     outcomes = [str(row.get("outcome") or "UNKNOWN").upper() for row in children]
-    if "BEHAVIOR_FAIL" in outcomes:
+    if "NO_PROGRESS" in outcomes:
+        outcome = "NO_PROGRESS"
+    elif "INCOMPLETE" in outcomes:
+        outcome = "INCOMPLETE"
+    elif "BEHAVIOR_FAIL" in outcomes:
         outcome = "BEHAVIOR_FAIL"
     elif all(item == "PASS" for item in outcomes):
         outcome = "PASS"
@@ -836,6 +850,12 @@ def record_check_output(
         stderr_text = unit_policy.project_check_output(stderr_text, "pytest")
         context_text = unit_policy.project_check_output(context_text, "pytest")
     typed = typed_observation if isinstance(typed_observation, Mapping) else {}
+    from kernel_check_watchdog import validate_execution_stop
+    execution_stop = validate_execution_stop(typed.get("execution_stop"))
+    if execution_stop is not None:
+        termination_reason = execution_stop["cause"]
+        execution_complete, reached_observation = False, False
+        assertion_reached = product_observed = False
     if counts is None:
         counts = typed.get("counts")
     if execution_complete is None:
@@ -943,7 +963,7 @@ def record_check_output(
         termination not in {"UNKNOWN", "RESOURCE_LIMIT", "TIMEOUT"}
         or typed_outcome in {"PASS", "BEHAVIOR_FAIL"}
     )
-    if termination in {"RESOURCE_LIMIT", "TIMEOUT"}:
+    if execution_stop is not None or termination in {"RESOURCE_LIMIT", "TIMEOUT", "NO_PROGRESS"}:
         complete = False
     revision_text = (_revision_value(runtime, effective_revision)
                      if effective_revision is not None else _current_revision(runtime))
@@ -963,7 +983,8 @@ def record_check_output(
     environment_error = (sandbox_exec_denial("\n".join((stdout_text, stderr_text)),
                                              read_grants=read_grants)
                          if typed_outcome == "ENVIRONMENT" else None)
-    receipt_status = _CANONICAL_STATUS.get(typed_outcome)
+    receipt_status = ("UNKNOWN" if execution_stop is not None or termination == "NO_PROGRESS"
+                      else _CANONICAL_STATUS.get(typed_outcome))
     if environment_error:
         receipt_status = "HOST_REFUSED"
     if receipt_status is None:
@@ -996,6 +1017,7 @@ def record_check_output(
         "counts": structured_counts,
         "execution_complete": complete,
         "termination_reason": termination,
+        **({"execution_stop": execution_stop} if execution_stop is not None else {}),
         **capture_metadata,
         "assertion_reached": assertion_reached,
         "product_observed": product_observed,
@@ -1030,7 +1052,10 @@ def record_check_output(
         exit_code=exit_code, typed_observation=typed_observation,
         failure_phase=failure_phase, assertion_reached=assertion_reached,
         product_observed=product_observed, wrapper_error=wrapper_text)
-    if isinstance(existing, Mapping):
+    if isinstance(existing, Mapping) and existing.get("execution_stop") is not None:
+        # Later views cannot replace the facts of a terminal host stop.
+        private = dict(existing)
+    elif isinstance(existing, Mapping) and execution_stop is None:
         merged = dict(existing)
         if wrapper_text:
             merged["wrapper_parse_error"] = wrapper_text
@@ -1136,7 +1161,8 @@ def record_check_output(
     if not suppress_unchanged:
         _emit(runtime, public,
               memory_limit_mechanism=private.get("memory_limit_mechanism"),
-              cgroup_leaf_pattern=cgroup_leaf_pattern)
+              cgroup_leaf_pattern=cgroup_leaf_pattern,
+              execution_stop=private.get("execution_stop"))
     setattr(runtime, "_latest_check_receipt", dict(public))
     _refresh_referencing_rows(runtime, public)
     return dict(public)
@@ -1151,7 +1177,9 @@ def _refresh_referencing_rows(runtime: object, public: Mapping[str, object]) -> 
     """
     outcome = str(public.get("outcome") or "").upper()
     status = str(public.get("status") or "").upper()
-    if outcome not in _CANONICAL_STATUS and (outcome, status) != ("ENVIRONMENT", "HOST_REFUSED"):
+    interrupted = outcome in {"NO_PROGRESS", "INCOMPLETE"}
+    if (not interrupted and outcome not in _CANONICAL_STATUS
+            and (outcome, status) != ("ENVIRONMENT", "HOST_REFUSED")):
         return
     execution = str(public.get("execution_id") or "")
     for collection in ("test_receipts",):
@@ -1166,6 +1194,11 @@ def _refresh_referencing_rows(runtime: object, public: Mapping[str, object]) -> 
                 continue  # aggregate rows are re-derived by canonical_identity
             row["outcome"] = outcome
             row["status"] = _CANONICAL_STATUS.get(outcome, status)
+            if interrupted:
+                for key in ("exit_code", "counts", "collected_tests", "reached_observation",
+                            "assertion_reached", "product_observed", "execution_complete",
+                            "termination_reason", "failure_phase"):
+                    row[key] = public.get(key)
 
 
 def retrieve_check_output(

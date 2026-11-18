@@ -814,7 +814,7 @@ class Descendants:
 
 
 def _log_kill_unit(process, reason: str, log_level: str, deadline_seconds: float, started: float,
-                   survivors: tuple[int, ...]) -> None:
+                   survivors: tuple[int, ...], *, journal: object | None = None) -> None:
     """Log-only: why the launch unit was killed, and survivors as ERROR. Never raises.
 
     log_level is WARN for kills of live or abandoned work; callers that kill an already
@@ -824,7 +824,7 @@ def _log_kill_unit(process, reason: str, log_level: str, deadline_seconds: float
     # deadline_seconds is the SIGKILL wait, not a resource limit, so it is never limit=.
     emit_kill("exec_tracker", target=f"launch unit pid {process.pid}", why=reason,
               pid=process.pid, elapsed_s=elapsed, level=log_level,
-              cause_key=f"kill_unit:{reason}")
+              cause_key=f"kill_unit:{reason}", journal=journal)
     if survivors:
         emit_kill("exec_tracker", target=f"launch unit pid {process.pid}",
                   why=f"{len(survivors)} descendant(s) survived SIGKILL after a "
@@ -844,7 +844,8 @@ def _log_unverified_containment(process, reason: str) -> None:
 def kill_launch_unit(process, family: Descendants | None = None,
                      deadline_seconds: float = 2.0, *,
                      launch_identity: LaunchIdentity | None,
-                     reason: str = "unspecified", log_level: str = "WARN") -> tuple[int, ...]:
+                     reason: str = "unspecified", log_level: str = "WARN",
+                     journal: object | None = None) -> tuple[int, ...]:
     """SIGKILL a launched process and every descendant; return the PIDs that survived.
 
     Killing only the launcher is not containment. A bwrap launcher killed while its inner
@@ -921,7 +922,7 @@ def kill_launch_unit(process, family: Descendants | None = None,
                 _log_unverified_containment(process, reason)
                 raise ContainmentUnverified(
                     "containment unverified: launch identity or descendant family unavailable; survivors unknown")
-            _log_kill_unit(process, reason, log_level, deadline_seconds, started, ())
+            _log_kill_unit(process, reason, log_level, deadline_seconds, started, (), journal=journal)
             return ()
         if time.monotonic() >= until:
             survivors = {row.pid for row in live}
@@ -931,5 +932,6 @@ def kill_launch_unit(process, family: Descendants | None = None,
                 _log_unverified_containment(process, reason)
                 raise ContainmentUnverified(
                     "containment unverified: launch identity or descendant family unavailable; survivors unknown")
-            _log_kill_unit(process, reason, log_level, deadline_seconds, started, tuple(sorted(survivors)))
+            _log_kill_unit(process, reason, log_level, deadline_seconds, started,
+                           tuple(sorted(survivors)), journal=journal)
             return tuple(sorted(survivors))

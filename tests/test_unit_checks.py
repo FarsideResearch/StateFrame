@@ -307,6 +307,9 @@ def test_command_recipe_cannot_write_outside_disposable_clone(tmp_path):
 
 
 def test_command_recipe_uses_check_sandbox_boundary(tmp_path, monkeypatch):
+    from kernel_check_watchdog import CheckWatchdogConfig
+    monkeypatch.delenv("STATEFRAME_CHECK_STALL_SECONDS", raising=False)
+    monkeypatch.delenv("STATEFRAME_PUBLIC_CHECK_CPU_SECONDS", raising=False)
     root = candidate(tmp_path)
     script = root / 'tests/check.py'
     script.write_text('assert True\n')
@@ -333,8 +336,10 @@ def test_command_recipe_uses_check_sandbox_boundary(tmp_path, monkeypatch):
     assert len(calls) == 1
     assert calls[0][0] == [sys.executable, 'tests/check.py']
     assert calls[0][1] != root
-    assert calls[0][2]['timeout'] == 300
-    assert calls[0][2]['cpu_seconds'] == 300
+    assert calls[0][2]['timeout'] is None
+    assert calls[0][2]['cpu_seconds'] is None
+    assert isinstance(calls[0][2]['check_watchdog'], CheckWatchdogConfig)
+    assert calls[0][2]['check_watchdog'].stall_seconds > 0
     assert calls[0][2]['output_limit'] == 256 * 1024
     assert re.fullmatch(r'[0-9a-f]{32}',
                         calls[0][2]['internal_env']['STATEFRAME_CHECK_TOKEN'])

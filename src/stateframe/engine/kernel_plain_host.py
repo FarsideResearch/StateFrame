@@ -73,6 +73,7 @@ class CheckOutcome:
     synthetic: bool = False
     error: str = ""
     cgroup_leaf_pattern: str | None = None
+    execution_stop: Mapping[str, object] | None = None
 
 
 CheckRunner = Callable[[Sequence[str], Path, Mapping[str, str]], CheckOutcome]
@@ -253,15 +254,17 @@ class PlainHost:
             exit_code=outcome.exit_code, timed_out=outcome.timed_out, synthetic=outcome.synthetic,
             output_sha256=sha256_bytes(outcome.output.encode()), output_chars=len(outcome.output),
             error=outcome.error))
+        stop_fields = ({"execution_stop": dict(outcome.execution_stop)}
+                       if outcome.execution_stop is not None else {})
         if profile:
             with profile.span("first_receipt"):
-                self.journal.write("check_receipt", receipt=asdict(receipt),
+                self.journal.write("check_receipt", receipt=asdict(receipt), **stop_fields,
                                    execution_id=profile.execution_id,
                                    **({"cgroup_leaf_pattern": outcome.cgroup_leaf_pattern}
                                       if outcome.cgroup_leaf_pattern else {}))
         else:
             self.journal.receipt(
-                "check_receipt", receipt,
+                "check_receipt", receipt, **stop_fields,
                 **({"cgroup_leaf_pattern": outcome.cgroup_leaf_pattern}
                    if outcome.cgroup_leaf_pattern else {}),
             )
@@ -402,6 +405,7 @@ def sandboxed_check_runner(lock_path: Path, audit_path: Path, *,
     def execute(argv: Sequence[str], root: Path) -> CheckOutcome:
         from capability_study_support import locked_test_process
         from kernel_execution_policy import check_cpu_backstop_seconds, run_sandboxed
+        from kernel_check_watchdog import check_watchdog_config
         from kernel_test_artifact_policy import prepare_pytest_command
         profile = _active_test_run_profile()
         config_span = profile.start_span("config_command_preparation") if profile else None
@@ -431,7 +435,7 @@ def sandboxed_check_runner(lock_path: Path, audit_path: Path, *,
                 if profiled_command:
                     execution_options["observe_pytest"] = True
                 result = run_sandboxed(
-                    list(command), root, env=env, timeout=CHECK_TIMEOUT_S,
+                    list(command), root, env=env, timeout=None, check_watchdog=check_watchdog_config(),
                     cpu_seconds=check_cpu_backstop_seconds(),
                     output_limit=256 * 1024, **execution_options,
                 )
@@ -452,15 +456,19 @@ def sandboxed_check_runner(lock_path: Path, audit_path: Path, *,
             if profile and held_span is not None:
                 profile.end_span(held_span)
                 profile.mark("test_lock_released")
+        execution_stop = getattr(result, "execution_stop", None)
         stdout, stderr = result.completed.stdout or "", result.completed.stderr or ""
         if isinstance(stdout, bytes):
             stdout = stdout.decode("utf-8", "replace")
         if isinstance(stderr, bytes):
             stderr = stderr.decode("utf-8", "replace")
         note = "\n[output truncated by the host]" if result.output_truncated else ""
-        return CheckOutcome(exit_code=None if result.timed_out else result.completed.returncode,
+        if execution_stop is not None:
+            note += "\ncheck stopped: " + str(execution_stop["cause"])
+        return CheckOutcome(exit_code=None if result.timed_out or execution_stop is not None else result.completed.returncode,
                             output=stdout + stderr + note, timed_out=bool(result.timed_out),
-                            cgroup_leaf_pattern=getattr(result, "cgroup_leaf_pattern", None))
+                            cgroup_leaf_pattern=getattr(result, "cgroup_leaf_pattern", None),
+                            execution_stop=execution_stop)
 
     return run
 

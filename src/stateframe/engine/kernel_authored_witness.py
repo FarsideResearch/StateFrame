@@ -38,7 +38,6 @@ from pathlib import Path
 
 ENV = "STATEFRAME_AUTHORED_WITNESS"
 SCHEMA = "stateframe-authored-witness/1"
-_PARENT_TIMEOUT_SECONDS = 300.0
 _MAX_COPY_BYTES = 512 * 1024 * 1024
 _MAX_SOURCE_BYTES = 1024 * 1024
 _COPY_IGNORE = shutil.ignore_patterns(".git", "__pycache__", ".pytest_cache", ".test-tmp",
@@ -223,7 +222,8 @@ def replay_on_parent(runtime: object, *, root: Path, command: Sequence[object],
                      parent: Mapping[str, object], current: Mapping[str, object]
                      ) -> dict[str, object]:
     """Run the host's own test command for ``test_path`` against the parent tree."""
-    from kernel_execution_policy import run_sandboxed
+    from kernel_check_watchdog import check_watchdog_config, execution_stop_outcome, validate_execution_stop
+    from kernel_execution_policy import check_cpu_backstop_seconds, run_sandboxed
     from kernel_reprospec import _run_result
     if not command:
         return {"outcome": "ENVIRONMENT", "reason": "NO_HOST_COMMAND"}
@@ -244,8 +244,14 @@ def replay_on_parent(runtime: object, *, root: Path, command: Sequence[object],
         env = ({str(k): _retarget(str(v), resolved_root, replacement)
                 for k, v in environment.items()} if environment is not None else None)
         try:
-            result = run_sandboxed(argv, destination, env=env, timeout=_PARENT_TIMEOUT_SECONDS,
-                                   output_limit=256 * 1024)
+            result = run_sandboxed(argv, destination, env=env, timeout=None,
+                                   check_watchdog=check_watchdog_config(),
+                                   cpu_seconds=check_cpu_backstop_seconds(), output_limit=256 * 1024)
+            stop = validate_execution_stop(getattr(result, "execution_stop", None))
+            if stop is not None:
+                return {"outcome": execution_stop_outcome(stop), "reason": stop["cause"],
+                        "execution_stop": stop, "execution_complete": False,
+                        "exit_code": result.completed.returncode}
             completed = result.completed
             output = f"{completed.stdout or ''}\n{completed.stderr or ''}"
             if getattr(result, "timed_out", False):
@@ -285,7 +291,7 @@ def classify_parent(replay: Mapping[str, object], names: Sequence[str],
     Absence counts only when the error names the entry symbol, or a module the
     candidate itself added; any other import/collection error is environment."""
     outcome = replay.get("outcome")
-    if replay.get("exit_code") == 0 or outcome == "PASS":
+    if replay.get("execution_stop") is not None or replay.get("exit_code") == 0 or outcome == "PASS":
         return None
     text = str(replay.get("output_tail") or "")
     for match in _ABSENCE_ERROR.finditer(text):
@@ -402,6 +408,9 @@ def note_test_run(runtime: object, *, selectors: Sequence[object], exit_code: in
         witness_kind = classify_parent(replay, names, added_modules(parent, binding))
         verdict["parent"] = {key: replay.get(key) for key in (
             "outcome", "exit_code", "tests", "failure_phase", "reason")}
+        if replay.get("execution_stop") is not None:
+            verdict["parent"].update(execution_stop=replay["execution_stop"], execution_complete=False)
+            attempted.pop((path, sha), None)
         if witness_kind is None:
             verdict["reason"] = ("PARENT_PASSED" if replay.get("outcome") == "PASS"
                                  else str(replay.get("reason") or "PARENT_NOT_BEHAVIOR_FAIL"))

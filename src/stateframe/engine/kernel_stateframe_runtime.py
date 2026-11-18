@@ -8580,7 +8580,10 @@ class StateFrameRuntime:
         memory_limit_killed: bool = False,
         termination_evidence: Mapping[str, object] | None = None,
     ) -> None:
-        replay_green = self._replay_green_observation(selectors)
+        from kernel_check_watchdog import execution_stop_outcome, validate_execution_stop
+        stop = validate_execution_stop(typed_observation.get("execution_stop")
+                                       if isinstance(typed_observation, Mapping) else None)
+        replay_green = self._replay_green_observation(selectors) if stop is None else None
         if replay_green is not None:
             # Only the result is archived evidence.  Binding is recomputed by
             # the normal current-host path below, which prevents an old
@@ -8696,13 +8699,15 @@ class StateFrameRuntime:
             "product_root": str(self.owner.root),
             "selectors": list(selector_scope),
         }
-        environment_reason = environment_check_reason(environment_context)
-        product_failure = (exit_code in {2, 3, 4, 5}
+        environment_reason = environment_check_reason(environment_context) if stop is None else None
+        product_failure = (stop is None and exit_code in {2, 3, 4, 5}
                            and product_check_failure(environment_context))
         if environment_reason and not getattr(self, "_evictfix_environment_notice_announced", False):
             self._evictfix_environment_notice_pending = environment_reason
         certificate_fields = {}
-        if getattr(self, "stateframe_vacuity_sentinel_mode", "off") == "on":
+        if stop is not None:
+            self._vacuity_certificate = None
+        elif getattr(self, "stateframe_vacuity_sentinel_mode", "off") == "on":
             from kernel_vacuity_sentinel import certificate_from_output
             # Bound to the candidate the run observed; a later edit makes it
             # stale (GATE_NEVER_RAN at the current head) in current_view().
@@ -8731,6 +8736,8 @@ class StateFrameRuntime:
         # Name the exact limit from the sandbox's evidence; a SIGKILL no limit explains is
         # reported as external with the CPU it had used, never as a guessed rlimit.
         from kernel_kill_attribution import receipt_fields
+        if stop is not None:
+            termination_evidence = {**(termination_evidence or {}), "execution_stop": stop}
         termination_fields = receipt_fields(
             exit_code, memory_limit_killed=memory_limit_killed, evidence=termination_evidence)
         likely_initiator = termination_fields.pop("likely_initiator")
@@ -8764,6 +8771,9 @@ class StateFrameRuntime:
                                   } for row in canonical_rows],
                                   signal_number=signal_number, signal_name=signal_name,
                                   likely_initiator=likely_initiator,
+                                  **({"execution_stop": stop, "outcome": execution_stop_outcome(stop),
+                                      "execution_complete": False, "termination_reason": stop["cause"]}
+                                     if stop is not None else {}),
                                   **termination_fields,
                                   binding=filtered_binding,
                                   after_binding=filtered_after_binding,
@@ -8792,61 +8802,62 @@ class StateFrameRuntime:
         # even when its lstat metadata happens to look unchanged.
         self.note_mutation(self._test_run_write_set, event)
         self._record_test_completion_receipt(event, canonical_rows)
-        self._idealpath_record_test_observation(
-            selectors, exit_code, filtered_binding, observation)
-        try:
-            # Q3 native witness writer: a model-authored test that calls the new entry,
-            # passes here and (host-replayed) fails on the parent unblocks NEW_BEHAVIOR.
-            from kernel_authored_witness import note_test_run as _authored_witness_note
-            witness_binding = dict(binding)
-            witness_binding["binding_stable"] = stable
-            witness_binding["host_execution_id"] = (
-                self.test_receipts[-1].get("receipt_id")
-                if self.test_receipts and isinstance(self.test_receipts[-1], Mapping)
-                else host_action_id
-            )
-            _authored_witness_note(
-                self, selectors=selectors, exit_code=exit_code, binding=witness_binding,
-                observation=observation, command=command, environment=test_environment)
-        except Exception as error:  # witness writer is fail-closed for certification
-            self.journal.emit(
-                "v46_mechanism_wiring_error",
-                producer="kernel_authored_witness",
-                phase="test_observation",
-                status="error",
-                error_type=type(error).__name__,
-                message=f"{type(error).__name__}: {(str(error).splitlines() or ['<no message>'])[0][:240]}",
-                dispatch=False,
-            )
-        if exit_code == 0:
-            # Public green is necessary but cannot substitute for the exact
-            # frozen S3 discriminator.  Run it in the same isolated runner
-            # before S6 verification can be admitted.
-            self._run_idealpath_frozen_repros()
-        if getattr(self, "history_findings", None) is not None and stable:
-            self._history_findings_from_test(self.test_receipts[-1], selectors, exit_code)
-        if getattr(self, "stateframe_raising_h_packets_mode", "off") == "on":
-            self._raising_h_note_observation(self.test_receipts[-1], stable=stable,
-                                             binding=filtered_binding)
-        try:
-            from kernel_stateframe_hstate_plus import note_test_receipt
-            note_test_receipt(self, self.test_receipts[-1])
-        except (ImportError, AttributeError, TypeError, ValueError):
-            pass
-        if getattr(self, "stateframe_post_green_work_menu_mode", "off") == "on":
-            from kernel_post_green_menu import note_test_receipt as post_green_test_receipt
-            receipt = self.test_receipts[-1]
-            if self._is_explicit_test_completion_receipt(receipt, self):
-                post_green_test_receipt(self, receipt)
-            else:
-                from kernel_post_green_menu import note_same_request_host_receipt
-                note_same_request_host_receipt(self, receipt)
-            if exit_code == 0 and os.environ.get("STATEFRAME_REPLAY_POSTGREEN_ACTIONS", "off").strip().lower() == "on":
-                self._replay_postgreen_actions(selectors)
-        if exit_code == 0:
-            self._run_host_checks_after_public_green()
-            if getattr(self, "same_shape_sweep_mode", "off") == "on":
-                self._run_same_shape_sweep_after_public_green()
+        if stop is None:
+            self._idealpath_record_test_observation(
+                selectors, exit_code, filtered_binding, observation)
+            try:
+                # Q3 native witness writer: a model-authored test that calls the new entry,
+                # passes here and (host-replayed) fails on the parent unblocks NEW_BEHAVIOR.
+                from kernel_authored_witness import note_test_run as _authored_witness_note
+                witness_binding = dict(binding)
+                witness_binding["binding_stable"] = stable
+                witness_binding["host_execution_id"] = (
+                    self.test_receipts[-1].get("receipt_id")
+                    if self.test_receipts and isinstance(self.test_receipts[-1], Mapping)
+                    else host_action_id
+                )
+                _authored_witness_note(
+                    self, selectors=selectors, exit_code=exit_code, binding=witness_binding,
+                    observation=observation, command=command, environment=test_environment)
+            except Exception as error:  # witness writer is fail-closed for certification
+                self.journal.emit(
+                    "v46_mechanism_wiring_error",
+                    producer="kernel_authored_witness",
+                    phase="test_observation",
+                    status="error",
+                    error_type=type(error).__name__,
+                    message=f"{type(error).__name__}: {(str(error).splitlines() or ['<no message>'])[0][:240]}",
+                    dispatch=False,
+                )
+            if exit_code == 0:
+                # Public green is necessary but cannot substitute for the exact
+                # frozen S3 discriminator.  Run it in the same isolated runner
+                # before S6 verification can be admitted.
+                self._run_idealpath_frozen_repros()
+            if getattr(self, "history_findings", None) is not None and stable:
+                self._history_findings_from_test(self.test_receipts[-1], selectors, exit_code)
+            if getattr(self, "stateframe_raising_h_packets_mode", "off") == "on":
+                self._raising_h_note_observation(self.test_receipts[-1], stable=stable,
+                                                 binding=filtered_binding)
+            try:
+                from kernel_stateframe_hstate_plus import note_test_receipt
+                note_test_receipt(self, self.test_receipts[-1])
+            except (ImportError, AttributeError, TypeError, ValueError):
+                pass
+            if getattr(self, "stateframe_post_green_work_menu_mode", "off") == "on":
+                from kernel_post_green_menu import note_test_receipt as post_green_test_receipt
+                receipt = self.test_receipts[-1]
+                if self._is_explicit_test_completion_receipt(receipt, self):
+                    post_green_test_receipt(self, receipt)
+                else:
+                    from kernel_post_green_menu import note_same_request_host_receipt
+                    note_same_request_host_receipt(self, receipt)
+                if exit_code == 0 and os.environ.get("STATEFRAME_REPLAY_POSTGREEN_ACTIONS", "off").strip().lower() == "on":
+                    self._replay_postgreen_actions(selectors)
+            if exit_code == 0:
+                self._run_host_checks_after_public_green()
+                if getattr(self, "same_shape_sweep_mode", "off") == "on":
+                    self._run_same_shape_sweep_after_public_green()
         if getattr(self, "stateframe_completion_v2_mode", "off") == "on":
             self._sync_completion_authority()
         if getattr(self, "stateframe_green_coherence_mode", "off") == "on":

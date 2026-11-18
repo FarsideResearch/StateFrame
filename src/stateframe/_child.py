@@ -1115,7 +1115,8 @@ def install_check_recorder(run: Path, replayer: Replayer | None, recorded_dir: P
     hashes the raw output into its typed state, so the rebuilt request would differ from the recorded one for no
     real reason. While the replay is still faithful, a re-executed check whose output equals the recorded one apart
     from durations and run ids is handed the RECORDED output: the same result, with the timings the original run
-    really measured. Any other difference keeps the new output, so the replay notices it and continues live.
+    really measured. A stopped replay additionally verifies the check binding and termination facts before
+    reusing the recorded details. Divergent termination refuses reuse of a recorded response.
     """
     import dataclasses
     import zlib
@@ -1123,6 +1124,8 @@ def install_check_recorder(run: Path, replayer: Replayer | None, recorded_dir: P
     # Fail open: this only serves a later resume, so it must never break the run it records.
     try:
         import kernel_execution_policy as policy
+        from kernel_check_watchdog import validate_execution_stop
+        from kernel_pilot import ACTIVE_RUNTIME
 
         folder = run / "checks"
         folder.mkdir(exist_ok=True)
@@ -1148,18 +1151,45 @@ def install_check_recorder(run: Path, replayer: Replayer | None, recorded_dir: P
         except (OSError, ValueError, zlib.error):
             return None
 
+    def check_binding(index, argv, root):
+        runtime = ACTIVE_RUNTIME.get()
+        resolved = Path(root).resolve()
+        run_root = run.resolve()
+        workspace = str(resolved.relative_to(run_root)) if resolved.is_relative_to(run_root) else str(resolved)
+        context = {"ordinal": index, "argv": argv, "workspace": workspace,
+                   "request_id": getattr(runtime, "current_request_id", None),
+                   "execution_id": getattr(runtime, "_pending_check_execution_id", None)}
+        return hashlib.sha256(json.dumps(context, sort_keys=True).encode()).hexdigest()
+
+    def divergence(index):
+        substitution["enabled"] = False
+        if replayer is not None:
+            replayer.note_check_divergence(index)
+        emit("check_replay_diverged", check=index, reason="check termination or execution binding changed")
+
     def run_sandboxed(command, root, **kwargs):
-        result = original(command, root, **kwargs)  # a real check error propagates exactly as before
         if not counter["on"]:
-            return result
+            return original(command, root, **kwargs)
+        index = counter["n"] + 1
+        comparing = substitution["enabled"] and replayer is not None and (
+            replayer.active or replayer.pending is not None)
+        previous = recorded_check(index) if comparing else None
         try:
-            return record_and_match(command, result)
+            # Checks can write files. Replay must run the effect and compare
+            # its terminal facts before it can use the recorded evidence.
+            result = original(command, root, **kwargs)
+        except Exception:
+            if previous is not None and previous.get("execution_stop") is not None:
+                divergence(index)
+            raise
+        try:
+            return record_and_match(command, root, result, previous, comparing)
         except Exception as error:  # noqa: BLE001 - disk full, unexpected result shape: pass the result through
             counter["on"] = False
             emit("check_recorder_off", reason=f"{type(error).__name__}: {error}"[:200])
             return result
 
-    def record_and_match(command, result):
+    def record_and_match(command, root, result, previous, comparing):
         counter["n"] += 1
         index = counter["n"]
         completed = result.completed
@@ -1167,12 +1197,27 @@ def install_check_recorder(run: Path, replayer: Replayer | None, recorded_dir: P
                   "returncode": completed.returncode,
                   "stdout": completed.stdout if isinstance(completed.stdout, str) else None,
                   "stderr": completed.stderr if isinstance(completed.stderr, str) else None}
-        if substitution["enabled"] and replayer is not None and replayer.active:
-            previous = recorded_check(index)
-            if (previous is not None and previous.get("argv") == record["argv"]
-                    and previous.get("returncode") == record["returncode"]
-                    and masked(previous.get("stdout")) == masked(record["stdout"])
-                    and masked(previous.get("stderr")) == masked(record["stderr"])):
+        stop = validate_execution_stop(getattr(result, "execution_stop", None))
+        if stop is not None:
+            record.update(execution_stop=stop, check_binding=check_binding(index, record["argv"], root))
+        if comparing:
+            prior_stop = validate_execution_stop(previous.get("execution_stop")) if previous is not None else None
+            output_matches = (previous is not None and previous.get("argv") == record["argv"]
+                              and previous.get("returncode") == record["returncode"]
+                              and masked(previous.get("stdout")) == masked(record["stdout"])
+                              and masked(previous.get("stderr")) == masked(record["stderr"]))
+            if stop is not None or prior_stop is not None:
+                audit_fields = {"inactivity_seconds", "progress_sequence", "last_progress_kind"}
+                same_stop = (stop is not None and prior_stop is not None
+                             and previous.get("check_binding") == record.get("check_binding")
+                             and all(stop[key] == prior_stop[key] for key in stop.keys() - audit_fields))
+                if output_matches and same_stop:
+                    result = dataclasses.replace(result, execution_stop=prior_stop)
+                    record["execution_stop"] = prior_stop
+                else:
+                    divergence(index)
+                    output_matches = False
+            if output_matches:
                 if (previous.get("stdout"), previous.get("stderr")) != (record["stdout"], record["stderr"]):
                     completed = subprocess.CompletedProcess(completed.args, completed.returncode,
                                                             previous.get("stdout"), previous.get("stderr"))
@@ -1180,7 +1225,7 @@ def install_check_recorder(run: Path, replayer: Replayer | None, recorded_dir: P
                     record.update(stdout=previous.get("stdout"), stderr=previous.get("stderr"),
                                   recorded_timings=True)
             else:
-                substitution["enabled"] = False  # the replay's state differs from here on; never patch again
+                substitution["enabled"] = False
         atomic_bytes(folder / f"{index:04d}.json.z",
                      zlib.compress(json.dumps(record).encode("utf-8")))
         return result

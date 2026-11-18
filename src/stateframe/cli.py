@@ -442,7 +442,8 @@ def _print_summary(summary: dict) -> None:
         print(diff if diff else "(no changes)")
     before, after = summary["tests_before"], summary["tests_after"]
     print("=== tests ===" if summary.get("check_source") == "tests" else "=== checks ===")
-    print(f"before: {'PASS' if before['passed'] else 'FAIL' if before['passed'] is False else 'NOT RUN'}  after: "
+    from .outcomes import check_label
+    print(f"before: {check_label(before)}  after: "
           f"{summary.get('check_outcome', 'not_run').upper()}  ({after['command']})")
     print("=== run summary ===")
     cached = summary.get("cached_tokens")

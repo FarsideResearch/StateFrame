@@ -849,7 +849,8 @@ def run_frozen_check(
     product_digest = harness_digest = ""
     product_modes: dict[str, int] = {}
     permit = active_permits()
-    context = acquire(*permit, timeout=300.0) if permit is not None else None
+    from kernel_read_fixes import check_admission_time_left
+    context = acquire(*permit, run_remaining=check_admission_time_left) if permit is not None else None
     clone: Path | None = None
     before = None
     try:
@@ -894,13 +895,28 @@ def run_frozen_check(
                 invalid_reason = "CHECK_WROTE_FILES"
                 raw = "check clone differs from candidate before execution"
             else:
-                observations = [execute(clone, selector) for selector in recipe.selectors]
+                for selector in recipe.selectors:
+                    observation = execute(clone, selector)
+                    observations.append(observation)
+                    if getattr(observation, "execution_stop", None) is not None:
+                        break
                 raw = "\n\n".join(f"[{selector}]\n{observation}"
                                    for selector, observation in zip(recipe.selectors, observations))
+                stopped = [getattr(value, "execution_stop", None) for value in observations
+                           if getattr(value, "execution_stop", None) is not None]
                 after = scan(clone, exclude=_check_ignored)
                 wrote_paths = tuple(sorted(path for path in set(before) | set(after)
                                          if before.get(path) != after.get(path)))
-                if wrote_paths:
+                if stopped:
+                    invalid_reason = "CHECK_" + str(stopped[-1]["cause"]).upper()
+                    # The composed wrapper owns a pending receipt context for
+                    # both pytest and whole-command frozen checks.
+                    from kernel_pilot import ACTIVE_RUNTIME
+                    runtime = ACTIVE_RUNTIME.get()
+                    if runtime is not None and hasattr(runtime, "_unit_check_execution_stop"):
+                        runtime._unit_check_execution_stop = dict(stopped[-1])
+                        runtime._unit_check_exit_code = getattr(observations[-1], "exit_code", None)
+                elif wrote_paths:
                     invalid_reason = "CHECK_WROTE_FILES"
                 else:
                     prefix = "pytest" if recipe.command_kind == "pytest" else "check"
@@ -934,6 +950,11 @@ def run_frozen_check(
                      + projected)
     evidence_dir = Path(evidence_dir)
     evidence_dir.mkdir(parents=True, exist_ok=True)
+    # Terminal metadata belongs on the evidence tape, outside projected text.
+    stops = [getattr(value, "execution_stop", None) for value in observations
+             if getattr(value, "execution_stop", None) is not None]
+    if stops:
+        raw += "\nexecution_stopped " + json.dumps(stops, sort_keys=True)
     evidence_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     evidence_path = evidence_dir / f"{evidence_hash}.txt"
     if evidence_path.exists():
@@ -960,12 +981,14 @@ def run_check_command(clone: Path, selector: str) -> str:
     if not command:
         return "check exit 4 — empty command selector"
     if __package__:
-        from .kernel_execution_policy import ExecutionPolicyError, run_sandboxed
+        from .kernel_execution_policy import ExecutionPolicyError, check_cpu_backstop_seconds, run_sandboxed
     else:
-        from kernel_execution_policy import ExecutionPolicyError, run_sandboxed
+        from kernel_execution_policy import ExecutionPolicyError, check_cpu_backstop_seconds, run_sandboxed
+    from kernel_check_watchdog import check_watchdog_config
     token = new_check_token()
     try:
-        result = run_sandboxed(command, clone, timeout=300, cpu_seconds=300,
+        result = run_sandboxed(command, clone, timeout=None, check_watchdog=check_watchdog_config(),
+                               cpu_seconds=check_cpu_backstop_seconds(),
                                output_limit=256 * 1024,
                                internal_env={"STATEFRAME_CHECK_TOKEN": token},
                                pre_reap_cleanup=lambda: _terminate_check_token(token))
@@ -982,6 +1005,12 @@ def run_check_command(clone: Path, selector: str) -> str:
     if result.cleanup_finding is not None:
         raise UnitCheckCleanupError(result.cleanup_finding)
     reap_check_group(result.pid, token=token)
+    execution_stop = getattr(result, "execution_stop", None)
+    if execution_stop is not None:
+        from kernel_check_watchdog import IncompleteCheck
+        return IncompleteCheck("check incomplete: " + str(execution_stop["cause"])
+                               + "\n" + result.completed.stdout + result.completed.stderr,
+                               execution_stop, exit_code=result.completed.returncode)
     if result.timed_out:
         return f"check exit 124 — timed out\n{result.completed.stdout}{result.completed.stderr}"
     return (f"check exit {result.completed.returncode}\n"
