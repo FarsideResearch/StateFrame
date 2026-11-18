@@ -1,8 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.7.47 (2026-11-18)
 
 - Routing schema 2 (still off by default; set `STATEFRAME_ROUTING_SCHEMA=2` in a custom profile): a resumed run reuses each request's journaled route decision instead of re-deciding it, and a model or endpoint drift on replay is pinned and recorded as `route_drift_pinned`. The `route_decision` record now also names the endpoint (omitted when it carries credentials) and the key's variable name. A read that returns new content resets the router's reads-without-progress count. Fixed: a step carried to another route was refused when that route's model was not one of the router's own endpoints. Tests: `tests/test_routing_v2_replay_decision.py`, `tests/test_routing_v2_read_evidence_producer.py`, `tests/test_route_proposal_engine_e2e.py`, `tests/test_routing_v2_launch_policy_models.py`.
+
 ## 0.7.46 (2026-11-18)
 
 - Fixed: a mutation that replaced an existing file no longer gets reverted when the run finishes. The finish applied the model's sealed candidate, which still held the old bytes, over the committed mutation edit (in the workspace, and in the repo with `--in-place`). A committed edit is now kept; if the model also changed that file, the run journals a `mutation_candidate_conflict` row and keeps the mutation's version.
