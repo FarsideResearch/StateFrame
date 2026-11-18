@@ -44,3 +44,9 @@ def test_malformed_sanitized_addopts_loads_as_empty_tuple() -> None:
 
         assert reloaded is not None, junk
         assert reloaded.sanitized_addopts == (), junk
+
+
+def test_empty_addopts_leave_the_serialized_policy_unchanged() -> None:
+    """With no replayed addopts the payload has no sanitized_addopts key, so request bytes match earlier releases."""
+    assert "sanitized_addopts" not in Policy().to_dict()
+    assert Policy.from_mapping(Policy().to_dict()).sanitized_addopts == ()

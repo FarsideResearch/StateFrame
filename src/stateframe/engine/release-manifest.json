@@ -698,7 +698,7 @@
   "kernel_terminal_lattice.py": "7e06db2fc444e083cdc7538085b623ad87189976294c72127def258b5464f77d",
   "kernel_terminal_policy.py": "45c6fe5ffea2b9f437ed36fd1d7758f6b018178ac4521bf64427fff76dff18f6",
   "kernel_terminal_surface_unify.py": "1d2400787cafa55cc6cca4013683691a11f92d87672f699d8097f8151a19ed84",
-  "kernel_test_artifact_policy.py": "4c69dcc33e4accb3764b128b187cd7501647bd219f1e4caf6e8395dd42c5710f",
+  "kernel_test_artifact_policy.py": "87a0f2495d201b6c41d222215d8e5244821b481326e4e6df84c8d0b3b052ebce",
   "kernel_test_integrity.py": "33038078ea20f88be6fbc20cbafa131254c823250b98de8de247338aa7bc4453",
   "kernel_test_isolation.py": "6ef2f122f9435c1826bef54d44cc08c0e6fd4df39f4d7a0306332310ce40ce86",
   "kernel_test_python.py": "b1a7e7f638cc3ec66e22ec214cd016096a82cf7b8b1606ddda64b118a6ae3ae4",
