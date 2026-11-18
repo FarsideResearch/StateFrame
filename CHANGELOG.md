@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.7.51 (2026-11-18)
 
 - Fixed: the test-generation oracle keeps candidates whose comparison direction cannot be read, abstains when the original function cannot load, and logs and records base-binding fallbacks in result notes.
