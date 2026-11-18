@@ -364,6 +364,8 @@ def append_map_to_final_user_message(messages: Sequence[Mapping[str, object]],
 # request text carries verbatim ([Current source:]/[Working source:] windows,
 # read pages, exact clipped reads). A run counts only when the bytes the model
 # saw are byte-equal to the current file, so a handle never names unseen bytes.
+# A window that a read receipt names at another revision (or another path) is a
+# stale delivery: its text is not scanned for this file (see _delivery_segments).
 # Both providers feed ``request_spans``, which unions covered lines per file and
 # mints one handle per maximal run (whole file -> REWRITE). Paged descriptors and
 # allocator source-range handles stay paging addresses; edit handles are only
@@ -376,6 +378,8 @@ _SOURCE_HEADER_RE = re.compile(
     r"|Paged source|Exact clipped read): (?P<path>[^\]\n]+)\]")
 _READ_PAGE_RE = re.compile(r"\[read page\] path=(?P<path>\S+) ")
 _PATH_REVISION_SUFFIX_RE = re.compile(r" revision sha256:[0-9a-f]{64}.*$")
+# A read receipt names the revision of the bytes its window was delivered from.
+_RECEIPT_RE = re.compile(r"\[read page\] path=(?P<path>\S+) revision=(?P<revision>sha256:[0-9a-f]{64})(?= )")
 # Delivery text a request carries for the model; assistant turns are model output.
 _DELIVERY_ROLES = frozenset({"user", "tool", "system"})
 MAX_MAP_FILES = 16
@@ -476,6 +480,47 @@ def verbatim_line_runs(source: str, text: str) -> list[tuple[int, int]]:
     return runs
 
 
+def _delivery_segments(text: str) -> list[tuple[int, int, str | None, str | None]]:
+    """Delivered windows of ``text`` as (start, end, receipt path, receipt revision).
+
+    A window opens at a source header or a read page line and runs to the next one. Only a
+    read receipt carries a revision, so receipt-less windows (legacy header labels) report
+    (None, None). Windows are contiguous and non-overlapping, in text order.
+    """
+    starts = sorted({match.start() for pattern in (_SOURCE_HEADER_RE, _READ_PAGE_RE)
+                     for match in pattern.finditer(text)})
+    segments: list[tuple[int, int, str | None, str | None]] = []
+    for index, start in enumerate(starts):
+        end = starts[index + 1] if index + 1 < len(starts) else len(text)
+        receipt = _RECEIPT_RE.match(text, start)
+        if receipt is None:
+            segments.append((start, end, None, None))
+        else:
+            segments.append((start, end, _clean_path(receipt.group("path")),
+                             receipt.group("revision")))
+    return segments
+
+
+def _current_delivery_pieces(text: str, segments: Sequence[tuple[int, int, str | None, str | None]],
+                             path: str, revision: str) -> list[str]:
+    """The maximal kept pieces of ``text`` for one file at one revision, in text order.
+
+    A window governed by a read receipt is dropped unless the receipt names this path at
+    ``revision``: text the model saw at an older revision never mints a handle at the
+    current one. Receipt-less windows are kept. Pieces are split only where a dropped window
+    sits, so with nothing dropped the single piece is the whole text, as before.
+    """
+    pieces: list[str] = []
+    cursor = 0
+    for start, end, receipt_path, receipt_revision in segments:
+        if receipt_revision is None or (receipt_path == path and receipt_revision == revision):
+            continue
+        pieces.append(text[cursor:start])
+        cursor = end
+    pieces.append(text[cursor:])
+    return pieces
+
+
 def request_spans(messages: Sequence[Mapping[str, object]],
                   read_source: Callable[[str], "str | None"]) -> tuple[DeliveredSpan, ...]:
     """Delivered spans of one request from both providers, unioned into maximal runs per file.
@@ -484,6 +529,7 @@ def request_spans(messages: Sequence[Mapping[str, object]],
     None when it is unreadable, missing, binary or too large. Nothing here writes.
     """
     text = _delivery_text(messages)
+    segments = _delivery_segments(text)
     sites = _frame_open_sites(messages)
     spans: list[DeliveredSpan] = []
     for path in candidate_paths(messages)[:MAX_MAP_FILES]:
@@ -495,7 +541,10 @@ def request_spans(messages: Sequence[Mapping[str, object]],
                 continue
         except UnicodeError:
             continue                         # undecodable bytes cannot be addressed by text
-        covered: list[tuple[int, int]] = list(verbatim_line_runs(source, text))
+        revision = source_revision(source)
+        covered: list[tuple[int, int]] = [
+            run for piece in _current_delivery_pieces(text, segments, path, revision)
+            for run in verbatim_line_runs(source, piece)]
         for site in sites:
             if _clean_path(str(site.get("path", ""))) != path:
                 continue
