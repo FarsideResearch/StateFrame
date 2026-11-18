@@ -156,6 +156,7 @@ class TestArtifactPolicy:
             "pytest_config": self.pytest_config,
             "coverage_requested": self.coverage_requested,
             "coverage_disabled": self.coverage_disabled,
+            "sanitized_addopts": list(self.sanitized_addopts),
             "observed_write_set": list(observed),
             "ignored_generated_paths": list(generated),
         }
@@ -171,7 +172,17 @@ class TestArtifactPolicy:
                            if value.get("pytest_config") not in (None, "") else None),
             coverage_requested=value.get("coverage_requested") is True,
             coverage_disabled=value.get("coverage_disabled") is True,
+            sanitized_addopts=_addopts_from_mapping(value),
         )
+
+
+def _addopts_from_mapping(value: Mapping[str, object]) -> tuple[str, ...]:
+    """Read the replayed addopts. A missing key (older payloads) or a value that is not a list of strings gives ()."""
+    raw = value.get("sanitized_addopts", ())
+    if (isinstance(raw, Sequence) and not isinstance(raw, (str, bytes, bytearray))
+            and all(isinstance(item, str) for item in raw)):
+        return tuple(raw)
+    return ()
 
 
 def _declarations_from_mapping(value: Mapping[str, object]) -> tuple[ArtifactDeclaration, ...]:

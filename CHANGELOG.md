@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.43 (2026-11-17)
+
+- Fixed: the test artifact policy now saves its replayed pytest addopts (`sanitized_addopts`) and reads them back on reload, so a resumed run rebuilds the same pytest command. Payloads written before this change load with no addopts; a malformed value is ignored.
+
 ## 0.7.42 (2026-11-17)
 
 - Fixed: after a parallel fan-out, the continuation now reads the recorded unit results and the owned paths and check selectors that pins need, so repair continuations and pins are no longer dropped. A fan-out whose children all finished but whose parent final check failed now shows FAILED instead of PASS or VERIFIED, and the next step tells the model to resolve the final check rather than finish.
