@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Fixed: completion-token totals now require a valid count for every send and preserve measured zero.
+
+- Fixed default pytest discovery so selected Python checks are found from the path manifest, decoded with their declared source encoding, and reported when unreadable.
+- Fixed runner selection to honor explicit selectors and configured pytest file patterns; documentation under `tests/` remains protected without activating pytest.
+
 - Fix: work copy creation, change manifests, candidate digests, and test discovery now raise typed path-specific errors when a directory cannot be scanned. Incomplete trees can no longer appear as deletions, empty digests, or missing checks.
 
 ## 0.7.67 (2026-11-18)

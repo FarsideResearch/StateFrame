@@ -3350,6 +3350,13 @@ def summarize(run: Path, started: float) -> dict[str, object]:
     total_prompt = _known_total(metrics, "total")
     cached_prompt = _known_total(metrics, "cached")
     uncached_prompt = _known_total(metrics, "uncached")
+    completion_metrics: list[dict[str, int | None]] = []
+    for send in sends:
+        count = send.get("completion_tokens")
+        completion_metrics.append({
+            "completion": count if type(count) is int and count >= 0 else None,
+        })
+    completion_total = _known_total(completion_metrics, "completion")
     try:
         requests = len(list_request_records(run))
     except (OSError, RequestRecordsError):
@@ -3383,7 +3390,7 @@ def summarize(run: Path, started: float) -> dict[str, object]:
         "max_request_bytes": max((int(s.get("request_bytes") or 0) for s in sends), default=0),
         "prompt_tokens_sent": total_prompt,
         "uncached_prompt_tokens": uncached_prompt,
-        "completion_tokens": sum(int(s.get("completion_tokens") or 0) for s in sends) or None,
+        "completion_tokens": completion_total,
         "cached_tokens": cached_prompt,
         "cached_share": (round(paired_cached / paired_total, 4)
                          if pairs and len(pairs) == len(sends) and paired_total > 0 else None),
