@@ -68,10 +68,13 @@ MAX_STATE_BYTES = 2 << 30
 # replaced by an older snapshot. The tool tape and engine log are live for the same reason.
 # Subframe decisions and supervisor channels are live host authority too: moving
 # their directory races the supervisor and can roll back durable transactions.
+# The mutation journal and evidence are durable launch and edit records that resume reconciles
+# before the engine starts; an older copy would erase that reconciliation.
 SKIP_RUN_ENTRIES = frozenset({"checkpoints", "attempts", "parent", ".engine.lock", ".run.lock",
                               "spec.json", "child-traceback.txt", "engine-result.json", "summary.json",
                               "engine.log", "checkpoint-refused.json", "tool-tape.jsonl",
-                              "hook-tape.jsonl", "hook-bundle", "hooks", "hook-scratch", "parallel"})
+                              "hook-tape.jsonl", "hook-bundle", "hooks", "hook-scratch", "parallel",
+                              "mutations"})
 
 # Keep writer diagnostics independent of the mutable errno.errorcode table and exception text.
 _OS_ERROR_NAMES = types.MappingProxyType({
@@ -343,6 +346,9 @@ HOST_GLOBALS = frozenset(
     ("kernel_cache_layout_candidate", "_REPLAY_STABLE_WIRE_DECISION_PROVIDER"),
     ("kernel_cache_layout_candidate", "_REPLAY_STABLE_WIRE_WINDOWS_PROVIDER"),
     ("kernel_cache_layout_candidate", "_REPLAY_STABLE_WIRE_RESERVES_PROVIDER"),
+    # The mutation runtime the resuming host installed; kernel_mutate_runtime.rebind_after_checkpoint
+    # copies its host settings onto the restored _active runtime.
+    ("kernel_mutate_runtime", "_host"),
 })
 # Derived or runtime-only instance attributes do not belong in restored task state.
 DROP_ATTRS = {

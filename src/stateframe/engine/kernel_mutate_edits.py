@@ -523,6 +523,90 @@ class MutationEdits:
                     os.close(fd)
                 os.close(root_fd)
 
+    def roll_forward_committed(self, saved: frozenset[str]) -> tuple[str, ...]:
+        """After a checkpoint restore, reapply edits committed after the checkpoint was saved.
+
+        The restored workspace holds the checkpoint's files, so an edit committed later (live, or
+        by resume reconciliation) is missing; replay serves its recorded observation and never
+        reruns it. All-or-nothing: every file of every row is first checked, in journal order,
+        against a simulated workspace (a later row touching a file an earlier row changed expects
+        that row's postimage). A file must hold its preimage, or already its postimage (skipped);
+        anything else refuses before the first write, and the caller falls back to full replay.
+        """
+        runtime = self.runtime
+        with _writer_lock(runtime.journal):
+            rows = [row for row in runtime.journal.events()
+                    if row.get("kind") == "EFFECT_COMMITTED" and row.get("call") not in saved]
+            if not rows:
+                return ()
+            root_fd = os.open(runtime.repo, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                plan = self._plan_roll_forward(root_fd, rows)
+                self._apply_roll_forward(root_fd, plan)
+            finally:
+                os.close(root_fd)
+        return tuple(path for path, _parts, _identity, _expected, _post in plan)
+
+    def _plan_roll_forward(self, root_fd: int, rows: list[dict]) -> list[tuple]:
+        """Validate every committed file against a simulated workspace; write nothing."""
+        journal = self.runtime.journal
+        # parts -> (parent identity, simulated current bytes); first sight reads the disk.
+        state: dict[tuple[str, ...], tuple[tuple[int, int], bytes | None]] = {}
+        plan: list[tuple] = []
+        for row in rows:
+            files = row.get("files")
+            if not isinstance(files, list):
+                raise EditConflict("committed file evidence is invalid")
+            for file in files:
+                if not isinstance(file, dict) or not {"pre_sha256", "post_sha256",
+                                                      "post_blob"} <= file.keys():
+                    raise EditConflict("committed file evidence is invalid")
+                parts = _parts(file.get("path"))
+                if parts not in state:
+                    parent_fd = _parent(root_fd, parts)
+                    try:
+                        state[parts] = (_identity(parent_fd), _read_at(parent_fd, parts[-1])[0])
+                    finally:
+                        os.close(parent_fd)
+                identity, current = state[parts]
+                digest = hashlib.sha256(current).hexdigest() if current is not None else None
+                if digest == file["post_sha256"]:
+                    continue
+                if digest != file["pre_sha256"]:
+                    raise EditConflict("restored file differs from the committed edit's preimage")
+                post = journal.get_blob(file["post_blob"]) if file["post_blob"] is not None else None
+                if (None if post is None else hashlib.sha256(post).hexdigest()) != file["post_sha256"]:
+                    raise EditConflict("committed edit postimage digest differs")
+                plan.append((file["path"], parts, identity, current, post))
+                state[parts] = (identity, post)
+        return plan
+
+    @staticmethod
+    def _apply_roll_forward(root_fd: int, plan: list[tuple]) -> None:
+        """Write a validated plan; a write-time failure undoes every write already made."""
+        pending: list[_BoundEdit] = []
+        try:
+            try:
+                for _path, parts, identity, expected, post in plan:
+                    with _current_parent(root_fd, parts, identity) as parent_fd:
+                        current, mode = _read_at(parent_fd, parts[-1])
+                        if current != expected:
+                            raise _WriteTimeConflict("roll-forward target changed before replacement")
+                        with _bound_write_context(root_fd, parts, identity, expected, pending):
+                            _write_at(parent_fd, parts[-1], post, mode or 0o644)
+            except (EditConflict, OSError) as error:
+                try:
+                    _undo_edits(pending)
+                except (EditConflict, OSError) as rollback_error:
+                    raise EditConflict("committed edit roll-forward rollback is indeterminate") \
+                        from rollback_error
+                raise EditConflict(f"committed edit roll-forward refused: {error}") from error
+            for receipt in pending:
+                receipt.cleanup()
+        finally:
+            for receipt in pending:
+                os.close(receipt.parent_fd)
+
     def recover(self, call: str, *, allow_rollforward: bool = True) -> EditResult:
         runtime = self.runtime
         rows = [row for row in runtime.journal.events() if row.get("call") == call]

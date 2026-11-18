@@ -9376,6 +9376,11 @@ def work(d, *, resume=None):
                 _hook_wiring_for_run.rebind_after_checkpoint(root, d, baseline_tests, measurement)
             except Exception as _error:  # noqa: BLE001 - a failed rebind must fall back to replay
                 _kernel_checkpoint.refuse_restored_setup(POC.parent, _error)
+        if _checkpoint_restored and "kernel_mutate_runtime" in sys.modules:
+            try:
+                sys.modules["kernel_mutate_runtime"].rebind_after_checkpoint()
+            except Exception as _error:  # noqa: BLE001 - a failed rebind must fall back to replay
+                _kernel_checkpoint.refuse_restored_setup(POC.parent, _error)
         from kernel_read_receipts import begin_read_attempt, finish_pending as _finish_read_attempt
         for step in step_indices(step + 1, _loop_limit):
             _finish_read_attempt(measurement)

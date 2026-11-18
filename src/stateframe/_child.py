@@ -1384,6 +1384,14 @@ def _engine_error_terminal(kind: str, error: BaseException) -> dict[str, object]
     return {"result": kind, "error": type(error).__name__, **_error_fields(error)}
 
 
+def _active_mutation_runtime(host_runtime):
+    """The runtime to finish: a checkpoint restore installs the saved runtime, which owns any
+    executor started after the restore; the one this process created first is then unused."""
+    runtime_module = sys.modules.get("kernel_mutate_runtime")
+    active = runtime_module.service() if runtime_module is not None else None
+    return active if active is not None else host_runtime
+
+
 def _finish_mutation_runtime(mutation_runtime, result: dict, status: int, emit_event):
     """Finish an enabled mutation runtime without turning host refusal into run failure."""
     try:
@@ -1735,7 +1743,8 @@ def main(argv: list[str]) -> int:
         status = 1
     finally:
         if mutation_runtime is not None:
-            result, status = _finish_mutation_runtime(mutation_runtime, result, status, emit)
+            result, status = _finish_mutation_runtime(_active_mutation_runtime(mutation_runtime),
+                                                      result, status, emit)
         if hook_wiring is not None:
             try:
                 hook_wiring.close()

@@ -67,6 +67,10 @@ USAGE = {
 }
 
 _active: MutationRuntime | None = None
+# The runtime this process's host installed. A checkpoint restore replaces _active with the
+# saved runtime but keeps this one (kernel_checkpoint HOST_GLOBALS), so host-owned settings
+# can be rebound onto the restored runtime.
+_host: MutationRuntime | None = None
 _UNIT_NAME = re.compile(r"[a-z][a-z0-9_]{0,39}\Z")
 
 
@@ -77,12 +81,36 @@ def schema_for_level(level: str) -> dict:
 
 
 def install(runtime: MutationRuntime | None) -> None:
-    global _active
+    global _active, _host
     _active = runtime
+    _host = runtime
 
 
 def service() -> MutationRuntime | None:
     return _active
+
+
+def rebind_after_checkpoint() -> None:
+    """After a checkpoint restore, carry this process's host settings onto the restored runtime.
+
+    The restored runtime keeps the model-visible state (units, episode, watches, hooks). The
+    executor is never saved (MutationRuntime.__getstate__), so the next launch starts a fresh one
+    in a newly created runtime root; the factory and the external-replay permission come from the
+    resuming host, whose --replay-external choice can differ from the saving attempt's. Mutation
+    edits committed after the checkpoint are rolled forward into the restored workspace.
+    """
+    global _host
+    host, restored = _host, _active
+    if host is None or restored is None or host is restored:
+        return
+    restored.executor_factory = host.executor_factory
+    restored.replay_external_allowed = host.replay_external_allowed
+    if hasattr(host, "attempt"):
+        restored.attempt = host.attempt
+    saved = restored.__dict__.pop("_checkpoint_committed_effects", None)
+    if saved is not None:
+        restored._edit_manager().roll_forward_committed(frozenset(saved))
+    _host = restored
 
 
 class MutationUnavailable(ValueError):
@@ -286,6 +314,21 @@ class MutationRuntime:
                 journal.append("watch_stop", watch=watch_id, reason="resume")
         self.episodes_started = sum(1 for row in journal.events()
                                     if row.get("kind") == "episode_enter") if hasattr(journal, "events") else 0
+
+    def __getstate__(self) -> dict:
+        """Checkpoint state without the executor: its supervisor, launch ledger and runtime root
+        belong to the saving process and are swept before any resume. A restored runtime starts a
+        fresh executor on its next launch, as after a retired hook executor."""
+        state = dict(self.__dict__)
+        # The mutation journal is live run data (never copied into a checkpoint); remember which
+        # edits the checkpointed workspace already holds so a restore can roll later ones forward.
+        state["_checkpoint_committed_effects"] = (frozenset(
+            row.get("call") for row in self.journal.events() if row.get("kind") == "EFFECT_COMMITTED")
+            if self.run_dir is not None and hasattr(self.journal, "events") else None)
+        if state.get("executor") is not None:
+            state["executor"] = None
+            state["_reopen_runtime_root"] = self.executor_factory is None and self.runtime_root is not None
+        return state
 
     def _ensure_executor(self):
         if self.executor is None:

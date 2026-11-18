@@ -170,6 +170,88 @@ def _dropped_existing_candidate_paths(work: workcopy.WorkCopy,
                   and (data is None or hashlib.sha256(data).hexdigest() != work.baseline[path]))
 
 
+MUTATION_CANDIDATE_CONFLICT = "mutation_candidate_conflict"
+
+
+def _committed_mutation_effects(run_dir: Path) -> dict[str, tuple[set[str | None], bytes | None, str | None]]:
+    """Per path whose last journaled effect is EFFECT_COMMITTED: (prior states, postimage, post digest).
+
+    Prior states are every digest the path held before the latest commit (the first preimage and
+    any intermediate committed postimages); None stands for an absent file. Bytes come from the
+    same journal evidence resume uses. Without a mutation journal this reads nothing.
+    """
+    if not (run_dir / "mutations" / "journal.jsonl").is_file():
+        return {}
+    from .engine.kernel_mutate_records import Journal
+
+    journal = Journal(run_dir)
+    last: dict[str, tuple[str, dict]] = {}
+    history: dict[str, set[str | None]] = {}
+    for row in journal.events():
+        kind = row.get("kind")
+        if not isinstance(kind, str) or not kind.startswith("EFFECT_") or not isinstance(row.get("files"), list):
+            continue
+        for item in row["files"]:
+            if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+                raise RunError("committed mutation evidence is invalid")
+            last[item["path"]] = (kind, item)
+            if kind == "EFFECT_COMMITTED":
+                history.setdefault(item["path"], set()).add(item.get("pre_sha256"))
+    effects: dict[str, tuple[set[str | None], bytes | None, str | None]] = {}
+    for path, (kind, item) in last.items():
+        if kind != "EFFECT_COMMITTED":
+            continue
+        workcopy._relative_parts(path)
+        digest, blob = item.get("post_sha256"), item.get("post_blob")
+        if digest is None:
+            if blob is not None:
+                raise RunError("committed mutation deletion evidence is invalid")
+            data = None
+        else:
+            if not isinstance(digest, str) or blob != digest:
+                raise RunError("committed mutation blob reference is invalid")
+            try:
+                data = journal.get_blob(blob)
+            except (OSError, ValueError) as error:  # RecordError: missing or tampered evidence
+                raise RunError(f"committed mutation postimage evidence is invalid: {error}") from error
+            if hashlib.sha256(data).hexdigest() != digest:
+                raise RunError("committed mutation postimage digest differs")
+        effects[path] = (history[path] - {digest}, data, digest)
+    return effects
+
+
+def _keep_committed_mutation_effects(run_dir: Path, candidate: dict[str, bytes | None]
+                                     ) -> tuple[dict[str, bytes | None], set[str]]:
+    """Stop the sealed candidate from reverting committed mutation edits at finish.
+
+    The DoneSeal candidate never sees mutation effects, so a file a mutation committed still
+    carries its preimage there. For each such path in the candidate: preimage (or any earlier
+    committed state) -> keep the postimage; postimage -> no-op; anything else means the model
+    edited the file too, which is journaled as a typed conflict and the postimage is kept.
+    Returns the candidate to apply and the paths whose postimage it now carries.
+    """
+    effects = _committed_mutation_effects(run_dir)
+    if not effects:
+        return candidate, set()
+    from .engine.kernel_mutate_records import Journal
+
+    result = dict(candidate)
+    kept: set[str] = set()
+    for path, (prior, post, post_digest) in sorted(effects.items()):
+        if path not in candidate:
+            continue
+        data = candidate[path]
+        digest = None if data is None else hashlib.sha256(data).hexdigest()
+        if digest == post_digest:
+            continue
+        if digest not in prior:
+            Journal(run_dir).append(MUTATION_CANDIDATE_CONFLICT, path=path, candidate_sha256=digest,
+                                    post_sha256=post_digest)
+        result[path] = post
+        kept.add(path)
+    return result, kept
+
+
 def checkpoint_resume_off(spec: dict) -> bool:
     """An explicit current or recorded opt-out blocks restore and all later saves."""
     current = os.environ.get("STATEFRAME_CHECKPOINT", "").strip().lower()
@@ -3709,8 +3791,7 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
             # environment, shell home and baseline), saves the execution session unstarted, and is
             # refused while a job is live; recorded exchanges after it replay through the tool tape.
             checkpoint_eligible = same_limits and not checkpoint_off
-            checkpoint_skip_reason = ("mutations_configured" if "mutations" in spec else
-                                      "hooks_configured" if hooks_configured else
+            checkpoint_skip_reason = ("hooks_configured" if hooks_configured else
                                       "routes_configured" if routes_configured else
                                       "edit_scope_widen" if widen_configured else None)
             checkpoint_skipped = checkpoint_eligible and checkpoint_skip_reason is not None
@@ -3759,10 +3840,7 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
                         "and checked byte for byte, then the run continues live")
             else:
                 if checkpoint_skipped:
-                    if checkpoint_skip_reason == "mutations_configured":
-                        printer("checkpoint: not restored because mutations are configured for this run; "
-                                "replaying the recorded exchanges instead")
-                    elif checkpoint_skip_reason == "hooks_configured":
+                    if checkpoint_skip_reason == "hooks_configured":
                         printer("checkpoint: not restored because hooks are configured for this run; "
                                 "replaying the recorded exchanges instead")
                     elif checkpoint_skip_reason == "edit_scope_widen":
@@ -4133,6 +4211,9 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
             artifact_digest = _artifact_digest(candidate)
             if edit_scope_widened(spec):
                 declared.update(_admitted_candidate_paths(run_dir, spec, work, candidate))
+            # Committed mutation edits are authorized by the mutation write grant, not the edit scope.
+            candidate, mutation_kept = _keep_committed_mutation_effects(run_dir, candidate)
+            declared.update(mutation_kept)
             dropped_paths = _dropped_existing_candidate_paths(work, candidate, declared)
             if dropped_paths:
                 candidate_error = "sealed candidate changed existing files outside edit scope"
