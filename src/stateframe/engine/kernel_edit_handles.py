@@ -365,7 +365,7 @@ def append_map_to_final_user_message(messages: Sequence[Mapping[str, object]],
 # read pages, exact clipped reads). A run counts only when the bytes the model
 # saw are byte-equal to the current file, so a handle never names unseen bytes.
 # A window that a read receipt names at another revision (or another path) is a
-# stale delivery: its text is not scanned for this file (see _delivery_segments).
+# stale delivery: its text is not scanned for this file (see _delivery_text_and_segments).
 # Both providers feed ``request_spans``, which unions covered lines per file and
 # mints one handle per maximal run (whole file -> REWRITE). Paged descriptors and
 # allocator source-range handles stay paging addresses; edit handles are only
@@ -379,7 +379,11 @@ _SOURCE_HEADER_RE = re.compile(
 _READ_PAGE_RE = re.compile(r"\[read page\] path=(?P<path>\S+) ")
 _PATH_REVISION_SUFFIX_RE = re.compile(r" revision sha256:[0-9a-f]{64}.*$")
 # A read receipt names the revision of the bytes its window was delivered from.
-_RECEIPT_RE = re.compile(r"\[read page\] path=(?P<path>\S+) revision=(?P<revision>sha256:[0-9a-f]{64})(?= )")
+_RECEIPT_RE = re.compile(r"\[read page\] path=(?P<path>.+?) revision=(?P<revision>sha256:[0-9a-f]{64})(?= )")
+# Frame-rendered window markers (kernel_request_source_window); a test pins these spellings.
+_MODEL_WINDOW_MARKER = "[Model source window]"
+_WINDOW_CONTENT_MARKER = "[Source window content]"
+_WINDOW_END_MARKER = "[End source window]"
 # Delivery text a request carries for the model; assistant turns are model output.
 _DELIVERY_ROLES = frozenset({"user", "tool", "system"})
 MAX_MAP_FILES = 16
@@ -435,7 +439,8 @@ def candidate_paths(messages: Sequence[Mapping[str, object]]) -> tuple[str, ...]
     seen: list[str] = []
     text = _delivery_text(messages)
     found = [(match.start(), match.group("path"))
-             for pattern in (_SOURCE_HEADER_RE, _READ_PAGE_RE) for match in pattern.finditer(text)]
+             for pattern in (_SOURCE_HEADER_RE, _READ_PAGE_RE, _RECEIPT_RE)
+             for match in pattern.finditer(text)]
     for _, raw in sorted(found):
         path = _clean_path(raw)
         if path is not None and path not in seen:
@@ -480,29 +485,88 @@ def verbatim_line_runs(source: str, text: str) -> list[tuple[int, int]]:
     return runs
 
 
-def _delivery_segments(text: str) -> list[tuple[int, int, str | None, str | None]]:
-    """Delivered windows of ``text`` as (start, end, receipt path, receipt revision).
+Segment = tuple[int, int, str | None, str | None]
+# A segment the engine cannot attribute to a current delivery: masked for every file.
+_UNTRUSTED: tuple[str | None, str | None] = ("", "")
 
-    A window opens at a source header or a read page line and runs to the next one. Only a
-    read receipt carries a revision, so receipt-less windows (legacy header labels) report
-    (None, None). Windows are contiguous and non-overlapping, in text order.
+
+def _read_call_ids(messages: Sequence[Mapping[str, object]]) -> frozenset[str]:
+    """Ids of assistant tool calls that invoke the read tool; only their results carry receipts."""
+    ids: set[str] = set()
+    for message in messages:
+        calls = message.get("tool_calls") if isinstance(message, Mapping) else None
+        for call in calls if isinstance(calls, list) else ():
+            function = call.get("function") if isinstance(call, Mapping) else None
+            name = function.get("name") if isinstance(function, Mapping) else None
+            if name == "read" and isinstance(call.get("id"), str):
+                ids.add(call["id"])
+    return frozenset(ids)
+
+
+def _in_frame_window_header(content: str, position: int) -> bool:
+    """True when ``position`` sits in the engine's header part of a frame-rendered window.
+
+    The engine renders a window as header, model marker, projection, receipt, content marker,
+    body, end marker. A receipt-looking line in the body is file text: it comes after the
+    content marker with no model marker between.
+    """
+    last_model = content.rfind(_MODEL_WINDOW_MARKER, 0, position)
+    if last_model < 0:
+        return False
+    closed = max(content.rfind(_WINDOW_CONTENT_MARKER, 0, position),
+                 content.rfind(_WINDOW_END_MARKER, 0, position))
+    return last_model > closed
+
+
+def _message_segments(content: str, offset: int, *, read_result: bool) -> list[Segment]:
+    """Windows of one message, in absolute text positions (``offset`` + local index).
+
+    A window opens at a source header or a read page line. A receipt is trusted only where the
+    engine writes one: at the start of a read tool result, or in a frame window's header part.
+    Any other read page line is untrusted and masks its window: file or model text can quote a
+    receipt, and a quoted one must not vouch for the bytes after it.
     """
     starts = sorted({match.start() for pattern in (_SOURCE_HEADER_RE, _READ_PAGE_RE)
-                     for match in pattern.finditer(text)})
-    segments: list[tuple[int, int, str | None, str | None]] = []
+                     for match in pattern.finditer(content)})
+    segments: list[Segment] = []
     for index, start in enumerate(starts):
-        end = starts[index + 1] if index + 1 < len(starts) else len(text)
-        receipt = _RECEIPT_RE.match(text, start)
-        if receipt is None:
-            segments.append((start, end, None, None))
-        else:
-            segments.append((start, end, _clean_path(receipt.group("path")),
-                             receipt.group("revision")))
+        end = starts[index + 1] if index + 1 < len(starts) else len(content)
+        path: str | None = None
+        revision: str | None = None
+        if content.startswith("[read page]", start):
+            receipt = _RECEIPT_RE.match(content, start)
+            trusted = receipt is not None and (
+                (read_result and start == 0) or _in_frame_window_header(content, start))
+            if trusted and receipt is not None:
+                path, revision = _clean_path(receipt.group("path")), receipt.group("revision")
+            else:
+                path, revision = _UNTRUSTED
+        segments.append((offset + start, offset + end, path, revision))
     return segments
 
 
-def _current_delivery_pieces(text: str, segments: Sequence[tuple[int, int, str | None, str | None]],
-                             path: str, revision: str) -> list[str]:
+def _delivery_text_and_segments(messages: Sequence[Mapping[str, object]]) -> tuple[str, list[Segment]]:
+    """The delivery text (same join as ``_delivery_text``) and its trusted/untrusted windows."""
+    read_ids = _read_call_ids(messages)
+    parts: list[str] = []
+    segments: list[Segment] = []
+    offset = 0
+    for message in messages:
+        if not isinstance(message, Mapping) or message.get("role") not in _DELIVERY_ROLES:
+            continue
+        content = message.get("content")
+        if not isinstance(content, str):
+            continue
+        if parts:
+            offset += 1                      # the "\n" join between delivery messages
+        read_result = message.get("role") == "tool" and message.get("tool_call_id") in read_ids
+        segments.extend(_message_segments(content, offset, read_result=read_result))
+        parts.append(content)
+        offset += len(content)
+    return "\n".join(parts), segments
+
+
+def _current_delivery_pieces(text: str, segments: Sequence[Segment], path: str, revision: str) -> list[str]:
     """The maximal kept pieces of ``text`` for one file at one revision, in text order.
 
     A window governed by a read receipt is dropped unless the receipt names this path at
@@ -528,8 +592,7 @@ def request_spans(messages: Sequence[Mapping[str, object]],
     ``read_source(path)`` returns the current full text of a workspace-relative path, or
     None when it is unreadable, missing, binary or too large. Nothing here writes.
     """
-    text = _delivery_text(messages)
-    segments = _delivery_segments(text)
+    text, segments = _delivery_text_and_segments(messages)
     sites = _frame_open_sites(messages)
     spans: list[DeliveredSpan] = []
     for path in candidate_paths(messages)[:MAX_MAP_FILES]:

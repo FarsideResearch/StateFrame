@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fixed: the edit handle map (`STATEFRAME_EDIT_PROTOCOL=handles`) no longer gives handles at the current file revision for text the model read before the file changed on disk. A read receipt that names an older revision now masks that window, so a stale read is not presented as current and an edit against it is refused. Only receipts the engine writes count, so file or model text that quotes a receipt cannot vouch for stale lines.
 - Fixed: the edit handle map (`STATEFRAME_EDIT_PROTOCOL=handles`) no longer gives handles at the current file revision for text the model read before the file changed on disk. A read receipt that names an older revision now masks that window, so a stale read is not presented as current and an edit against it is refused.
 ## 0.7.56 (2026-11-18)
 
