@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Added a merge core for edits made against a file that changed on disk: an edit now re-locates its span by exact bytes, or merges non-overlapping line changes, and only reports a conflict when both sides changed the same lines. Nothing calls it yet, so current behaviour is unchanged.
+- Edit handles now keep the exact bytes the model was shown, so a handle can still report what it was given after its file changes on disk. Edits still refuse on a changed file exactly as before; large whole-file rewrite bases keep only a digest.
 
 ## 0.7.58 (2026-11-18)
 
