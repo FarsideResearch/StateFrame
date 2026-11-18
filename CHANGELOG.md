@@ -1,9 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.7.57 (2026-11-18)
 
 - Fixed: the edit handle map (`STATEFRAME_EDIT_PROTOCOL=handles`) no longer gives handles at the current file revision for text the model read before the file changed on disk. A read receipt that names an older revision now masks that window, so a stale read is not presented as current and an edit against it is refused. Only receipts the engine writes count, so file or model text that quotes a receipt cannot vouch for stale lines.
-- Fixed: the edit handle map (`STATEFRAME_EDIT_PROTOCOL=handles`) no longer gives handles at the current file revision for text the model read before the file changed on disk. A read receipt that names an older revision now masks that window, so a stale read is not presented as current and an edit against it is refused.
+
 ## 0.7.56 (2026-11-18)
 
 - Turn timing: time that no host phase covered between a response and the next request is now also reported on its own as `unattributed_host_ns`, so it is no longer read as tool execution alone. The existing per-phase fields are unchanged; the new value is part of `tool_execution`.
