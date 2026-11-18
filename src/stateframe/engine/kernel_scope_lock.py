@@ -49,7 +49,7 @@ def enabled(environ: Mapping[str, str] | None = None) -> bool:
 
 def literal_changes(before: str, after: str) -> list[dict[str, object]]:
     """Typed value deltas on stable lines; inserted lines are not value changes."""
-    from kernel_aha10_honest_loop import typed_literal_changes
+    from kernel_aha10_honest_loop import aligned_line_pairs, typed_literal_changes
     result: list[dict[str, object]] = []
     for change in typed_literal_changes(before, after):
         old_line = str(change.get("old_line", ""))
@@ -72,31 +72,28 @@ def literal_changes(before: str, after: str) -> list[dict[str, object]]:
         r"[A-Za-z_$][\w$]*(?:\s*(?:\.|::|->)\s*[A-Za-z_$][\w$]*)*)"
     )
     old_lines, new_lines = before.splitlines(), after.splitlines()
-    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
-            None, old_lines, new_lines, autojunk=False).get_opcodes():
-        if tag != "replace":
-            continue
-        for offset, (old_line, new_line) in enumerate(zip(old_lines[i1:i2], new_lines[j1:j2])):
-            old_tokens, new_tokens = token.findall(old_line), token.findall(new_line)
-            matcher = difflib.SequenceMatcher(None, old_tokens, new_tokens, autojunk=False)
-            for token_tag, left, right, new_left, new_right in matcher.get_opcodes():
-                if token_tag == "equal":
+    for old_index, new_index in aligned_line_pairs(old_lines, new_lines):
+        old_line, new_line = old_lines[old_index], new_lines[new_index]
+        old_tokens, new_tokens = token.findall(old_line), token.findall(new_line)
+        matcher = difflib.SequenceMatcher(None, old_tokens, new_tokens, autojunk=False)
+        for token_tag, left, right, new_left, new_right in matcher.get_opcodes():
+            if token_tag == "equal":
+                continue
+            removed, added = old_tokens[left:right], new_tokens[new_left:new_right]
+            for old_value, new_value in zip(removed, added):
+                if old_value == new_value:
                     continue
-                removed, added = old_tokens[left:right], new_tokens[new_left:new_right]
-                for old_value, new_value in zip(removed, added):
-                    if old_value == new_value:
-                        continue
-                    if not (any(char.isdigit() for char in old_value + new_value)
-                            or "." in old_value or "." in new_value
-                            or old_value[:1] in {'"', "'"} or new_value[:1] in {'"', "'"}):
-                        continue
-                    line_number = j1 + offset + 1
-                    result.append({
-                        "kind": "mixed_value_hunk", "name": old_value,
-                        "old": old_value, "new": new_value, "line": line_number,
-                        "old_line": old_line, "new_line": new_line,
-                        "span": {"start_line": line_number, "end_line": line_number},
-                    })
+                if not (any(char.isdigit() for char in old_value + new_value)
+                        or "." in old_value or "." in new_value
+                        or old_value[:1] in {'"', "'"} or new_value[:1] in {'"', "'"}):
+                    continue
+                line_number = new_index + 1
+                result.append({
+                    "kind": "mixed_value_hunk", "name": old_value,
+                    "old": old_value, "new": new_value, "line": line_number,
+                    "old_line": old_line, "new_line": new_line,
+                    "span": {"start_line": line_number, "end_line": line_number},
+                })
     return result
 
 
