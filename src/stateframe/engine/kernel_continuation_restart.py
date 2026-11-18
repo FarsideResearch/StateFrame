@@ -382,8 +382,9 @@ _CAPACITY_SAFE_TAIL = frozenset(
     if classification == "SAFE_TAIL"
 )
 SAFE_TAIL = frozenset({
-    # Routing schema 2 audit records: the RouteDecision is re-derived per request on replay
-    # (cross-process replay is not read back), so these never carry resume authority.
+    # Routing schema 2 records: a cross-process replay reads the journaled route_decision back to
+    # rebuild its destination (kernel_route_decision._replayed_decision). Resume classification is
+    # unchanged: these still never decide whether an attempt resumes or what it has completed.
     "route_decision", "route_drift_pinned",
     # route_proposal_preserved: the withheld proposal lives in memory only; after a resume the
     # target leg regenerates (the legacy behaviour). token_estimate_fallback: per-endpoint notice.

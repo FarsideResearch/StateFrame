@@ -25,6 +25,10 @@ SOURCE_DEFAULT = "default"
 # Replay of a prepared body whose decision was made in another process: the destination is
 # taken as already routed and no router or static route is consulted again.
 SOURCE_RECOVERED = "recovered"
+# Cross-process replay that read back the journaled decision for this request_id (FRP).
+SOURCE_REPLAYED = "replayed"
+# Journal-side index of ``route_decision`` events by request_id, built once per journal.
+_ROUTE_INDEX_ATTR = "_route_decision_index"
 
 
 @dataclass(frozen=True)
@@ -66,6 +70,18 @@ def _runtime_of(meter: object) -> object | None:
     return runtime if runtime is not None else getattr(meter, "completion_owner_runtime", None)
 
 
+def _journal_endpoint(endpoint: str) -> str | None:
+    """The endpoint as journaled for replay, or None when it cannot be stored credential-free.
+
+    Userinfo, query and fragment are never journaled; a replay of such a request falls back to
+    the ``recovered`` behaviour instead of sending to a rewritten URL.
+    """
+    parts = urllib.parse.urlsplit(endpoint)
+    if parts.username is not None or parts.password is not None or parts.query or parts.fragment:
+        return None
+    return endpoint
+
+
 def _remember(meter: object, decision: RouteDecision) -> None:
     """Cache the decision on the request capture and journal it once per request_id."""
     setattr(meter, "route_decision", decision)
@@ -77,10 +93,72 @@ def _remember(meter: object, decision: RouteDecision) -> None:
     if getattr(meter, "_route_decision_journaled", None) == decision.request_id:
         return
     setattr(meter, "_route_decision_journaled", decision.request_id)
-    meter.journal.emit(  # type: ignore[attr-defined]
-        "route_decision", request_id=decision.request_id, model=decision.model,
-        endpoint_host=decision.endpoint_host, source=decision.source, role=decision.role,
-        dispatch=False)
+    fields: dict[str, object] = {
+        "request_id": decision.request_id, "model": decision.model,
+        "endpoint_host": decision.endpoint_host, "source": decision.source, "role": decision.role,
+        "key_env": decision.key_env, "dispatch": False,
+    }
+    # Replay needs the full destination (path included); only the credential-free form is stored.
+    journaled_endpoint = _journal_endpoint(decision.endpoint)
+    if journaled_endpoint is not None:
+        fields["endpoint"] = journaled_endpoint
+    journal = meter.journal  # type: ignore[attr-defined]
+    journal.emit("route_decision", **fields)
+    index = getattr(journal, _ROUTE_INDEX_ATTR, None)
+    if index is not None:
+        index.setdefault(decision.request_id, []).append({"kind": "route_decision", **fields})
+
+
+def _journaled_routes(journal: object) -> dict[str, list[dict[str, object]]] | None:
+    """``route_decision`` events grouped by request_id, read once per journal object.
+
+    Uses the journal's own validated ``records(rebuild=False)`` pass. The pass is consumed in full
+    before any caller emits, because emitting while a replay generator is open is refused.
+    """
+    index = getattr(journal, _ROUTE_INDEX_ATTR, None)
+    if index is not None:
+        return index
+    records = getattr(journal, "records", None)
+    if not callable(records):
+        return None
+    index = {}
+    for event in records(rebuild=False):
+        if event.get("kind") != "route_decision":
+            continue
+        request_id = event.get("request_id")
+        if isinstance(request_id, str):
+            index.setdefault(request_id, []).append(dict(event))
+    setattr(journal, _ROUTE_INDEX_ATTR, index)
+    return index
+
+
+def _replayed_decision(meter: object, request_id: str) -> RouteDecision | None:
+    """Rebuild the decision journaled for this request_id, or None when it cannot be trusted.
+
+    Only the destination fields are read back. The credential is resolved from the journaled
+    key_env name exactly as ``_static_route`` does; the secret itself is never journaled. Two
+    journaled decisions that disagree for one request_id are treated as no decision.
+    """
+    journal = getattr(meter, "journal", None)
+    if journal is None:
+        return None
+    index = _journaled_routes(journal)
+    events = index.get(request_id) if index is not None else None
+    if not events:
+        return None
+    identities = {(event.get("model"), event.get("endpoint"), event.get("key_env"),
+                   event.get("role")) for event in events}
+    if len(identities) != 1:
+        return None
+    model, endpoint, key_env, role = identities.pop()
+    if not isinstance(model, str) or not model or not isinstance(endpoint, str) or not endpoint:
+        return None
+    if key_env is not None and not isinstance(key_env, str):
+        return None
+    key = os.environ.get(key_env, "") if key_env is not None else ""
+    return RouteDecision(
+        model=model, endpoint=endpoint, key_env=key_env, source=SOURCE_REPLAYED,
+        role=role if isinstance(role, str) else None, request_id=request_id, key=key)
 
 
 def _static_route(meter: object, route: object, body: dict[str, object],
@@ -178,14 +256,46 @@ def _reapply_router_adaptation(meter: object, cached: RouteDecision, body: dict[
     return adapted
 
 
+def _diagnostic_endpoint(endpoint: str) -> str:
+    """Scheme, host, port and path only: the drift-diagnostic form (never replay authority)."""
+    parts = urllib.parse.urlsplit(endpoint)
+    return urllib.parse.urlunsplit((parts.scheme, parts.netloc.rsplit("@", 1)[-1], parts.path, "", ""))
+
+
+def _adopt_replayed_decision(meter: object, replayed: RouteDecision, body: dict[str, object],
+                             wanted_endpoint: str) -> tuple[RouteDecision, dict[str, object], str, str]:
+    """The journaled decision wins over a drifting model or endpoint; drift journals once per request.
+
+    Only the pairs that actually drifted are recorded: the model pair, the endpoint pair, or both.
+    """
+    wanted_model = str(body.get("model", ""))
+    model_drift = wanted_model != replayed.model
+    endpoint_drift = wanted_endpoint != replayed.endpoint
+    already_journaled = getattr(meter, "_route_drift_journaled", None) == replayed.request_id
+    if (model_drift or endpoint_drift) and not already_journaled:
+        setattr(meter, "_route_drift_journaled", replayed.request_id)
+        fields: dict[str, object] = {"request_id": replayed.request_id, "dispatch": False}
+        if model_drift:
+            fields.update(wanted_model=wanted_model, kept_model=replayed.model)
+        if endpoint_drift:
+            fields.update(wanted_endpoint=_diagnostic_endpoint(wanted_endpoint),
+                          kept_endpoint=_diagnostic_endpoint(replayed.endpoint))
+        meter.journal.emit("route_drift_pinned", **fields)  # type: ignore[attr-defined]
+    body["model"] = replayed.model
+    _remember(meter, replayed)
+    return replayed, body, replayed.endpoint, replayed.key
+
+
 def resolve_route_decision(meter: object, body: dict[str, object], endpoint: str, key: str, *,
                            recovery_prepared: bool) -> tuple[RouteDecision, dict[str, object], str, str]:
     """Per-request entry point: reuse the cached decision or decide once.
 
     A second body build for the same request_id reuses the cached decision and does not
     re-decide. A cached model-router decision re-applies the router's body adaptation (its
-    proposed model, endpoint and key are discarded). A recovery replay reuses the cached decision too; without one (replay in a
-    new process) the already-routed body is taken as-is and marked ``SOURCE_RECOVERED``.
+    proposed model, endpoint and key are discarded). A recovery replay reuses the cached decision too.
+    Without one (replay in a new process) schema 2 rebuilds the decision journaled for this request_id
+    as ``SOURCE_REPLAYED``. With no usable journaled decision the already-routed body is taken as-is
+    and marked ``SOURCE_RECOVERED``.
     """
     request_id = str(getattr(meter, "request_id", ""))
     cached = getattr(meter, "route_decision", None)
@@ -199,6 +309,10 @@ def resolve_route_decision(meter: object, body: dict[str, object], endpoint: str
                 router.validate_final_request(meter, body)  # type: ignore[attr-defined]
         return cached, body, cached.endpoint, cached.key
     if recovery_prepared:
+        if routing_v2():
+            replayed = _replayed_decision(meter, request_id)
+            if replayed is not None:
+                return _adopt_replayed_decision(meter, replayed, body, endpoint)
         decision = RouteDecision(
             model=str(body.get("model", "")), endpoint=endpoint, key_env=None,
             source=SOURCE_RECOVERED, role=None, request_id=request_id, key=key)
