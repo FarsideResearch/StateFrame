@@ -9,7 +9,7 @@ import stat
 import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
-from typing import Callable, Literal, Mapping, Protocol
+from typing import BinaryIO, Callable, Literal, Mapping, Protocol
 
 
 MAX_FILE_BYTES = 16 << 20
@@ -119,27 +119,21 @@ class ContentStore:
                     raise EffectError(f"workspace changed while capturing {relative}")
                 target = self._path(entry.digest)
                 target.parent.mkdir(parents=True, exist_ok=True)
+                if target.exists():
+                    # Known object: the live source still gets the same drift checks,
+                    # but no temp file, fsync or link is needed.
+                    _stream_source(fd, relative, entry, None)
+                    # Verification is bounded, independently of the workspace.
+                    self.verify(entry.digest)
+                    continue
                 out_fd, temporary = tempfile.mkstemp(prefix=".cas-", dir=target.parent)
                 try:
-                    digest = hashlib.sha256()
-                    total = 0
                     with os.fdopen(out_fd, "wb") as output:
-                        while block := os.read(fd, 1 << 20):
-                            total += len(block)
-                            if total > entry.size or total > MAX_FILE_BYTES:
-                                raise EffectError(
-                                    f"workspace grew while capturing {relative}"
-                                )
-                            digest.update(block)
-                            output.write(block)
+                        _stream_source(fd, relative, entry, output)
                         output.flush()
                         os.fsync(output.fileno())
-                    if total != entry.size or digest.hexdigest() != entry.digest:
-                        raise EffectError(
-                            f"workspace changed while capturing {relative}"
-                        )
                     if target.exists():
-                        # Verification is bounded, independently of the workspace.
+                        # Object appeared during the copy; verify it instead of replacing it.
                         self.verify(entry.digest)
                     else:
                         os.chmod(temporary, 0o444)
@@ -159,6 +153,26 @@ class Entry:
 
 
 Manifest = Mapping[str, Entry]
+
+
+def _stream_source(
+    fd: int, relative: str, entry: Entry, output: BinaryIO | None
+) -> None:
+    """Hash an open workspace file against its manifest entry, copying it when ``output`` is set.
+
+    Raises the same messages, in the same order, as the copying capture always did.
+    """
+    digest = hashlib.sha256()
+    total = 0
+    while block := os.read(fd, 1 << 20):
+        total += len(block)
+        if total > entry.size or total > MAX_FILE_BYTES:
+            raise EffectError(f"workspace grew while capturing {relative}")
+        digest.update(block)
+        if output is not None:
+            output.write(block)
+    if total != entry.size or digest.hexdigest() != entry.digest:
+        raise EffectError(f"workspace changed while capturing {relative}")
 
 
 def _read_file(path: Path) -> bytes:
