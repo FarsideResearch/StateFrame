@@ -1,9 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.7.51 (2026-11-18)
 
-- Fixed: corpus fix checks use their package-qualified registry; unreadable index files and oracle, witness, and mirror-check failures now report warnings. Witness evidence records oracle errors without removing survivors. Candidate interrupts stop the run while `SystemExit` remains a typed outcome.
 - Fixed: the test-generation oracle keeps candidates whose comparison direction cannot be read, abstains when the original function cannot load, and logs and records base-binding fallbacks in result notes.
+- Fixed: corpus fix checks use their package-qualified registry; unreadable index files and oracle, witness, and mirror-check failures now report warnings. Witness evidence records oracle errors without removing survivors. Candidate interrupts stop the run while `SystemExit` remains a typed outcome.
 
 ## 0.7.50 (2026-11-18)
 
