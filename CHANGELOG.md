@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Added a merge core for edits made against a file that changed on disk: an edit now re-locates its span by exact bytes, or merges non-overlapping line changes, and only reports a conflict when both sides changed the same lines. Nothing calls it yet, so current behaviour is unchanged.
+
 ## 0.7.58 (2026-11-18)
 
 - Fixed: the read budget no longer refuses a read whose requested source never arrived (the source budget or a size limit withheld it), so the model can still obtain that code. Such reads do not count as progress, so a run that only keeps re-reading withheld code still stops as stalled. A different line range of a file already read now counts as new rather than as a repeat.

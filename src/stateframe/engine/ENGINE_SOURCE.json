@@ -1,6 +1,6 @@
 {
  "dropped_lab_only": 1,
- "file_count": 851,
+ "file_count": 852,
  "files": {
   "architecture/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "architecture/domain_ids.py": "b0aefd60ec4b876a45ff77f2badfdf12a4902af02cbb6506398b46da368106fd",
@@ -221,6 +221,7 @@
   "kernel_edit_churn_budget.py": "81c16f12deea0ce91dabb05de7e46cea5973bc8cabd872fe09daff8b35c713ff",
   "kernel_edit_guard.py": "096ff58ad856e108b5445d15bb3c4b65c58c23a0bcc02a199f9aa7bc8a9ef9f4",
   "kernel_edit_handles.py": "6d59300c369e2119ca9447c8e99f83da2087b734e80bb2544ead26923b19c5f4",
+  "kernel_edit_merge.py": "78034961eecdfe20da0664eb205ee9576450aa0c598492b2a827ccd8b03941db",
   "kernel_edit_normalization.py": "0a9f315e93a08ade6c1530f12f0b54d08395797a90d8af0dacd6be6d90dddee6",
   "kernel_edit_protocol_switch.py": "927d51926892fa07cdbcd5dee326fc24f188baf94a1529c6508892d83ef9e692",
   "kernel_edit_refusal_codes.py": "af6390cfb6056caafe29aa94db2cd3ee5a15c119b7feba437412ed8873de87ce",
@@ -4787,7 +4788,7 @@
  "release_listed_but_absent_in_source": [],
  "release_manifest": "37f11a29d4ceccbc5ea3aa95d1e60249e41b93974fe1da74e347ccfad28f1374",
  "schema": "stateframe-engine-source/1",
- "shipped_hash": "d838a30c3efadfd11b60c2a7de409dec432b85c54790b40d038b9cd4643eb84d",
+ "shipped_hash": "aec405b2e0099ac8a092b8cc9ea1a7fc4b04db1a04c0ef1e8fcd51e7977b759d",
  "source_hash": "1a75f27c6197deed9df5acd441902846aced5fd358729dab308577e184a077c4",
  "source_tree": "37f11a29d4ceccbc5ea3aa95d1e60249e41b93974fe1da74e347ccfad28f1374"
 }
