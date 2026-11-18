@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from pathlib import Path
 
 from .request_records import RequestRecordsError, list_request_records
+from .replay_tape import numbered_wire_files, wire_stem
 
 FRAME_MARKER = "[StateFrame]"
 
@@ -22,11 +24,14 @@ def _wire_files(run: Path) -> list[Path]:
     wire = run / "wire"
     if not wire.is_dir():
         raise InspectError(f"{run} has no wire/ directory; is it a stateframe run directory?")
-    return sorted(wire.glob("[0-9][0-9][0-9][0-9].request.json"))
+    return [path for _send, path in numbered_wire_files(wire, ".request.json")]
 
 
 def load_send(run: Path, number: int) -> tuple[bytes, dict]:
-    path = run / "wire" / f"{number:04d}.request.json"
+    if type(number) is not int or number < 1:
+        available = len(_wire_files(run))
+        raise InspectError(f"no send {number}; this run has sends 1..{available}")
+    path = wire_stem(run / "wire", number).with_suffix(".request.json")
     if not path.is_file():
         available = len(_wire_files(run))
         raise InspectError(f"no send {number}; this run has sends 1..{available}")
@@ -36,7 +41,19 @@ def load_send(run: Path, number: int) -> tuple[bytes, dict]:
 
 def frame_of(body: dict) -> dict | None:
     """The typed StateFrame payload carried in a request body, parsed from its JSON."""
-    for message in body.get("messages") or []:
+    messages = body.get("messages") or []
+    engine_dir = str(Path(__file__).resolve().parent / "engine")
+    added_engine_dir = engine_dir not in sys.path
+    if added_engine_dir:
+        sys.path.insert(0, engine_dir)
+    try:
+        from kernel_cache_layout_view import semantic_messages
+
+        messages = semantic_messages(messages)
+    finally:
+        if added_engine_dir:
+            sys.path.remove(engine_dir)
+    for message in messages:
         content = message.get("content") if isinstance(message, dict) else None
         # The engine writes "[StateFrame]" then a newline (or a space) then the JSON payload.
         if isinstance(content, str) and content.startswith(FRAME_MARKER):
@@ -79,7 +96,7 @@ def overview(run: Path) -> str:
     lines.append(f"{'send':>4}  {'bytes':>7}  {'frame B':>7}  {'msgs':>4}  {'roles':<10} "
                  f"{'prompt':>7}  {'cached':>7}  action")
     for path in files:
-        number = int(path.name[:4])
+        number = int(path.name.removesuffix(".request.json"))
         body = json.loads(path.read_bytes())
         frame = frame_of(body)
         frame_bytes = len(json.dumps(frame, separators=(",", ":"))) if frame else 0
@@ -118,7 +135,7 @@ def show_send(run: Path, number: int, *, what: str = "summary") -> str | bytes:
     tools = [t.get("function", {}).get("name") for t in body.get("tools") or []]
     lines = [
         f"send {number}: {len(data)} bytes, sha256 {hashlib.sha256(data).hexdigest()}",
-        f"file: {run / 'wire' / f'{number:04d}.request.json'}",
+        f"file: {wire_stem(run / 'wire', number).with_suffix('.request.json')}",
         f"model: {body.get('model')}  max_tokens: {body.get('max_tokens')}  "
         f"temperature: {body.get('temperature')}",
         f"messages: {' '.join((m.get('role') or '?') for m in body.get('messages') or [])}",

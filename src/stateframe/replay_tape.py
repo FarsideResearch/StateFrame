@@ -53,6 +53,31 @@ def _stable_wire_record(stem: Path, send_record: dict | None = None) -> dict[str
     return {"stable_wire_reserves": record} if record is not None else {}
 
 
+def wire_stem(wire_dir: Path, send: int) -> Path:
+    """The recorder's canonical stem, with four digits as a minimum width."""
+    if type(send) is not int or send < 1:
+        raise ValueError("wire send number must be a positive integer")
+    return wire_dir / f"{send:04d}"
+
+
+def numbered_wire_files(wire_dir: Path, suffix: str) -> list[tuple[int, Path]]:
+    """Wire files in numeric order, accepting the recorder's minimum four-digit width."""
+    if not wire_dir.is_dir():
+        return []
+    pattern = re.compile(r"([0-9]{4,})" + re.escape(suffix))
+    files: list[tuple[int, Path]] = []
+    for path in wire_dir.glob(f"*{suffix}"):
+        match = pattern.fullmatch(path.name)
+        if match is None:
+            continue
+        send = int(match.group(1))
+        if path.name != f"{send:04d}{suffix}":
+            continue
+        files.append((send, path))
+    files.sort(key=lambda item: item[0])
+    return files
+
+
 REFUSAL_FILE = "checkpoint-refused.json"
 
 
@@ -180,7 +205,7 @@ def recorded_countdown_window(wire_dir: Path) -> tuple[float, float] | None:
     if not wire_dir.is_dir():
         return None
     seconds = []
-    for request in sorted(wire_dir.glob("[0-9][0-9][0-9][0-9].request.json")):
+    for _send, request in numbered_wire_files(wire_dir, ".request.json"):
         response = request.with_name(request.name.replace(".request.", ".response."))
         if not response.is_file() or not _response_ok(response.read_bytes()):
             continue
@@ -279,7 +304,7 @@ def _route_record(path: Path) -> dict[str, object]:
 
 
 def _route_path(wire_dir: Path, index: int) -> Path:
-    return wire_dir / f"{index:04d}.route.json"
+    return wire_stem(wire_dir, index).with_suffix(".route.json")
 
 
 def build(wire_dir: Path, sends_path: Path, *, routes_required: bool = False) -> list[dict[str, object]]:
@@ -293,8 +318,10 @@ def build(wire_dir: Path, sends_path: Path, *, routes_required: bool = False) ->
     if not wire_dir.is_dir():
         return []
     records = _send_records(sends_path)
-    indexes = sorted(int(p.name[:4]) for p in wire_dir.glob("[0-9][0-9][0-9][0-9].request.json"))
-    route_indexes = sorted(int(p.name[:4]) for p in wire_dir.glob("[0-9][0-9][0-9][0-9].route.json"))
+    request_files = numbered_wire_files(wire_dir, ".request.json")
+    route_files = numbered_wire_files(wire_dir, ".route.json")
+    indexes = [send for send, _path in request_files]
+    route_indexes = [send for send, _path in route_files]
     if routes_required and indexes and not route_indexes:
         raise TapeError("wire/ route records are required for this run")
     if route_indexes and route_indexes != list(range(1, route_indexes[-1] + 1)):
@@ -306,7 +333,7 @@ def build(wire_dir: Path, sends_path: Path, *, routes_required: bool = False) ->
         raise TapeError("wire/ request files are not a contiguous sequence")
     tape: list[dict[str, object]] = []
     for index in indexes:
-        stem = wire_dir / f"{index:04d}"
+        stem = wire_stem(wire_dir, index)
         request_path, response_path = stem.with_suffix(".request.json"), stem.with_suffix(".response.json")
         request = request_path.read_bytes()
         route_path = _route_path(wire_dir, index)
@@ -316,9 +343,9 @@ def build(wire_dir: Path, sends_path: Path, *, routes_required: bool = False) ->
         record = records.get(index)
         if record is not None and record.get("request_sha256") != hashlib.sha256(request).hexdigest():
             raise TapeError(f"wire/{request_path.name} does not match its sends.jsonl record")
-        error_path = wire_dir / f"{index:04d}.error.txt"
+        error_path = stem.with_suffix(".error.txt")
         failed_send = error_path.is_file()
-        identity_path = wire_dir / f"{index:04d}.endpoint.json"
+        identity_path = stem.with_suffix(".endpoint.json")
         identity = None
         if identity_path.exists():
             if identity_path.is_symlink():
@@ -363,8 +390,10 @@ def pending_request(wire_dir: Path, *, routes_required: bool = False) -> dict[st
     """The last request of an attempt that got neither a response nor an error (in flight at the stop)."""
     if not wire_dir.is_dir():
         return None
-    indexes = sorted(int(p.name[:4]) for p in wire_dir.glob("[0-9][0-9][0-9][0-9].request.json"))
-    routes = sorted(int(p.name[:4]) for p in wire_dir.glob("[0-9][0-9][0-9][0-9].route.json"))
+    request_files = numbered_wire_files(wire_dir, ".request.json")
+    route_files = numbered_wire_files(wire_dir, ".route.json")
+    indexes = [send for send, _path in request_files]
+    routes = [send for send, _path in route_files]
     if routes_required and indexes and not routes:
         raise TapeError("wire/ route records are required for pending send")
     if routes and (not indexes or routes[-1] == indexes[-1] + 1):
@@ -372,9 +401,9 @@ def pending_request(wire_dir: Path, *, routes_required: bool = False) -> dict[st
         return {"send": routes[-1], "route": route, "orphan_route": True}
     if not indexes:
         return None
-    stem = wire_dir / f"{indexes[-1]:04d}"
+    stem = wire_stem(wire_dir, indexes[-1])
     response = stem.with_suffix(".response.json")
-    if (wire_dir / f"{indexes[-1]:04d}.error.txt").is_file():
+    if stem.with_suffix(".error.txt").is_file():
         return None
     if response.is_file() and _response_ok(response.read_bytes()):
         return None
@@ -382,7 +411,7 @@ def pending_request(wire_dir: Path, *, routes_required: bool = False) -> dict[st
     pending = {"send": indexes[-1], "request": str(request),
                "request_digest": normalized_digest(request.read_bytes()),
                **_stable_wire_record(stem)}
-    identity_path = wire_dir / f"{indexes[-1]:04d}.endpoint.json"
+    identity_path = stem.with_suffix(".endpoint.json")
     if identity_path.exists():
         if identity_path.is_symlink() or not identity_path.is_file():
             raise TapeError(f"wire/{identity_path.name} is not a regular endpoint record")

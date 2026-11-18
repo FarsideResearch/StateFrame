@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fixed: `inspect --frame` now shows the full typed state carried by cache-layout requests, including public checks, completion permission and submission state.
+- Fixed: replay, pending-send, countdown and inspection readers now retain wire records beyond send 9999 while continuing to read existing run directories.
 ## 0.7.61 (2026-11-18)
 
 - Fixed: default check discovery now selects pytest only for conventionally named Python test modules, so unrelated files under `tests/` do not hide declared build checks.
