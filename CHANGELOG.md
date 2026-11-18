@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.44 (2026-11-17)
 
 - Added: `STATEFRAME_DATA_WORKSPACE` switch (default `off`) and the evidence packet contract in `kernel_data_packet.py`: typed counts, invariants, canonical receipts and byte-budget fitting. Nothing calls it yet, so the switch changes no run.
 
