@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.7.45 (2026-11-17)
 
 - Fixed: a location-encoded open-site inventory no longer fails its own receipt check on the next request (`FrameFit5Error: location inventory receipt or retrieval route changed`). The delivery-truth pass now leaves encoded inventory rows untouched and checks only the resident frontier. Tests: `tests/test_location_inventory_reencode.py`.
