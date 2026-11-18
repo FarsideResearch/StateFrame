@@ -697,10 +697,10 @@ def _receipt_verifies_success(row: Mapping[str, object]) -> bool:
 def _read_reveals_new_evidence(row: Mapping[str, object]) -> bool:
     """MR-8 v2: a read row that the producer flagged as returning new evidence.
 
-    Reads are never meaningful by action name, so this takes only the producer's explicit
-    ``meaningful_action`` flag, the same branch ``_receipt_is_meaningful`` honours first.
+    The producer sets ``new_evidence`` on the read row. It is deliberately not
+    ``meaningful_action``: a read must not become a committed or completed action receipt.
     """
-    return row.get("meaningful_action") is True
+    return row.get("new_evidence") is True
 
 
 def _failure_token(row: Mapping[str, object], *, hypothesis: bool = False) -> str | None:
@@ -2011,11 +2011,18 @@ class ModelRouter:
                 and callable(getattr(self.journal, "emit", None))):
             self.journal.emit(kind, **fields)
 
+    def _launch_policy_models(self) -> frozenset[str]:
+        """Model ids a launch may select: router endpoints, the base model, and under routing v2 the route table's models."""
+        if not routing_v2():
+            return self.allowed_model_ids
+        from kernel_frame_routes import route_model_ids
+        return self.allowed_model_ids | route_model_ids()
+
     def _execution_policy(self, runtime: object | None, endpoint: EndpointConfig):
         from kernel_model_policy import execution_policy_for
 
         if runtime is not None:
-            setattr(runtime, "model_router_allowed_models", self.allowed_model_ids)
+            setattr(runtime, "model_router_allowed_models", self._launch_policy_models())
         actual_model = (
             (getattr(runtime, "model_name", None)
              or getattr(runtime, "model", None)

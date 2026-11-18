@@ -170,6 +170,17 @@ def active() -> bool:
     return ROUTES_ACTIVE
 
 
+def route_model_ids() -> frozenset[str]:
+    """Every model name the installed route table names; empty when no table is installed.
+
+    The router's launch policy set adds these under routing v2 (MR-5), so a routed leg may select its model.
+    """
+    if not ROUTES_ACTIVE or not _roles:
+        return frozenset()
+    return frozenset(str(settings["model"]) for settings in _roles.values()
+                     if isinstance(settings.get("model"), str) and settings["model"])
+
+
 def unit_scope() -> tuple[str, str | None, int | None]:
     if not active():
         return "run", None, None

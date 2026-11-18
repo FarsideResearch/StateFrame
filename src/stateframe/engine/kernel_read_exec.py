@@ -23,6 +23,7 @@ from kernel_source_delivery import (
     deliver_source, normalize_read_request,
 )
 from kernel_launch_identity_cost import ENVIRONMENT, UNKNOWN, PhaseMeter
+from kernel_read_evidence import note_read_evidence
 from kernel_read_receipts import (capture_read, capture_failed, enabled as read_captures_enabled,
                                   uncaptured_path_reason,
                                   relative_path as _receipt_relative_path)
@@ -1112,8 +1113,13 @@ def execute_read(root: Path, p: Path, raw: str, display: str, start: int, *,
 
 
 def emit_read_receipt(bolt: object, root: Path, p: Path, raw: str, start: int,
-                      result: str, delivery: Mapping[str, object] | None = None) -> None:
-    """E346: read receipts complete the action tape (re-read-rate vital)."""
+                      result: str, delivery: Mapping[str, object] | None = None, *,
+                      new_evidence: bool = False) -> None:
+    """E346: read receipts complete the action tape (re-read-rate vital).
+
+    ``new_evidence`` (MR-8 v2 only, from kernel_read_evidence) marks the row as new evidence so
+    the router resets its reads-without-action counter. Schema 1 always passes False.
+    """
     from kernel_tool_paths import receipt_target_path
     result_status = str(result).upper()
     if result_status in {
@@ -1136,6 +1142,8 @@ def emit_read_receipt(bolt: object, root: Path, p: Path, raw: str, start: int,
         receipts = getattr(bolt, "receipts", None)
     if receipts and delivery:
         receipts[-1]["delivery"] = dict(delivery)
+    if new_evidence and receipts:
+        receipts[-1]["new_evidence"] = True
 
 
 def dispatch_live_read(root: Path, p: Path, raw: str, display: str, start: int, *,
@@ -1192,7 +1200,9 @@ def dispatch_live_read(root: Path, p: Path, raw: str, display: str, start: int, 
             measurement, resolved_path, result,
             bytes_read=bytes_read,
         )
-    emit_read_receipt(bolt, root, p, raw, start, result, delivery)
+    # MR-8 v2: an OK read of content the run has not returned before is new evidence.
+    new_evidence = result == "OK" and note_read_evidence(measurement, str(p), delivery)
+    emit_read_receipt(bolt, root, p, raw, start, result, delivery, new_evidence=new_evidence)
     scope = getattr(measurement, "_read_attempt_scope", None)
     if scope is not None:
         dedup = delivery.get("read_dedup")

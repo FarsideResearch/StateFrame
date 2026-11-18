@@ -41,10 +41,10 @@ def _edit(receipt_id, status="APPLIED"):
     return {"receipt_id": receipt_id, "action": "EDIT", "status": status}
 
 
-def _read(receipt_id, meaningful=None):
+def _read(receipt_id, new_evidence=None):
     row = {"receipt_id": receipt_id, "action": "READ", "status": "OK"}
-    if meaningful is not None:
-        row["meaningful_action"] = meaningful
+    if new_evidence is not None:
+        row["new_evidence"] = new_evidence
     return row
 
 
@@ -91,7 +91,7 @@ def test_v2_applied_edit_is_not_verifying_success(v2):
 
 
 def test_v2_read_with_new_receipt_resets_reads_since_action(v2):
-    rows = [_read("r1"), _read("r2"), _read("r3", meaningful=True)]
+    rows = [_read("r1"), _read("r2"), _read("r3", new_evidence=True)]
     assert _signals(rows)["reads_without_discriminating_action"] == 0
 
 
@@ -101,7 +101,7 @@ def test_v2_plain_reads_still_accumulate(v2):
 
 
 def test_v1_read_with_new_receipt_is_unchanged(v1):
-    rows = [_read("r1"), _read("r2"), _read("r3", meaningful=True)]
+    rows = [_read("r1"), _read("r2"), _read("r3", new_evidence=True)]
     assert _signals(rows)["reads_without_discriminating_action"] == 3
 
 
