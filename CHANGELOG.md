@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.56 (2026-11-18)
 
 - Turn timing: time that no host phase covered between a response and the next request is now also reported on its own as `unattributed_host_ns`, so it is no longer read as tool execution alone. The existing per-phase fields are unchanged; the new value is part of `tool_execution`.
 - Workspace effect capture no longer copies, fsyncs and links a file whose content the run's store already holds; it still checks the live file against the scanned state and verifies the stored copy, so the same changes are caught and the run's stored data is unchanged.
