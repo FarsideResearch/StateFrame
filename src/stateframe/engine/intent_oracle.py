@@ -50,11 +50,14 @@ Public contract:
 """
 import ast
 import datetime
+import logging
 import math
 import re
 import sys
 import textwrap
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 # ------------------------------------------------------------------ tiers
 TIER_EXAMPLE = "EXAMPLE"
@@ -756,7 +759,8 @@ def extract(fn_source):
     """Executable expectations mined from a function's prose + signature.
 
     Deterministic, no model call, never raises. An empty list is the honest and
-    common answer: most functions do not state a checkable contract.
+    common answer: most functions do not state a checkable contract. A miner that
+    raises is skipped so the others still run, and the skip is logged as a WARNING.
     """
     fn, _src = _parse_fn(fn_source)
     if fn is None:
@@ -766,8 +770,11 @@ def extract(fn_source):
     for extractor in _EXTRACTORS:
         try:
             out.extend(extractor(fn, doc) or [])
-        except Exception:
-            continue                      # one broken miner never blocks the rest
+        except Exception as error:
+            # One broken miner never blocks the rest, but the lost judge is reported.
+            logger.warning("intent oracle miner %s failed: %s",
+                           getattr(extractor, "__name__", "?"), type(error).__name__)
+            continue
     out.sort(key=lambda e: TIER_RANK.get(e.tier, len(TIERS)))
     return out[:MAX_EXPECTATIONS]
 
@@ -844,7 +851,8 @@ def _load(fn_source, name):
 
 
 def run_call(fn, call):
-    """One observed outcome. Never raises; a runaway loop is halted by budget."""
+    """One observed outcome. Never raises (except KeyboardInterrupt, which stops the
+    run); a runaway loop is halted by budget."""
     if fn is None:
         return Outcome(ok=False, exc="Unloadable")
     old = sys.gettrace()
@@ -856,6 +864,10 @@ def run_call(fn, call):
         return Outcome(ok=False, exc="Halt")
     except Exception as exc:
         return Outcome(ok=False, exc=type(exc).__name__)
+    except KeyboardInterrupt:
+        # Ctrl-C and engine SIGTERM (raised as a KeyboardInterrupt subclass) must
+        # stop the run, never become a candidate outcome.
+        raise
     except BaseException as exc:          # SystemExit et al from repo code
         return Outcome(ok=False, exc=type(exc).__name__)
     finally:
@@ -863,7 +875,10 @@ def run_call(fn, call):
 
 
 def evaluate(fn_source, name, expectations):
-    """{expectation index: True/False/None}. None = could not observe (no signal)."""
+    """{expectation index: True/False/None}. None = could not observe (no signal).
+
+    A check that raises also yields None, and is logged as a WARNING so an
+    authoring bug in the check stays distinguishable from a legitimate abstention."""
     fn = _load(fn_source, name)
     verdicts = {}
     for i, exp in enumerate(expectations):
@@ -876,7 +891,9 @@ def evaluate(fn_source, name, expectations):
             continue
         try:
             verdicts[i] = bool(exp.check(outs))
-        except Exception:
+        except Exception as error:
+            logger.warning("intent oracle check %r raised %s; recorded as no signal",
+                           getattr(exp, "description", "?"), type(error).__name__)
             verdicts[i] = None
     return verdicts
 

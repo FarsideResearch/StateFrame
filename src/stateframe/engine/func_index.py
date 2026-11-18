@@ -28,6 +28,7 @@ Layout:
 from __future__ import annotations
 
 import ast
+import logging
 import math
 import pathlib
 import re
@@ -39,6 +40,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 # words() is REUSED, never reimplemented: a divergent tokenizer would make the
 # function view and the file view incomparable (and the shadow table meaningless).
 from probes.real_repo_baseline_v2 import words, build_index, bm25_rank  # noqa: E402
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------- construct table
 # Same regex families as fixer.class_pattern_rank. Kept here so both views share
@@ -614,14 +617,22 @@ MENU_N = 8
 def load_repo_files(root=REPO_DEFAULT):
     """Same exclusions as fixer.load_repo (tests, migrations, dotted paths).
     Duplicated rather than imported so this module never pulls fixer.py into a
-    process while a live run owns it."""
+    process while a live run owns it.
+
+    An unreadable file is still skipped (the index covers what can be read), but
+    the skip is reported in one WARNING per call so a shrunken index is visible."""
     root = pathlib.Path(root)
     files = {}
+    skipped = []
     for p in sorted(root.rglob("*.py")):
         if "test" in p.name or "migration" in str(p) or "/." in str(p):
             continue
+        rel = str(p.relative_to(root))
         try:
-            files[str(p.relative_to(root))] = p.read_text()
-        except Exception:
-            pass
+            files[rel] = p.read_text()
+        except Exception as error:
+            skipped.append(f"{rel} ({type(error).__name__})")
+    if skipped:
+        logger.warning("load_repo_files skipped %d unreadable file(s): %s", len(skipped),
+                       ", ".join(skipped[:5]) + (" ..." if len(skipped) > 5 else ""))
     return files

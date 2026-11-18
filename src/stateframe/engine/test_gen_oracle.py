@@ -36,6 +36,7 @@ answer is NO_SIGNAL, and that is the common answer.
 
 import ast
 import itertools
+import logging
 import re
 import sys
 import textwrap
@@ -44,6 +45,8 @@ from dataclasses import dataclass, field
 
 import intent_oracle as io
 import witness_replay as wr
+
+_log = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------- budget
 MAX_CASES = 72              # synthesized cases per menu (hard ceiling)
@@ -148,6 +151,7 @@ class DiscriminationResult:
     cases_cited: list = field(default_factory=list)     # labels backing the pick
     predicates: list = field(default_factory=list)      # (name, n_consistent)
     reason: str = ""
+    notes: list = field(default_factory=list)           # typed degradations met on the way
 
     @property
     def counts(self):
@@ -294,11 +298,14 @@ def _target_params(fn, candidates, params):
     return params[:MAX_PROBED_PARAMS]
 
 
-def synthesize_cases(fn_source, candidates, symptom_class, max_cases=MAX_CASES):
+def synthesize_cases(fn_source, candidates, symptom_class, max_cases=MAX_CASES,
+                     notes=None):
     """The synthesized case list: per-family templates x AST facts.
 
     Deterministic and bounded. Never raises — an unparseable function yields an
-    empty list, which becomes NO_SIGNAL upstream.
+    empty list, which becomes NO_SIGNAL upstream. A degradation on the way (the
+    base binding falling back to default values) is logged and, when `notes` is
+    a list, appended to it as a typed reason.
     """
     fn = _fn_node(fn_source)
     if fn is None:
@@ -309,7 +316,14 @@ def synthesize_cases(fn_source, candidates, symptom_class, max_cases=MAX_CASES):
     base = {}
     try:
         base = io._base_binding(fn)
-    except Exception:
+    except Exception as exc:
+        # The fallback keeps the probes usable, but every case is then built from
+        # guessed defaults rather than the function's own binding: say so.
+        why = ("base binding unavailable (%s); probes use default values"
+               % type(exc).__name__)
+        _log.warning("test-generation oracle: %s for %s()", why, fn.name)
+        if notes is not None:
+            notes.append(why)
         base = {n: io._default_for(n, "") for n in params}
     order = _param_names(fn)
     full_order = [p.arg for p in list(fn.args.posonlyargs) + list(fn.args.args)]
@@ -496,16 +510,32 @@ def _resolved_constants(fn_source):
     return out[:6]
 
 
+class SourceLoadError(Exception):
+    """Typed load failure: the source did not compile or execute, or it defined
+    no callable of the requested name. `.reason` is the short typed cause."""
+
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = reason
+
+
 def _load(fn_source, name):
+    """The callable `name` defined by `fn_source`, in an isolated namespace.
+
+    Raises SourceLoadError rather than returning None, so a caller cannot mistake
+    an unloadable source for a function that loaded.
+    """
     src = textwrap.dedent(fn_source or "")
     ns = _namespace(fn_source)
     try:
         code = compile(src, SANDBOX_FILENAME, "exec")
         exec(code, ns)                # noqa: S102 — candidate source, isolated ns
-    except Exception:
-        return None
+    except Exception as exc:
+        raise SourceLoadError("%s while loading" % type(exc).__name__) from exc
     fn = ns.get(name)
-    return fn if callable(fn) else None
+    if not callable(fn):
+        raise SourceLoadError("no callable named %r" % name)
+    return fn
 
 
 class _HardHalt(BaseException):
@@ -644,9 +674,11 @@ def _execute_matrix(fn_source, name, candidates, span_lines, cases):
     """{'base': [fp...], 'cands': [[fp...]|None], 'cov': [...]}.
 
     A candidate whose source cannot be built or loaded gets None and takes no
-    part in any predicate — it is neither killed nor credited.
+    part in any predicate; it is neither killed nor credited. An ORIGINAL that
+    cannot load raises SourceLoadError: with no base outcomes every candidate
+    would look discriminating, so the matrix refuses to discriminate at all.
     """
-    base_fn = _load(fn_source, name)
+    base_fn = _load(fn_source, name)  # SourceLoadError propagates on purpose
     base_fps, base_cov = [], []
     for case in cases:
         out, cov = run_case(base_fn, case)
@@ -656,7 +688,12 @@ def _execute_matrix(fn_source, name, candidates, span_lines, cases):
     cand_fps, cand_cov = [], []
     for cand in candidates:
         src = io._apply(span_lines, cand)
-        fn = _load(src, name) if src is not None else None
+        fn = None
+        if src is not None:
+            try:
+                fn = _load(src, name)
+            except SourceLoadError:
+                fn = None                 # documented: neither killed nor credited
         if fn is None:
             cand_fps.append(None)
             cand_cov.append(None)
@@ -1387,21 +1424,34 @@ def predicate_symptom_direction(symptom_class, candidates, surviving):
     """
     if symptom_class != "cmp_flip" or len(surviving) < 2:
         return None, ""
-    reversing = set()
+    # RULE 3 applies per candidate: one whose direction cannot be read is KEPT
+    # (no evidence against it), never dropped from the survivor set.
+    reversing, unread, errors = set(), set(), []
     for ci in surviving:
         try:
             _off, old_line, new_line = candidates[ci]
             old_node, _ = wr.extract_condition(old_line)
             new_node, _ = wr.extract_condition(new_line)
             if old_node is None or new_node is None:
+                unread.add(ci)
                 continue
             if wr.reverses_direction(old_node, new_node):
                 reversing.add(ci)
-        except Exception:
-            continue
+        except Exception as exc:
+            unread.add(ci)
+            errors.append(type(exc).__name__)
+    if errors:
+        _log.warning("test-generation oracle: direction check failed on %d "
+                     "candidate(s) (%s); kept them", len(errors),
+                     ", ".join(sorted(set(errors))))
     if not reversing:
         return None, ""
-    return reversing, "reverses the comparison direction the symptom names"
+    why = "reverses the comparison direction the symptom names"
+    if unread:
+        why += "; kept %d candidate(s) whose direction could not be read" % len(unread)
+    if errors:
+        why += " (error: %s)" % ", ".join(sorted(set(errors)))
+    return reversing | unread, why
 
 
 # ================================================================ 6. VERDICT
@@ -1442,14 +1492,19 @@ def _synthesize(fn_source, candidates, symptom_class, span_lines, result):
 
     budget = max(MIN_CASES, MAX_EXECUTIONS // max(1, len(cands)))
     cases = synthesize_cases(fn_source, cands, symptom_class,
-                             max_cases=min(MAX_CASES, budget))
+                             max_cases=min(MAX_CASES, budget), notes=result.notes)
     result.cases = cases
     if not cases:
         result.reason = "no case template applied"
         return result
 
-    base_fps, base_cov, cand_fps, cand_cov = _execute_matrix(
-        fn_source, fn.name, cands, span, cases)
+    try:
+        base_fps, base_cov, cand_fps, cand_cov = _execute_matrix(
+            fn_source, fn.name, cands, span, cases)
+    except SourceLoadError as exc:
+        # No base outcomes means no discrimination: abstain with the typed cause.
+        result.reason = "original function did not load: %s" % exc.reason
+        return result
     live = [ci for ci, f in enumerate(cand_fps) if f is not None]
     if len(live) < 2:
         result.reason = "fewer than two candidates are executable"
