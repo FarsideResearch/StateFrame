@@ -259,7 +259,9 @@ def _is_static(value: object) -> bool:
 
 
 # Reviewed exclusions: module globals a restore keeps from the NEW process (never saved).
-# Each is a pure cache or a lazily rebuilt holder; dropping it can change only speed.
+# Each is a pure cache, a lazily rebuilt holder, or per-thread runtime state (threading.local), which
+# cannot be pickled at all. Dropping a cache changes only speed; the thread-local entries keep their
+# import-time (empty) state in the new process, and their readers fall back to defaults.
 DROP_GLOBALS = {
     ("kernel_fl_checkpoint_capture", "_API"):
         "lazy import holder of checkpoint helper classes; re-created on first use",
@@ -283,6 +285,44 @@ DROP_GLOBALS = {
         "fallback binding salt is process-local and regenerated after restore",
     ("stateframe.engine.kernel_request_auth_identity", "_AUTH_BINDING_SECRET_LOCK"):
         "process-local lock protecting auth binding secret cache",
+    # threading.local objects cannot be pickled. Each is per-thread runtime state that the new
+    # process rebuilds from its own import; the readers below tolerate it being unset.
+    ("kernel_bounded_http", "_PROBE_STATE"):
+        "per-thread /props probe outcome; each probe resets it before use",
+    ("engine.kernel_bounded_http", "_PROBE_STATE"):
+        "per-thread /props probe outcome; each probe resets it before use",
+    ("stateframe.engine.kernel_bounded_http", "_PROBE_STATE"):
+        "per-thread /props probe outcome; each probe resets it before use",
+    ("fixer", "_TRACE"):
+        "per-thread last trace ref; each captured call resets it before use",
+    ("engine.fixer", "_TRACE"):
+        "per-thread last trace ref; each captured call resets it before use",
+    ("stateframe.engine.fixer", "_TRACE"):
+        "per-thread last trace ref; each captured call resets it before use",
+    ("fixer", "_CALL_META"):
+        "per-thread metadata of the current model call; read through getattr defaults",
+    ("engine.fixer", "_CALL_META"):
+        "per-thread metadata of the current model call; read through getattr defaults",
+    ("stateframe.engine.fixer", "_CALL_META"):
+        "per-thread metadata of the current model call; read through getattr defaults",
+    ("fixer", "_USAGE_SINK"):
+        "per-thread usage accumulator installed by set_usage_sink; read through getattr defaults",
+    ("engine.fixer", "_USAGE_SINK"):
+        "per-thread usage accumulator installed by set_usage_sink; read through getattr defaults",
+    ("stateframe.engine.fixer", "_USAGE_SINK"):
+        "per-thread usage accumulator installed by set_usage_sink; read through getattr defaults",
+    ("fixer", "_TRUNCATION_SINK"):
+        "per-thread truncation telemetry installed by set_truncation_sink; read through getattr defaults",
+    ("engine.fixer", "_TRUNCATION_SINK"):
+        "per-thread truncation telemetry installed by set_truncation_sink; read through getattr defaults",
+    ("stateframe.engine.fixer", "_TRUNCATION_SINK"):
+        "per-thread truncation telemetry installed by set_truncation_sink; read through getattr defaults",
+    ("prompt_ledger", "_CONTEXT"):
+        "per-thread run/task labels for prompt capture; set by fixer.run via set_context",
+    ("engine.prompt_ledger", "_CONTEXT"):
+        "per-thread run/task labels for prompt capture; set by fixer.run via set_context",
+    ("stateframe.engine.prompt_ledger", "_CONTEXT"):
+        "per-thread run/task labels for prompt capture; set by fixer.run via set_context",
 }
 # Host configuration the product child sets on the engine before work() runs. The new process's
 # host sets them again (possibly to new values: a raised --max-turns), and KEY is a credential that
@@ -2350,6 +2390,9 @@ def _capture_snapshot_file(
             os.replace(temporary_path, capture_target)
             temporary_path = None
             if new_pool_files is not None:
+                # Pooled files are write-once: read-only from the moment they are published.
+                published = os.lstat(capture_target)
+                os.chmod(capture_target, stat.S_IMODE(published.st_mode) & ~0o222)
                 new_pool_files.append(capture_target)
         else:
             temporary_path.unlink()
@@ -2612,6 +2655,7 @@ def _snapshot_tree(source: Path, target: Path, relative: str, pool: Path, manife
             store.mkdir(mode=0o700, parents=True, exist_ok=True)
             known = _POOL_KNOWN.setdefault(str(store), {
                 name: _pool_identity(store / name) for name in os.listdir(store)})
+        live_infos = {entry.name: entry.stat(follow_symlinks=False) for entry in entries}
         for name in names:
             cached = known.get(name)
             identity, _cloned = _capture_snapshot_file(
@@ -2619,6 +2663,9 @@ def _snapshot_tree(source: Path, target: Path, relative: str, pool: Path, manife
             if cached is not None and cached != identity:
                 raise CheckpointError("pooled file identity changed during checkpoint capture")
             known[name] = identity
+            # A pool file is shared by every checkpoint holding these bytes, so its own mtime is the
+            # first capture's; the live mtime of this checkpoint is recorded for restore.
+            _note_mtime(f"{relative}/{name}", live_infos[name])
         manifests[relative] = [[name, known[name][0]] for name in names]
         return
     if source.is_dir() and not source.is_symlink():
@@ -2639,7 +2686,7 @@ def _snapshot_tree(source: Path, target: Path, relative: str, pool: Path, manife
             (previous_files or {}).get(relative, ()), file_chunks, seq):
         return
     if source.is_file() and not source.is_symlink():
-        _capture_snapshot_file(source, target)
+        _capture_run_file(source, target, relative)
         return
     if source.is_symlink():
         _capture_snapshot_symlink(source, target, home)
@@ -2648,39 +2695,163 @@ def _snapshot_tree(source: Path, target: Path, relative: str, pool: Path, manife
         _clone(source, target)
 
 
-# Per-run content-addressed store of changed run files. A changed file is hashed once while it is
-# copied into the store; the snapshot then hard-links the object, so equal (bytes, mode, mtime)
-# files across checkpoints share one inode. Objects no snapshot links any more (nlink == 1) are
-# collected when a checkpoint is published.
+# Per-run content-addressed store of run files. A file is stored once per (bytes, mode): the object
+# is named by its sha256 and mode, made read-only, and every checkpoint holding those bytes
+# hard-links it. The live run dir never links into the store; restore always makes private copies.
+# mtime is not part of the key (a touched file with the same bytes reuses the object), so a checkpoint
+# copy keeps the mtime of the first capture of its bytes. Objects no snapshot links any more
+# (nlink == 1) are collected when a checkpoint is published.
 OBJECT_DIR = "env-objects"
+# os.link errnos meaning "this filesystem cannot link here": the checkpoint takes a private copy.
+LINK_FALLBACK_ERRNOS = frozenset({errno.EXDEV, errno.EPERM, errno.EMLINK, errno.ENOTSUP})
+# Live stat tuple (dev, ino, size, mtime_ns, ctime_ns, secret generation) -> sha256 scanned under it.
+# ctime moves on every write, so a changed file misses. Cleared when the run changes.
+_DIGEST_MEMO: dict[tuple[int, int, int, int, int, int], str] = {}
+# Timestamps come from a coarse clock, so a rewrite shortly after a scan can keep the same ctime. As
+# git does for its index, a digest is remembered only when the file's mtime and ctime both predate
+# the scan by this window; a recently touched file is always hashed again.
+_RACY_WINDOW_NS = 2_000_000_000
 
 
-def _store_object(path: str, info: os.stat_result, objects: Path, counter: list[int]) -> str:
-    """Copy ``path`` into the object store (once per distinct content) and return the object path."""
+def _note_new_bytes(count: int) -> None:
+    """Add bytes this save newly wrote to its ledger (meta "bytes_new"); a no-op outside a save."""
+    ledger = _SAVE.get("bytes_new")
+    if isinstance(ledger, list) and count:
+        ledger[0] += count
+
+
+def _note_mode(key: str, info: os.stat_result) -> None:
+    """Record the live mode and mtime_ns of a captured file so restore can give the copy both back.
+
+    The mtime matters because stored objects are shared by content: a stored copy carries the mtime
+    of the first capture of those bytes, not the live file's mtime at this checkpoint.
+    """
+    modes = _SAVE.get("copy_modes")
+    if isinstance(modes, dict):
+        modes[key] = stat.S_IMODE(info.st_mode)
+    _note_mtime(key, info)
+
+
+def _note_mtime(key: str, info: os.stat_result) -> None:
+    """Record a live file's mtime_ns under its checkpoint key (meta "file_mtime_ns"); no-op outside a save."""
+    mtimes = _SAVE.get("copy_mtimes")
+    if isinstance(mtimes, dict):
+        mtimes[key] = info.st_mtime_ns
+
+
+def _live_digest(path: Path, info: os.stat_result) -> tuple[int, str]:
+    """(size, sha256) of a live regular file after the registered-secret scan.
+
+    A digest is reused only for the exact stat tuple it was computed from, under the current secret
+    generation, so an unchanged file costs no read and no lstat.
+    """
+    _check_registered_secrets(os.fsencode(path), failure_type=_StateFileSecretError)
+    generation = _SECRET_GENERATION
+    key = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns, generation)
+    cached = _DIGEST_MEMO.get(key)
+    if cached is not None:
+        return info.st_size, cached
+    started = time.time_ns()
+    size, digest = _check_snapshot_file(path)
+    newest_change = max(info.st_mtime_ns, info.st_ctime_ns)
+    if generation == _SECRET_GENERATION and newest_change < started - _RACY_WINDOW_NS:
+        _DIGEST_MEMO[key] = digest
+    return size, digest
+
+
+def _store_object(path: str, info: os.stat_result, digest: str, objects: Path) -> tuple[Path, int]:
+    """Make the object for (bytes ``digest``, ``info``'s mode) exist; return it and the bytes written.
+
+    An existing object is reused without reading the source. A new one is copied to a temporary while
+    its bytes are hashed: a source that changed since it was scanned raises instead of storing bytes
+    the scan never saw. The copy is fsynced, made read-only, then renamed into place.
+    """
     objects.mkdir(mode=0o700, exist_ok=True)
-    counter[0] += 1
-    temporary = objects / f".{os.getpid()}-{counter[0]}.tmp"
-    digest = hashlib.sha256()
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
-    with open(path, "rb") as reader, os.fdopen(os.open(temporary, flags, 0o600), "wb") as writer:
-        for block in iter(lambda: reader.read(1 << 20), b""):
-            digest.update(block)
-            writer.write(block)
-    shutil.copystat(path, temporary, follow_symlinks=False)
-    final = objects / f"{digest.hexdigest()}-{stat.S_IMODE(info.st_mode):o}-{info.st_mtime_ns}"
+    mode = stat.S_IMODE(info.st_mode)
+    final = objects / f"{digest}-{mode:o}"
     try:
-        if final.stat().st_size == info.st_size:  # equal content, mode and mtime: reuse the object
-            os.unlink(temporary)
-            return str(final)
-    except OSError:
+        existing = os.lstat(final)
+        if stat.S_ISREG(existing.st_mode) and existing.st_size == info.st_size:
+            return final, 0
+    except FileNotFoundError:
         pass
-    os.replace(temporary, final)
-    return str(final)
+    temporary_name: str | None = None
+    try:
+        with open(path, "rb") as reader:
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f".{os.getpid()}-", suffix=".tmp", dir=objects)
+            hasher = hashlib.sha256()
+            written = 0
+            with os.fdopen(descriptor, "wb") as writer:
+                for block in iter(lambda: reader.read(1 << 20), b""):
+                    hasher.update(block)
+                    writer.write(block)
+                    written += len(block)
+                writer.flush()
+                os.fsync(writer.fileno())
+        if hasher.hexdigest() != digest or written != info.st_size:
+            raise CheckpointError("run file changed during checkpoint capture")
+        shutil.copystat(path, temporary_name, follow_symlinks=False)
+        os.chmod(temporary_name, mode & ~0o222)
+        os.replace(temporary_name, final)
+    except BaseException:
+        if temporary_name is not None:
+            try:
+                os.unlink(temporary_name)
+            except OSError:
+                pass
+        raise
+    return final, written
 
 
-def _copy_scan_key(info: os.stat_result, generation: int) -> tuple[int, int, int, int, int, int, str]:
-    """Verified-scan memo key for an environment file seen by ``_copy_tree`` (no digest is computed)."""
-    return _snapshot_file_cache_key(info, generation, "")
+def _link_or_copy(stored: Path, destination: str | Path, live: Path, relpath: str,
+                  digests: dict[str, str] | None, counts: dict[str, int]) -> str:
+    """Hard-link ``stored`` to ``destination``; a filesystem refusing the link gets a private copy.
+
+    Returns "linked", "copied" or "cloned". A fallback is counted in ``counts["link_fallback"]`` and
+    never fails the checkpoint.
+    """
+    try:
+        os.link(stored, destination)
+        return "linked"
+    except OSError as error:
+        if error.errno not in LINK_FALLBACK_ERRNOS:
+            raise
+    counts["link_fallback"] = counts.get("link_fallback", 0) + 1
+    cloned = _capture_recorded(live, Path(destination), relpath, digests)
+    if not cloned:
+        _note_new_bytes(os.lstat(live).st_size)
+    return "cloned" if cloned else "copied"
+
+
+def _file_sha256(path: str | os.PathLike[str]) -> str | None:
+    """SHA-256 of a regular file, streamed in 1 MiB blocks; None when it is not readable as one."""
+    descriptor = None
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                             | getattr(os, "O_CLOEXEC", 0))
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            return None
+        digest = hashlib.sha256()
+        while True:
+            block = os.read(descriptor, 1 << 20)
+            if not block:
+                return digest.hexdigest()
+            digest.update(block)
+    except OSError:
+        return None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _capture_recorded(source: Path, destination: Path, relpath: str,
+                      digests: dict[str, str] | None, **kwargs: bool) -> bool:
+    """``_capture_snapshot_file`` that also records the sha256 of the bytes it published."""
+    identity, cloned = _capture_snapshot_file(source, destination, **kwargs)
+    if digests is not None and identity[1]:
+        digests[relpath] = identity[1]
+    return cloned
 
 
 def _copy_tree(source: Path, target: Path, previous: Path | None,
@@ -2688,13 +2859,13 @@ def _copy_tree(source: Path, target: Path, previous: Path | None,
                objects: Path | None = None,
                home: Path | None = None, home_subtree: Path | None = None,
                excluded: set[Path] | None = None) -> dict[str, int]:
-    """Copy ``source`` to ``target``; a file unchanged since the previous checkpoint is hard-linked.
+    """Copy ``source`` to ``target``, sharing every regular file whose bytes already exist in the set.
 
-    Checkpoint copies are never modified after they are written, so linking to one is safe; a file
-    is unchanged when size and mtime_ns equal the previous copy (copies keep the source mtime).
-    Seed-matching env files and big changed files are APFS-cloned (copy-on-write)
-    when possible; other changed files go through the content-addressed ``objects`` store when one
-    is given, else they are copied. One lstat per unchanged file (scandir types are free).
+    Each regular file is hashed once per stat tuple (``_live_digest``). Resolution, in order: (1) the
+    previous snapshot's copy, hard-linked, when its recorded sha256 equals the live digest; (2) the
+    content-addressed ``objects`` store when the save has one (stored once, ever); (3) a private copy.
+    ``seed`` is accepted for the call contract only: content matching already shares seed-identical
+    bytes, so no seed-specific copy path remains.
     """
     if objects is None:
         objects = _SAVE.get("snapshot_objects")
@@ -2703,14 +2874,14 @@ def _copy_tree(source: Path, target: Path, previous: Path | None,
         # boundary filters through wrappers that only forward the seed option.
         home, home_subtree, excluded = _SAVE.get("snapshot_exclusions", (None, None, None))
     excluded = excluded or set()
-    counts = {"linked": 0, "copied": 0, "cloned": 0}
-    counter = [0]
-    if previous is None:
-        objects = None  # a first snapshot has nothing to dedup against; skip the hash pass
+    # (digests written for this copy, digests the prior snapshot recorded); both optional.
+    digests, prior_digests = _SAVE.get("copy_digests", (None, None))
+    prefix = _SAVE.get("copy_prefix", "")
     darwin = sys.platform == "darwin"
+    seed_root = None if seed is None else os.fspath(seed)
+    counts = {"linked": 0, "copied": 0, "cloned": 0}
     src_root, dst_root = os.fspath(source), os.fspath(target)
     prev_root = None if previous is None else os.fspath(previous)
-    seed_root = None if seed is None else os.fspath(seed)
     pending = [""]
     if home is not None or home_subtree is not None or excluded:
         if _snapshot_path_excluded(source, home, home_subtree, excluded):
@@ -2743,41 +2914,38 @@ def _copy_tree(source: Path, target: Path, previous: Path | None,
                 continue
             info = entry.stat(follow_symlinks=False)
             relpath = os.path.join(rel, name) if rel else name
-            # A file whose (inode, size, mtime, ctime) was already scanned under the current secret
-            # set is not read again; any newly registered secret bumps the generation and misses.
-            generation = _SECRET_GENERATION
-            scan_key = _copy_scan_key(info, generation)
-            scanned = scan_key in _VERIFIED_POOL_IDENTITIES
-            if seed_root is not None and not info.st_mode & 0o222:
+            if not stat.S_ISREG(info.st_mode):
+                _capture_recorded(Path(path), Path(destination), relpath, digests)  # refuses it
+                counts["copied"] += 1
+                continue
+            _note_mode(os.path.join(prefix, relpath) if prefix else relpath, info)
+            # A digest is needed only to compare with a prior copy or to name an object. A plain
+            # private copy is scanned as it is written, which keeps the bytes it publishes scanned.
+            size, digest = info.st_size, None
+            if old_dir is not None or objects is not None:
+                size, digest = _live_digest(Path(path), info)
+            if old_dir is not None and digest is not None:
+                prior_path = os.path.join(old_dir, name)
                 try:
-                    seed_info = os.stat(os.path.join(seed_root, relpath))
-                except OSError:
-                    seed_info = None
-                if (seed_info is not None and info.st_dev == seed_info.st_dev
-                        and info.st_ino == seed_info.st_ino and stat.S_ISREG(seed_info.st_mode)):
-                    _identity, cloned = _capture_snapshot_file(
-                        Path(path), Path(destination), prefer_clone=True)
-                    counts["cloned" if cloned else "copied"] += 1
-                    continue
-            if old_dir is not None:
-                old = os.path.join(old_dir, name)
-                try:
-                    prior = os.lstat(old)
+                    prior = os.lstat(prior_path)
                 except OSError:
                     prior = None
                 if (prior is not None and stat.S_ISREG(prior.st_mode)
                         and (prior.st_dev, prior.st_ino) != (info.st_dev, info.st_ino)
-                        and prior.st_size == info.st_size
-                        and prior.st_mtime_ns == info.st_mtime_ns):
-                    if not scanned:
-                        _check_snapshot_file(Path(path))
-                        if generation == _SECRET_GENERATION:
-                            _VERIFIED_POOL_IDENTITIES.add(scan_key)
-                    os.link(old, destination)
-                    durable_inodes.add((prior.st_dev, prior.st_ino))
-                    counts["linked"] += 1
-                    continue
+                        and prior.st_size == size):
+                    recorded = prior_digests.get(relpath) if prior_digests is not None else None
+                    prior_digest = recorded if type(recorded) is str else _file_sha256(prior_path)
+                    if prior_digest == digest:
+                        status = _link_or_copy(Path(prior_path), destination, Path(path),
+                                               relpath, digests, counts)
+                        if status == "linked":
+                            durable_inodes.add((prior.st_dev, prior.st_ino))
+                        if digests is not None:
+                            digests[relpath] = digest
+                        counts[status] += 1
+                        continue
             if seed_root is not None and darwin:
+                # Clone preference only: the live bytes are captured, never the seed's copy.
                 try:
                     seed_info = os.stat(os.path.join(seed_root, relpath))
                 except OSError:
@@ -2785,41 +2953,89 @@ def _copy_tree(source: Path, target: Path, previous: Path | None,
                 if (seed_info is not None and stat.S_ISREG(seed_info.st_mode)
                         and seed_info.st_size == info.st_size
                         and seed_info.st_mtime_ns == info.st_mtime_ns):
-                    _identity, cloned = _capture_snapshot_file(
-                        Path(path), Path(destination), prefer_clone=True)
+                    cloned = _capture_recorded(Path(path), Path(destination), relpath, digests,
+                                               prefer_clone=True)
+                    _note_new_bytes(0 if cloned else info.st_size)
                     counts["cloned" if cloned else "copied"] += 1
                     continue
-            if info.st_size >= _BIG_FILE and darwin:
-                _identity, cloned = _capture_snapshot_file(Path(path), Path(destination))
-                counts["cloned" if cloned else "copied"] += 1
+            if objects is not None:
+                stored, new_bytes = _store_object(path, info, digest, objects)
+                _note_new_bytes(new_bytes)
+                status = _link_or_copy(stored, destination, Path(path), relpath, digests, counts)
+                if status == "linked":
+                    stored_info = os.stat(stored)
+                    durable_inodes.add((stored_info.st_dev, stored_info.st_ino))
+                if digests is not None:
+                    digests[relpath] = digest
+                counts["copied" if new_bytes or status != "linked" else "linked"] += 1
                 continue
-            if objects is not None and stat.S_ISREG(info.st_mode):
-                # Scan before storing, then require the source to be unchanged across both steps so
-                # the stored bytes are the bytes that were scanned for registered secrets.
-                if not scanned:
-                    _check_snapshot_file(Path(path))
-                stored = _store_object(path, info, objects, counter)
-                after = os.lstat(path)
-                if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns,
-                        after.st_ctime_ns) != (info.st_dev, info.st_ino, info.st_size,
-                                               info.st_mtime_ns, info.st_ctime_ns):
-                    raise CheckpointError("run file changed during checkpoint capture")
-                if generation == _SECRET_GENERATION:
-                    _VERIFIED_POOL_IDENTITIES.add(scan_key)
-                try:
-                    os.link(stored, destination)
-                except OSError as error:
-                    # Identical tiny files (empty __init__.py) share one object inode and can
-                    # reach the filesystem link limit; a private copy is always correct.
-                    if error.errno != errno.EMLINK:
-                        raise
-                    _identity, cloned = _capture_snapshot_file(Path(path), Path(destination))
-            else:
-                _identity, cloned = _capture_snapshot_file(Path(path), Path(destination))
-            if generation == _SECRET_GENERATION:
-                _VERIFIED_POOL_IDENTITIES.add(scan_key)
-            counts["copied"] += 1
+            cloned = _capture_private(Path(path), info, destination, relpath, digests)
+            _note_new_bytes(0 if cloned else info.st_size)
+            counts["cloned" if cloned else "copied"] += 1
     return counts
+
+
+def _capture_run_file(source: Path, target: Path, relative: str) -> None:
+    """Store one top-level or worker run file through the content-addressed store on the save path."""
+    objects = _SAVE.get("snapshot_objects")
+    if not isinstance(objects, Path):
+        try:
+            info = os.lstat(source)
+        except OSError:
+            info = None  # the capture below reports the missing or unreadable source
+        if info is not None and stat.S_ISREG(info.st_mode):
+            _note_mode(relative, info)
+        _capture_snapshot_file(source, target)
+        return
+    try:
+        info = os.lstat(source)
+    except OSError as error:
+        raise CheckpointError("run file changed during checkpoint capture") from error
+    if not stat.S_ISREG(info.st_mode):
+        raise CheckpointError("snapshot source is not a regular run file")
+    _size, digest = _live_digest(source, info)
+    _note_mode(relative, info)
+    stored, new_bytes = _store_object(str(source), info, digest, objects)
+    _note_new_bytes(new_bytes)
+    counts = _SAVE.get("counts")
+    if not isinstance(counts, dict):
+        counts = {}
+    status = _link_or_copy(stored, target, source, relative, None, counts)
+    if status == "linked":
+        durable = _SAVE.get("durable_inodes")
+        stored_info = os.stat(stored)
+        if isinstance(durable, set):
+            durable.add((stored_info.st_dev, stored_info.st_ino))
+    key = "copied" if new_bytes or status != "linked" else "linked"
+    counts[key] = counts.get(key, 0) + 1
+
+
+def _capture_private(path: Path, info: os.stat_result, destination: str, relpath: str,
+                     digests: dict[str, str] | None) -> bool:
+    """Private copy of a live file, scanned as written; remembers its digest for the stat tuple it was read under.
+
+    The digest comes from the bytes that were captured (the same bytes that were scanned), so a later
+    save can skip re-reading the file while its stat tuple is unchanged and clearly older than the racy window.
+    """
+    generation = _SECRET_GENERATION
+    started = time.time_ns()
+    identity, cloned = _capture_snapshot_file(path, Path(destination))
+    digest = identity[1]
+    if digests is not None and digest:
+        digests[relpath] = digest
+    newest_change = max(info.st_mtime_ns, info.st_ctime_ns)
+    if digest and generation == _SECRET_GENERATION and newest_change < started - _RACY_WINDOW_NS:
+        _DIGEST_MEMO[(info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+                      generation)] = digest
+    return cloned
+
+
+def _copy_pooled_fallback(source: Path, target: Path) -> None:
+    """Private copy of a staged pool file for a filesystem that refuses the hard link."""
+    shutil.copyfile(source, target)
+    os.chmod(target, 0o444)
+    if _pool_identity(target) != _pool_identity(source):
+        raise CheckpointError("checkpoint artifact identity conflict")
 
 
 def _prune_objects(root: Path) -> None:
@@ -3015,6 +3231,11 @@ def _publish_staged_artifacts(root: Path, tmp: Path) -> None:
             # A target created after the preflight is not owned by this transaction.
             owned_set.remove(relative)
             _write_artifact_transaction(tmp, sorted(owned_set))
+        except OSError as error:
+            if error.errno not in LINK_FALLBACK_ERRNOS:
+                raise
+            _copy_pooled_fallback(source, target)
+            _record(root.parent, event="link_fallback", target=relative)
         published_dirs.add(target.parent)
 
     for directory in published_dirs:
@@ -3175,6 +3396,7 @@ def save(frame, step: int, run_dir: Path, *, background: bool = False) -> Path:
     cache_run = os.path.realpath(run_dir)
     if _STATE.get("verified_pool_cache_run") != cache_run:
         _VERIFIED_POOL_IDENTITIES.clear()
+        _DIGEST_MEMO.clear()
         _POOL_KNOWN.clear()
         _STATE["verified_pool_cache_run"] = cache_run
     started = time.perf_counter()
@@ -3275,11 +3497,19 @@ def _save_into(payload, ctx, step, run_dir, root, final, tmp, clocks, started, c
             prior_meta = json.loads((previous / META_FILE).read_text())
         except (OSError, ValueError):
             pass
+    recorded_digests = prior_meta.get("file_sha256")
+    recorded_digests = recorded_digests if isinstance(recorded_digests, dict) else {}
+    file_digests: dict[str, dict[str, str]] = {}
     copied = {"linked": 0, "copied": 0, "cloned": 0}
     manifests: dict[str, list] = {}
     file_chunks: dict[str, list] = {}
     new_pool_files: list[Path] = []
     durable_inodes: set[tuple[int, int]] = set()
+    file_modes: dict[str, int] = {}
+    file_mtimes: dict[str, int] = {}
+    bytes_new = [0]
+    _SAVE.update(copy_modes=file_modes, copy_mtimes=file_mtimes, bytes_new=bytes_new, counts=copied,
+                 durable_inodes=durable_inodes)
     for name in entries:
         source, destination = run_dir / name, tmp / "run" / name
         if (name == "worker" or name in POOLED_DIRS) and source.is_dir() and not source.is_symlink():
@@ -3293,8 +3523,7 @@ def _save_into(payload, ctx, step, run_dir, root, final, tmp, clocks, started, c
                 _capture_snapshot_symlink(source, destination, home)
                 continue
             if source.is_file() and not source.is_symlink():
-                _identity, cloned = _capture_snapshot_file(source, destination)
-                copied["cloned" if cloned else "copied"] += 1
+                _capture_run_file(source, destination, name)
                 continue
             if _clonefile(source, destination):
                 copied["cloned"] += 1
@@ -3305,9 +3534,18 @@ def _save_into(payload, ctx, step, run_dir, root, final, tmp, clocks, started, c
         seed = _seed_for_run(run_dir) if name == "env" else None
         # Boundary filters and the object store ride in _SAVE, so wrappers that only forward
         # ``seed`` keep the original copy-hook call contract.
-        for key, value in _copy_tree(source, destination, prior, durable_inodes,
-                                     seed=seed).items():
-            copied[key] += value
+        prior_map = recorded_digests.get(name)
+        file_digests[name] = {}
+        _SAVE["copy_digests"] = (file_digests[name],
+                                 prior_map if isinstance(prior_map, dict) else {})
+        _SAVE["copy_prefix"] = name
+        try:
+            for key, value in _copy_tree(source, destination, prior, durable_inodes,
+                                         seed=seed).items():
+                copied[key] = copied.get(key, 0) + value
+        finally:
+            _SAVE.pop("copy_digests", None)
+            _SAVE.pop("copy_prefix", None)
     manifest_bytes = json.dumps(manifests, sort_keys=True, separators=(",", ":")).encode()
     pool_sha256 = {
         f"{relative}/{name}": _POOL_KNOWN[str(root / POOL_DIR / relative.replace('/', '__'))][name][1]
@@ -3325,6 +3563,11 @@ def _save_into(payload, ctx, step, run_dir, root, final, tmp, clocks, started, c
         "blob_manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
         "pool_sha256": pool_sha256,
         "file_chunks": file_chunks,
+        "file_sha256": file_digests,
+        "file_modes": file_modes,
+        "file_mtime_ns": file_mtimes,
+        "link_fallback": copied.get("link_fallback", 0),
+        "bytes_new": bytes_new[0] + len(manifest_bytes),
         "blob_count": sum(len(names) for names in manifests.values()),
         "seconds": {"collect": round(collected - started, 3), "files": round(files_done - collected, 3),
                     "capture": round(time.perf_counter() - started, 3)},
@@ -3366,6 +3609,7 @@ def _save_into(payload, ctx, step, run_dir, root, final, tmp, clocks, started, c
                     chunk_index=index,
                      chunks=sorted({row[0] for rows in index.values() for row in rows}
                                    | {row[0] for rows in file_chunks.values() for row in rows}))
+        meta["bytes_new"] += writer.stored_count
         meta["seconds"]["write"] = round(time.perf_counter() - t0, 3)
         meta["signature"] = _signature(meta, meta["state_sha256"])
         with os.fdopen(os.open(tmp / META_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as stream:
@@ -3990,6 +4234,40 @@ def validate(checkpoint: Path) -> dict:
     return meta
 
 
+def _restore_modes(run_dir: Path, meta: dict) -> None:
+    """Give each restored file its recorded mode; a file with none (a pooled blob) gains owner-write.
+
+    Checkpoint copies are read-only object links, so a plain copy would restore read-only files that the
+    engine must keep writing. Every restored file is writable unless it was recorded read-only.
+    """
+    recorded = meta.get("file_modes", {})
+    if not isinstance(recorded, dict):
+        raise CheckpointError("checkpoint file modes are invalid")
+    for name in meta["entries"]:
+        top = run_dir / name
+        if not os.path.lexists(top) or top.is_symlink():
+            continue
+        if top.is_dir():
+            paths = [Path(directory, file) for directory, _dirs, files in os.walk(top, followlinks=False)
+                     for file in files]
+        else:
+            paths = [top]
+        for path in paths:
+            current_info = os.lstat(path)
+            if not stat.S_ISREG(current_info.st_mode):
+                continue
+            current = stat.S_IMODE(current_info.st_mode)
+            mode = recorded.get(path.relative_to(run_dir).as_posix())
+            if mode is None:
+                target_mode = current | stat.S_IWUSR
+            elif type(mode) is int and 0 <= mode <= 0o7777:
+                target_mode = mode
+            else:
+                raise CheckpointError("checkpoint file mode is invalid")
+            if target_mode != current:
+                os.chmod(path, target_mode)
+
+
 def _restore_files(checkpoint: Path, run_dir: Path, meta: dict) -> None:
     # Refuse old or damaged snapshots before moving any new-attempt files aside. In particular,
     # a snapshot must never replace the pinned bundle or the live hook delivery records.
@@ -4005,6 +4283,7 @@ def _restore_files(checkpoint: Path, run_dir: Path, meta: dict) -> None:
     for name in meta["entries"]:
         _clone(checkpoint / "run" / name, run_dir / name)
     manifest = checkpoint / MANIFEST_FILE
+    pool_sources: dict[str, Path] = {}
     if manifest.is_file():
         for relative, files in json.loads(manifest.read_bytes()).items():
             store = checkpoint.parent / POOL_DIR / relative.replace("/", "__")
@@ -4013,6 +4292,8 @@ def _restore_files(checkpoint: Path, run_dir: Path, meta: dict) -> None:
             for row in files:
                 name = row[0]
                 _clone(store / name, live / name)
+                pool_sources[f"{relative}/{name}"] = store / name
+    _restore_modes(run_dir, meta)
     for relative, rows in meta.get("file_chunks", {}).items():
         if (not relative.startswith("worker/measurement-runs/")
                 or relative.count("/") != 3 or not relative.endswith("/events.jsonl")):
@@ -4045,6 +4326,56 @@ def _restore_files(checkpoint: Path, run_dir: Path, meta: dict) -> None:
                         or raw.hexdigest() != raw_sha or output.tell() != end):
                     raise CheckpointError(f"audit journal chunk checksum mismatch: {relative}")
         shutil.copystat(checkpoint / "run" / relative, destination)
+    # Last: the journal placeholders above are rewritten, and their copystat would reset the mtime.
+    _restore_mtimes(checkpoint, run_dir, meta, pool_sources)
+
+
+def _restore_mtimes(checkpoint: Path, run_dir: Path, meta: dict,
+                    pool_sources: dict[str, Path] | None = None) -> None:
+    """Give each restored file the mtime_ns it had when checkpointed (meta "file_mtime_ns").
+
+    Only the private copy in ``run_dir`` is touched. A file that is not a single-link inode, or that
+    shares an inode with its stored source (the checkpoint's run copy, or the blob pool file for pooled
+    blobs), is replaced by a private copy before utime, so os.utime never reaches a shared object. A
+    missing or malformed record is ignored and restore continues (old checkpoints keep their behavior).
+    """
+    recorded = meta.get("file_mtime_ns")
+    if not isinstance(recorded, dict):
+        return
+    entries = set(meta.get("entries", ()))
+    for key, mtime_ns in recorded.items():
+        parts = key.split("/") if isinstance(key, str) else []
+        if (type(mtime_ns) is not int or not -(1 << 63) < mtime_ns < (1 << 63)
+                or not parts or parts[0] not in entries or any(part in ("", ".", "..") for part in parts)):
+            _warn_once("file_mtime_ns", "checkpoint mtime record has an invalid entry; mtimes not restored")
+            continue
+        target = run_dir.joinpath(*parts)
+        try:
+            info = os.lstat(target)
+            source = (pool_sources or {}).get(key, checkpoint / "run" / key)
+            stored = os.lstat(source)
+            if not stat.S_ISREG(info.st_mode):
+                continue
+            if info.st_nlink != 1 or os.path.samestat(info, stored):
+                _replace_with_private_copy(target)
+            os.utime(target, ns=(mtime_ns, mtime_ns), follow_symlinks=False)
+        except OSError:
+            _warn_once("file_mtime_restore", "could not restore a checkpointed file mtime; continuing")
+
+
+def _replace_with_private_copy(path: Path) -> None:
+    """Swap ``path`` for a fresh single-link copy with the same bytes, mode and times."""
+    descriptor, temporary = tempfile.mkstemp(prefix=".mtime-", suffix=".tmp", dir=path.parent)
+    os.close(descriptor)
+    try:
+        shutil.copy2(path, temporary, follow_symlinks=False)
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
 
 
 _ABSENT = object()

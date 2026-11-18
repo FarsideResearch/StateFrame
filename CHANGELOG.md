@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.39 (2026-11-17)
+
+- Checkpoints: a file rewritten with the same size and modification time is now captured instead of reusing the previous snapshot's copy.
+- Checkpoints: unchanged files are shared with earlier checkpoints instead of copied, so each checkpoint adds only the bytes that changed. Restored files keep the exact modification time they had when the checkpoint was taken.
+- Checkpoints: saves during a run failed in the background writer and never published; per-thread runtime state (the /props probe outcome, fixer trace and usage sinks, prompt-ledger context, and the parallel process-table tick view) is no longer written into checkpoints, and the tick view is rebuilt empty on restore.
+
 ## 0.7.38 (2026-11-17)
 
 - Fixed: edit_source and rewrite_source now refuse hook definition and bundled input files, like the other edit tools.

@@ -73,6 +73,8 @@ def test_publication_rescans_then_reuses_verified_pool_identity(
 def test_publication_refuses_mutated_staged_bytes(staged_pool_file):
     root, pending, _source, target, staged, identity = staged_pool_file
     before = staged.stat()
+    # Pooled files are read-only by design; this tamperer bypasses that with chmod.
+    staged.chmod(0o600)
     staged.write_bytes(b'{"value":"evil"}')
     os.utime(staged, ns=(before.st_atime_ns, before.st_mtime_ns))
 
@@ -96,6 +98,8 @@ def test_published_pool_mutation_invalidates_transferred_verification(staged_poo
     checkpoint._publish_staged_artifacts(root, pending)
     assert _cached(target, identity)
     before = target.stat()
+    # Pooled files are read-only by design; this tamperer bypasses that with chmod.
+    target.chmod(0o600)
     target.write_bytes(b'{"value":"evil"}')
     os.utime(target, ns=(before.st_atime_ns, before.st_mtime_ns))
 
