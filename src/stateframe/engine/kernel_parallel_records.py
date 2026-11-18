@@ -723,7 +723,17 @@ class ParallelResult(Record):
     integration: str
     observation: str
     measured: ParallelMeasured
-    schema: str = field(default='stateframe-parallel-result/1', kw_only=True)
+    # The parent final check's receipt; None when no check ran (NOT_RUN) or for legacy /1 results.
+    final_check_receipt: CheckReceipt | None = field(default=None, kw_only=True)
+    schema: str = field(default='stateframe-parallel-result/2', kw_only=True)
+
+    @classmethod
+    def from_json(cls, value: dict[str, Any]):
+        if isinstance(value, dict) and value.get('schema') == 'stateframe-parallel-result/1':
+            legacy_fields = {item.name for item in fields(cls) if item.name != 'final_check_receipt'}
+            if set(value) == legacy_fields:
+                value = {**value, 'final_check_receipt': None, 'schema': 'stateframe-parallel-result/2'}
+        return super().from_json(value)
 
 
 @dataclass(frozen=True)

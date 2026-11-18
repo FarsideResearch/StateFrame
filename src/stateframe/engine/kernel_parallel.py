@@ -28,7 +28,7 @@ if __package__:
     from .kernel_parallel_projection import project_unit
     from .kernel_parallel_budget import BudgetStore
     from .kernel_parallel_records import (
-        AdmissionResult, CanonicalSignature, CheckRecipe, EngineBinding, ExecutionState,
+        AdmissionResult, CanonicalSignature, CheckReceipt, CheckRecipe, EngineBinding, ExecutionState,
         ConsumeSpec, ExportSpec, FileDelta, HostAnswer, HostRequest, ParallelLimits, ParallelMeasured,
         ParallelRequest, ParallelResult, Proposal, ProposalEntry, Refusal, RequirementClause, TxnRecord, UnitContract, UnitOutcome,
         UnitUsage, MAX_PARALLEL_UNITS, canonical_json, format_parallel_limit,
@@ -44,7 +44,7 @@ else:
     from kernel_parallel_projection import project_unit
     from kernel_parallel_budget import BudgetStore
     from kernel_parallel_records import (
-        AdmissionResult, CanonicalSignature, CheckRecipe, EngineBinding, ExecutionState,
+        AdmissionResult, CanonicalSignature, CheckReceipt, CheckRecipe, EngineBinding, ExecutionState,
         ConsumeSpec, ExportSpec, FileDelta, HostAnswer, HostRequest, ParallelLimits, ParallelMeasured,
         ParallelRequest, ParallelResult, Proposal, ProposalEntry, Refusal, RequirementClause, TxnRecord, UnitContract, UnitOutcome,
         UnitUsage, MAX_PARALLEL_UNITS, canonical_json, format_parallel_limit,
@@ -195,6 +195,17 @@ class HostClientProtocol(Protocol):
     def submit(self, op: str, scope: str, payload: dict) -> str: ...
     def poll(self, result_id: str) -> HostAnswer: ...
     def cancel(self, scope: str) -> None: ...
+
+
+class CompositionCheckFailed(ParallelError):
+    """A composition check ran and did not pass; the unit outcome keeps that status, not NOT_RUN."""
+
+    def __init__(self, check_status: str, message: str) -> None:
+        super().__init__(message)
+        self.check_status = check_status
+
+
+_FINAL_CHECK_RECEIPT = "final-check-receipt.json"
 
 
 def _atomic_json(path: Path, value: object, *, replace: bool = False) -> None:
@@ -1488,6 +1499,16 @@ def render_parallel_disposition(
     data_truncated |= was_truncated
     integration, was_truncated = _bounded_disposition_text(public_text(result.integration), 64)
     data_truncated |= was_truncated
+    receipt_section: dict[str, object] | None = None
+    if result.final_check_receipt is not None:
+        receipt = result.final_check_receipt
+        receipt_status, was_truncated = _bounded_disposition_text(public_text(receipt.status), 64)
+        data_truncated |= was_truncated
+        receipt_reason, was_truncated = _bounded_disposition_text(
+            public_text(receipt.invalid_reason or ""), 192)
+        data_truncated |= was_truncated
+        receipt_section = {"status": receipt_status, "receipt_digest": receipt.digest(),
+                           "invalid_reason": receipt_reason}
     refusal = result.admission.refusal
     admission: dict[str, object] = {"status": result.admission.status}
     if refusal is not None:
@@ -1567,6 +1588,8 @@ def render_parallel_disposition(
         "admission": admission,
         "final_check": final_check,
         "integration": integration,
+        # Additive: the parent final check's receipt; None when no check ran.
+        "final_check_receipt": receipt_section,
         "unit_fields": list(_PARALLEL_DISPOSITION_ID_FIELDS),
         "unit_details_fields": list(_PARALLEL_DISPOSITION_DETAIL_FIELDS),
         "units": [],
@@ -2236,7 +2259,8 @@ def _accept_proposal(context: ParallelContext, request: ParallelRequest, admissi
         receipt = _candidate_check(spec, composed_root, call_root, context, proposal.check_receipt)
         check_status = receipt.status if receipt is not None else "NOT_RUN"
         if receipt is not None and receipt.status != "PASS":
-            raise ParallelError(f"COMPOSITION_CHECK_FAILED: {receipt.status}: {receipt.invalid_reason or ''}")
+            raise CompositionCheckFailed(
+                receipt.status, f"COMPOSITION_CHECK_FAILED: {receipt.status}: {receipt.invalid_reason or ''}")
         if any(item.status == "UNKNOWN" for item in report.verdicts) and check_status != "PASS":
             _record_refused_contracts(call_root, unit.id, report)
             raise ParallelError("UNVERIFIABLE_CONTRACT: subframe has no passing composition check")
@@ -2274,7 +2298,8 @@ def _accept_proposal(context: ParallelContext, request: ParallelRequest, admissi
 def _result(context: ParallelContext, call_root: Path, request: ParallelRequest,
             admission: AdmissionResult, outcomes: Mapping[str, UnitOutcome],
             store: TxnStore, unknown_pairs: tuple, started: float, peak: int,
-            final_check: str, integration: str) -> ParallelResult:
+            final_check: str, integration: str, *,
+            final_check_receipt: CheckReceipt | None = None) -> ParallelResult:
     ordered = tuple(outcomes[unit.id] for unit in request.units if unit.id in outcomes)
     elapsed = round(max(0.0, time.monotonic() - started), 3)
     serial = round(sum(item.wall_seconds for item in ordered), 3)
@@ -2287,7 +2312,8 @@ def _result(context: ParallelContext, call_root: Path, request: ParallelRequest,
                                request, tiny_plan=tiny_plan)
     result = ParallelResult(request.call_id, admission, ordered,
                             tuple(record.txn_id for record, _ in _latest_records(store)),
-                            final_check, unknown_pairs, integration, observation, measured)
+                            final_check, unknown_pairs, integration, observation, measured,
+                            final_check_receipt=final_check_receipt)
     _emit_late_parallel_degrade(context.runtime, ordered, len(request.units))
     _atomic_json(call_root / "result.json", result.to_json())
     return result
@@ -2372,11 +2398,28 @@ def _record_refused_contracts(call_root: Path, unit_id: str, report: object) -> 
                  replace=True)
 
 
+def _final_check_receipt(call_root: Path) -> CheckReceipt | None:
+    """The parent final check's receipt written by _final_check; None when no check ran."""
+    path = call_root / _FINAL_CHECK_RECEIPT
+    if not path.exists() and not path.is_symlink():
+        return None
+    if path.is_symlink() or not path.is_file():
+        raise ParallelError("final subframe check receipt is not a regular file")
+    try:
+        return CheckReceipt.from_json(json.loads(path.read_bytes()))
+    except (OSError, ValueError) as error:
+        raise ParallelError(f"final subframe check receipt is invalid: {error}") from error
+
+
 def _final_check(context: ParallelContext, request: ParallelRequest, call_root: Path,
                  unknown_pairs: tuple, surviving: set[str] | None = None) -> tuple[str, str]:
     if _service is None:
         raise ParallelError("subframe service is not installed")
     _, parent_spec = _service
+    # A receipt from an earlier evaluation of this call must not outlive this one.
+    stale = call_root / _FINAL_CHECK_RECEIPT
+    if stale.is_symlink() or stale.is_file():
+        stale.unlink()
     surviving = surviving if surviving is not None else {unit.id for unit in request.units}
     snapshot = DirectorySnapshot(context.root, 0)
     contracts = {unit.id: verify_contracts(request.units, snapshot, unit_id=unit.id)
@@ -2412,6 +2455,7 @@ def _final_check(context: ParallelContext, request: ParallelRequest, call_root: 
                                      visible_paths=all_paths)
     test_python = os.environ.get("STATEFRAME_TEST_PYTHON", sys.executable)
     receipt = _check(final_spec, context.root, call_root / "checks" / "final", test_python=test_python)
+    _atomic_json(call_root / _FINAL_CHECK_RECEIPT, receipt.to_json(), replace=True)
     if not contracts_ok:
         return receipt.status, "FAILED"
     if receipt.status == "PASS":
@@ -2549,10 +2593,10 @@ def preserve_unit_candidate(call_root: Path, unit_id: str) -> dict[str, object] 
 
 
 def _failure_outcome(unit_id: str, reason: str, detail: str, usage: UnitUsage,
-                     wall: float, queue_wait: float) -> UnitOutcome:
+                     wall: float, queue_wait: float, *, check: str = "NOT_RUN") -> UnitOutcome:
     status = reason if reason in {"BLOCKED", "BUDGET_EXHAUSTED", "ENGINE_ERROR", "TIMED_OUT", "CANCELLED"} else "REFUSED"
     return UnitOutcome(unit_id, status, reason, detail[:300], None, (), None,
-                       "NOT_RUN", usage, round(wall, 3), round(queue_wait, 3))
+                       check, usage, round(wall, 3), round(queue_wait, 3))
 
 
 def _blocked_outcome(call_root: Path, unit_id: str, usage: UnitUsage,
@@ -3206,8 +3250,9 @@ def execute_parallel(context: ParallelContext, args: Mapping, *, host: HostClien
                     committed.add(unit_id)
                 except (ParallelError, OSError, ValueError, RuntimeError) as error:
                     reason, _, detail = str(error).partition(": ")
+                    check = error.check_status if isinstance(error, CompositionCheckFailed) else "NOT_RUN"
                     outcome = _failure_outcome(unit_id, reason, detail or str(error), usage,
-                                               wall, queue_wait)
+                                               wall, queue_wait, check=check)
             else:
                 if terminal == "SUBFRAME_BLOCKED":
                     try:
@@ -3238,14 +3283,19 @@ def execute_parallel(context: ParallelContext, args: Mapping, *, host: HostClien
 
     unknown_pairs = tuple(unknown[key] for key in sorted(unknown))
     final_check, integration = _final_check(context, request, call_root, unknown_pairs, committed)
+    final_receipt = _final_check_receipt(call_root)
     if any(outcome.status not in {"COMMITTED", "COMMITTED_UNVERIFIED"}
            for outcome in outcomes.values()):
         integration = "FAILED"
+    elif integration == "NOT_RUN" and final_check == "NOT_RUN" and outcomes:
+        # Committed work with no check that ran cannot be called integration-NOT_RUN.
+        integration = "UNVERIFIED"
     context.runtime.journal.emit("parallel_final", final_check=final_check,
                                  integration=integration,
                                  unknown_pairs=[pair.to_json() for pair in unknown_pairs])
     result = _result(context, call_root, request, admission, outcomes, store, unknown_pairs,
-                      started, _peak_active_subframes(call_root), final_check, integration)
+                      started, _peak_active_subframes(call_root), final_check, integration,
+                      final_check_receipt=final_receipt)
     tape.complete(call_id=raw_call_id, exit_code=0, observation=result.observation,
                   post_manifest_digest=manifest_digest(context.root),
                   env_identity=str(context.runtime.binding().get("environment_revision") or "disabled"))
