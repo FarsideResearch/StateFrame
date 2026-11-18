@@ -8,6 +8,7 @@ import os
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+import kernel_file_digest_memo
 from kernel_obligation_assess import UnavailableEvidence, assessment_is_blocking
 from kernel_verdict import SATISFIED, evaluate_required_tests
 
@@ -418,7 +419,11 @@ def _workspace_product_file_digests(runtime: object,
             resolved.relative_to(root)
             if not candidate.is_file():
                 return None
-            files[raw] = "sha256:" + hashlib.sha256(candidate.read_bytes()).hexdigest()
+            # Stat-identity memo: unchanged files are not re-read on every turn.
+            value = kernel_file_digest_memo.file_sha256(str(candidate))
+            if value is None:
+                return None
+            files[raw] = value
         except (OSError, RuntimeError, TypeError, ValueError):
             return None
     return files or None

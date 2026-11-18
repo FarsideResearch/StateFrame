@@ -266,6 +266,18 @@ def _is_static(value: object) -> bool:
 # cannot be pickled at all. Dropping a cache changes only speed; the thread-local entries keep their
 # import-time (empty) state in the new process, and their readers fall back to defaults.
 DROP_GLOBALS = {
+    ("kernel_file_digest_memo", "_MEMO"):
+        "process-local file observations; never valid across checkpoint restore",
+    ("kernel_file_digest_memo", "_LAST_CLOCK_NS"):
+        "process-local file observations; never valid across checkpoint restore",
+    ("engine.kernel_file_digest_memo", "_MEMO"):
+        "process-local file observations; never valid across checkpoint restore",
+    ("engine.kernel_file_digest_memo", "_LAST_CLOCK_NS"):
+        "process-local file observations; never valid across checkpoint restore",
+    ("stateframe.engine.kernel_file_digest_memo", "_MEMO"):
+        "process-local file observations; never valid across checkpoint restore",
+    ("stateframe.engine.kernel_file_digest_memo", "_LAST_CLOCK_NS"):
+        "process-local file observations; never valid across checkpoint restore",
     ("kernel_fl_checkpoint_capture", "_API"):
         "lazy import holder of checkpoint helper classes; re-created on first use",
     ("mc_repo_intel_vendor.lsp_resolve", "_PROJECTS"):
@@ -4422,6 +4434,14 @@ def restore(frame, checkpoint: Path, run_dir: Path) -> dict:
         if module is not None:
             for key, value in state.items():
                 setattr(module, key, value)
+    # Older payloads may contain these globals (including patched globals).
+    # Also discard observations made by this process before loading the snapshot.
+    for name in ("kernel_file_digest_memo", "engine.kernel_file_digest_memo",
+                 "stateframe.engine.kernel_file_digest_memo"):
+        module = sys.modules.get(name)
+        if module is not None:
+            module._MEMO = {}
+            module._LAST_CLOCK_NS = None
     for name, saved in payload["participants"].items():
         live = _PARTICIPANTS.get(name)
         if live is None:

@@ -6,17 +6,15 @@ public actions and trusted subprocess receipts, never a gold task row.
 from __future__ import annotations
 
 import copy
-import hashlib
 import json
 import os
 import re
-import stat
-import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from pathlib import Path, PurePosixPath
 
+import kernel_file_digest_memo
 from kernel_measurement import digest
 from kernel_read_working_set import evictfix_enabled
 from kernel_non_product_paths import NON_PRODUCT_PARTS, is_non_product  # noqa: F401 (re-export)
@@ -212,45 +210,9 @@ def _workspace_entries(root: Path) -> list[tuple[tuple[str, ...], str, bool]]:
     return found
 
 
-# Per-process digest memo: absolute path -> (lstat signature, "sha256:<hex>").
-# Any change to inode, device, size, mtime_ns or ctime_ns (ctime moves on every
-# write, even when a tool restores mtime) forces a rehash.  Entries younger than
-# _RACY_NS are never memoized (git's racy-timestamp rule), and an entry is
-# stored only when the file's signature is unchanged across the read.
-_DIGEST_MEMO: dict[str, tuple[tuple[int, int, int, int, int], str]] = {}
-_DIGEST_MEMO_MAX = 200_000
-_RACY_NS = 2_000_000_000
-
-
-def _stat_signature(result: os.stat_result) -> tuple[int, int, int, int, int]:
-    return (result.st_ino, result.st_dev, result.st_size, result.st_mtime_ns, result.st_ctime_ns)
-
-
 def _file_value(path: str) -> str | None:
-    try:
-        before = os.lstat(path)
-    except OSError:
-        return None
-    if not stat.S_ISREG(before.st_mode):
-        return None
-    signature = _stat_signature(before)
-    memo = _DIGEST_MEMO.get(path)
-    if memo is not None and memo[0] == signature:
-        return memo[1]
-    with open(path, "rb") as stream:
-        value = "sha256:" + hashlib.file_digest(stream, "sha256").hexdigest()
-    try:
-        after = _stat_signature(os.lstat(path))
-    except OSError:
-        after = None
-    if (after == signature
-            and time.time_ns() - max(before.st_mtime_ns, before.st_ctime_ns) > _RACY_NS):
-        if len(_DIGEST_MEMO) >= _DIGEST_MEMO_MAX:
-            _DIGEST_MEMO.clear()
-        _DIGEST_MEMO[path] = (signature, value)
-    else:
-        _DIGEST_MEMO.pop(path, None)
-    return value
+    """Digest of one regular file via the shared stat-identity memo (see kernel_file_digest_memo)."""
+    return kernel_file_digest_memo.file_sha256(path)
 
 
 def _freeze_files(value: dict[str, str]) -> MappingProxyType:
@@ -378,7 +340,7 @@ class WorkspaceViewStore:
         for parts, path, is_link in entries:
             try:
                 stat_result = os.lstat(path)
-                stat_signature: object = _stat_signature(stat_result)
+                stat_signature: object = kernel_file_digest_memo.stat_signature(stat_result)
                 link_target = os.readlink(path) if is_link else None
             except OSError:
                 stat_signature, link_target = "MISSING", None
@@ -402,9 +364,15 @@ class WorkspaceViewStore:
                 self.note_mutation((), {"boundary": boundary_name, "reason": "external_change"})
         if self._view is None or self._dirty:
             entries = reconcile_entries if reconcile_entries is not None else _workspace_entries(self.root)
+            before_signatures = self._entry_signature(entries)
             binding = workspace_binding(
                 self.root, self.environment, command=context[0], run_write_set=context[1],
                 _entries=entries)
+            # A binding and its reuse signatures must describe the same observed
+            # workspace. Include membership changes as well as file identities.
+            after_signatures = self._entry_signature(_workspace_entries(self.root))
+            if before_signatures != after_signatures:
+                raise OSError("workspace changed while building binding")
             self._view = WorkspaceView(
                 root=str(self.root), scope_identity=self.scope_identity,
                 mutation_epoch=self.mutation_epoch, boundary=boundary_name,
@@ -417,7 +385,7 @@ class WorkspaceViewStore:
                 product_files=_freeze_files(binding["product_files"]),
                 harness_files=_freeze_files(binding["harness_files"]),
             )
-            self._entry_signatures = self._entry_signature(entries)
+            self._entry_signatures = after_signatures
             self._dirty = False
             self._last_context = context
         # An unchanged reconciliation still crosses the host boundary. Record
