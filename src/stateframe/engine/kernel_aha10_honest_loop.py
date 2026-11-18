@@ -8,9 +8,11 @@ these pure contracts only preserve their identity and classify what is known.
 from __future__ import annotations
 
 import ast
+import difflib
 import hashlib
 import json
 import re
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
@@ -1052,10 +1054,51 @@ def _code_prefix(line: str) -> str:
     return line
 
 
+# difflib.SequenceMatcher(autojunk=False) costs about one step per (i, j) pair of equal lines, so
+# thousands of identical lines make alignment quadratic. Shared prefix/suffix lines are trimmed
+# first; a window whose equal-line pair count exceeds this budget pairs nothing (never by index).
+_DIFF_PAIR_BUDGET = 1 << 20
+
+
+def _matching_pairs(left: Sequence[str], right: Sequence[str]) -> int:
+    counts = Counter(right)
+    return sum(counts.get(item, 0) for item in left)
+
+
+def aligned_line_pairs(old_lines: Sequence[str], new_lines: Sequence[str]) -> list[tuple[int, int]]:
+    """Old/new line index pairs that may be compared as the same line.
+
+    Lines pair only through difflib alignment: "equal" blocks are skipped, and a "replace" block
+    pairs line-by-line only when both sides have the same length. Unequal replace blocks, and any
+    window over _DIFF_PAIR_BUDGET, yield no pairs.
+    """
+    limit = min(len(old_lines), len(new_lines))
+    prefix = 0
+    while prefix < limit and old_lines[prefix] == new_lines[prefix]:
+        prefix += 1
+    suffix = 0
+    while suffix < limit - prefix and old_lines[-1 - suffix] == new_lines[-1 - suffix]:
+        suffix += 1
+    inner_old = old_lines[prefix:len(old_lines) - suffix]
+    inner_new = new_lines[prefix:len(new_lines) - suffix]
+    if not inner_old or not inner_new or _matching_pairs(inner_old, inner_new) > _DIFF_PAIR_BUDGET:
+        return []
+    pairs: list[tuple[int, int]] = []
+    matcher = difflib.SequenceMatcher(None, inner_old, inner_new, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag != "replace" or (i2 - i1) != (j2 - j1):
+            continue
+        pairs.extend((prefix + i1 + k, prefix + j1 + k) for k in range(i2 - i1))
+    return pairs
+
+
 def typed_literal_changes(before: str, after: str) -> list[dict[str, object]]:
-    """Find one typed value delta per otherwise unchanged source line."""
+    """Find one typed value delta per aligned, otherwise unchanged source line."""
     changes: list[dict[str, object]] = []
-    for line_number, (old, new) in enumerate(zip(before.splitlines(), after.splitlines()), 1):
+    old_lines, new_lines = before.splitlines(), after.splitlines()
+    for old_index, new_index in aligned_line_pairs(old_lines, new_lines):
+        old, new = old_lines[old_index], new_lines[new_index]
+        line_number = new_index + 1
         if old.lstrip().startswith(("#", "//", "/*", "*", "<!--")) \
                 and new.lstrip().startswith(("#", "//", "/*", "*", "<!--")):
             continue
@@ -1309,6 +1352,6 @@ __all__ = [
     "provider_boundary_receipt", "request_boundary_receipt", "request_context", "resolve_requirement_clause",
     "settle_obligations", "smoke_identity",
     "source_unit_fixtures", "source_units", "inventory_matches", "inventory_coverage",
-    "terminal_projection", "typed_literal_changes",
+    "terminal_projection", "typed_literal_changes", "aligned_line_pairs",
     "validate_solver_check_receipt",
 ]
