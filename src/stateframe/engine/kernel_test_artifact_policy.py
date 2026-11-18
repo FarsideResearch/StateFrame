@@ -150,16 +150,21 @@ class TestArtifactPolicy:
         observed = tuple(sorted({_normal_path(item)
                                  for item in observed_write_set if str(item).strip()}))
         generated = self.generated_write_paths(observed)
-        return {
+        payload: dict[str, object] = {
             "schema": SCHEMA,
             "declarations": [item.to_dict() for item in self.declarations],
             "pytest_config": self.pytest_config,
             "coverage_requested": self.coverage_requested,
             "coverage_disabled": self.coverage_disabled,
-            "sanitized_addopts": list(self.sanitized_addopts),
-            "observed_write_set": list(observed),
-            "ignored_generated_paths": list(generated),
         }
+        if self.sanitized_addopts:
+            # Written only when present: the payload reaches the request, so an
+            # empty value must keep earlier releases' bytes. Reload treats a
+            # missing key as no addopts.
+            payload["sanitized_addopts"] = list(self.sanitized_addopts)
+        payload["observed_write_set"] = list(observed)
+        payload["ignored_generated_paths"] = list(generated)
+        return payload
 
     @classmethod
     def from_mapping(cls, value: object) -> "TestArtifactPolicy | None":
