@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.54 (2026-11-18)
 
 - Scope lock: literal deltas pair lines by difflib alignment, never by index. A replace block pairs only when both sides have equal length, and a window over `_DIFF_PAIR_BUDGET` (1 << 20 equal-line pairs) reports no literal deltas, so one inserted line in a large repetitive file no longer yields spurious deltas. Shared helper: `aligned_line_pairs` in `kernel_aha10_honest_loop.py`, used by `typed_literal_changes` and the scope-lock mixed-value fallback. Tests: `tests/test_scope_lock_literal_pairing.py`.
 
