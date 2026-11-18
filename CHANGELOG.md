@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fixed: system Python remains available for repository tests when StateFrame itself runs on system Python. Only StateFrame's own virtual environment is excluded from the PATH fallback.
+
 ## 0.7.68 (2026-11-18)
 
 - Fixed: completion-token totals now require a valid count for every send and preserve measured zero.
