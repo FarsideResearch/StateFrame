@@ -96,7 +96,7 @@ def _is_sha256_digest(value: str) -> bool:
     return True
 
 
-def seed(abs_path: str, digest: str, signature: Signature) -> bool:
+def seed_verified_digest(abs_path: str, digest: str, signature: Signature) -> bool:
     """Validate and record a caller's digest and pre-read signature.
 
     A matching signature at seed time cannot prove that the caller started its

@@ -99,7 +99,7 @@ def test_seed_refuses_racy_file_and_stores_nothing(tmp_path, opens):
     target.write_bytes(b"seeded")
     path = str(target)
     signature = memo.stat_signature(os.lstat(path))
-    assert memo.seed(path, _sha(b"seeded"), signature) is False
+    assert memo.seed_verified_digest(path, _sha(b"seeded"), signature) is False
     opens.clear()
     assert memo.file_sha256(path) == _sha(b"seeded")
     assert opens.count(path) == 1  # not memoized, so it was read
@@ -111,7 +111,7 @@ def test_seed_stores_settled_file_so_next_read_is_skipped(tmp_path, opens):
     path = str(target)
     time.sleep(2.1)
     signature = memo.stat_signature(os.lstat(path))
-    assert memo.seed(path, _sha(b"seeded-old"), signature) is True
+    assert memo.seed_verified_digest(path, _sha(b"seeded-old"), signature) is True
     opens.clear()
     assert memo.file_sha256(path) == _sha(b"seeded-old")
     assert opens == []
@@ -128,7 +128,7 @@ def test_seed_with_signature_taken_before_later_write_stores_nothing(tmp_path, o
     old_digest = _sha(b"old-bytes")
     target.write_bytes(b"new-bytes-longer")
     time.sleep(2.1)  # settle the write so only the signature mismatch can refuse the seed
-    assert memo.seed(path, old_digest, signature_before_read) is False
+    assert memo.seed_verified_digest(path, old_digest, signature_before_read) is False
     opens.clear()
     assert memo.file_sha256(path) == _sha(b"new-bytes-longer")
     assert opens.count(path) == 1
@@ -144,7 +144,7 @@ def test_seed_refusal_drops_existing_memo_entry(tmp_path, opens):
     stale_signature = memo.stat_signature(os.lstat(path))
     target.write_bytes(b"second!")
     time.sleep(2.1)
-    assert memo.seed(path, _sha(b"first"), stale_signature) is False
+    assert memo.seed_verified_digest(path, _sha(b"first"), stale_signature) is False
     assert path not in memo._MEMO
     assert memo.file_sha256(path) == _sha(b"second!")
 
@@ -159,7 +159,7 @@ def test_seed_racy_signature_refuses_and_drops_existing_entry(tmp_path):
     # Touching mtime to now keeps the signature matching the caller's but makes it racy.
     os.utime(path)
     racy_signature = memo.stat_signature(os.lstat(path))
-    assert memo.seed(path, _sha(b"settled"), racy_signature) is False
+    assert memo.seed_verified_digest(path, _sha(b"settled"), racy_signature) is False
     assert path not in memo._MEMO
 
 
@@ -169,13 +169,13 @@ def test_seed_rejects_malformed_digest(tmp_path, bad):
     target.write_bytes(b"x")
     time.sleep(2.1)
     signature = memo.stat_signature(os.lstat(str(target)))
-    assert memo.seed(str(target), bad, signature) is False
+    assert memo.seed_verified_digest(str(target), bad, signature) is False
 
 
 def test_seed_rejects_missing_and_non_regular(tmp_path):
     good = "sha256:" + "0" * 64
-    assert memo.seed(str(tmp_path / "absent"), good, _NO_SIGNATURE) is False
-    assert memo.seed(str(tmp_path), good, memo.stat_signature(os.lstat(tmp_path))) is False
+    assert memo.seed_verified_digest(str(tmp_path / "absent"), good, _NO_SIGNATURE) is False
+    assert memo.seed_verified_digest(str(tmp_path), good, memo.stat_signature(os.lstat(tmp_path))) is False
 
 
 def test_live_projection_file_value_delegates_to_shared_memo(tmp_path):
@@ -197,7 +197,7 @@ def test_seed_rechecks_bytes_when_caller_read_started_in_racy_tick(tmp_path, mon
     monkeypatch.setattr(os, "lstat", lambda path, *a, **kw:
                         frozen if str(path) == str(target) else real_lstat(path, *a, **kw))
     monkeypatch.setattr(time, "time_ns", lambda: max(signature[-2:]) + 3_000_000_000)
-    assert memo.seed(str(target), old_digest, signature) is False
+    assert memo.seed_verified_digest(str(target), old_digest, signature) is False
     assert memo.file_sha256(str(target)) == _sha(b"new")
 
 
