@@ -20,8 +20,11 @@ def fresh_cache():
 
 @pytest.mark.parametrize("registry_first", [False, True])
 def test_package_parsed_once_across_ledger_and_registry(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, registry_first: bool,
+    tmp_path: Path, tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch, registry_first: bool,
 ) -> None:
+    # Both orderings use identical bytes. Give each its own cold persistent index.
+    monkeypatch.setenv("STATEFRAME_HOME", str(tmp_path_factory.mktemp("parse-cache-home")))
     package = tmp_path / "package"
     package.mkdir()
     sources = {
