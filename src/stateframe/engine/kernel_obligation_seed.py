@@ -7,6 +7,7 @@ problem-report prose and emits only bounded requirement clauses.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -135,6 +136,35 @@ def _bounded_list(values: Sequence[str]) -> tuple[str, ...]:
 
 
 @dataclass(frozen=True, slots=True)
+class SourceSpan:
+    """An immutable occurrence in an identified, hash-bound UTF-8 public source."""
+
+    source_id: str
+    source_sha256: str
+    start_byte: int
+    end_byte: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.source_id, str) or not self.source_id.strip() or len(self.source_id) > 128:
+            raise ValueError("source id must be nonempty and at most 128 characters")
+        if not isinstance(self.source_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", self.source_sha256):
+            raise ValueError("source hash must be a SHA-256 hex digest")
+        if (type(self.start_byte) is not int or type(self.end_byte) is not int
+                or not 0 <= self.start_byte < self.end_byte):
+            raise ValueError("source span must have nonempty, nonnegative integer byte bounds")
+
+    @property
+    def id(self) -> str:
+        identity = json.dumps([self.source_id, self.source_sha256, self.start_byte, self.end_byte],
+                              ensure_ascii=False, separators=(",", ":"))
+        return "span-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+    def to_dict(self) -> dict[str, object]:
+        return {"id": self.id, "source_id": self.source_id, "source_sha256": self.source_sha256,
+                "start_byte": self.start_byte, "end_byte": self.end_byte}
+
+
+@dataclass(frozen=True, slots=True)
 class Obligation:
     """One host-authored, still-open requirement from the public brief."""
 
@@ -146,6 +176,7 @@ class Obligation:
     status: str = "open"
     unmappable: bool = False
     source_label: str = ""
+    source_spans: tuple[SourceSpan, ...] = ()
 
     def __post_init__(self) -> None:
         if not re.fullmatch(r"obl-[0-9]{1,4}", self.id):
@@ -160,6 +191,9 @@ class Obligation:
             raise ValueError("unmappable must be a boolean")
         if self.unmappable and self.source_label.lower() not in {"title", "symptom", "focus"}:
             raise ValueError("unmappable task metadata needs a Title, Symptom, or Focus source label")
+        if (not isinstance(self.source_spans, tuple) or len(self.source_spans) > 1
+                or any(not isinstance(span, SourceSpan) for span in self.source_spans)):
+            raise ValueError("an obligation carries at most one exact occurrence; repeated occurrences stay separate")
 
     def to_dict(self) -> dict[str, object]:
         result = {
@@ -176,6 +210,9 @@ class Obligation:
                 "source_label": self.source_label.lower(),
                 "source_disposition": "advisory_unmappable",
             })
+        if self.source_spans:
+            result["source_span_ids"] = [span.id for span in self.source_spans]
+            result["source_spans"] = [span.to_dict() for span in self.source_spans]
         return result
 
     as_dict = to_dict
@@ -371,9 +408,38 @@ def _legacy_candidate_clauses(text: str) -> list[str]:
 
 
 def _candidate_spans(text: str) -> list[tuple[int, int]]:
-    """Compatibility view of the deterministic clause list."""
-    clauses = _candidate_clauses(text)
-    return [(0, len(clause)) for clause in clauses]
+    """Compatibility view with real character offsets, including repeated clauses."""
+    return [(start, end) for _clause, start, end in _clause_occurrences(text, _candidate_clauses(text))]
+
+
+def _clause_occurrences(text: str, clauses: Sequence[str]) -> list[tuple[str, int, int]]:
+    """Map normalized clauses back to source; derived clauses retain their parent.
+
+    Surface projections can synthesize text (e.g. a shared predicate over a
+    subject list). Such a clause cites the whole exact parent span rather than
+    pretending its generated words were contiguous in the source.
+    """
+    chars: list[str] = []
+    locations: list[int] = []
+    for index, char in enumerate(text):
+        if char.isspace():
+            if not chars or chars[-1] == " ":
+                continue
+            char = " "
+        chars.append(char)
+        locations.append(index)
+    normalized = "".join(chars)
+    result: list[tuple[str, int, int]] = []
+    cursor = 0
+    for clause in clauses:
+        start = normalized.find(clause, cursor)
+        if start < 0:
+            result.append((clause, 0, len(text)))
+        else:
+            end = start + len(clause)
+            result.append((clause, locations[start], locations[end - 1] + 1))
+            cursor = end
+    return result
 
 
 def _source_symbols(files: Sequence[tuple[str, str]]) -> dict[str, list[str]]:
@@ -458,38 +524,42 @@ def _kind(clause: str) -> ObligationKind:
     return "behaviour"
 
 
-def extract_obligations(brief: str, manifest: object = None) -> tuple[Obligation, ...]:
+def extract_obligations(brief: str, manifest: object = None, *,
+                        source_id: str = "brief") -> tuple[Obligation, ...]:
     """Extract stable obligations from host-provided public text and files."""
     if not isinstance(brief, str):
         raise TypeError("brief must be a string")
     files = _manifest_files(manifest)
     result: list[Obligation] = []
-    seen: set[str] = set()
     # TASK.md labels describe the task, but cannot be mapped to a concrete
     # observable by themselves. Preserve them as advisory work IDs so terminal
     # submissions can disclose them without turning them into host blockers.
-    tagged_candidates: list[tuple[str, str | None]] = []
+    tagged_candidates: list[tuple[str, str | None, SourceSpan]] = []
     extract = _candidate_clauses if enabled() else _legacy_candidate_clauses
-    from kernel_requirements_ledger import _TASK_METADATA_MENTION, _task_metadata_label
-    source_offset = 0
+    from kernel_requirements_ledger import _TASK_METADATA_MENTION, _task_metadata_label, _ticket_segments
+    encoded = brief.encode("utf-8")
+    source_hash = hashlib.sha256(encoded).hexdigest()
     previous_field = False
-    for raw_line in brief.splitlines(keepends=True) or [brief]:
-        line = raw_line.rstrip("\r\n")
-        label = _task_metadata_label(line, source_prefix=brief[:source_offset])
-        mentioned = bool(_TASK_METADATA_MENTION.search(line))
-        continuation = previous_field and bool(line[:1].isspace())
-        source_offset += len(raw_line)
+    previous_end = 0
+    for start_byte, end_byte, text in _ticket_segments(brief):
+        prefix = encoded[:start_byte].decode("utf-8")
+        label = _task_metadata_label(text, source_prefix=prefix)
+        mentioned = bool(_TASK_METADATA_MENTION.search(text))
+        gap = encoded[previous_end:start_byte].decode("utf-8")
+        gap = gap.replace("\r\n", "\n").replace("\r", "\n")
+        continuation = previous_field and not re.search(r"\n\s*\n", gap)
         previous_field = mentioned or continuation
+        previous_end = end_byte
         if mentioned or continuation:
-            clause = " ".join(line.split())
-            if clause:
-                tagged_candidates.append((clause, label))
-            continue
-        tagged_candidates.extend((clause, None) for clause in extract(line))
-    for clause, source_label in tagged_candidates:
-        if not clause or clause in seen:
-            continue
-        seen.add(clause)
+            clauses = [" ".join(text.split())]
+        else:
+            clauses = extract(text)
+        for clause, left, right in _clause_occurrences(text, clauses):
+            origin = SourceSpan(source_id, source_hash,
+                                start_byte + len(text[:left].encode("utf-8")),
+                                start_byte + len(text[:right].encode("utf-8")))
+            tagged_candidates.append((clause, label, origin))
+    for clause, source_label, origin in tagged_candidates:
         symbols = _clause_symbols(clause, files)
         mentioned_files = _clause_files(clause, files, symbols)
         result.append(Obligation(
@@ -497,6 +567,7 @@ def extract_obligations(brief: str, manifest: object = None) -> tuple[Obligation
             mentioned_symbols=symbols, mentioned_files=mentioned_files,
             unmappable=source_label is not None,
             source_label=source_label or "",
+            source_spans=(origin,),
         ))
     return tuple(result)
 
@@ -506,6 +577,9 @@ def _coerce_obligation(value: Obligation | Mapping[str, object]) -> Obligation:
         return value
     if not isinstance(value, Mapping):
         raise TypeError("obligations must contain Obligation values or mappings")
+    origins = _coerce_source_spans(value.get("source_spans", ()))
+    if "source_span_ids" in value and value["source_span_ids"] != [span.id for span in origins]:
+        raise ValueError("source span references must match their exact origins")
     return Obligation(
         id=str(value.get("id", "")), text=str(value.get("text", "")),
         kind=value.get("kind", "behaviour"),
@@ -514,7 +588,23 @@ def _coerce_obligation(value: Obligation | Mapping[str, object]) -> Obligation:
         status=str(value.get("status", "open")),
         unmappable=value.get("unmappable", False) is True,
         source_label=str(value.get("source_label", "")),
+        source_spans=origins,
     )
+
+
+def _coerce_source_spans(value: object) -> tuple[SourceSpan, ...]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)) or len(value) > 1:
+        raise ValueError("source spans must contain at most one exact occurrence")
+    result: list[SourceSpan] = []
+    for row in value:
+        if not isinstance(row, Mapping):
+            raise ValueError("source spans must be mappings")
+        span = SourceSpan(row.get("source_id"), row.get("source_sha256"),
+                          row.get("start_byte"), row.get("end_byte"))
+        if row.get("id") != span.id:
+            raise ValueError("source span identity does not match its origin")
+        result.append(span)
+    return tuple(result)
 
 
 def obligation_step_fields(obligation: Obligation | Mapping[str, object]) -> dict[str, object]:
@@ -530,12 +620,38 @@ def obligation_step_fields(obligation: Obligation | Mapping[str, object]) -> dic
     }
     if len(item.text) > MAX_OBLIGATION_TEXT:
         fields["source_text_bounded"] = True
+    if item.source_spans:
+        # A compact, lossless reference keeps 32 ordinary open steps within the
+        # existing render budget. Text already lives on the step; empty target
+        # lists carry no information. Do not duplicate the hash or derived id.
+        span = item.source_spans[0]
+        digest = base64.urlsafe_b64encode(bytes.fromhex(span.source_sha256)).decode("ascii").rstrip("=")
+        fields["origin"] = [span.source_id, digest, span.start_byte, span.end_byte]
+        fields.pop("source_text")
+        for key in ("mentioned_symbols", "mentioned_files"):
+            if not fields[key]:
+                fields.pop(key)
     if item.unmappable:
         fields.update({
             "source_label": item.source_label.lower(),
             "source_disposition": "advisory_unmappable",
         })
     return fields
+
+
+def source_span_from_fields(fields: Mapping[str, object]) -> SourceSpan | None:
+    """Recover an exact origin from a serialized work step's compact reference."""
+    value = fields.get("origin")
+    if value is None:
+        return None
+    if (not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray))
+            or len(value) != 4 or not isinstance(value[1], str)):
+        raise ValueError("invalid compact source span")
+    try:
+        digest = base64.b64decode(value[1] + "=", altchars=b"-_", validate=True).hex()
+    except ValueError as error:
+        raise ValueError("invalid compact source hash") from error
+    return SourceSpan(value[0], digest, value[2], value[3])
 
 
 def host_seed_operations(obligations: Sequence[Obligation | Mapping[str, object]],
@@ -677,8 +793,8 @@ def seed_fingerprint(obligations: Sequence[Obligation]) -> str:
 
 __all__ = [
     "KINDS", "MAX_OBLIGATION_TEXT", "MAX_OBLIGATIONS", "MODE_ENV", "Obligation", "PROVENANCE",
-    "PublicBrief", "SCHEMA", "display_obligations", "display_text", "enabled",
+    "PublicBrief", "SCHEMA", "SourceSpan", "display_obligations", "display_text", "enabled",
     "evidence_ref_satisfies", "extract_obligations", "host_seed_operations",
     "mode", "obligation_step_fields", "open_obligations", "public_manifest",
-    "public_manifest_for_owner", "seed_fingerprint",
+    "public_manifest_for_owner", "seed_fingerprint", "source_span_from_fields",
 ]
