@@ -646,7 +646,7 @@
   "kernel_stateframe_dedup.py": "0b68051bd441f021db2f5f249c4911e98417c5037c81dc600231a63deb890200",
   "kernel_stateframe_envelope.py": "51f6369438a809b544bf6e5b9b554115d47a8e3a2a03a45d0dc5a1ad9364bac1",
   "kernel_stateframe_epoch.py": "5d7560be2b8c94b2eaf68953b3d6e413017fdf28ee2ddc6904affb5b6601ec1a",
-  "kernel_stateframe_f4.py": "a81500fae797e1885ab1146d107ad6fad2f32b824eb7694352629519e3018ba0",
+  "kernel_stateframe_f4.py": "e61b6c3a728a502e94a8c60cf6f589e9c611d42ff19d4b117fa68d1c0eaa9181",
   "kernel_stateframe_f4_fit.py": "29dbd47763d5063c2d0087ed48a2eec67c2f45958bdf847c9aa307753ae1b13d",
   "kernel_stateframe_final_message.py": "798c56d7a9cbd3f1359ce23ce577da7f88bebcabf3aef99456b14e8f70b373f1",
   "kernel_stateframe_fork_a.py": "26850126e197a69b2ea3a359fc0e768cb04f2966c9b63e99664ac98652ea2238",

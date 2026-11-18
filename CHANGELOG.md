@@ -5,6 +5,7 @@
 - Added a merge core for edits made against a file that changed on disk: an edit now re-locates its span by exact bytes, or merges non-overlapping line changes, and only reports a conflict when both sides changed the same lines. Nothing calls it yet, so current behaviour is unchanged.
 - Edit handles now keep the exact bytes the model was shown, so a handle can still report what it was given after its file changes on disk. Edits still refuse on a changed file exactly as before; large whole-file rewrite bases keep only a digest.
 - Opt-in `STATEFRAME_COLLAB_DRIFT=on` (default `off`): an edit whose file changed after the model read it is merged onto the current file instead of refused. Unique base bytes re-locate the edit, non-overlapping line changes combine, and only changes to the same lines return `EDIT_CONFLICT` with the base, your version and the current text. `STATEFRAME_STRICT_DRIFT=on` keeps today's refusals even when collab drift is on. Receipts gain `drift=`, `base=`, `current=` and `hunks=` fields.
+- With `STATEFRAME_COLLAB_DRIFT=on`, a file page the model is working in (cited or being edited) that changes on disk is now shown at its current bytes with a one-line notice, instead of being dropped. Other changed pages are still dropped, and their notice now says the file changed on disk. A refreshed page that would grow past its original size is still dropped.
 
 ## 0.7.58 (2026-11-18)
 

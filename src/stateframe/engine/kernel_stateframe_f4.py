@@ -1173,6 +1173,8 @@ class RealExchangeLedger:
         self._latest_batch_id: str | None = None
         self._source_pages: dict[tuple[str, str, int, int], dict[str, object]] = {}
         self._source_evictions: list[dict[str, object]] = []
+        # COLLAB-DRIFT: active pages refreshed in place after their file changed on disk (notice-only rows)
+        self._source_refreshes: list[dict[str, object]] = []
         self._source_sequence = 0
         self._pending_edit: dict[str, object] | None = None
         self._on_evict = on_evict
@@ -1376,6 +1378,9 @@ class RealExchangeLedger:
                     and old.get("start_line") == page.get("start_line")
                     and old.get("end_line") == page.get("end_line"))
         ]
+        # A fresh read of the file supersedes its "changed on disk" refresh notice.
+        self._source_refreshes = [
+            old for old in self._source_refreshes if old.get("path") != page.get("path")]
         self._trim_source_pages()
 
     def _observe_source_exchange(self, pair: Sequence[Mapping[str, object]]) -> None:
@@ -1469,6 +1474,59 @@ class RealExchangeLedger:
                     and old.get("end_line") == page.get("end_line"))
         ]
 
+    def _refresh_active_source_page(self, old_key: tuple[str, str, int, int], old_page: dict[str, object],
+                                    source: str, current_revision: str, probe: str) -> bool:
+        """COLLAB-DRIFT: show an active page at the current bytes of its region. False when it must be evicted.
+
+        The region is the unique re-anchored location of the page's bytes (kernel_edit_merge.reanchor, hinted at
+        the old start line). When the bytes are gone, the same line numbers are used, clamped to the new file.
+        The refreshed page must fit the per-page working-set byte cap (MAX_SOURCE_WORKING_SET_BYTES), else the
+        caller evicts it. Total working-set pressure is still handled by _trim_source_pages.
+        """
+        from kernel_edit_merge import reanchor
+
+        lines = source.splitlines(keepends=True)
+        old_start, old_end = int(old_page["start_line"]), int(old_page["end_line"])
+        span = reanchor(probe, source, old_start) or reanchor(str(old_page["content"]), source, old_start)
+        if span is not None:
+            raw = source.encode("utf-8")
+            byte_start, byte_end = span
+            start_line = raw.count(b"\n", 0, byte_start) + 1
+            end_line = raw.count(b"\n", 0, max(byte_start, byte_end - 1)) + 1
+        else:
+            start_line, end_line = old_start, min(old_end, len(lines))
+        if start_line < 1 or end_line < start_line or end_line > len(lines):
+            return False
+        content = "".join(lines[start_line - 1:end_line])
+        content_bytes = content.encode("utf-8")
+        if not content or len(content_bytes) > MAX_SOURCE_WORKING_SET_BYTES:
+            return False
+        page = dict(old_page)
+        page.update(
+            revision=current_revision,
+            start_line=start_line,
+            end_line=end_line,
+            total_lines=len(lines),
+            content=content,
+            content_digest=hashlib.sha256(content_bytes).hexdigest(),
+            byte_length=len(content_bytes),
+        )
+        self._record_source_refresh(old_page)
+        self._rekey_source_page(old_key, page)
+        return True
+
+    def _record_source_refresh(self, page: Mapping[str, object]) -> None:
+        """Notice row for a page refreshed from the file it was read from (range as the model saw it)."""
+        row = {
+            "path": str(page.get("path") or ""),
+            "start_line": int(page.get("start_line", 0)),
+            "end_line": int(page.get("end_line", 0)),
+            "content_digest": str(page.get("content_digest") or ""),
+        }
+        self._source_refreshes = [old for old in self._source_refreshes if old.get("path") != row["path"]]
+        self._source_refreshes.append(row)
+        self._source_refreshes = self._source_refreshes[-MAX_SOURCE_WORKING_SET_EVICTIONS:]
+
     def refresh_source_pages(self, root: object) -> bool:
         """Rebind retained pages to exact current bytes, shifting only exact unchanged spans."""
         if not source_working_set_enabled() or not self._source_pages:
@@ -1481,6 +1539,8 @@ class RealExchangeLedger:
         root_path = root if isinstance(root, Path) else Path(str(root))
         sources: dict[str, str | None] = {}
         pending = self._pending_edit
+        from kernel_edit_drift import drift_merge_enabled
+        drift = drift_merge_enabled()
         for old_key, old_page in list(self._source_pages.items()):
             path = str(old_page["path"])
             if path not in sources:
@@ -1496,6 +1556,19 @@ class RealExchangeLedger:
             current_segment = ("".join(current_lines[old_start - 1:old_end])
                                if old_start >= 1 and old_end <= len(current_lines) else "")
             expected_content = str(old_page["content"])
+            moved = current_revision != old_page.get("revision")
+            if moved and drift and _source_page_priority(old_page) <= 1:
+                # An active page (cited or edit anchor) whose file moved is shown at its current bytes, unless
+                # the engine's own edit landed in it (that rebind stays silent, as today).
+                own_edit_landed = (
+                    expected_content != str(old_page["content"])
+                    and self._exact_page_location(source, expected_content, old_start) is not None)
+                if not own_edit_landed:
+                    if not self._refresh_active_source_page(
+                            old_key, old_page, source, current_revision, expected_content):
+                        self._source_pages.pop(old_key, None)
+                        self._record_source_eviction(old_page, "source_revision_changed")
+                    continue
             if (current_revision != old_page.get("revision")
                     and old_page.get("edit_anchor") is True
                     and isinstance(pending, Mapping) and pending.get("path") == path):
@@ -1567,18 +1640,31 @@ class RealExchangeLedger:
     def source_working_set_notices(self) -> tuple[str, ...]:
         if not source_working_set_enabled():
             return ()
+        from kernel_edit_drift import drift_merge_enabled
+        drift = drift_merge_enabled()
         notices = []
+        for refreshed in self._source_refreshes:
+            path = str(refreshed.get("path") or "")
+            start_line, end_line = int(refreshed.get("start_line", 0)), int(refreshed.get("end_line", 0))
+            if not path or start_line < 1 or end_line < start_line:
+                continue
+            notices.append(
+                f"[Source page refreshed] {path} lines {start_line}-{end_line} "
+                "changed on disk since you read it; current bytes shown")
         for row in self._source_evictions:
             path = str(row.get("path") or "")
             start_line, end_line = int(row.get("start_line", 0)), int(row.get("end_line", 0))
             if not path or start_line < 1 or end_line < start_line:
                 continue
+            reason = row.get("reason", "capacity")
             call = (f"read(path={json.dumps(path, ensure_ascii=False)}, "
                     f"start_line={start_line}, end_line={end_line})")
+            changed = ("The file changed on disk since you read it. "
+                       if drift and reason == "source_revision_changed" else "")
             notices.append(
                 "[Source page evicted]\n"
-                f"path={path} lines={start_line}-{end_line} reason={row.get('reason', 'capacity')}\n"
-                f"Retrieve current bytes before relying on this page with: {call}."
+                f"path={path} lines={start_line}-{end_line} reason={reason}\n"
+                f"{changed}Retrieve current bytes before relying on this page with: {call}."
             )
         return tuple(notices)
 
@@ -1591,6 +1677,8 @@ class RealExchangeLedger:
             "evictions": copy.deepcopy(self._source_evictions),
             "sequence": self._source_sequence,
         }
+        if self._source_refreshes:
+            state["refreshes"] = copy.deepcopy(self._source_refreshes)
         if self._pending_edit is not None:
             state["pending_edit"] = copy.deepcopy(self._pending_edit)
         return state
@@ -1654,6 +1742,18 @@ class RealExchangeLedger:
                         "path": path, "start_line": start, "end_line": end,
                         "content_digest": digest,
                     }, str(row.get("reason") or "capacity")[:80])
+        refreshes = state.get("refreshes", ())
+        if isinstance(refreshes, Sequence) and not isinstance(refreshes, (str, bytes, bytearray)):
+            for row in refreshes[-MAX_SOURCE_WORKING_SET_EVICTIONS:]:
+                if not isinstance(row, Mapping):
+                    continue
+                path = _source_path(row.get("path"))
+                start, end = row.get("start_line"), row.get("end_line")
+                if path and type(start) is int and type(end) is int and start >= 1 and end >= start:
+                    self._record_source_refresh({
+                        "path": path, "start_line": start, "end_line": end,
+                        "content_digest": str(row.get("content_digest") or ""),
+                    })
         sequence = state.get("sequence")
         if type(sequence) is int and sequence > self._source_sequence:
             self._source_sequence = sequence
@@ -1727,6 +1827,7 @@ class RealExchangeLedger:
             state["exchange_batch_ids"] = list(self._exchange_batch_ids)
             state["latest_batch_id"] = self._latest_batch_id
         if source_working_set_enabled() and (self._source_pages or self._source_evictions
+                                             or self._source_refreshes
                                              or self._pending_edit is not None):
             state["source_working_set"] = self._source_working_set_state()
         return state
