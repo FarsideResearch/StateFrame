@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.7.56 (2026-11-18)
 
 - Turn timing: time that no host phase covered between a response and the next request is now also reported on its own as `unattributed_host_ns`, so it is no longer read as tool execution alone. The existing per-phase fields are unchanged; the new value is part of `tool_execution`.
