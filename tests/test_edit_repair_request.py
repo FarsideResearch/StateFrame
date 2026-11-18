@@ -127,6 +127,12 @@ CASES = {
     RefusalCode.PARSE_BREAK: (
         [("q1h1", "return 1", "return (")], [alpha_span()], {"parse_check": py_parse},
         [("q2h1", "return 1", "return (1)")]),
+    # Produced by the COLLAB-DRIFT resolver, not the validator: the proposal and corrected batch are
+    # kept here so CASES covers the closed catalog. The generic round trip skips it; see
+    # test_edit_conflict_round_trips_through_the_production_executor.
+    RefusalCode.EDIT_CONFLICT: (
+        [("q1h1", "return 2", "return 20")], [alpha_span()], {},
+        [("q2h1", "return 9", "return 20")]),
 }
 
 
@@ -134,7 +140,8 @@ def test_cases_cover_the_closed_catalog():
     assert set(CASES) == set(RefusalCode)
 
 
-@pytest.mark.parametrize("code", list(CASES), ids=lambda c: c.value)
+@pytest.mark.parametrize("code", [c for c in CASES if c is not RefusalCode.EDIT_CONFLICT],
+                         ids=lambda c: c.value)
 def test_each_code_yields_a_repair_request_with_current_bytes_fresh_handles_and_proposal(code):
     proposal, spans, kwargs, corrected = CASES[code]
     result = refuse(proposal, spans, **kwargs)
@@ -379,3 +386,46 @@ def test_module_is_pure_and_unwired():
     for py in (ROOT / "src").rglob("*.py"):
         if py.name not in {"kernel_edit_repair_request.py", "kernel_edit_repair_hook.py"}:
             assert "kernel_edit_repair_request" not in py.read_text(encoding="utf-8"), py
+
+
+# ------------------------------------------------- EDIT_CONFLICT: production executor round trip
+
+
+def test_edit_conflict_round_trips_through_the_production_executor(tmp_path, monkeypatch):
+    """A same-line change on disk (return 2 -> return 9) makes the executor refuse with EDIT_CONFLICT.
+
+    The refusal is built by execute_edit_source with COLLAB drift on, the repair request carries the
+    current bytes and fresh handles, and the corrected batch validates against them.
+    """
+    from kernel_edit_source_tool import EditProtocolRunState, execute_edit_source
+
+    monkeypatch.setenv("STATEFRAME_COLLAB_DRIFT", "on")
+    monkeypatch.delenv("STATEFRAME_STRICT_DRIFT", raising=False)
+    drifted = SOURCE.replace("return 2", "return 9")
+    (tmp_path / PATH).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / PATH).write_bytes(drifted.encode("utf-8"))
+
+    state = EditProtocolRunState()
+    state.set_request(mint_handles(1, [DeliveredSpan.from_source(PATH, SOURCE)]))
+    proposal = CASES[RefusalCode.EDIT_CONFLICT][0]
+    corrected = CASES[RefusalCode.EDIT_CONFLICT][3]
+    outcome = execute_edit_source(
+        tmp_path, {"edits": [{"handle": h, "old_text": o, "new_text": n} for h, o, n in proposal]},
+        state=state, read_bytes=lambda p: p.read_bytes())
+    assert outcome.status == "REJECTED" and outcome.codes() == ("EDIT_CONFLICT",)
+    assert (tmp_path / PATH).read_bytes() == drifted.encode("utf-8")
+
+    repair = build(outcome.refusals, drifted.encode("utf-8"), minter, proposal, path=PATH,
+                   request_ordinal=2)
+    assert repair.current_source == drifted
+    assert repair.handles == ("q2h1",)
+    assert "EDIT_CONFLICT" in repair.render()
+    assert repair.fingerprints == tuple(r.fingerprint for r in outcome.refusals)
+    assert repair.level is EscalationLevel.RETRY and not repair.blocked
+
+    fixed = validate_edit_source_batch(corrected, covered_from(repair), repair.current_source,
+                                       current_revision=repair.current_revision,
+                                       authority_ref="authority:test",
+                                       inventory_ref="inventory:test",
+                                       source_receipt="receipt:test", parse_check=py_parse)
+    assert fixed.ok, fixed.as_dict()

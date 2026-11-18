@@ -840,6 +840,8 @@ OPT_IN_SWITCHES = {
     "STATEFRAME_CROSSFILE_EXISTENCE_CHECK": ("on", "off"),  # opt-in report of edits leaving repo symbol references dangling; off by default
     "STATEFRAME_CROSSFILE_SIGNATURE_CHECK": ("on", "off"),  # opt-in report of callers broken by a changed signature; off by default
     "STATEFRAME_EDIT_PROTOCOL": ("legacy_safe", "handles"),  # one edit interface per run; legacy_safe by default
+    "STATEFRAME_COLLAB_DRIFT": ("off", "on"),  # edits on a file that moved since delivery merge instead of refusing; off by default
+    "STATEFRAME_STRICT_DRIFT": ("off", "on"),  # on forces today's SOURCE_CHANGED refusal even with COLLAB_DRIFT on
 }
 PARALLEL_CONTROL_SWITCHES = frozenset({
     "STATEFRAME_PARALLEL_DROP_TOOL_AFTER_TERMINAL",

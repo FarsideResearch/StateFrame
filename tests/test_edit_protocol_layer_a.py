@@ -19,7 +19,9 @@ current revision) written once at the top.
 from __future__ import annotations
 
 import ast
+import os
 import sys
+from unittest import mock
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -176,6 +178,16 @@ def host(tmp_path: Path) -> Host:
 
 
 @dataclass(frozen=True)
+class DriftView:
+    """Outcome of a proposal judged by the production executor: same shape the validator gives."""
+
+    ok: bool
+    codes: tuple[RefusalCode, ...]
+    refusals: tuple[object, ...]
+    plan: object = None
+
+
+@dataclass(frozen=True)
 class Area:
     code: RefusalCode
     # (host, q1 map) -> (proposal edits, spans known to request q1)
@@ -184,6 +196,24 @@ class Area:
     correct: object
     # expected bytes of PATH after the correction
     expected: bytes
+    # Optional judge for codes the validator cannot produce: (host, proposal) -> DriftView.
+    refuse: object = None
+
+
+def production_judgement(host: "Host", proposal: "Batch") -> DriftView:
+    """Judge the proposal through execute_edit_source with COLLAB drift on, against the bytes now on disk."""
+    from kernel_edit_source_tool import EditProtocolRunState, execute_edit_source
+
+    (host.root / PATH).write_bytes(host.files[PATH])
+    state = EditProtocolRunState()
+    state.set_request(host.maps[1])
+    edits = [{"handle": h, "old_text": o, "new_text": n} for h, o, n in proposal]
+    with mock.patch.dict(os.environ, {"STATEFRAME_COLLAB_DRIFT": "on"}):
+        outcome = execute_edit_source(host.root, {"edits": edits}, state=state,
+                                      read_bytes=lambda p: p.read_bytes())
+    return DriftView(ok=outcome.status == "APPLIED",
+                     codes=tuple(refusal.code for refusal in outcome.refusals),
+                     refusals=outcome.refusals)
 
 
 def body(handle_map: HandleMap) -> HandleRecord:
@@ -271,12 +301,19 @@ AREAS = [
          lambda host, q1: plain(host, q1, ("return 1", "return (")),
          lambda q2: [(body(q2).handle, "return 1", "return (1)")],
          SOURCE.replace("return 1", "return (1)").encode()),
+    Area(RefusalCode.EDIT_CONFLICT,
+         # The file changed on the same line the model edits (return 2 -> return 9) after delivery.
+         lambda host, q1: (host.files.__setitem__(PATH, DRIFTED_SOURCE.encode()),
+                           plain(host, q1, ("return 2", "return 20")))[1],
+         lambda q2: [(body(q2).handle, "return 9", "return 20")],
+         DRIFTED_SOURCE.replace("return 9", "return 20").encode(),
+         refuse=production_judgement),
 ]
 
 
 def test_areas_cover_the_closed_catalog_once_each():
     assert {area.code for area in AREAS} == set(RefusalCode)
-    assert len(AREAS) == len(RefusalCode) == 12
+    assert len(AREAS) == len(RefusalCode) == 13
 
 
 # ------------------------------------------------------------------- the round trip
@@ -290,7 +327,8 @@ def run_round_trip(host: Host, area: Area) -> tuple[RepairRequest, BatchValidati
 
     # The model's proposal is refused with exactly this area's code.
     proposal, spans = area.induce(host, q1)
-    refused = host.validate(proposal, spans, PATH)
+    refused = (area.refuse(host, proposal) if area.refuse is not None
+               else host.validate(proposal, spans, PATH))
     # The authority is the host's view of the file at the time the batch is judged.
     authority = host.authority(PATH)
     authority.consume(0)

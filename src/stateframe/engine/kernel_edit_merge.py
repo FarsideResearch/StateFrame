@@ -274,3 +274,100 @@ def _three_way(
     merged = "".join(out)
     start = _nbytes(merged[:ours_at])
     return MergeApplied(merged, "merged", base_range, (start, start + _nbytes(ours_span)), tuple(hunks))
+
+
+@dataclass(frozen=True)
+class _Hunk:
+    """One base-line change from one side: base lines [i1, i2) became other lines [j1, j2)."""
+
+    i1: int
+    i2: int
+    j1: int
+    j2: int
+    side: Literal["ours", "theirs"]
+
+
+def _hunks(base: list[str], other: list[str], side: Literal["ours", "theirs"]) -> list[_Hunk]:
+    ops = SequenceMatcher(None, base, other, autojunk=False).get_opcodes()
+    return [_Hunk(i1, i2, j1, j2, side) for tag, i1, i2, j1, j2 in ops if tag != "equal"]
+
+
+def _render(base: list[str], start: int, end: int, hunks: list[_Hunk], other: list[str]) -> list[str]:
+    """Base lines [start, end) with one side's hunks applied."""
+    out: list[str] = []
+    pos = start
+    for hunk in sorted(hunks, key=lambda h: (h.i1, h.i2)):
+        out.extend(base[pos : hunk.i1])
+        out.extend(other[hunk.j1 : hunk.j2])
+        pos = hunk.i2
+    out.extend(base[pos:end])
+    return out
+
+
+def _shift(x: int, hunks: list[_Hunk]) -> int:
+    """Map a base line index to the matching line index of the side that produced hunks."""
+    return x + sum((h.j2 - h.j1) - (h.i2 - h.i1) for h in hunks if h.i2 <= x)
+
+
+def merge_texts(base: str, ours: str, theirs: str) -> MergeOutcome:
+    """Whole-file diff3: ours and theirs are each diffed against base line by line.
+
+    Used when the edit replaces a whole file (rewrite): ours changes only the lines that
+    differ from base, so an outside change to other lines combines. Hunks that touch the
+    same base lines combine only when both sides produce the same text there; otherwise
+    they conflict. The result has mode "merged" and carries no current_range (callers
+    derive the replaced region from the text they receive).
+    """
+    base_lines, ours_lines, theirs_lines = _split_lines(base), _split_lines(ours), _split_lines(theirs)
+    oh = _hunks(base_lines, ours_lines, "ours")
+    th = _hunks(base_lines, theirs_lines, "theirs")
+    members = sorted([*oh, *th], key=lambda h: (h.i1, h.i2, h.side))
+
+    groups: list[list[_Hunk]] = []
+    bounds: list[tuple[int, int]] = []
+    for hunk in members:
+        if groups and _overlaps(hunk.i1, hunk.i2, *bounds[-1]):
+            groups[-1].append(hunk)
+            bounds[-1] = (bounds[-1][0], max(bounds[-1][1], hunk.i2))
+        else:
+            groups.append([hunk])
+            bounds.append((hunk.i1, hunk.i2))
+
+    out: list[str] = []
+    applied: list[AppliedHunk] = []
+    conflicts: list[ConflictHunk] = []
+    cursor = 0
+    for group, (start, end) in zip(groups, bounds):
+        out.extend(base_lines[cursor:start])
+        ours_group = [h for h in group if h.side == "ours"]
+        theirs_group = [h for h in group if h.side == "theirs"]
+        ours_render = _render(base_lines, start, end, ours_group, ours_lines)
+        theirs_render = _render(base_lines, start, end, theirs_group, theirs_lines)
+        if ours_group and theirs_group and ours_render != theirs_render:
+            o_start, o_end = _shift(start, oh), _shift(end, oh)
+            t_start, t_end = _shift(start, th), _shift(end, th)
+            conflicts.append(ConflictHunk(
+                base_lines=(start, end),
+                ours_lines=(o_start, o_end),
+                theirs_lines=(t_start, t_end),
+                base_text="".join(base_lines[start:end]),
+                ours_text="".join(ours_render),
+                theirs_text="".join(theirs_render),
+            ))
+        else:
+            if ours_group and theirs_group:
+                side: Literal["ours", "theirs", "both"] = "both"
+                rendered = ours_render
+            elif ours_group:
+                side, rendered = "ours", ours_render
+            elif theirs_group:
+                side, rendered = "theirs", theirs_render
+            else:  # unreachable: every group holds at least one hunk
+                side, rendered = "both", base_lines[start:end]
+            out.extend(rendered)
+            applied.append(AppliedHunk(side, (start, end)))
+        cursor = end
+    out.extend(base_lines[cursor:])
+    if conflicts:
+        return MergeConflict(tuple(conflicts))
+    return MergeApplied("".join(out), "merged", (0, _nbytes(base)), None, tuple(applied))
