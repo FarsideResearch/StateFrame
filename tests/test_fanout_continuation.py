@@ -141,6 +141,15 @@ def test_lifecycle_partial_repaired_verified_then_retired(tmp_path: Path):
         "fanout_turn_index": 3,
         "passed_checks": {"tests/test_shipping.py": 5},
     }
+    # The recorded parent result must itself pass before the continuation may say VERIFIED.
+    # The r6 fixture's recorded final check is FAIL, so the repaired render reports FAILED here.
+    not_verified, _pin, _events = continuation.render(repaired, workspace, budget=3072)
+    assert "final_check=FAIL; final_integration=FAILED" in not_verified
+    assert "final_check=PASS" not in not_verified
+    assert "integration=VERIFIED" not in not_verified
+
+    repaired["final_check"] = "PASS"
+    repaired["integration"] = "VERIFIED"
     verified, released_pin, _events = continuation.render(repaired, workspace, budget=3072)
     assert "remaining=[]" in verified
     assert "final_check=PASS; final_integration=VERIFIED" in verified

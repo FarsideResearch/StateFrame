@@ -990,6 +990,7 @@ def _validated_bounded_action_receipt(value: object) -> dict[str, object]:
 
 
 def _validated_parallel_disposition(value: object) -> dict[str, object]:
+    from kernel_fanout_continuation import WRITER_DETAIL_FIELDS, WRITER_SCOPE_FIELDS
     from kernel_parallel import (
         MAX_PARALLEL_DISPOSITION_BYTES, MAX_PARALLEL_UNITS,
         PARALLEL_ACTION_SUMMARY_BYTES, PARALLEL_DISPOSITION_SCHEMA,
@@ -1014,9 +1015,6 @@ def _validated_parallel_disposition(value: object) -> dict[str, object]:
     admission = disposition.get("admission")
     units = disposition.get("units")
     details = disposition.get("unit_details")
-    expected_detail_fields = [
-        "id", "reason", "changed_files", "contract_ok", "check_status", "requests",
-    ]
     if isinstance(summary, str):
         try:
             summary_bytes = len(summary.encode("utf-8"))
@@ -1030,7 +1028,7 @@ def _validated_parallel_disposition(value: object) -> dict[str, object]:
         or not isinstance(disposition.get("final_check"), str)
         or not isinstance(disposition.get("integration"), str)
         or disposition.get("unit_fields") != ["id", "status"]
-        or disposition.get("unit_details_fields") != expected_detail_fields
+        or disposition.get("unit_details_fields") != list(WRITER_DETAIL_FIELDS)
         or not isinstance(admission, Mapping)
         or not isinstance(admission.get("status"), str)
         or admission["status"] not in {"ADMITTED", "REFUSED"}
@@ -1054,7 +1052,7 @@ def _validated_parallel_disposition(value: object) -> dict[str, object]:
     detail_ids: set[str] = set()
     for row in details:
         if (
-            not isinstance(row, list) or len(row) != 6
+            not isinstance(row, list) or len(row) != len(WRITER_DETAIL_FIELDS)
             or not isinstance(row[0], str) or row[0] not in unit_ids
             or row[0] in detail_ids
             or row[1] is not None and not isinstance(row[1], str)
@@ -1064,7 +1062,6 @@ def _validated_parallel_disposition(value: object) -> dict[str, object]:
             or type(row[5]) is not int or row[5] < 0
         ):
             raise FrameFit5Error("parallel disposition unit detail is invalid")
-        detail_ids.add(row[0])
         for file_row in row[2]:
             if (not isinstance(file_row, list) or len(file_row) != 4
                     or not isinstance(file_row[0], str)
@@ -1073,6 +1070,21 @@ def _validated_parallel_disposition(value: object) -> dict[str, object]:
                     or type(file_row[2]) is not int or file_row[2] < 0
                     or type(file_row[3]) is not int or file_row[3] < 0):
                 raise FrameFit5Error("parallel disposition changed-file detail is invalid")
+        detail_ids.add(row[0])
+    # unit_scopes is additive: absent on older records, and always the same width when present.
+    if (disposition.get("unit_scope_fields", list(WRITER_SCOPE_FIELDS)) != list(WRITER_SCOPE_FIELDS)
+            or not isinstance(disposition.get("unit_scopes", []), list)):
+        raise FrameFit5Error("parallel disposition unit scopes are malformed")
+    scope_ids: set[str] = set()
+    for row in disposition.get("unit_scopes", []):
+        if (
+            not isinstance(row, list) or len(row) != len(WRITER_SCOPE_FIELDS)
+            or not isinstance(row[0], str) or row[0] not in unit_ids or row[0] in scope_ids
+            or not isinstance(row[1], list) or not isinstance(row[2], list)
+            or any(not isinstance(item, str) for item in (*row[1], *row[2]))
+        ):
+            raise FrameFit5Error("parallel disposition unit scope is invalid")
+        scope_ids.add(row[0])
     omitted_units = truncation.get("omitted_units")
     omitted_details = truncation.get("omitted_details")
     status_counts = truncation.get("omitted_status_counts")

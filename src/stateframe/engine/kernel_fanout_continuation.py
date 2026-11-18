@@ -27,6 +27,12 @@ _EDIT_TOOLS = frozenset({
     "rename_file", "replace", "replace_module", "str_replace", "write", "write_file",
 })
 _CHECK_TOOLS = frozenset({"pytest", "run_tests", "test"})
+# Canonical wire shape of a parallel disposition, written by kernel_parallel and read here.
+# Identity rows are [id, status]; detail rows are positional; scope rows (owned paths and check
+# selectors, needed for pins) live in the additive unit_scopes section.
+WRITER_UNIT_FIELDS = ("id", "status")
+WRITER_DETAIL_FIELDS = ("id", "reason", "changed_files", "contract_ok", "check_status", "requests")
+WRITER_SCOPE_FIELDS = ("id", "owns", "check_selectors")
 
 
 class FanoutContinuationError(ValueError):
@@ -85,10 +91,80 @@ def _selectors(unit: Mapping[str, object]) -> list[str]:
     return [_clean(item, limit=220) for item in raw if isinstance(item, str) and item.strip()] if _is_sequence(raw) else []
 
 
+def _writer_detail_map(details: object) -> dict[str, Sequence[object]]:
+    if not _is_sequence(details):
+        raise FanoutContinuationError("fan-out disposition has invalid unit details")
+    by_id: dict[str, Sequence[object]] = {}
+    for detail in details:
+        if (not _is_sequence(detail) or not detail or not isinstance(detail[0], str)
+                or detail[0] in by_id):
+            raise FanoutContinuationError("fan-out disposition has a malformed unit detail")
+        by_id[detail[0]] = detail
+    return by_id
+
+
+def _writer_scope_map(scopes: object) -> dict[str, Sequence[object]]:
+    if not _is_sequence(scopes):
+        raise FanoutContinuationError("fan-out disposition has invalid unit scopes")
+    by_id: dict[str, Sequence[object]] = {}
+    for scope in scopes:
+        if not _is_sequence(scope) or len(scope) != len(WRITER_SCOPE_FIELDS):
+            raise FanoutContinuationError("fan-out disposition has a malformed unit scope")
+        if not isinstance(scope[0], str) or scope[0] in by_id:
+            raise FanoutContinuationError("fan-out disposition has a malformed unit scope")
+        by_id[scope[0]] = scope
+    return by_id
+
+
+def _writer_unit_mapping(
+        identity: Sequence[object], details: Mapping[str, Sequence[object]],
+        scopes: Mapping[str, Sequence[object]],
+) -> dict[str, object]:
+    """Map one writer identity row plus its detail and scope rows onto the renderer's unit fields."""
+    if (len(identity) != len(WRITER_UNIT_FIELDS) or not isinstance(identity[0], str)
+            or not isinstance(identity[1], str)):
+        raise FanoutContinuationError("fan-out disposition contains a malformed unit")
+    row: dict[str, object] = dict(zip(WRITER_UNIT_FIELDS, identity))
+    scope = scopes.get(identity[0])
+    if scope is not None:
+        row["owns"] = scope[1]
+        row["check_selectors"] = scope[2]
+    detail = details.get(identity[0])
+    if detail is None:
+        return row
+    if len(detail) != len(WRITER_DETAIL_FIELDS):
+        raise FanoutContinuationError("fan-out disposition has a malformed unit detail")
+    values = dict(zip(WRITER_DETAIL_FIELDS, detail))
+    changed = values["changed_files"]
+    if not _is_sequence(changed):
+        raise FanoutContinuationError("fan-out disposition has malformed changed files")
+    row.update({
+        "reason": values["reason"],
+        "check_status": values["check_status"],
+        "requests": values["requests"],
+        "contract_ok": values["contract_ok"],
+        "changed_paths": [item[0] for item in changed if _is_sequence(item) and item and isinstance(item[0], str)],
+    })
+    return row
+
+
+def _canonical_unit_rows(raw_units: Sequence[object], disposition: Mapping[str, object]) -> Sequence[object]:
+    """Accept the parallel writer's positional rows and the mapping rows the CLI projects."""
+    if not any(_is_sequence(row) for row in raw_units):
+        return raw_units
+    details = _writer_detail_map(disposition.get("unit_details", ()))
+    scopes = _writer_scope_map(disposition.get("unit_scopes", ()))
+    return [
+        _writer_unit_mapping(row, details, scopes) if _is_sequence(row) else row
+        for row in raw_units
+    ]
+
+
 def _unit_rows(disposition: Mapping[str, object]) -> list[dict[str, object]]:
     raw_units = disposition.get("units", disposition.get("unit_dispositions", ()))
     if not _is_sequence(raw_units) or len(raw_units) > MAX_UNITS:
         raise FanoutContinuationError("fan-out disposition has invalid unit rows")
+    raw_units = _canonical_unit_rows(raw_units, disposition)
     rows: list[dict[str, object]] = []
     seen_ids: set[str] = set()
     for raw in raw_units:
@@ -420,10 +496,11 @@ def render(
         for reason in ([unit.get("reason")] if unit.get("status") == "REFUSED" else []):
             code, detail = _reason_code(reason)
             fixed.append(f"refusal={code}: {detail}" if detail else f"refusal={code}")
-    final_check = "PASS" if not remaining and units else _clean(disposition.get("final_check", "UNKNOWN"), limit=40).upper()
-    integration = "VERIFIED" if not remaining and units else _clean(
+    # Verification words come only from the recorded parent result; children finishing never implies PASS.
+    final_check = _clean(disposition.get("final_check", "UNKNOWN"), limit=40).upper() or "UNKNOWN"
+    integration = _clean(
         disposition.get("final_integration", disposition.get("integration", "UNKNOWN")), limit=40
-    ).upper()
+    ).upper() or "UNKNOWN"
     fixed.extend([
         f"final_check={final_check}; final_integration={integration}",
         f"remaining=[{','.join(remaining)}]",
@@ -446,8 +523,11 @@ def render(
         completed_wording = f"{'/'.join(completed)} committed+PASS, don't reopen" if completed else "don't reopen completed units"
         checks_wording = ",".join(check_paths) or "the remaining unit check"
         next_action = f"repair only {remaining_wording}; {completed_wording}; run {checks_wording} then the full check"
-    else:
+    elif final_check == "PASS" and units:
         next_action = "all units committed and verified; finish unless a concrete mismatch"
+    else:
+        next_action = (f"units finished but parent final check is {final_check}, not verified; "
+                       "resolve the parent final check, then run the full check before finishing")
     fixed.append(f"next_action: {_truncate_utf8(next_action, 500)}")
 
     required_ids = set(remaining)
