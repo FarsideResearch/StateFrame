@@ -1414,6 +1414,7 @@ class TurnTimingRecorder:
             "budget_diet": 0, "journal_io": 0, "tool_execution": 0,
         }
         breakdown: dict[str, int] = {}
+        unattributed_ns = 0
         priority = {
             "tool_execution": 0, "prepare_subphases": 1, "menu_composition": 2,
             "contracts": 3, "budget_diet": 4, "journal_io": 5,
@@ -1438,7 +1439,10 @@ class TurnTimingRecorder:
                 name = active[0][2]
                 bucket = _turn_timing_bucket(name)
             else:
+                # No span covers this gap: it stays in tool_execution (the
+                # reconciled buckets are unchanged) and is also reported alone.
                 name, bucket = "tool_execution", "tool_execution"
+                unattributed_ns += right - left
             duration = right - left
             buckets[bucket] += duration
             breakdown[name] = breakdown.get(name, 0) + duration
@@ -1453,6 +1457,8 @@ class TurnTimingRecorder:
             "wall_gap_ns": wall_gap_ns,
             "steps_ns": buckets,
             "step_breakdown_ns": breakdown,
+            # Subset of steps_ns["tool_execution"]; the gaps no host span covered.
+            "unattributed_host_ns": unattributed_ns,
             "steps_sum_ns": steps_sum_ns,
             "reconciliation_error_ns": wall_gap_ns - steps_sum_ns,
             "reconciles_within_5_percent": (

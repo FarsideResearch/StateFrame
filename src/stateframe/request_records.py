@@ -178,9 +178,8 @@ def _pack_records(pack: Path, *, use_cache: bool = True) -> dict[str, bytes]:
     return records
 
 
-def list_request_records(run_dir: str | os.PathLike[str]) -> list[str]:
-    """Return canonical record names from the loose and/or sealed representation."""
-    root = Path(run_dir)
+def _enumerate(root: Path) -> tuple[dict[str, Path], set[str]]:
+    """One loose-directory listing plus the sealed name set; loose listing errors always raise."""
     loose = _loose_files(root)
     try:
         packed = set(_pack_records(root / PACK_NAME))
@@ -188,6 +187,12 @@ def list_request_records(run_dir: str | os.PathLike[str]) -> list[str]:
         if not loose:
             raise
         packed = set()
+    return loose, packed
+
+
+def list_request_records(run_dir: str | os.PathLike[str]) -> list[str]:
+    """Return canonical record names from the loose and/or sealed representation."""
+    loose, packed = _enumerate(Path(run_dir))
     return sorted(set(loose) | packed)
 
 
@@ -209,8 +214,22 @@ def read_request_record(run_dir: str | os.PathLike[str], name: str) -> bytes:
     return _read_packed(root / PACK_NAME, name)
 
 
+def _read_listed(pack: Path, name: str, loose: dict[str, Path]) -> bytes:
+    """Read one record using the listing taken once for the whole pass (loose wins over sealed)."""
+    path = loose.get(name)
+    if path is not None:
+        try:
+            return path.read_bytes()
+        except FileNotFoundError:
+            pass  # Unlinked after listing: seal publishes the pack before removing loose files.
+    return _read_packed(pack, name)
+
+
 def _all_records(run_dir: Path) -> dict[str, bytes]:
-    return {name: read_request_record(run_dir, name) for name in list_request_records(run_dir)}
+    """Read every record with a single directory listing instead of one listing per record."""
+    loose, packed = _enumerate(run_dir)
+    pack = run_dir / PACK_NAME
+    return {name: _read_listed(pack, name, loose) for name in sorted(set(loose) | packed)}
 
 
 def _write_archive(stream, records: dict[str, bytes]) -> None:

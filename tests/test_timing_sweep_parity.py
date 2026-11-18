@@ -53,6 +53,24 @@ def _old_attribution(spans, manual, started, ended):
     return buckets, breakdown
 
 
+def _uncovered_ns(spans, manual, started, ended):
+    """Sum of the gaps where no clipped span is active (the unattributed host time)."""
+    clipped = []
+    for name, start, end in [*spans, *((name, start, ended) for name, start in manual)]:
+        left, right = max(started, int(start)), min(ended, int(end))
+        if right > left:
+            clipped.append((str(name), left, right))
+    boundaries = {started, ended}
+    for _, start, end in clipped:
+        boundaries.update((start, end))
+    ordered = sorted(boundaries)
+    total = 0
+    for left, right in zip(ordered, ordered[1:]):  # noqa: RUF007 - mirrors old scan
+        if right > left and not any(row[1] <= left and row[2] >= right for row in clipped):
+            total += right - left
+    return total
+
+
 def _finish(monkeypatch, spans, manual, started=100, ended=200):
     monkeypatch.setenv("STATEFRAME_TURN_TIMING", "on")
     monkeypatch.setattr(measurement.time, "perf_counter_ns", lambda: ended)
@@ -94,7 +112,9 @@ def test_timing_sweep_matches_interval_scan_and_all_fields(monkeypatch):
             "producer": "kernel_measurement", "request_id": "before",
             "next_request_id": "after", "step": 7, "provider_ns": 23,
             "wall_gap_ns": 100, "steps_ns": buckets,
-            "step_breakdown_ns": breakdown, "steps_sum_ns": sum(buckets.values()),
+            "step_breakdown_ns": breakdown,
+            "unattributed_host_ns": _uncovered_ns(spans, manual, 100, 200),
+            "steps_sum_ns": sum(buckets.values()),
             "reconciliation_error_ns": 100 - sum(buckets.values()),
             "reconciles_within_5_percent": True, "dispatch": False,
         }

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.56 (2026-11-18)
+
+- Turn timing: time that no host phase covered between a response and the next request is now also reported on its own as `unattributed_host_ns`, so it is no longer read as tool execution alone. The existing per-phase fields are unchanged; the new value is part of `tool_execution`.
+- Workspace effect capture no longer copies, fsyncs and links a file whose content the run's store already holds; it still checks the live file against the scanned state and verifies the stored copy, so the same changes are caught and the run's stored data is unchanged.
+- Timeline: when no selector is set and recall can select, relevant items now come from recall alone, so the timeline no longer loads every candidate event before discarding them. Output order and contents are unchanged.
+- Sealing request records lists the run's loose request files once per pass instead of once per record; the sealed pack bytes and the loose-over-sealed precedence are unchanged.
+- Faster runs with long receipt histories: reassigning a receipt row to the same content no longer appends a new copy to the history file, so the file stops growing on repeated identical updates. Decoded rows, requests and replies are unchanged.
+
 ## 0.7.55 (2026-11-18)
 
 - Fixed: a sealed candidate that changed existing out-of-scope files no longer loses its in-scope edits while still reporting `SUBMITTED`. Retained edits reach the working copy and `final.diff` when possible, and detected dropped paths survive apply failures. The summary reports `DELIVERY_REFUSED` with `CANDIDATE_OUT_OF_SCOPE`, `CHECKS_STALE`, or `CANDIDATE_NOT_DELIVERED`; stale checks stay unaccepted, exit remains 2, `--in-place` is blocked, and the engine terminal is unchanged.

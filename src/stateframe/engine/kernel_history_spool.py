@@ -174,9 +174,12 @@ class HistorySpool(Sequence):
             self._owned_directory = None
         self._directory = directory
 
-    def _write_all(self, data, position):
+    def _assert_writer(self):
         if os.getpid() != self._writer_pid:
             raise RuntimeError('forked history snapshots are read-only')
+
+    def _write_all(self, data, position):
+        self._assert_writer()
         with _spool_span('history_spool_write'):
             written = 0
             while written < len(data):
@@ -269,6 +272,12 @@ class HistorySpool(Sequence):
 
     def _replace_encoded(self, index: int, encoded: bytes):
         index = self._normalize(index)
+        # Compare with the raw stored record, never self._encoded(): subclasses
+        # (receipt history) answer that from live, possibly mutated state.
+        # Writer check first so a forked child is refused even for identical rows.
+        self._assert_writer()
+        if self._read(self._position(index, self._root, self._height)) == encoded:
+            return
         record = self._write(encoded)
         self._root = self._replace(self._root, self._height, index, record)
 

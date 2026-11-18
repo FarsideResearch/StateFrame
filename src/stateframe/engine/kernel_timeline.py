@@ -765,8 +765,24 @@ class TimelineIndex:
             rows.append(row)
         return rows
 
+    def _recall_relevant(self, focus: object, *, max_items: int,
+                         budget_tokens: int) -> tuple[dict[str, object], ...]:
+        view = self.recall.select(focus, budget_tokens=max(32, budget_tokens), max_items=max_items,
+                                  ledger=self.decision_graph, consume_requested=False,
+                                  track_shown=False)
+        rows = []
+        for item in getattr(view, "items", ()):
+            row = dict(item)
+            row["source"] = "recall"
+            rows.append(row)
+        return tuple(rows[:max_items])
+
     def _select_relevant(self, focus: object, *, max_items: int,
                          budget_tokens: int) -> tuple[dict[str, object], ...]:
+        recall_selects = self.recall is not None and callable(getattr(self.recall, "select", None))
+        if self.selector is None and recall_selects:
+            # Recall alone decides here, so candidate rows would be built and discarded.
+            return self._recall_relevant(focus, max_items=max_items, budget_tokens=budget_tokens)
         limit = (max_items if isinstance(self._events, HistorySpool) and max_items > 0
                  and self.selector is None and not callable(getattr(self.recall, "select", None))
                  else None)
@@ -778,16 +794,8 @@ class TimelineIndex:
                 selected = getattr(selected, "items")
             if isinstance(selected, Sequence) and not isinstance(selected, (str, bytes, bytearray)):
                 return tuple(dict(item) for item in selected if isinstance(item, Mapping))[:max_items]
-        if self.recall is not None and callable(getattr(self.recall, "select", None)):
-            view = self.recall.select(focus, budget_tokens=max(32, budget_tokens), max_items=max_items,
-                                      ledger=self.decision_graph, consume_requested=False,
-                                      track_shown=False)
-            rows = []
-            for item in getattr(view, "items", ()):
-                row = dict(item)
-                row["source"] = "recall"
-                rows.append(row)
-            return tuple(rows[:max_items])
+        if recall_selects:
+            return self._recall_relevant(focus, max_items=max_items, budget_tokens=budget_tokens)
         return tuple(sorted(candidates, key=lambda row: (int(row.get("turn", 0)),
                                                           int(row.get("timestamp_ns", 0))))[-max_items:])
 
