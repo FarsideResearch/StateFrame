@@ -12,7 +12,8 @@ from pathlib import Path
 import pytest
 
 from _timeouts import scaled
-from stateframe.test_runners import declared_test_evidence, verification_evidence_for_tests
+from stateframe.test_runners import (DECLARED_TEST_SOURCE, declared_test_evidence, discover_check,
+                                     parse_command, verification_evidence_for_tests)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -276,6 +277,25 @@ class TestVerificationAuthority(unittest.TestCase):
                 "tests", "generic", ("node", "--test", "sample.test.cjs"), run.stdout,
                 passed=True, declared=True, repo=repo),
                 ("tests", "verified by tests", True))
+
+    @unittest.skipUnless(shutil.which("node"), "node is not installed")
+    def test_node_test_command_without_discovered_test_files_is_a_check(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "verify.js").write_text("require('node:test')('works', () => {});\n")
+            self.assertEqual(discover_check(repo), (None, "none", False))
+
+            command = "node --test verify.js"
+            kind, argv = parse_command(command)
+            result = subprocess.run(argv, cwd=repo, text=True, capture_output=True,
+                                    check=False, timeout=scaled(30))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            declared = declared_test_evidence(command, None, DECLARED_TEST_SOURCE, kind)
+            self.assertTrue(declared)
+            self.assertEqual(verification_evidence_for_tests(
+                DECLARED_TEST_SOURCE, kind, argv, result.stdout,
+                passed=True, declared=declared, repo=repo),
+                ("command", None, False))
 
 
 if __name__ == "__main__":
