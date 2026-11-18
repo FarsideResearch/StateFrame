@@ -34,10 +34,9 @@ def test_metadata_prefix_scans_are_linear_for_many_short_lines(monkeypatch):
         if prefix_state is None:
             scanned += len(source_prefix)
         else:
-            state_id = id(prefix_state)
             current = prefix_state.characters_scanned
-            scanned += current - state_counts.get(state_id, 0)
-            state_counts[state_id] = current
+            scanned += current - state_counts.get(prefix_state, 0)
+            state_counts[prefix_state] = current
         if prefix_state is None:
             return original(text, source_prefix=source_prefix)
         return original(text, source_prefix=source_prefix, prefix_state=prefix_state)
@@ -46,9 +45,13 @@ def test_metadata_prefix_scans_are_linear_for_many_short_lines(monkeypatch):
     ledger.clear_cache()
     rows = ledger.parse_ticket_once("linear-scan-ticket", brief, revision="linear-v1")
     obligations = seed.extract_obligations(brief)
+    scanned += sum(state.characters_scanned - observed
+                   for state, observed in state_counts.items())
+    ledger.clear_cache()
 
     assert len(rows) == 5_000
-    assert len(obligations) == 5_000
+    assert len(obligations) == seed.MAX_EXTRACTED_OCCURRENCES + 1
+    assert obligations[-1].overflow is True
     assert scanned <= 4 * len(brief), f"metadata prefix scanning visited {scanned} characters"
 
 

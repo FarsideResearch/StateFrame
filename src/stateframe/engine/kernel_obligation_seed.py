@@ -24,6 +24,8 @@ SCHEMA = "stateframe-obligation/1"
 PROVENANCE = "HOST_BRIEF"
 MAX_OBLIGATION_TEXT = 400
 MAX_OBLIGATIONS = 256
+# Work records hold 512 steps; reserve one step for an explicit overflow record.
+MAX_EXTRACTED_OCCURRENCES = 511
 MAX_MENTIONED = 24
 KINDS = ("behaviour", "constraint", "compat", "rename", "interface")
 ObligationKind = Literal["behaviour", "constraint", "compat", "rename", "interface"]
@@ -177,6 +179,7 @@ class Obligation:
     unmappable: bool = False
     source_label: str = ""
     source_spans: tuple[SourceSpan, ...] = ()
+    overflow: bool = False
 
     def __post_init__(self) -> None:
         if not re.fullmatch(r"obl-[0-9]{1,4}", self.id):
@@ -189,6 +192,8 @@ class Obligation:
             raise ValueError("new obligations must be open")
         if type(self.unmappable) is not bool:
             raise ValueError("unmappable must be a boolean")
+        if type(self.overflow) is not bool:
+            raise ValueError("overflow must be a boolean")
         if self.unmappable and self.source_label.lower() not in {"title", "symptom", "focus"}:
             raise ValueError("unmappable task metadata needs a Title, Symptom, or Focus source label")
         if (not isinstance(self.source_spans, tuple) or len(self.source_spans) > 1
@@ -213,9 +218,27 @@ class Obligation:
         if self.source_spans:
             result["source_span_ids"] = [span.id for span in self.source_spans]
             result["source_spans"] = [span.to_dict() for span in self.source_spans]
+        if self.overflow:
+            result["overflow"] = True
         return result
 
     as_dict = to_dict
+
+
+def _overflow_obligation(used_ids: set[str]) -> Obligation:
+    """Keep the dropped tail visible as unresolved, bounded host work."""
+    for number in range(10_000):
+        obligation_id = f"obl-{number:03d}"
+        if obligation_id not in used_ids:
+            break
+    else:
+        raise ValueError("unable to allocate a bounded overflow obligation id")
+    text = (f"Unresolved extraction overflow: additional requirement occurrences were omitted after the "
+            f"{MAX_EXTRACTED_OCCURRENCES} occurrence limit. Review the remaining brief before marking work complete.")
+    return Obligation(
+        id=obligation_id, text=text, kind="behaviour",
+        overflow=True,
+    )
 
 
 class PublicBrief(str):
@@ -544,6 +567,7 @@ def extract_obligations(brief: str, manifest: object = None, *,
     prefix_state = _MetadataPrefixState()
     previous_field = False
     previous_end = 0
+    overflow_found = False
     for start_byte, end_byte, text in _ticket_segments(brief):
         raw_gap = encoded[previous_end:start_byte].decode("utf-8")
         gap = raw_gap.replace("\r\n", "\n").replace("\r", "\n")
@@ -558,10 +582,15 @@ def extract_obligations(brief: str, manifest: object = None, *,
         else:
             clauses = extract(text)
         for clause, left, right in _clause_occurrences(text, clauses):
+            if len(tagged_candidates) >= MAX_EXTRACTED_OCCURRENCES:
+                overflow_found = True
+                break
             origin = SourceSpan(source_id, source_hash,
                                 start_byte + len(text[:left].encode("utf-8")),
                                 start_byte + len(text[:right].encode("utf-8")))
             tagged_candidates.append((clause, label, origin))
+        if overflow_found:
+            break
         prefix_state.advance(text)
     for clause, source_label, origin in tagged_candidates:
         symbols = _clause_symbols(clause, files)
@@ -573,6 +602,8 @@ def extract_obligations(brief: str, manifest: object = None, *,
             source_label=source_label or "",
             source_spans=(origin,),
         ))
+    if overflow_found:
+        result.append(_overflow_obligation({item.id for item in result}))
     return tuple(result)
 
 
@@ -584,6 +615,9 @@ def _coerce_obligation(value: Obligation | Mapping[str, object]) -> Obligation:
     origins = _coerce_source_spans(value.get("source_spans", ()))
     if "source_span_ids" in value and value["source_span_ids"] != [span.id for span in origins]:
         raise ValueError("source span references must match their exact origins")
+    overflow = value.get("overflow", False)
+    if type(overflow) is not bool:
+        raise ValueError("overflow must be a boolean")
     return Obligation(
         id=str(value.get("id", "")), text=str(value.get("text", "")),
         kind=value.get("kind", "behaviour"),
@@ -593,6 +627,7 @@ def _coerce_obligation(value: Obligation | Mapping[str, object]) -> Obligation:
         unmappable=value.get("unmappable", False) is True,
         source_label=str(value.get("source_label", "")),
         source_spans=origins,
+        overflow=overflow,
     )
 
 
@@ -640,6 +675,8 @@ def obligation_step_fields(obligation: Obligation | Mapping[str, object]) -> dic
             "source_label": item.source_label.lower(),
             "source_disposition": "advisory_unmappable",
         })
+    if item.overflow:
+        fields["overflow"] = True
     return fields
 
 
@@ -661,13 +698,32 @@ def source_span_from_fields(fields: Mapping[str, object]) -> SourceSpan | None:
 def host_seed_operations(obligations: Sequence[Obligation | Mapping[str, object]],
                          *, goal_id: str = "goal-0") -> list[dict[str, object]]:
     """Build the typed host operations used to add obligation steps."""
-    result = []
+    selected: list[Obligation] = []
+    overflow_item: Obligation | None = None
     for value in obligations:
         item = _coerce_obligation(value)
+        if item.overflow:
+            overflow_item = item
+            if len(selected) >= MAX_EXTRACTED_OCCURRENCES:
+                break
+            continue
+        if len(selected) >= MAX_EXTRACTED_OCCURRENCES:
+            overflow_item = _overflow_obligation({selected_item.id for selected_item in selected})
+            break
+        selected.append(item)
+
+    if overflow_item is not None:
+        overflow_item = _overflow_obligation({item.id for item in selected})
+
+    result = []
+    for item in selected:
         # Work-record steps cap text at MAX_STEP_TEXT (== MAX_OBLIGATION_TEXT).
         # The full clause stays on the Obligation; the step carries a bounded copy.
         result.append({"op": "add_step", "goal_id": goal_id, "text": display_text(item.text),
                        "fields": obligation_step_fields(item)})
+    if overflow_item is not None:
+        result.append({"op": "add_step", "goal_id": goal_id, "text": display_text(overflow_item.text),
+                       "fields": obligation_step_fields(overflow_item)})
     return result
 
 
@@ -796,7 +852,8 @@ def seed_fingerprint(obligations: Sequence[Obligation]) -> str:
 
 
 __all__ = [
-    "KINDS", "MAX_OBLIGATION_TEXT", "MAX_OBLIGATIONS", "MODE_ENV", "Obligation", "PROVENANCE",
+    "KINDS", "MAX_EXTRACTED_OCCURRENCES", "MAX_OBLIGATION_TEXT", "MAX_OBLIGATIONS", "MODE_ENV",
+    "Obligation", "PROVENANCE",
     "PublicBrief", "SCHEMA", "SourceSpan", "display_obligations", "display_text", "enabled",
     "evidence_ref_satisfies", "extract_obligations", "host_seed_operations",
     "mode", "obligation_step_fields", "open_obligations", "public_manifest",
