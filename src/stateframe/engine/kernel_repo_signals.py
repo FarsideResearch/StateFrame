@@ -92,56 +92,57 @@ def _safe_root(root: Path | str) -> Path:
     return safe_expanduser(Path(root)).resolve()
 
 
-def _source_paths(root: Path) -> list[Path]:
+def _inventory_paths(root: Path, *, source_only: bool) -> list[Path]:
     if not root.exists() or not root.is_dir():
         return []
     paths: list[Path] = []
+
+    def raise_walk_error(error: OSError) -> None:
+        raise error
+
     try:
-        iterator = root.rglob("*")
-        for path in iterator:
-            if not path.is_file() or path.is_symlink():
-                continue
-            try:
-                relative = path.relative_to(root)
-            except ValueError:
-                continue
-            if any(part in _SKIP_DIRS or part.startswith(".") for part in relative.parts):
-                continue
-            if path.suffix.lower() not in _SOURCE_SUFFIXES:
-                continue
-            paths.append(path)
+        for directory, dirnames, filenames in os.walk(
+                root, topdown=True, onerror=raise_walk_error, followlinks=False):
+            current = Path(directory)
+            dirnames[:] = [
+                name for name in sorted(dirnames)
+                if name not in _SKIP_DIRS and not name.startswith(".")
+                and not (current / name).is_symlink()
+            ]
+            for name in sorted(filenames):
+                path = current / name
+                if not path.is_file() or path.is_symlink():
+                    continue
+                if source_only and (
+                        name.startswith(".") or path.suffix.lower() not in _SOURCE_SUFFIXES):
+                    continue
+                try:
+                    path.relative_to(root)
+                except ValueError:
+                    continue
+                paths.append(path)
     except (OSError, RuntimeError):
         return paths
     return sorted(paths, key=lambda item: item.relative_to(root).as_posix())
+
+
+def _source_paths(root: Path) -> list[Path]:
+    return _inventory_paths(root, source_only=True)
 
 
 def _workspace_paths(root: Path) -> list[Path]:
     """Return files for W0/Wt, including docs/configuration beyond source code."""
-    if not root.exists() or not root.is_dir():
-        return []
-    paths: list[Path] = []
-    try:
-        for path in root.rglob("*"):
-            if not path.is_file() or path.is_symlink():
-                continue
-            try:
-                relative = path.relative_to(root)
-            except ValueError:
-                continue
-            if any(part in _SKIP_DIRS or part.startswith(".") and part != relative.name
-                   for part in relative.parts[:-1]):
-                continue
-            paths.append(path)
-    except (OSError, RuntimeError):
-        return paths
-    return sorted(paths, key=lambda item: item.relative_to(root).as_posix())
+    return _inventory_paths(root, source_only=False)
 
 
 def _read_source(path: Path) -> str:
     try:
         # Source indexing is bounded so a generated/binary-looking file cannot
-        # consume the request budget or make signal generation unbounded.
-        return path.read_text(encoding="utf-8")[:200_000]
+        # consume the request budget or make signal generation unbounded. A
+        # decoding error surfaced by the bounded read invalidates this source;
+        # the rest of the file is not explicitly scanned for UTF-8 validity.
+        with path.open("r", encoding="utf-8") as source:
+            return source.read(200_000)
     except (OSError, UnicodeError):
         return ""
 

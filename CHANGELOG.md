@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fixed repository-signal inventories to prune excluded directories before descent and read only the retained 200,000-character source prefix.
 - Fixed: `source_roots` deduplicates roots as they are added and indexes import providers per directory, avoiding repeated provider scans on large workspaces.
 - Fixed: a repeated read-only call suppressed by the host now settles as not applied without granting source credit, so continuation no longer blocks on an unknown effect.
 - Fixed: the project test interpreter handoff is no longer described as a shell override. The guide now records CLI selection precedence and explains that `--test-python` selects an alternate project interpreter.
