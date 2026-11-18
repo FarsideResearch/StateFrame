@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.60 (2026-11-18)
 
 - Parallel subframes: after a verified fan-out the `parallel` tool stays available for the rest of the run. Only the completed plan is retired, so re-dispatching that identical plan is refused while new plans run.
 
