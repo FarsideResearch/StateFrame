@@ -7,14 +7,13 @@ Loudness bar: a raise, a WARNING-or-higher record from the owning module, or a t
 string that a reader checks. Documented fail-open paths and telemetry helpers are degrade-OK and only pinned
 where the typed outcome is the safety argument.
 
-Tag convention: ``T8-<MODULE>-<line>`` names the guarded ``except`` line. The three CRASH-HIDER sites on
+T8 tags name the symbol keys of guarded handlers. The three CRASH-HIDER sites on
 default paths (catalog callee lookup, TS dispatch scan, has_error probe) were strict xfails; they are now fixed
 and asserted, each with a regression test for the typed outcome its caller reads.
 """
 from __future__ import annotations
 
 import logging
-import re
 import sys
 import types
 from pathlib import Path
@@ -23,12 +22,18 @@ from types import SimpleNamespace
 import pytest
 
 import kernel_repo_catalog as catalog
-from kernel_catalog_contracts import CoverageStatus
 import kernel_repo_intel as repo_intel
-from mc_repo_intel_vendor import call_graph
-from mc_repo_intel_vendor import repo_map
-from mc_repo_intel_vendor import ts_dispatch
-from mc_repo_intel_vendor import ts_extract
+from _except_sites import (
+    UNREVIEWED_HANDLER,
+    ExceptSite,
+    _broad_except_sites,
+    assert_site_tags,
+    assert_triaged,
+    edited_module_paths,
+    shifted_module_paths,
+)
+from kernel_catalog_contracts import CoverageStatus
+from mc_repo_intel_vendor import call_graph, repo_map, ts_dispatch, ts_extract
 
 ENGINE = Path(repo_intel.__file__).resolve().parent
 _MODULE_FILES = (
@@ -50,7 +55,8 @@ class _Ref(SimpleNamespace):
     """Stand-in for a graph callee reference with the ``symbol`` attribute the catalog reads."""
 
 
-# T8-KERNEL_REPO_CATALOG-857: a source whose callee lookup fails must not lose its CALLS edges silently.
+# T8-[kernel_repo_catalog | _graph_dependencies | except Exception as exc: | 2]
+# a source whose callee lookup fails must not lose its CALLS edges silently.
 def test_graph_dependency_callee_failure_is_loud(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
                                                  caplog: pytest.LogCaptureFixture) -> None:
     class _Graph:
@@ -74,7 +80,8 @@ def test_graph_dependency_callee_failure_is_loud(tmp_path: Path, monkeypatch: py
     assert "a.py::f (RuntimeError)" in caplog.text, "the record names the source and the failure type"
 
 
-# T8-CALL_GRAPH-2114: a tree-sitter boundary scan failure must read as UNKNOWN boundaries, not "none".
+# T8-[call_graph | dispatch_boundaries_in_file | except Exception as exc: | 1]
+# a tree-sitter boundary scan failure must read as UNKNOWN boundaries, not "none".
 def test_ts_dispatch_scan_failure_is_loud_not_empty(monkeypatch: pytest.MonkeyPatch,
                                                     caplog: pytest.LogCaptureFixture) -> None:
     def _boom(source: str, relpath: str):
@@ -89,7 +96,8 @@ def test_ts_dispatch_scan_failure_is_loud_not_empty(monkeypatch: pytest.MonkeyPa
     assert _loud(caplog, "call_graph"), "scan failure must leave a WARNING+ record"
 
 
-# T8-TS_EXTRACT-850: a binding quirk in has_error must not read as "no syntax errors" (file marked INDEXED).
+# T8-[ts_extract | _has_error | except Exception as exc: | 1]
+# a binding quirk in has_error must not read as "no syntax errors" (file marked INDEXED).
 def test_has_error_probe_failure_is_not_read_as_clean(caplog: pytest.LogCaptureFixture) -> None:
     class _Root:
         def has_error(self) -> bool:
@@ -274,7 +282,8 @@ def test_has_error_probe_failure_marks_extract_parse_partial(monkeypatch: pytest
     assert result.status == call_graph.COVERAGE_PARSE_PARTIAL, "unknown error state must not be INDEXED"
 
 
-# T8-KERNEL_REPO_INTEL-159: suggestions are advisory; the NOT_FOUND status stays typed.
+# T8-[kernel_repo_intel | _not_found | except Exception: | 1]
+# suggestions are advisory; the NOT_FOUND status stays typed.
 def test_not_found_survives_suggestion_failure() -> None:
     class _Graph:
         def search_names(self, symbol: str, limit: int = 5):
@@ -288,7 +297,8 @@ def test_not_found_survives_suggestion_failure() -> None:
     assert result["suggestions"] == []
 
 
-# T8-KERNEL_REPO_INTEL-612: focused orientation is documented fail-open; the map is returned unchanged.
+# T8-[kernel_repo_intel | _ensure_focus_entry | except Exception: | 1]
+# focused orientation is documented fail-open; the map is returned unchanged.
 def test_focus_entry_failure_is_fail_open(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (tmp_path / "pkg").mkdir()
     (tmp_path / "pkg" / "mod.py").write_text("def f():\n    return 1\n", encoding="utf-8")
@@ -300,7 +310,8 @@ def test_focus_entry_failure_is_fail_open(tmp_path: Path, monkeypatch: pytest.Mo
     assert repo_intel._ensure_focus_entry(tmp_path, "MAP", "pkg/mod.py") == "MAP"
 
 
-# T8-KERNEL_REPO_CATALOG-942: a failed outline is recorded on the file's outline as degraded with a reason.
+# T8-[kernel_repo_catalog | build_structural_index | except Exception as exc: | 1]
+# a failed outline is recorded on the file's outline as degraded with a reason.
 def test_outline_failure_is_typed_degraded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (tmp_path / "mod.py").write_text("def f():\n    return 1\n", encoding="utf-8")
 
@@ -315,7 +326,8 @@ def test_outline_failure_is_typed_degraded(tmp_path: Path, monkeypatch: pytest.M
     assert modules[0].parser == "unavailable"
 
 
-# T8-REPO_MAP-237: outline failure on a non-scanned language lists the file as text scan and keeps the reason.
+# T8-[repo_map | _file_entry_with_mode | except Exception as exc: | 1]
+# outline failure on a non-scanned language lists the file as text scan and keeps the reason.
 def test_file_entry_outline_failure_keeps_text_scan_and_reason(tmp_path: Path,
                                                                monkeypatch: pytest.MonkeyPatch) -> None:
     src = tmp_path / "svc.go"
@@ -332,7 +344,8 @@ def test_file_entry_outline_failure_keeps_text_scan_and_reason(tmp_path: Path,
     assert entry is not None and "svc.go" in entry
 
 
-# T8-REPO_MAP-247: a tree-sitter extract failure degrades that file to the text scan and records the failure type.
+# T8-[repo_map | _file_entry_with_mode | except Exception as exc: | 2]
+# a tree-sitter extract failure degrades that file to the text scan and records the failure type.
 def test_file_entry_tree_sitter_failure_degrades_and_records(tmp_path: Path,
                                                              monkeypatch: pytest.MonkeyPatch) -> None:
     src = tmp_path / "mod.py"
@@ -350,7 +363,8 @@ def test_file_entry_tree_sitter_failure_degrades_and_records(tmp_path: Path,
     assert entry is not None
 
 
-# T8-TS_DISPATCH-1288: a broken <script> block degrades the SFC outline with a typed reason.
+# T8-[ts_dispatch | _vue_outline | except Exception as exc: | 1]
+# a broken <script> block degrades the SFC outline with a typed reason.
 def test_vue_script_parse_failure_is_typed_degraded(monkeypatch: pytest.MonkeyPatch) -> None:
     source = "<script>\nexport const a = 1\n</script>\n<template><div>{{ a }}</div></template>\n"
 
@@ -363,7 +377,8 @@ def test_vue_script_parse_failure_is_typed_degraded(monkeypatch: pytest.MonkeyPa
     assert "script:RuntimeError" in str(outline.get("degraded_reason", ""))
 
 
-# T8-TS_DISPATCH-1687: a script-block parser failure in structural spans is recorded as a parser-status span.
+# T8-[ts_dispatch | structural_spans | except Exception as exc: | 1]
+# a script-block parser failure in structural spans is recorded as a parser-status span.
 def test_structural_spans_script_failure_records_parser_status(monkeypatch: pytest.MonkeyPatch) -> None:
     source = "<script>\nexport const a = 1\n</script>\n"
 
@@ -377,7 +392,8 @@ def test_structural_spans_script_failure_records_parser_status(monkeypatch: pyte
     assert result["degraded"] is True
 
 
-# T8-TS_DISPATCH-1711: an unavailable parser refuses structural edits with a typed unavailable outcome.
+# T8-[ts_dispatch | structural_spans | except Exception as exc: | 2]
+# an unavailable parser refuses structural edits with a typed unavailable outcome.
 def test_structural_spans_unavailable_parser_is_typed(monkeypatch: pytest.MonkeyPatch) -> None:
     def _boom(language: str, text: str):
         raise RuntimeError("forced: parser missing")
@@ -389,7 +405,8 @@ def test_structural_spans_unavailable_parser_is_typed(monkeypatch: pytest.Monkey
     assert result["reason"] == "RuntimeError"
 
 
-# T8-TS_DISPATCH-1721: a Python grammar probe failure reports the stdlib ast identity, never a tree-sitter one.
+# T8-[ts_dispatch | _python_outline_parser_identity | except Exception: | 1]
+# a Python grammar probe failure reports the stdlib ast identity, never a tree-sitter one.
 def test_python_parser_identity_falls_back_to_ast(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = types.ModuleType("tree_sitter_language_pack")
 
@@ -401,7 +418,8 @@ def test_python_parser_identity_falls_back_to_ast(monkeypatch: pytest.MonkeyPatc
     assert ts_dispatch._python_outline_parser_identity() == ("ast", "AVAILABLE", "stdlib")
 
 
-# T8-TS_DISPATCH-1734: a Vue grammar probe failure is reported in the outline capability key.
+# T8-[ts_dispatch | outline_capability_key | except Exception as exc: | 1]
+# a Vue grammar probe failure is reported in the outline capability key.
 def test_vue_capability_probe_failure_is_typed(monkeypatch: pytest.MonkeyPatch) -> None:
     def _boom() -> bool:
         raise RuntimeError("forced: probe")
@@ -411,7 +429,8 @@ def test_vue_capability_probe_failure_is_typed(monkeypatch: pytest.MonkeyPatch) 
     assert ":DEGRADED:" in key
 
 
-# T8-TS_DISPATCH-1747: a TS grammar lookup failure is reported in the outline capability key.
+# T8-[ts_dispatch | outline_capability_key | except Exception as exc: | 2]
+# a TS grammar lookup failure is reported in the outline capability key.
 def test_ts_capability_probe_failure_is_typed(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = types.ModuleType("tree_sitter_language_pack")
 
@@ -424,7 +443,8 @@ def test_ts_capability_probe_failure_is_typed(monkeypatch: pytest.MonkeyPatch) -
     assert key.startswith("typescript:DEGRADED:RuntimeError") or ":DEGRADED:RuntimeError:" in key
 
 
-# T8-TS_DISPATCH-1758: an unreadable file yields a lexical outline that names the read failure.
+# T8-[ts_dispatch | outline_file | except Exception as exc: | 1]
+# an unreadable file yields a lexical outline that names the read failure.
 def test_outline_file_unreadable_is_typed_lexical(tmp_path: Path) -> None:
     result = ts_dispatch.outline_file(tmp_path / "missing.ts")
     assert result["degraded"] is True
@@ -433,53 +453,99 @@ def test_outline_file_unreadable_is_typed_lexical(tmp_path: Path) -> None:
 
 # ── Inventory guard and tag self-check ────────────────────────────────────────────────────────────
 
-_BROAD = re.compile(r"^\s*except\s*(?:\(|Exception\b|BaseException\b|:)")
+# Unit sites: 24 silent sites (verdicts in the T8H-REPOINTEL md).
+_UNIT_SITES: set[ExceptSite] = {
+    ("kernel_repo_catalog", "_graph_dependencies", "except Exception as exc:", 2),
+    ("kernel_repo_catalog", "build_structural_index", "except Exception as exc:", 1),
+    ("kernel_repo_intel", "_not_found", "except Exception:", 1),
+    ("kernel_repo_intel", "_ensure_focus_entry", "except Exception:", 1),
+    ("call_graph", "_expr_src", "except Exception:", 1),
+    ("call_graph", "dispatch_boundaries_in_file", "except Exception as exc:", 1),
+    ("call_graph", "<module>", "except Exception:", 1),
+    ("lsp_resolve", "<module>", "except Exception:", 1),
+    ("lsp_resolve", "_to_target", "except Exception:", 1),
+    ("repo_map", "_file_entry_with_mode", "except Exception as exc:", 1),
+    ("repo_map", "_file_entry_with_mode", "except Exception as exc:", 2),
+    ("repo_map", "_record_commit_sha_lookup_failure", "except BaseException:", 1),
+    ("repo_map", "_record_commit_sha_lookup_failure", "except BaseException:", 2),
+    ("repo_map", "_record_commit_sha_lookup_failure", "except Exception:", 1),
+    ("repo_map", "_record_commit_sha_lookup_failure", "except Exception:", 2),
+    ("ts_dispatch", "_vue_grammar_available", "except Exception:", 1),
+    ("ts_dispatch", "_vue_outline", "except Exception as exc:", 1),
+    ("ts_dispatch", "structural_spans", "except Exception as exc:", 1),
+    ("ts_dispatch", "structural_spans", "except Exception as exc:", 2),
+    ("ts_dispatch", "_python_outline_parser_identity", "except Exception:", 1),
+    ("ts_dispatch", "outline_capability_key", "except Exception as exc:", 1),
+    ("ts_dispatch", "outline_capability_key", "except Exception as exc:", 2),
+    ("ts_dispatch", "outline_file", "except Exception as exc:", 1),
+    ("ts_extract", "_has_error", "except Exception as exc:", 1),
+}
+
+# The remaining 27 are census-v2 LOUD (census counts any logger.* call as loud,
+# so several are debug-only; flagged in the md for re-triage).
+_CENSUS_LOUD: set[ExceptSite] = {
+    ("kernel_repo_catalog", "_graph_dependencies", "except Exception as exc:", 1),
+    ("kernel_repo_intel", "_journal_repo_map_receipt", "except Exception:", 1),
+    ("call_graph", "_atomic_write_text", "except BaseException:", 1),
+    ("call_graph", "CodeGraph._apply_lsp_resolution", "except Exception as exc:", 1),
+    ("call_graph", "CodeGraph._apply_lsp_resolution", "except Exception as exc:", 2),
+    ("call_graph", "CodeGraph.pagerank", "except Exception as exc:", 1),
+    ("call_graph", "repo_cache_key", "except Exception as exc:", 1),
+    ("call_graph", "_copy_shared_sidecar", "except Exception as exc:", 1),
+    ("call_graph", "warm_cache_from_shared", "except Exception as exc:", 1),
+    ("call_graph", "publish_cache_to_shared", "except Exception as exc:", 1),
+    ("call_graph", "publish_cache_to_shared", "except Exception as exc:", 2),
+    ("call_graph", "_tree_fingerprint", "except Exception as exc:", 1),
+    ("lsp_resolve", "_resolve_sites_blocking", "except Exception as exc:", 1),
+    ("lsp_resolve", "resolve_file_full.resolve", "except BaseException as error:", 1),
+    ("lsp_resolve", "resolve_file_full", "except Exception as exc:", 1),
+    ("lsp_resolve", "resolve_file_full", "except Exception as exc:", 2),
+    ("repo_map", "build_repo_map_with_stats", "except Exception as exc:", 1),
+    ("ts_dispatch", "_scan_ts", "except Exception as exc:", 1),
+    ("ts_dispatch", "dispatch_boundaries_in_file", "except Exception as exc:", 1),
+    ("ts_dispatch", "_python_ast_fallback", "except Exception as exc:", 1),
+    ("ts_dispatch", "_structure_outline", "except Exception as exc:", 1),
+    ("ts_dispatch", "outline_source", "except Exception as exc:", 1),
+    ("ts_extract", "<module>", "except Exception as _exc:", 1),
+    ("ts_extract", "is_tree_sitter_functional", "except Exception as exc:", 1),
+    ("ts_extract", "_TSVisitor.run", "except Exception as exc:", 1),
+    ("ts_extract", "extract_ts_like", "except Exception as exc:", 1),
+    ("ts_extract", "extract_ts_like", "except Exception as exc:", 2),
+}
 
 
 def test_repointel_broad_excepts_are_triaged() -> None:
-    # Unit sites: 24 silent sites (verdicts in the T8H-REPOINTEL md). The remaining 26 are census-v2 LOUD
-    # (census counts any logger.* call as loud, so several are debug-only; flagged in the md for re-triage).
-    unit_sites = {
-        ("kernel_repo_catalog", 857), ("kernel_repo_catalog", 942),
-        ("kernel_repo_intel", 159), ("kernel_repo_intel", 612),
-        ("call_graph", 2031), ("call_graph", 2114), ("call_graph", 2201),
-        ("lsp_resolve", 88), ("lsp_resolve", 363),
-        ("repo_map", 237), ("repo_map", 247), ("repo_map", 542), ("repo_map", 552),
-        ("repo_map", 560), ("repo_map", 580),
-        ("ts_dispatch", 1092), ("ts_dispatch", 1288), ("ts_dispatch", 1687), ("ts_dispatch", 1711),
-        ("ts_dispatch", 1721), ("ts_dispatch", 1734), ("ts_dispatch", 1747), ("ts_dispatch", 1758),
-        ("ts_extract", 850),
-    }
-    census_loud = {
-        ("kernel_repo_catalog", 845), ("kernel_repo_intel", 655),
-        ("call_graph", 1103), ("call_graph", 1416), ("call_graph", 1451), ("call_graph", 1812),
-        ("call_graph", 2334), ("call_graph", 2364), ("call_graph", 2387), ("call_graph", 2407),
-        ("call_graph", 2410), ("call_graph", 2439),
-        ("lsp_resolve", 414), ("lsp_resolve", 491), ("lsp_resolve", 499), ("lsp_resolve", 514),
-        ("repo_map", 489),
-        ("ts_dispatch", 133), ("ts_dispatch", 211), ("ts_dispatch", 1392), ("ts_dispatch", 1515),
-        ("ts_dispatch", 1554),
-        ("ts_extract", 53), ("ts_extract", 101), ("ts_extract", 717), ("ts_extract", 887), ("ts_extract", 893),
-    }
-    triaged = unit_sites | census_loud
-    found: set[tuple[str, int]] = set()
-    for path in _MODULE_FILES:
-        for number, text in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            if not _BROAD.match(text):
-                continue
-            if re.match(r"^\s*except\s*\(", text) and not re.search(r"Exception|BaseException", text):
-                continue  # narrow tuple
-            found.add((path.stem, number))
-    assert found == triaged, (
-        f"untriaged: {sorted(found - triaged)}; stale: {sorted(triaged - found)}")
+    assert_triaged(_broad_except_sites(_MODULE_FILES), _UNIT_SITES | _CENSUS_LOUD)
 
 
 def test_repointel_journal_tags_point_at_broad_except_sites() -> None:
-    source = Path(__file__).read_text(encoding="utf-8")
-    by_stem = {path.stem.upper(): path for path in _MODULE_FILES}
-    tags = re.findall(r"T8-([A-Z0-9_]+)-(\d+)", source)
-    assert tags, "expected T8 tags in this file"
-    for stem, line in tags:
-        path = by_stem[stem]
-        lines = path.read_text(encoding="utf-8").splitlines()
-        assert _BROAD.match(lines[int(line) - 1]), f"{stem}-{line} does not point at a broad except"
+    assert_site_tags(Path(__file__), _broad_except_sites(_MODULE_FILES))
+
+
+def test_repointel_inventory_survives_line_shift(tmp_path: Path) -> None:
+    found = _broad_except_sites(shifted_module_paths(_MODULE_FILES, tmp_path))
+    assert_triaged(found, _UNIT_SITES | _CENSUS_LOUD)
+    assert_site_tags(Path(__file__), found)
+
+
+def test_repointel_inventory_rejects_missing_site(tmp_path: Path) -> None:
+    paths = edited_module_paths(
+        _MODULE_FILES, tmp_path, "ts_extract",
+        "def _has_error(", "def _renamed_has_error(",
+    )
+    stale = ("ts_extract", "_has_error", "except Exception as exc:", 1)
+    found = _broad_except_sites(paths)
+    with pytest.raises(AssertionError) as failure:
+        assert_triaged(found, _UNIT_SITES | _CENSUS_LOUD)
+    assert f"stale: [{stale!r}]" in str(failure.value)
+    with pytest.raises(AssertionError) as tag_failure:
+        assert_site_tags(Path(__file__), found)
+    assert "ts_extract | _has_error | except Exception as exc: | 1" in str(tag_failure.value)
+
+
+def test_repointel_inventory_rejects_untriaged_site(tmp_path: Path) -> None:
+    paths = edited_module_paths(_MODULE_FILES, tmp_path, "ts_extract", None, UNREVIEWED_HANDLER)
+    untriaged = ("ts_extract", "_t8_unreviewed", "except Exception:", 1)
+    with pytest.raises(AssertionError) as failure:
+        assert_triaged(_broad_except_sites(paths), _UNIT_SITES | _CENSUS_LOUD)
+    assert f"untriaged: [{untriaged!r}]; stale: []" in str(failure.value)
