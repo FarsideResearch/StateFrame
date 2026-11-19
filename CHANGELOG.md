@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.0 (2026-11-19)
 
 - Startup reaches the first model request sooner, especially in large repositories. StateFrame postpones optional repository-wide analysis until it is needed and reuses validated startup results.
 - Later turns avoid repeating unchanged file checks and shell-environment scans. Repeated exact token counts can also be reused when caching is enabled.
