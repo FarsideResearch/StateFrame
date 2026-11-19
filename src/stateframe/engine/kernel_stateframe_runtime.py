@@ -14027,11 +14027,44 @@ class StateFrameRuntime:
             readiness_snapshot = runtime_snapshot(self)
             if readiness_snapshot is None:
                 readiness_snapshot = self.readiness_decision()
-            # An open blocker or repairable advisory is an actionable request,
-            # so run_tests must reach the real executor instead of being
-            # mistaken for a redundant green re-check.
-            if (getattr(readiness_snapshot, "blockers", ())
-                    or getattr(readiness_snapshot, "repairable_advisories", ())):
+            requested_set = set(requested)
+
+            def readiness_rows(value: object) -> tuple[object, ...]:
+                if isinstance(value, Mapping):
+                    return (value,)
+                if isinstance(value, Sequence) and not isinstance(
+                        value, (str, bytes, bytearray)):
+                    return tuple(value)
+                return () if value is None else (value,)
+
+            def blocks_requested_requirement(row: object) -> bool:
+                if not isinstance(row, Mapping):
+                    return True
+                row_selectors: list[str] = []
+                for key in ("selectors", "selector", "target", "suite", "test"):
+                    value = row.get(key)
+                    if isinstance(value, str) and value.strip():
+                        row_selectors.append(value.strip())
+                    elif isinstance(value, Sequence) and not isinstance(
+                            value, (str, bytes, bytearray)):
+                        row_selectors.extend(str(item).strip() for item in value
+                                             if str(item).strip())
+                if not row_selectors:
+                    row_selectors = [
+                        str(row[key]).strip()
+                        for key in ("check_id", "obligation_id", "id")
+                        if row.get(key) not in (None, "")
+                    ]
+                return not row_selectors or bool(requested_set.intersection(row_selectors))
+
+            blockers = readiness_rows(getattr(readiness_snapshot, "blockers", ()))
+            advisories = (
+                *readiness_rows(getattr(readiness_snapshot, "advisory", ())),
+                *readiness_rows(getattr(readiness_snapshot, "repairable_advisories", ())),
+            )
+            # An open row blocks reuse only for its own requirement. A row
+            # without a selector or identity remains fail-closed.
+            if any(blocks_requested_requirement(row) for row in (*blockers, *advisories)):
                 return None
         if reused and continuation is not None:
             stage_receipt = getattr(continuation, "stage_reused_test_receipt", None)
