@@ -1,7 +1,6 @@
 """Regressions for cleanup authority held across child exit and PID reuse."""
 
 import errno
-import io
 import os
 import signal
 import subprocess
@@ -204,7 +203,9 @@ def test_runner_drive_cleans_group_before_reaping_exited_leader(tmp_path, monkey
         returncode = None
 
         def __init__(self):
-            self.stdout = io.StringIO("")
+            path = tmp_path / "engine-output"
+            path.touch()
+            self.stdout = path.open()
 
         def poll(self):
             return 0

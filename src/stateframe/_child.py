@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import signal
 import stat
 import subprocess
 import sys
@@ -27,6 +28,7 @@ import traceback
 import urllib.request
 from contextlib import suppress
 from pathlib import Path
+from typing import TextIO
 
 if __package__:
     from .cache_metrics import normalize
@@ -1253,32 +1255,104 @@ def hold_engine_lock(run: Path):
     return handle
 
 
-def watch_parent() -> None:
+TEARDOWN_GRACE_SECONDS = 8.0
+_WORKER_TERM_SECONDS = 0.5
+_WORKER_KILL_SECONDS = 1.0
+
+
+class EngineTeardown:
+    """Own the stop deadline and keep the engine lock held through interpreter exit."""
+
+    def __init__(self) -> None:
+        self.deadline: float | None = None
+        self.lock: TextIO | None = None
+
+    def begin(self) -> None:
+        if self.deadline is None:
+            self.deadline = time.monotonic() + TEARDOWN_GRACE_SECONDS
+
+
+def _adopt_orphan_workers() -> None:
+    if sys.platform == "linux":
+        import ctypes
+
+        # Adopt grandchildren even if they created their own session. Reaping
+        # is deferred until stop, when the regular process owners have closed.
+        if ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+            _reason_log.emit_reason("degrade", "engine_subreaper_unavailable", "engine_child",
+                                    "cannot adopt orphaned engine workers",
+                                    os.strerror(ctypes.get_errno()), journal=False, level="WARN")
+
+
+def _reap_workers() -> None:
+    if __package__:
+        from .engine.kernel_exec_tracker import Descendants, ProcessTable
+    else:
+        from engine.kernel_exec_tracker import Descendants, ProcessTable
+
+    pid = os.getpid()
+    table = ProcessTable()
+    family = Descendants(pid, table)
+    term_until = time.monotonic() + _WORKER_TERM_SECONDS
+    kill_until = term_until + _WORKER_KILL_SECONDS
+    signalled = set()
+    escalated = False
+    while True:
+        now = time.monotonic()
+        if now >= kill_until:
+            raise RuntimeError("engine workers survived teardown")
+        rows = table.snapshot()
+        live = [row for row in family.update(rows) if row.pid != pid]
+        while True:
+            try:
+                reaped, _ = os.waitpid(-1, os.WNOHANG)
+            except ChildProcessError:
+                if not live:
+                    return
+                break
+            if reaped == 0 or time.monotonic() >= kill_until:
+                break
+        if now < term_until:
+            fresh = [row for row in live if row not in signalled]
+            sent = family.signal(fresh, signal.SIGTERM)
+            signalled.update(row for row in fresh if row.pid in sent)
+        elif live:
+            family.signal(live, signal.SIGKILL)
+            if not escalated:
+                _reason_log.emit_kill("engine_child", target="remaining engine workers",
+                                      why="workers did not exit on teardown request",
+                                      cause_key="engine_workers_teardown", journal=False, level="WARN")
+                escalated = True
+        time.sleep(0.02)
+
+
+def watch_parent(teardown: EngineTeardown | None = None) -> None:
     """Stop when the runner that started us is gone (killed with SIGKILL, laptop crash recovery).
 
     The engine runs in its own session so the runner can stop its whole process group; an orphaned
     engine would otherwise keep calling the model and editing its sandbox with nobody recording the run.
     """
-    import signal
-    import threading
-
     parent = os.getppid()
+    owns_session = os.getsid(0) == os.getpid() == os.getpgrp()
 
     def loop() -> None:
         while True:
-            time.sleep(1.0)
-            if os.getppid() != parent:
+            deadline = teardown.deadline if teardown is not None else None
+            parent_gone = os.getppid() != parent
+            if parent_gone or (deadline is not None and time.monotonic() >= deadline):
                 try:
-                    # Only our own session's group (the runner starts us with start_new_session);
-                    # never a group we merely belong to, such as a test runner's.
-                    if os.getpgrp() == os.getpid():
-                        _reason_log.emit_kill(
-                            "engine_child", target="engine process group", pid=os.getpid(),
-                            why=f"parent runner pid {parent} is gone",
-                            signal_name="SIGKILL", level="ERROR", cause_key="parent_gone")
+                    if owns_session:
+                        if parent_gone:
+                            _reason_log.emit_kill(
+                                "engine_child", target="engine process group", pid=os.getpid(),
+                                why=f"parent runner pid {parent} is gone",
+                                signal_name="SIGKILL", level="ERROR", cause_key="parent_gone")
+                        # The runner reports teardown escalation. Logging here
+                        # could wait on the very stream preventing normal exit.
                         os.killpg(os.getpgrp(), signal.SIGKILL)
                 finally:
                     os._exit(137)
+            time.sleep(0.1 if teardown is not None else 1.0)
 
     threading.Thread(target=loop, name="stateframe-parent-watch", daemon=True).start()
 
@@ -1457,14 +1531,17 @@ def _finish_mutation_runtime(mutation_runtime, result: dict, status: int, emit_e
     return result, status
 
 
-def main(argv: list[str]) -> int:
+def main(argv: list[str], *, teardown: EngineTeardown | None = None) -> int:
     if len(argv) != 2:
         print("usage: _child.py <run-dir>", file=sys.stderr)
         return 2
     startup_home_identity = _runner_home_identity_pin()
     run = Path(argv[1]).resolve(strict=True)
-    watch_parent()
+    if teardown is None:
+        watch_parent()
     lock = hold_engine_lock(run)  # noqa: F841 - held until exit
+    if teardown is not None:
+        teardown.lock = lock
     spec = json.loads((run / "spec.json").read_text())
     emit_run_env_events(run)
     resume = spec.get("resume") if isinstance(spec.get("resume"), dict) else None
@@ -1669,13 +1746,6 @@ def main(argv: list[str]) -> int:
     from kernel_exec_session import ExecSession
     from kernel_shell_tool import configure as configure_shell
     session = ExecSession(run)
-    import signal
-    previous_term = signal.getsignal(signal.SIGTERM)
-
-    def terminate_shell_run(signum, frame):
-        raise KeyboardInterrupt("engine received SIGTERM")
-
-    signal.signal(signal.SIGTERM, terminate_shell_run)
     started = time.monotonic()
     result: object = None
     mutation_runtime = None
@@ -1833,14 +1903,45 @@ def main(argv: list[str]) -> int:
                 except (RuntimeError, OSError) as error:
                     emit("engine_error", error="SlotLeaseCleanupFailed", detail=str(error)[:300])
                     result, status = {"result": "ENGINE_ERROR", "error": "SlotLeaseCleanupFailed"}, 1
-            signal.signal(signal.SIGTERM, previous_term)
     elapsed = time.monotonic() - started
     atomic_bytes(run / "engine-result.json", json.dumps(
-        {"result": result, "seconds": round(elapsed, 3)}, default=str, indent=1).encode("utf-8"))
+        {"result": result, "seconds": round(elapsed, 3), "exit_status": status},
+        default=str, indent=1).encode("utf-8"))
     emit("engine_end", result=(result or {}).get("result") if isinstance(result, dict) else str(result),
          seconds=round(elapsed, 1))
+    if teardown is not None:
+        teardown.begin()
+    return status
+
+
+def _run_cli(argv: list[str]) -> int:
+    teardown = EngineTeardown()
+    owns_session = os.getsid(0) == os.getpid() == os.getpgrp()
+
+    def terminate(signum, frame):
+        if teardown.deadline is None:
+            teardown.begin()
+            raise KeyboardInterrupt("engine received SIGTERM")
+
+    signal.signal(signal.SIGTERM, terminate)
+    watch_parent(teardown)
+    try:
+        if owns_session:
+            _adopt_orphan_workers()
+        status = main(argv, teardown=teardown)
+    except KeyboardInterrupt:
+        status = 130
+        teardown.begin()
+    finally:
+        if owns_session and teardown.deadline is not None:
+            try:
+                _reap_workers()
+            except (OSError, RuntimeError, ValueError) as error:
+                _reason_log.emit_reason("invariant", "engine_worker_cleanup_failed", "engine_child",
+                                        "engine worker cleanup could not be verified",
+                                        str(error)[:240], journal=False, level="ERROR")
     return status
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv))
+    raise SystemExit(_run_cli(sys.argv))
