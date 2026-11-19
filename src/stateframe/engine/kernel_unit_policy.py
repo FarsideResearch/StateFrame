@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import re
+import ast
 import secrets
 import shlex
 import hashlib
 import json
 import os
 import signal
+import stat
 import shutil
 import sys
 import tempfile
@@ -16,7 +18,13 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, Callable, Mapping, Sequence
+
+if TYPE_CHECKING:
+    if __package__:
+        from .kernel_effects import Manifest
+    else:
+        from kernel_effects import Manifest
 
 if __package__:
     from .kernel_edit_tool_names import EDIT_TOOL_NAMES
@@ -67,6 +75,14 @@ _MAX_NAME = 80
 _PYTEST_SUMMARY = re.compile(r'\b\d+\s+(?:passed|failed|errors?|skipped|xfailed|xpassed)\b')
 _PYTEST_COUNT = re.compile(r'\b(\d+)\s+(passed|failed|errors?)\b')
 _CHECK_EXIT = re.compile(r'^(?:pytest|check) exit (\d+)\b', re.MULTILINE)
+_ASSERT_SOURCE_FILE_BYTES = 64 * 1024
+_ASSERT_SOURCE_TOTAL_BYTES = 256 * 1024
+_ASSERT_EXCERPT_BYTES = 2048
+_ASSERT_OUTPUT_BYTES = 8192
+
+
+def _visible_asserts_enabled() -> bool:
+    return os.environ.get("STATEFRAME_UNIT_POLICY_VISIBLE_ASSERTS", "off") == "on"
 
 
 def _scrub_error_group(bodies: Sequence[str], mentions_hidden: Callable[[str], bool]) -> str:
@@ -450,7 +466,10 @@ class UnitPolicy:
                 + _page_text("directory", metadata, rendered))
         return NavigationPage(text, metadata)
 
-    def project_check_output(self, raw: str, runner: str, *, clone_root: Path | None = None) -> str:
+    def project_check_output(
+        self, raw: str, runner: str, *, clone_root: Path | None = None,
+        assertion_source: Callable[[str, int], str | None] | None = None,
+    ) -> str:
         """Project diagnostics while retaining path-qualified pytest evidence.
 
         The check runs on a full clone of the snapshot, so any free text in pytest's
@@ -459,6 +478,8 @@ class UnitPolicy:
         Attribution of that text is unknowable, so the projection fails closed: it keeps
         only structure (exit code, counts, node ids, exception type names and the
         locations of visible frames) and replaces everything else with a marker.
+        An optional host accessor supplies bounded assertion predicates from the exact
+        checked snapshot, never source or operand values from the process output.
         """
         prefix = str(Path(clone_root)) + os.sep if clone_root is not None else None
         lines = [line.replace(prefix, "") if prefix else line for line in raw.splitlines()]
@@ -476,6 +497,9 @@ class UnitPolicy:
         # drops the group, a visible frame (or the end of the report) emits its scrubbed form.
         held_errors: list[str] = []
         held_tainted = False
+        source_enabled = _visible_asserts_enabled()
+        source_seen: set[str] = set()
+        source_bytes = 0
 
         def flush(emit: bool) -> None:
             nonlocal held_tainted
@@ -515,6 +539,16 @@ class UnitPolicy:
                 else:
                     flush(True)
                     projected.append(_scrub_frame(line, path, number))
+                    if (source_enabled and assertion_source is not None and path == _path(path)
+                            and path in self.spec.contract.check.source_paths
+                            and path not in self.spec.hidden_paths and len(number) <= 9):
+                        excerpt = assertion_source(path, int(number))
+                        if excerpt and excerpt not in source_seen:
+                            size = len(excerpt.encode("utf-8")) + 1
+                            if source_bytes + size <= _ASSERT_OUTPUT_BYTES:
+                                projected.append(excerpt)
+                                source_seen.add(excerpt)
+                                source_bytes += size
                 continue
             structured = _scrub_structured_line(line, self._mentions_hidden)
             if structured is not None:
@@ -718,6 +752,65 @@ def _manifest_digest(manifest: object, paths: set[str] | None = None) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _capture_assertion_source(
+    policy: UnitPolicy, root: Path, manifest: Manifest,
+) -> Callable[[str, int], str | None]:
+    """Capture only public check predicates before untrusted code runs.
+
+    The caller verifies this clone's manifest before capture and after execution, and
+    discards this accessor on any invalid check. No live file reads occur at projection.
+    """
+    revision = _manifest_digest(manifest)
+    excerpts: dict[tuple[str, int], str | None] = {}
+    remaining = _ASSERT_SOURCE_TOTAL_BYTES
+    for path in sorted(set(policy.spec.contract.check.source_paths)):
+        if (path != _path(path) or not policy.visible(path)
+                or path in policy.spec.hidden_paths):
+            continue
+        entry = manifest.get(path)
+        if (entry is None or entry.kind != "file"
+                or not 0 < entry.size <= min(_ASSERT_SOURCE_FILE_BYTES, remaining)):
+            continue
+        # A symlink in any component is outside source authority, even if it resolves
+        # inside the clone. The clone has no running check processes at this point.
+        parts = PurePosixPath(path).parts
+        if any(root.joinpath(*parts[:index]).is_symlink()
+               for index in range(1, len(parts) + 1)):
+            continue
+        remaining -= entry.size
+        try:
+            fd = os.open(root / path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            with os.fdopen(fd, "rb") as source_file:
+                if not stat.S_ISREG(os.fstat(source_file.fileno()).st_mode):
+                    continue
+                data = source_file.read(_ASSERT_SOURCE_FILE_BYTES + 1)
+            if len(data) != entry.size or hashlib.sha256(data).hexdigest() != entry.digest:
+                continue
+            source = data.decode("utf-8")
+            tree = ast.parse(source)
+        except (OSError, UnicodeError, SyntaxError, ValueError, RecursionError):
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assert) or node.test.end_lineno is None:
+                continue
+            predicate = ast.get_source_segment(source, node.test)
+            if predicate is None:
+                continue
+            end = node.test.end_lineno
+            location = f"{path}:{node.lineno}" + (f"-{end}" if end != node.lineno else "")
+            statement = (f"assert (\n{predicate}\n)" if "\n" in predicate
+                         else f"assert {predicate}")
+            excerpt = (f"[visible assert {location} sha256={entry.digest} revision={revision}]\n"
+                       + statement)
+            # Do not truncate syntax or accidentally expose the optional message.
+            value = excerpt if len(excerpt.encode("utf-8")) + 1 <= _ASSERT_EXCERPT_BYTES else None
+            for number in range(node.lineno, end + 1):
+                key = (path, number)
+                # Multiple statements on one line cannot be attributed exactly.
+                excerpts[key] = None if key in excerpts else value
+    return lambda path, number: excerpts.get((path, number))
+
+
 def _check_environment_digest() -> str:
     """Bind a frozen check to the interpreter and complete inherited environment."""
     payload = {
@@ -860,6 +953,7 @@ def run_frozen_check(
     context = acquire(*permit, run_remaining=check_admission_time_left) if permit is not None else None
     clone: Path | None = None
     before = None
+    assertion_source = None
     try:
         if (previous_receipt is not None and previous_receipt.status == "PASS"
                 and previous_receipt.invalid_reason is None
@@ -902,6 +996,9 @@ def run_frozen_check(
                 invalid_reason = "CHECK_WROTE_FILES"
                 raw = "check clone differs from candidate before execution"
             else:
+                captured_source = (_capture_assertion_source(policy, clone, copied)
+                                   if _visible_asserts_enabled() and recipe.command_kind == "pytest"
+                                   else None)
                 for selector in recipe.selectors:
                     observation = execute(clone, selector)
                     observations.append(observation)
@@ -929,6 +1026,7 @@ def run_frozen_check(
                     prefix = "pytest" if recipe.command_kind == "pytest" else "check"
                     status = ("PASS" if all(re.match(rf"^{prefix} exit 0\b", value)
                                             for value in observations) else "FAIL")
+                    assertion_source = captured_source
     except UnitCheckPermitError as error:
         invalid_reason = "RESOURCES_UNAVAILABLE"
         raw = str(error)
@@ -945,7 +1043,8 @@ def run_frozen_check(
         invalid_reason = "CHECK_WROTE_FILES"
         raw = f"check isolation failed: {type(error).__name__}: {error}"
     projected = policy.project_check_output(
-        raw, "pytest" if recipe.command_kind == "pytest" else "other", clone_root=clone)
+        raw, "pytest" if recipe.command_kind == "pytest" else "other", clone_root=clone,
+        assertion_source=assertion_source if invalid_reason is None else None)
     if recipe.command_kind == "pytest" and recipe.selectors:
         rows = [policy.project_selector_status(
             selector, observations[index] if index < len(observations) else "")

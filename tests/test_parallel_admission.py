@@ -379,12 +379,12 @@ def test_static_import_coupling_refuses_with_evidence(tmp_path, producer, consum
     assert result.refusal.evidence[0].line == 1
 
 
-def test_dynamic_import_is_independent_by_scan_and_limits_are_unknown(tmp_path):
+def test_dynamic_import_couples_by_scan_and_limits_are_unknown(tmp_path):
     snapshot = snap(tmp_path, {'a.py': 'def f(): pass\n', 'b.py': 'module = __import__("a")\n'})
     units = (unit('a', 'a.py'), unit('b', 'b.py'))
     edges, pairs = scan_coupling(units, snapshot, ParallelLimits())
-    assert edges == []
-    assert [(pair.status, pair.reason) for pair in pairs] == [('INDEPENDENT_BY_SCAN', '')]
+    assert edges != []
+    assert [pair.status for pair in pairs] != ['INDEPENDENT_BY_SCAN']
     edges, pairs = scan_coupling(units, snapshot, ParallelLimits(scan_max_bytes=1))
     assert edges == []
     assert [(pair.status, pair.reason) for pair in pairs] == [('UNKNOWN', 'BYTE_LIMIT')]

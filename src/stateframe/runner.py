@@ -794,6 +794,7 @@ OPT_IN_SWITCHES = {
     "STATEFRAME_UNIT_PLAN_V2": ("off", "on"),  # index-ordered multi-file unit plan
     "STATEFRAME_SEAM_RECALL": ("off", "on"),  # cross-file seam_violations recall
     "STATEFRAME_UNIT_COALESCE": ("off", "on"),
+    "STATEFRAME_UNIT_POLICY_VISIBLE_ASSERTS": ("off", "on"),
     "STATEFRAME_SEND_INDEX_HEADER": ("off", "on"),  # label each chat POST with its send and attempt number
     "STATEFRAME_DATA_WORKSPACE": ("off", "on"),  # data workspace evidence packets; off is byte-identical
     "STATEFRAME_ENV_SEED": ("auto", "copy"),  # host-side run environment creation policy
@@ -842,6 +843,7 @@ OPT_IN_SWITCHES = {
     "STATEFRAME_PARALLEL_USAGE_FEEDBACK": ("observe", "off"),
     "STATEFRAME_PARALLEL_DROP_TOOL_AFTER_TERMINAL": ("on", "off"),
     "STATEFRAME_PARALLEL_SALVAGE_ADOPT": ("off", "on"),  # opt-in: offer a stopped subframe's kept edits to the commit gates
+    "STATEFRAME_SUBFRAME_INTERFACE_BEHAVIOR": ("off", "on"),
     "STATEFRAME_PARALLEL_FORCE_MANIFEST": (),  # internal benchmark-only; stability may change
     "STATEFRAME_QUEUE_WAIT_MAX_S": (),  # finite positive seconds; a profile may set it too
     "STATEFRAME_SEND_STALL_S": (),  # 10-600 seconds without request-body progress

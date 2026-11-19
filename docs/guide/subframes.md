@@ -143,6 +143,27 @@ The corresponding profile or shell settings are:
 fan-out, that exact plan cannot be dispatched again in the same run. The `parallel` schema stays available, so a
 different plan can still be dispatched. Set it to `off` to disable the re-dispatch guard. It has no effect when `--parallel` is off.
 
+### Behavioral interface documentation
+
+`STATEFRAME_SUBFRAME_INTERFACE_BEHAVIOR` is off by default; set it to `on` in the shell or a custom profile to
+include multiline Python docstrings in consumed interface projections. With it unset or `off`, interface records,
+digests, and child task text retain their existing bytes and first-line documentation.
+
+When enabled, each nonempty docstring becomes a labeled JSON envelope with `text` and `truncated` fields in the
+existing `doc_first_line` wire field. This avoids adding record fields or changing the wire schema. The entire
+envelope, including the label, JSON escaping, and truncation marker, is capped at 2,048 UTF-8 bytes per interface.
+It contains a deterministic prefix of the cleaned docstring, with Unicode and control characters JSON-escaped.
+The adjacent path, definition line, and SHA-256 digest identify the resolved source; re-exports use the defining
+file, and methods use their own documentation and definition line. Missing docs remain empty, and non-Python
+projections are unchanged. Recorded projections retain their text when deserialized regardless of the current switch.
+
+The projection labels documentation as untrusted source data, not instructions or proof of behavior. Quoting keeps
+embedded newlines and instruction-like text inside the envelope. The provider is never executed and its full source
+remains withheld unless the contract grants a supporting read. The excerpt travels in the child task and counts
+toward the existing first-request budget; requirements are retained, and an oversized request is refused before
+provider send. Documentation cannot establish undocumented return shapes, exceptions, side effects, or sentinels.
+Use explicit requirements, checks, or declared supporting reads for those contracts.
+
 ### Validation and request allowances
 
 With subframes enabled, limit values must be positive integers. Invalid limits are rejected at run start rather
@@ -376,6 +397,15 @@ repeat with `kill -KILL <pid> ...` after checking their identities again, then r
   message bodies, captured stdout/stderr/log and parametrize ids are replaced by `[... withheld]` markers, and a
   command-kind check shows only its exit status and counts. Full assertion detail is kept only when the workspace
   holds no withheld files and every frame is owned.
+- `STATEFRAME_UNIT_POLICY_VISIBLE_ASSERTS` is off by default. Set it to `on` in the shell or a custom profile to
+  append source-backed assertion predicates beside visible pytest frame locations in closed diagnostics. The host
+  captures declared, visible check sources from the verified check clone before execution; each excerpt names its
+  source location, file SHA-256 and checked manifest revision. Runtime values, assertion messages, captured streams
+  and parameter labels remain withheld. Multiline predicates are supported; invalid syntax, unmapped locations,
+  symlinks, digest mismatches and checks that change files retain the existing markers. Source capture is bounded
+  to 64 KiB per file and 256 KiB total; each excerpt is at most 2 KiB, with 8 KiB total added diagnostic text.
+  Direct output projection without a trusted check snapshot retains the existing markers. With the switch off,
+  diagnostic bytes are unchanged.
 - Deletes and moves are not available inside a subframe.
 - Non-Python export signatures are not statically verified; their contract verdict remains `UNKNOWN` and needs a
   passing composition check where required.

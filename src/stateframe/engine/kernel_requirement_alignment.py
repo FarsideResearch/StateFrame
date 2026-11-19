@@ -12,6 +12,9 @@ import os
 import re
 from collections.abc import Mapping, Sequence
 
+from kernel_obligation_seed import lossless_enabled
+from kernel_sentence_boundaries import sentence_ranges
+
 
 ENV = "STATEFRAME_REQUIREMENT_ALIGNMENT"
 SCHEMA = "stateframe-requirement-alignment/1"
@@ -58,46 +61,8 @@ def _opens_quote(text: str, index: int, char: str) -> bool:
     return not (text[index - 1].isalnum() and text[index + 1].isalnum())
 
 
-def _split_sentences(text: str) -> list[str]:
-    """Split prose at terminal punctuation, respecting quoted code and decimals."""
-    result: list[str] = []
-    start = 0
-    in_backticks = False
-    quote = ""
-    index = 0
-    while index < len(text):
-        char = text[index]
-        if char == "`":
-            in_backticks = not in_backticks
-        elif not in_backticks:
-            if quote:
-                if char == quote and (index == 0 or text[index - 1] != "\\"):
-                    quote = ""
-            elif char in "'\"" and _opens_quote(text, index, char):
-                quote = char
-            elif char in ".!?":
-                if (char == "." and index > 0 and index + 1 < len(text)
-                        and text[index - 1].isdigit() and text[index + 1].isdigit()):
-                    index += 1
-                    continue
-                end = index + 1
-                while end < len(text) and text[end] in ".!?":
-                    end += 1
-                piece = _normal_text(text[start:end])
-                if piece:
-                    result.append(piece)
-                start = end
-                index = end
-                continue
-        index += 1
-    tail = _normal_text(text[start:])
-    if tail:
-        result.append(tail)
-    return result
-
-
-def _sentence_boundaries(text: str) -> list[tuple[int, int]]:
-    """Return normalized-text sentence boundaries using the same scanner."""
+def _shipped_sentence_ranges(text: str) -> list[tuple[int, int]]:
+    """Keep the shipped alignment boundaries until lossless mode is enabled."""
     result: list[tuple[int, int]] = []
     start = 0
     in_backticks = False
@@ -130,6 +95,27 @@ def _sentence_boundaries(text: str) -> list[tuple[int, int]]:
     if _normal_text(text[start:]):
         result.append((start, len(text)))
     return result
+
+
+def _active_sentence_ranges(text: str) -> Sequence[tuple[int, int]]:
+    if lossless_enabled():
+        return sentence_ranges(text)
+    return _shipped_sentence_ranges(text)
+
+
+def _split_sentences(text: str) -> list[str]:
+    """Split using lossless boundaries only when their opt-in switch is on."""
+    pieces: list[str] = []
+    for start, end in _active_sentence_ranges(text):
+        piece = _normal_text(text[start:end])
+        if piece:
+            pieces.append(piece)
+    return pieces
+
+
+def _sentence_boundaries(text: str) -> list[tuple[int, int]]:
+    """Return exact ranges from the active sentence scanner."""
+    return list(_active_sentence_ranges(text))
 
 
 def _ticket_groups(ticket: str) -> list[tuple[bool, list[tuple[int, str]]]]:
