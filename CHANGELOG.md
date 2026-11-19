@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.70 (2026-11-18)
+
+- Fixed: `edit_source` and `rewrite_source` now pass the before-first-product-edit question gate (`STATEFRAME_QGATES=on`). The gate's edit set listed only legacy edit names, so protocol edits skipped it until the gate was answered.
+- Fixed: `edit_source` and `rewrite_source` now count as edits for the per-step model route. A reply from the read model that only edits through handles is re-asked of the edit model, as legacy `edit` replies already were. Before, the route gate (`kernel_frame_routes.WRITE`) did not list the protocol tools.
+- Fixed: `edit_source` and `rewrite_source` clear the cached binding before dispatch, as legacy edits already did. The pre-dispatch invalidation list named only legacy edit kinds, so a protocol edit could read a binding cached before its write. Tests: `tests/test_protocol_gate_bindcache.py`.
+- Fixed: applied `edit_source` and `rewrite_source` edits now count as product edits for completion. They resolve `product_fixed` and `candidate_revision` like `edit`, and a menu offering only protocol edits reports repair available.
+- Fixed: protocol edits (`edit_source`, `rewrite_source`) now pass the pytest collection guard that legacy edits already passed. Before, a protocol write could change `pytest.ini`, `sitecustomize.py`, a root plugin module or a test `__init__.py` and skip the refusal.
+
 ## 0.7.69 (2026-11-18)
 
 - Fixed: system Python remains available for repository tests when StateFrame itself runs on system Python. Only StateFrame's own virtual environment is excluded from the PATH fallback.

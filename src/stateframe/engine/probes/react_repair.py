@@ -13742,6 +13742,11 @@ def work(d, *, resume=None):
                     return None
 
                 def _ep_write(path: pathlib.Path, data: bytes) -> tuple[bool, str | None]:
+                    # Same collection guard as legacy edits: the composed candidate is the `after` bytes.
+                    _ep_refusal = _collection_refusal(
+                        path, after=data.decode("utf-8", errors="replace"))
+                    if _ep_refusal:
+                        return False, _ep_refusal
                     return _effect_write_bytes(path, data, operation=_ep_tool)
 
                 if _hook_gate_route(_ep_tool, _ep_args):
