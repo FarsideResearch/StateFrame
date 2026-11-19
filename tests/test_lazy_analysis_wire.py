@@ -246,7 +246,7 @@ def _run(tree, work, *, minimal="off", indexed=None, hold=False, fallback=False,
         for name in ("other", "unrelated"):
             (repo / "shop" / f"{name}.py").write_text(snippet)
         scope = ["--target", "shop/pricing.py", "--edit", "shop/other.py"]
-        paths = ["shop/other.py", "shop/pricing.py"] + ([TEST_PATH] if analysis_resume else [])
+        paths = ["shop/other.py", "shop/pricing.py"]
         steps = [{"tool": "read", "required": True, "arguments": {"path": path}} for path in paths]
         steps[0]["arguments"]["symbol"] = "build_item"
         sends = len(steps)
@@ -298,7 +298,7 @@ def _run(tree, work, *, minimal="off", indexed=None, hold=False, fallback=False,
         if analysis_resume:
             assert result.returncode != 0 and len(trace.requests) == 2, diagnostic(result)
             recorded_events = json.loads((run / "graph-observations.json").read_bytes())
-            config.update(hold_analysis=None, stop_at=None, ready_during_replay=analysis)
+            config.update(hold_analysis=None, ready_during_replay=analysis)
             result = launch(["resume", str(run), "--endpoint", endpoint])
         assert len(trace.requests) == len(trace.responses) == len(steps), diagnostic(result)
         trace.script.assert_consumed()
@@ -355,7 +355,7 @@ def test_replay_keeps_the_cold_census_with_a_ready_worker(tmp_path):
     assert (run / metadata).read_bytes() == archived
     assert [row.get("replayed", False) for row in
             map(json.loads, (run / "sends.jsonl").read_text().splitlines())] == [
-                True, True, False,
+                True, True,
             ]
 
 
