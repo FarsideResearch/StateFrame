@@ -18,6 +18,8 @@ from keyword import iskeyword
 from pathlib import PurePosixPath
 from typing import Literal
 
+from kernel_sentence_boundaries import sentence_ranges
+
 
 MODE_ENV = "STATEFRAME_OBLIGATION_SEED"
 LOSSLESS_MODE_ENV = "STATEFRAME_OBLIGATION_SEED_LOSSLESS"
@@ -51,7 +53,7 @@ _REQUIREMENT = re.compile(
     re.IGNORECASE,
 )
 _CLAUSE_BOUNDARY = re.compile(
-    r"(?:;\s*|:\s*(?=(?:[`A-Za-z]|\d))|\s+(?=(?:without|while|still)\b)|"
+    r"(?:;\s*|:\s+(?=(?:[`A-Za-z]|\d))|\s+(?=(?:without|while|still)\b)|"
     r",\s+(?=(?:while|without|still|also|so|reject|preserve|carry|accept|"
     r"include|allow|make|leave|remain|restore|rename|replace)\b)|"
     r"\s+(?=and\s+(?:keep|preserve|carry|reject|accept|include|allow|make|"
@@ -61,7 +63,7 @@ _CLAUSE_BOUNDARY = re.compile(
     re.IGNORECASE,
 )
 _LEGACY_CLAUSE_BOUNDARY = re.compile(
-    r"(?:;\s*|:\s*(?=(?:[`A-Za-z]|\d))|"
+    r"(?:;\s*|:\s+(?=(?:[`A-Za-z]|\d))|"
     r",\s+(?=(?:while|without|still|also|reject|preserve|carry|accept|"
     r"include|allow|make|leave|remain|restore|rename|replace)\b)|"
     r"\s+(?=and\s+(?:keep|preserve|carry|reject|accept|include|allow|make|"
@@ -319,34 +321,8 @@ def _normalized_brief(text: str) -> str:
 
 
 def _sentence_chunks(text: str) -> list[str]:
-    """Split prose without treating dotted identifiers or decimals as sentences."""
-    chunks: list[str] = []
-    start = 0
-    in_backticks = False
-    index = 0
-    while index < len(text):
-        char = text[index]
-        if char == "`":
-            in_backticks = not in_backticks
-        elif not in_backticks and char in ".!?":
-            # A decimal point is part of the number; punctuation runs end one
-            # sentence as a unit.  Dotted Python names are protected by
-            # backticks in the public briefs, but the digit guard is cheap.
-            if (char == "." and index > 0 and index + 1 < len(text)
-                    and text[index - 1].isdigit() and text[index + 1].isdigit()):
-                index += 1
-                continue
-            end = index + 1
-            while end < len(text) and text[end] in ".!?":
-                end += 1
-            chunks.append(text[start:end])
-            start = end
-            index = end
-            continue
-        index += 1
-    if text[start:].strip():
-        chunks.append(text[start:])
-    return chunks
+    """Split prose while keeping references and their exact source text whole."""
+    return [text[start:end] for start, end in sentence_ranges(text)]
 
 
 def _clean_clause(value: str) -> str:
@@ -436,8 +412,8 @@ def _legacy_candidate_clauses(text: str) -> list[str]:
     """Keep the pre-seed punctuation-boundary extraction outside the opt-in lane."""
     normalized = _normalized_brief(text)
     result: list[str] = []
-    for match in _SENTENCE.finditer(normalized):
-        raw = match.group(0).strip()
+    for start, end in sentence_ranges(normalized):
+        raw = normalized[start:end].strip()
         if (_DIAGNOSTIC_LINE.search(raw)
                 or raw.lower().startswith(("at ", "keyerror"))):
             continue
