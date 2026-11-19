@@ -641,6 +641,9 @@ def test_execution_receipt_controls_exact_result_label(tmp_path, command, output
     from stateframe import outcomes
     kind = "pytest" if command[0] == "pytest" else "generic"
     (tmp_path / "package.json").write_text('{"scripts":{"test":"jest"}}')
+    if expected == "verified by tests":
+        test_file = "test_value.py" if kind == "pytest" else "sample.test.js"
+        (tmp_path / test_file).write_text("\n")
     digest = "sha256:" + "a" * 64
     summary = {"runner_kind": kind, "protect_tests": "off", "check_source": "tests",
                "child_exit_code": 0, "engine_terminal": {"result": "SUBMITTED",

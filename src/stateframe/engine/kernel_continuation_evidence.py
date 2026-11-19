@@ -167,9 +167,10 @@ READ_OUTCOMES = {
     "recall_generated_artifact": frozenset({"RECALLED"}),
     "probe": PROBE_OUTCOMES,
 }
-# These are failed, non-mutating acquisition attempts.  They deliberately do
-# not grant source credit, but they must settle the current effect.
-READ_NOT_APPLIED_RESULTS = frozenset({"ERROR", "OUT_OF_RANGE"})
+# These are failed, non-mutating acquisition attempts. They do not grant source
+# credit, but they must settle the current effect. A repeat-suppressed call never
+# ran; leaving it unknown blocks continuation when search tools cannot repair it.
+READ_NOT_APPLIED_RESULTS = frozenset({"ERROR", "OUT_OF_RANGE", "REPEAT_SUPPRESSED"})
 READ_NOT_APPLIED_RESULTS_BY_TOOL = {
     **{name: frozenset({"REFUSED"}) for name in HOST_OBSERVATIONS},
     # Budget admission refused before capture: the attempt is settled, but it

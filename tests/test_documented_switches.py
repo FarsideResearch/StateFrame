@@ -9,11 +9,12 @@ shell" without the allowlist entry).
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 
 import pytest
 
-from stateframe import runner
+from stateframe import cli, runner
 from stateframe.engine.kernel_parallel_records import PARALLEL_LIMIT_OPTIONS, ParallelLimits
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -272,3 +273,27 @@ def test_internal_probe_inputs_skip_but_unrelated_names_still_fail():
     documented["STATEFRAME_UNRELATED_SWITCH"] = ["Set `STATEFRAME_UNRELATED_SWITCH` in the shell."]
     problems = unsupported(documented, runner.OPT_IN_SWITCHES, set())
     assert [p.split(":", 1)[0] for p in problems] == ["STATEFRAME_UNRELATED_SWITCH"]
+
+
+def test_test_interpreter_handoff_is_not_documented_as_a_shell_override(monkeypatch, tmp_path):
+    repo = tmp_path
+    venv_python = repo / ".venv/bin/python3"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.symlink_to(sys.executable)
+    override = repo / "selected-python"
+    override.symlink_to(sys.executable)
+    monkeypatch.setenv("STATEFRAME_TEST_PYTHON", str(override))
+
+    args = cli.build_parser().parse_args([
+        "run", "--repo", str(repo), "--task", "check",
+        "--endpoint", "http://localhost:8080", "--model", "local",
+    ])
+    options = cli._run_options(args, None)
+    options.runner_kind = "generic"
+    selected = runner._select_test_python(options, printer=lambda *args: None)
+    assert Path(selected) == venv_python
+
+    guide = (ROOT / "docs/guide/running.md").read_text(encoding="utf-8")
+    shell_settings = next(line for line in guide.splitlines()
+                          if "The shell-settable names are" in line)
+    assert "STATEFRAME_TEST_PYTHON" not in shell_settings

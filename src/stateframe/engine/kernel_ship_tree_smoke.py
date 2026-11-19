@@ -301,7 +301,8 @@ def source_roots(root: Path, paths: Sequence[str]) -> tuple[str, ...]:
     only Python, and other languages never consult a module search path.
     """
     root = Path(root).resolve()
-    result: list[Path] = [root]
+    checked_files: list[tuple[Path, tuple[str, ...]]] = []
+    import_names: set[str] = set()
     for raw in paths:
         value = str(raw or "").strip()
         if not value.endswith(".py"):
@@ -315,13 +316,115 @@ def source_roots(root: Path, paths: Sequence[str]) -> tuple[str, ...]:
             tops = _top_level_import_names(file.read_text(encoding="utf-8"))
         except (OSError, UnicodeError):
             tops = ()
+        checked_files.append((relative, tops))
+        import_names.update(tops)
+
+    result: list[Path] = [root]
+    result_paths = {root}
+    provider_names_cache: dict[Path, frozenset[str]] = {}
+    incomplete_provider_dirs: set[Path] = set()
+    provider_fallback_cache: dict[tuple[Path, str], bool] = {}
+    result_provider_names: set[str] = set()
+    result_provider_cache: dict[str, bool] = {}
+    unindexed_result_roots: list[Path] = []
+    first_level_provider_index: dict[str, tuple[Path, ...]] | None = None
+    first_level_unindexed_dirs: tuple[Path, ...] = ()
+    sibling_provider_cache: dict[str, tuple[Path, ...]] = {}
+
+    def directory_providers(directory: Path) -> frozenset[str]:
+        cached = provider_names_cache.get(directory)
+        if cached is not None:
+            return cached
+        if not import_names:
+            provider_names_cache[directory] = frozenset()
+            return provider_names_cache[directory]
+        candidates: set[str] = set()
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    try:
+                        if entry.name in import_names and entry.is_dir(follow_symlinks=True):
+                            candidates.add(entry.name)
+                        if entry.name.endswith(".py"):
+                            name = entry.name[:-3]
+                            if name in import_names and entry.is_file(follow_symlinks=True):
+                                candidates.add(name)
+                    except OSError:
+                        incomplete_provider_dirs.add(directory)
+        except OSError:
+            incomplete_provider_dirs.add(directory)
+            provider_names_cache[directory] = frozenset()
+            return provider_names_cache[directory]
+        names = frozenset(name for name in candidates if _provides(directory, name))
+        provider_names_cache[directory] = names
+        return names
+
+    def provides(directory: Path, name: str) -> bool:
+        if name in directory_providers(directory):
+            return True
+        if directory not in incomplete_provider_dirs:
+            return False
+        key = (directory, name)
+        if key not in provider_fallback_cache:
+            provider_fallback_cache[key] = _provides(directory, name)
+        return provider_fallback_cache[key]
+
+    def add_root(directory: Path) -> None:
+        if directory in result_paths:
+            return
+        result_paths.add(directory)
+        result.append(directory)
+        result_provider_names.update(directory_providers(directory))
+        if directory in incomplete_provider_dirs:
+            unindexed_result_roots.append(directory)
+            for name in tuple(result_provider_cache):
+                if not result_provider_cache[name] and provides(directory, name):
+                    result_provider_cache[name] = True
+
+    def result_provides(name: str) -> bool:
+        if name in result_provider_names:
+            return True
+        if name not in result_provider_cache:
+            result_provider_cache[name] = any(
+                provides(directory, name) for directory in unindexed_result_roots
+            )
+        return result_provider_cache[name]
+
+    def sibling_providers(name: str) -> tuple[Path, ...]:
+        nonlocal first_level_provider_index, first_level_unindexed_dirs
+        if first_level_provider_index is None:
+            providers: dict[str, list[Path]] = {}
+            unindexed: list[Path] = []
+            for child in _first_level_dirs(root):
+                for provided_name in directory_providers(child):
+                    providers.setdefault(provided_name, []).append(child)
+                if child in incomplete_provider_dirs:
+                    unindexed.append(child)
+            first_level_provider_index = {
+                provided_name: tuple(directories)
+                for provided_name, directories in providers.items()
+            }
+            first_level_unindexed_dirs = tuple(unindexed)
+        if name not in sibling_provider_cache:
+            providers = list(first_level_provider_index.get(name, ()))
+            for child in first_level_unindexed_dirs:
+                if name not in directory_providers(child) and provides(child, name):
+                    providers.append(child)
+            sibling_provider_cache[name] = tuple(providers)
+        return sibling_provider_cache[name]
+
+    result_provider_names.update(directory_providers(root))
+    if root in incomplete_provider_dirs:
+        unindexed_result_roots.append(root)
+
+    for relative, tops in checked_files:
         ancestors = [root.joinpath(*relative.parts[:index])
                      for index in range(0, len(relative.parts))]
         resolved_tops: set[str] = set()
         for directory in ancestors:
-            provided = {top for top in tops if _provides(directory, top)}
+            provided = {top for top in tops if provides(directory, top)}
             if provided:
-                result.append(directory)
+                add_root(directory)
                 resolved_tops.update(provided)
             for entry in _ini_pythonpath(directory):
                 try:
@@ -330,13 +433,13 @@ def source_roots(root: Path, paths: Sequence[str]) -> tuple[str, ...]:
                 except (OSError, ValueError):
                     continue        # never import from outside the checkout
                 if resolved.is_dir():
-                    result.append(resolved)
+                    add_root(resolved)
         for top in tops:
-            if top in resolved_tops or any(_provides(Path(item), top) for item in result):
+            if top in resolved_tops or result_provides(top):
                 continue
-            providers = [child for child in _first_level_dirs(root) if _provides(child, top)]
+            providers = sibling_providers(top)
             if len(providers) == 1:                 # unambiguous sibling project only
-                result.append(providers[0])
+                add_root(providers[0])
     for entry in os.environ.get("PYTHONPATH", "").split(os.pathsep):
         if not entry.strip():
             continue
@@ -347,8 +450,8 @@ def source_roots(root: Path, paths: Sequence[str]) -> tuple[str, ...]:
         except (OSError, ValueError):
             continue
         if resolved.is_dir():
-            result.append(resolved)
-    return tuple(dict.fromkeys(str(item) for item in result))
+            add_root(resolved)
+    return tuple(str(item) for item in result)
 
 
 def _first_level_dirs(root: Path) -> tuple[Path, ...]:
