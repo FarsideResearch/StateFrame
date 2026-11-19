@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.7.79 (2026-11-19)
 
 - Fixed shell rollback snapshots to save file contents in one pack and publish the snapshot only after its contents and index are durable. Existing snapshots remain readable.
