@@ -3460,6 +3460,22 @@ def _attach_receipt_alignment(receipt: CheckReceipt, *, check: CheckDefinition,
     return CheckReceipt.from_mapping(payload)
 
 
+SHARED_CHECK_CACHE_ENV = "STATEFRAME_SHARED_CHECK_CACHE"
+
+
+def shared_check_cache_mode(runtime: object | None = None) -> str:
+    """Read the opt-in single exact-instance proof cache mode; invalid values fail closed to off.
+
+    ``on`` makes the repair and closure paths share one cache, so a proof run by
+    either path is reused by the other when the instance key matches.
+    """
+    configured = (getattr(runtime, "stateframe_shared_check_cache_mode", None)
+                  if runtime is not None else None)
+    raw = configured if configured is not None else os.environ.get(SHARED_CHECK_CACHE_ENV, "off")
+    value = str(raw).strip().lower()
+    return value if value in {"off", "on"} else "off"
+
+
 def run_check(root: str | Path, check: CheckDefinition | Mapping[str, object], *,
               snapshot: object = None, environment: object = None,
               cache: dict[str, CheckReceipt] | None = None,

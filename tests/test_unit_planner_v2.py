@@ -230,7 +230,8 @@ def test_results_from_run_maps_pytest_exit_and_failures():
     plan, _ = plan_for()
     assert set(v2.results_from_run(plan, 0, "").values()) == {True}
     got = v2.results_from_run(plan, 1, "FAILED tests/test_p.py::test_consume - assert 1")
-    assert got["test_consume"] is False and got["test_page"] is True
+    # HEB item 11: a gate test pytest never reported has no verdict (absent), it is no longer True.
+    assert got == {"test_consume": False}
     assert v2.results_from_run(plan, 2, "") is None and v2.results_from_run(plan, None, "") is None
 
 

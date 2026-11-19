@@ -839,6 +839,7 @@ OPT_IN_SWITCHES = {
     "STATEFRAME_TRANSPORT_BACKOFF_S": (),  # finite seconds between 0 and 60
     "STATEFRAME_FL_CHECKPOINT_CAPTURE": ("on", "off"),  # opt-in settled-boundary observer capture
     "STATEFRAME_HISTORY_DIGEST_IDS": ("on", "off"),  # tool-call id frontier in the state-frame history digest; r2hc3 ships off
+    "STATEFRAME_SHARED_CHECK_CACHE": ("on", "off"),  # one exact-instance proof cache for repair and closure checks; off by default
     "STATEFRAME_CATALOG_FULL_COVERAGE": ("on", "off"),  # structural index covers every eligible file, not the first 512; off by default
     "STATEFRAME_CROSSFILE_INDEX": ("on", "off"),  # opt-in read-only cross-file symbol index; off by default
     "STATEFRAME_CROSSFILE_EXISTENCE_CHECK": ("on", "off"),  # opt-in report of edits leaving repo symbol references dangling; off by default

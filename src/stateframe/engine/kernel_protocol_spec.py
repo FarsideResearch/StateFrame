@@ -241,6 +241,11 @@ _SWITCH_REFS = (
         "suppress only fully equal enrichment re-emits for one check execution",
     ),
     SwitchRef(
+        "STATEFRAME_SHARED_CHECK_CACHE", "kernel_obligation_assess",
+        "shared_check_cache_mode", ("off", "on"), "off",
+        "one exact-instance proof cache shared by the repair and closure check paths",
+    ),
+    SwitchRef(
         "KERNEL_STAGNATION_CAP", "kernel_stagnation_cap", "mode",
         ("off", "on"), "off", "bounded host-observed stagnation stop control", "MODE_ENV",
     ),

@@ -2212,6 +2212,15 @@ def _replay_txns(store: TxnStore, context: ParallelContext) -> tuple[int, set[st
     return generation, committed
 
 
+def _parent_environment_digest() -> str:
+    """Parent-side environment digest. Must equal the worker-side value so PASS receipts reuse."""
+    if __package__:
+        from .kernel_unit_policy import _check_environment_digest
+    else:
+        from kernel_unit_policy import _check_environment_digest
+    return _check_environment_digest()
+
+
 def _candidate_check(spec, candidate: Path, call_root: Path, context: ParallelContext,
                      worker_receipt):
     if spec.contract.check.command_kind == "none" or not spec.contract.check.selectors:
@@ -2230,8 +2239,7 @@ def _candidate_check(spec, candidate: Path, call_root: Path, context: ParallelCo
     source = scan(candidate, exclude=ignored)
     product_digest = _manifest_digest(source)
     harness_digest = _manifest_digest(source, set(spec.contract.check.source_paths))
-    environment_digest = hashlib.sha256(
-        (sys.executable + "\0" + sys.version + "\0" + os.name).encode()).hexdigest()
+    environment_digest = _parent_environment_digest()
     if (worker_receipt is not None and worker_receipt.status == "PASS"
             and worker_receipt.recipe_digest == spec.contract.check.digest()
             and worker_receipt.product_manifest_digest == product_digest

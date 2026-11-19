@@ -435,8 +435,10 @@ def results_from_run(plan: UnitPlan, exit_code: int | None, output: str) -> dict
     if exit_code == 0:
         return {t: True for t in names}
     if exit_code == 1:
+        # A red run (-x -q) only proves the FAILED lines. Any other gate test was never
+        # reported, so it gets no verdict: absent here means unit_gate counts it failing.
         failed = set(_FAILED_LINE.findall(output or ""))
-        return {t: t not in failed for t in names}
+        return {t: False for t in names if t in failed}
     return None                                    # collection error / usage error / no tests
 
 
