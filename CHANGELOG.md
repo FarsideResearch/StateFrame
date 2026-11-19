@@ -1,9 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.7.71 (2026-11-18)
 
-- Tests: the F-B parent identity fixture keeps its exact 43-consumer, one-comparison, 5,000-read budget; elapsed time is diagnostic because filesystem latency and suite load vary.
 - Completion routing, tool menus, and provider validation share one parent product comparison per workspace generation, avoiding repeated reads of editable files.
+- Tests: the F-B parent identity fixture keeps its exact 43-consumer, one-comparison, 5,000-read budget; elapsed time is diagnostic because filesystem latency and suite load vary.
+
 ## 0.7.70 (2026-11-18)
 
 - Fixed: `edit_source` and `rewrite_source` now pass the before-first-product-edit question gate (`STATEFRAME_QGATES=on`). The gate's edit set listed only legacy edit names, so protocol edits skipped it until the gate was answered.
