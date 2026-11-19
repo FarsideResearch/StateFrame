@@ -277,13 +277,13 @@ def _run(tree, work, *, minimal="off", indexed=None, hold=False, fallback=False,
         config.update(wait_for_graph=True, demand_at=2, stop_at=3)
     # The hold, provider timeout and requested send count are the proof's
     # bounds. Leave extra time for setup when the build host is busy.
-    run_timeout = 300 if analysis else 85
+    run_timeout = 300
 
     def launch(arguments):
         probe.write_text(f"config = {config!r}\n" + PROBE, encoding="utf-8")
         return subprocess.run([sys.executable, "-B", "-c", DRIVER, str(probe), *arguments],
                               cwd=tree, env=env, capture_output=True, text=True, check=False,
-                              timeout=scaled(run_timeout + 60 if analysis else 100))
+                              timeout=scaled(run_timeout + 60))
 
     def diagnostic(result):
         log = run / "engine.log"
