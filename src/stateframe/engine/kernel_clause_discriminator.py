@@ -16,6 +16,8 @@ import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+from kernel_evidence_pin import build_evidence_pin
+
 
 SCHEMA = "stateframe-clause-discriminator/1"
 EVIDENCE_PIN_SCHEMA = "stateframe-evidence-pin/1"
@@ -837,7 +839,8 @@ def _evidence_pin(*, receipt_id: str, revision: object, observed: object,
         "scope": copy.deepcopy(scope),
     }
     encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-    return payload, "[EVIDENCEPIN]" + encoded + "[/EVIDENCEPIN]"
+    # observed/scope quote untrusted run output; neutralize marker text so the block stays well formed.
+    return payload, build_evidence_pin(encoded)
 
 
 def evidence_pin(*, receipt_id: str, revision: object, observed: object,

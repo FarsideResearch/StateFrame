@@ -243,6 +243,14 @@ def test_every_static_engine_journal_kind_has_a_resume_classification() -> None:
     _assert_classified(_journal_event_kinds(), safe_tail, documented_reject)
 
 
+def test_submission_reopened_event_has_a_resume_classification() -> None:
+    _assert_classified(
+        {"completion_owner_submission_reopened"},
+        restart.SAFE_TAIL,
+        restart.DOCUMENTED_REJECT,
+    )
+
+
 def test_unclassified_control_is_detected() -> None:
     planted = "planted_unclassified_resume_event"
     planted_inventory = _journal_event_kinds() | {planted}

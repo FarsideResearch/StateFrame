@@ -543,6 +543,7 @@ DOCUMENTED_REJECT: dict[str, str] = {
         completion_owner_premature_rule_menu completion_owner_premature_rule_uncertified
         completion_owner_progress_reset completion_owner_reserved_response_reconciled
         completion_owner_reserved_response_released completion_owner_reserved_response_submitted
+        completion_owner_submission_reopened
         completion_owner_reused_verification completion_owner_route_decision_rendered
         completion_owner_stall_rule_attempted completion_owner_stall_rule_notice
         completion_owner_stall_rule_rendered completion_owner_terminal_choice_offered

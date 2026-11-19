@@ -1663,7 +1663,8 @@ def _compact_menu_text(
         if native_names:
             return "[Decision handoff]"
         return _dedupe_text(text)
-    return "[Decision handoff]\n[EVIDENCEPIN]\n" + "\n".join(retained) + "\n[/EVIDENCEPIN]"
+    from kernel_evidence_pin import build_evidence_pin
+    return "[Decision handoff]\n" + build_evidence_pin("\n" + "\n".join(retained) + "\n")
 
 
 def _id_values(value: object) -> set[str]:

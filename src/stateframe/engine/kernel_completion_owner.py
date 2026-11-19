@@ -13,6 +13,7 @@ from typing import Callable
 from pathlib import Path
 
 from kernel_completion_authority import refusal_reason_codes as _authority_refusal_reason_codes
+from kernel_evidence_pin import typed_pin_is_sole_wire_block, well_formed_pin_blocks
 from kernel_harden8 import record_failure
 from kernel_done_acceptance import done_accepted
 
@@ -5570,26 +5571,26 @@ def _framefit5_terminal_line_present(messages: object, expected: str) -> bool:
 
 
 def _wire_evidence_pin(messages: object) -> tuple[str | None, int]:
-    """Return the one serialized evidence block and its wire occurrence count."""
+    """Return the last well-formed evidence block on the wire and how many well-formed blocks there are.
+
+    A stray start marker in task or tool text is not a block: a block may not contain a nested marker, so it
+    cannot swallow the real pin that follows it.
+    """
     protocol = _framefit5_owner_protocol(messages)
     if protocol is not None:
         value = protocol.get("evidence_pin")
         return (value, 1) if isinstance(value, str) and value else (None, 0)
-    text = _contract_host_text(messages)
-    start = "[EVIDENCEPIN]"
-    end = "[/EVIDENCEPIN]"
-    values: list[str] = []
-    position = 0
-    while True:
-        begin = text.find(start, position)
-        if begin < 0:
-            break
-        finish = text.find(end, begin + len(start))
-        if finish < 0:
-            break
-        values.append(text[begin:finish + len(end)])
-        position = finish + len(end)
-    return (values[-1] if values else None), len(values)
+    blocks = well_formed_pin_blocks(_contract_host_text(messages))
+    return (blocks[-1] if blocks else None), len(blocks)
+
+
+def _wire_pin_is_typed(messages: object, typed: str) -> bool:
+    """Exact check: the typed pin is the one and only well-formed evidence block on the wire."""
+    protocol = _framefit5_owner_protocol(messages)
+    if protocol is not None:
+        value = protocol.get("evidence_pin")
+        return isinstance(value, str) and value == typed
+    return typed_pin_is_sole_wire_block(_contract_host_text(messages), typed)
 
 
 def _wire_continuation_limits(messages: object) -> str | None:
@@ -5738,7 +5739,7 @@ def establish_lean_request_action_contract(
         evidence_pin_value = _contract_evidence_pin_value(runtime)
         wire_pin, wire_pin_count = _wire_evidence_pin(messages)
         if (evidence_pin_value and _evidence_marker_present(evidence_pin_value)
-                and (wire_pin_count != 1 or wire_pin != evidence_pin_value)):
+                and not _wire_pin_is_typed(messages, evidence_pin_value)):
             _contract_error(
                 runtime, "typed evidence pin is absent or changed on the lean request",
                 request_id=request_id, boundary="lean_prepare", route="lean", tool_names=names)
@@ -6661,7 +6662,7 @@ def establish_request_action_contract(
         # records without EVIDENCEPIN markers remain compatible; live pins
         # always carry the marker and therefore use the strict path.
         if (evidence_pin_value and _evidence_marker_present(evidence_pin_value)
-                and (wire_pin_count != 1 or wire_pin != evidence_pin_value)):
+                and not _wire_pin_is_typed(messages, evidence_pin_value)):
             _contract_error(
                 runtime,
                 "typed evidence pin is absent or changed on the serialized wire"
