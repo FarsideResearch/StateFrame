@@ -794,6 +794,7 @@ OPT_IN_SWITCHES = {
     "STATEFRAME_UNIT_PLAN_V2": ("off", "on"),  # index-ordered multi-file unit plan
     "STATEFRAME_SEAM_RECALL": ("off", "on"),  # cross-file seam_violations recall
     "STATEFRAME_UNIT_COALESCE": ("off", "on"),
+    "STATEFRAME_UNIT_POLICY_VISIBLE_ASSERTS": ("off", "on"),
     "STATEFRAME_SEND_INDEX_HEADER": ("off", "on"),  # label each chat POST with its send and attempt number
     "STATEFRAME_DATA_WORKSPACE": ("off", "on"),  # data workspace evidence packets; off is byte-identical
     "STATEFRAME_ENV_SEED": ("auto", "copy"),  # host-side run environment creation policy

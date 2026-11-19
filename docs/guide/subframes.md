@@ -397,6 +397,15 @@ repeat with `kill -KILL <pid> ...` after checking their identities again, then r
   message bodies, captured stdout/stderr/log and parametrize ids are replaced by `[... withheld]` markers, and a
   command-kind check shows only its exit status and counts. Full assertion detail is kept only when the workspace
   holds no withheld files and every frame is owned.
+- `STATEFRAME_UNIT_POLICY_VISIBLE_ASSERTS` is off by default. Set it to `on` in the shell or a custom profile to
+  append source-backed assertion predicates beside visible pytest frame locations in closed diagnostics. The host
+  captures declared, visible check sources from the verified check clone before execution; each excerpt names its
+  source location, file SHA-256 and checked manifest revision. Runtime values, assertion messages, captured streams
+  and parameter labels remain withheld. Multiline predicates are supported; invalid syntax, unmapped locations,
+  symlinks, digest mismatches and checks that change files retain the existing markers. Source capture is bounded
+  to 64 KiB per file and 256 KiB total; each excerpt is at most 2 KiB, with 8 KiB total added diagnostic text.
+  Direct output projection without a trusted check snapshot retains the existing markers. With the switch off,
+  diagnostic bytes are unchanged.
 - Deletes and moves are not available inside a subframe.
 - Non-Python export signatures are not statically verified; their contract verdict remains `UNKNOWN` and needs a
   passing composition check where required.
