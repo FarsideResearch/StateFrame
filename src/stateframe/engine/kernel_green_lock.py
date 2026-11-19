@@ -7,6 +7,7 @@ import json
 import os
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from threading import RLock
 
 import kernel_file_digest_memo
 from kernel_obligation_assess import UnavailableEvidence, assessment_is_blocking
@@ -30,6 +31,7 @@ _EDIT_ACTIONS = frozenset({
 })
 _TERMINAL_ACTIONS = frozenset({"done", "run_tests"})
 _PROGRESS_ACTIONS = _EDIT_ACTIONS | frozenset({"read", "work"})
+_PARENT_COMPARISON_LOCK = RLock()
 
 
 def _repair_blocks_done_enabled(runtime: object) -> bool:
@@ -468,6 +470,20 @@ def _usable_product_revision(value: object) -> object | None:
     return value
 
 
+def _parent_comparison_generation(runtime: object) -> tuple[object, ...] | None:
+    lock = getattr(runtime, "green_lock", None)
+    store = getattr(runtime, "_workspace_view_store", None)
+    binding_epoch = getattr(runtime, "_binding_epoch", None)
+    workspace_epoch = getattr(store, "mutation_epoch", None)
+    paths = getattr(lock, "_starting_editable_product_paths", ())
+    if (not isinstance(lock, GreenLock) or not paths
+            or type(binding_epoch) is not int or type(workspace_epoch) is not int):
+        return None
+    # The binding epoch tracks dispatch and effects. The view epoch also sees
+    # reconciliation and subprocess writes. Scope can widen before either moves.
+    return (binding_epoch, store, workspace_epoch, lock, paths)
+
+
 def product_revision_change_from_parent(runtime: object) -> tuple[bool, str, str]:
     """Compare current product identity with its host-captured parent identity.
 
@@ -475,7 +491,36 @@ def product_revision_change_from_parent(runtime: object) -> tuple[bool, str, str
     Otherwise compare explicit product revision identities. Missing parent
     identity is not evidence that product work occurred.
     """
-    current = _current_binding(runtime)
+    cache_enabled = getattr(runtime, "_host_step_budget2_cache_enabled", None)
+    if (not callable(cache_enabled) or not cache_enabled()
+            or _parent_comparison_generation(runtime) is None):
+        return _compare_product_with_parent(runtime, _current_binding(runtime))
+
+    # Menu preparation and provider validation can run on different threads.
+    # Publish only complete evidence from a single generation.
+    with _PARENT_COMPARISON_LOCK:
+        for _ in range(2):
+            before = _parent_comparison_generation(runtime)
+            current = _current_binding(runtime)
+            generation = _parent_comparison_generation(runtime)
+            if generation is None:
+                return _compare_product_with_parent(runtime, current)
+            if before != generation:
+                continue
+            cached = getattr(runtime, "_parent_product_comparison_cache", None)
+            if cached is not None and cached[0] == generation and cached[1] is current:
+                return cached[2]
+            result = _compare_product_with_parent(runtime, current)
+            if generation == _parent_comparison_generation(runtime):
+                if result[0] or result[2] in PROVEN_PARENT_UNCHANGED:
+                    setattr(runtime, "_parent_product_comparison_cache", (generation, current, result))
+                return result
+        return False, "UNKNOWN", "parent_product_revision_unavailable"
+
+
+def _compare_product_with_parent(
+        runtime: object, current: Mapping[str, object] | None | UnavailableEvidence,
+) -> tuple[bool, str, str]:
     if isinstance(current, UnavailableEvidence):
         return False, "UNKNOWN", "current_product_binding_unavailable:" + current.reason_code
     lock = getattr(runtime, "green_lock", None)
@@ -566,21 +611,22 @@ def admit_widened_editable_path(runtime: object, path: str) -> bool:
     files = _workspace_product_file_digests(runtime, (path,))
     if not files or files.get(path) is None:
         return False
-    lock = getattr(runtime, "green_lock", None)
-    if lock is not None and isinstance(getattr(lock, "_starting_editable_product_files", None), dict):
-        paths = tuple(getattr(lock, "_starting_editable_product_paths", ()))
-        if lock._starting_editable_product_files and path not in paths:
-            lock._starting_editable_product_files[path] = files[path]
-            lock._starting_editable_product_paths = tuple(sorted({*paths, path}))
-    capture = getattr(runtime, "_parent_product_identity_capture", None)
-    if isinstance(capture, Mapping) and isinstance(capture.get("files"), Mapping):
-        if path not in capture["files"]:
-            merged = {**capture["files"], path: files[path]}
-            setattr(runtime, "_parent_product_identity_capture", {
-                **capture, "paths": tuple(merged), "files": merged,
-                "file_count": sum(value is not None for value in merged.values()),
-                "digest": _stable_product_identity(merged),
-            })
+    with _PARENT_COMPARISON_LOCK:
+        lock = getattr(runtime, "green_lock", None)
+        if lock is not None and isinstance(getattr(lock, "_starting_editable_product_files", None), dict):
+            paths = tuple(getattr(lock, "_starting_editable_product_paths", ()))
+            if lock._starting_editable_product_files and path not in paths:
+                lock._starting_editable_product_files[path] = files[path]
+                lock._starting_editable_product_paths = tuple(sorted({*paths, path}))
+        capture = getattr(runtime, "_parent_product_identity_capture", None)
+        if isinstance(capture, Mapping) and isinstance(capture.get("files"), Mapping):
+            if path not in capture["files"]:
+                merged = {**capture["files"], path: files[path]}
+                setattr(runtime, "_parent_product_identity_capture", {
+                    **capture, "paths": tuple(merged), "files": merged,
+                    "file_count": sum(value is not None for value in merged.values()),
+                    "digest": _stable_product_identity(merged),
+                })
     return True
 
 
