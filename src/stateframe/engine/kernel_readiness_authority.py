@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Mapping, Sequence
 
 from kernel_bounded_locate_code import OBSERVATION_TOOLS
+from kernel_edit_tool_names import EDIT_TOOL_NAMES
 from kernel_harden8 import record_failure
 
 MODE_ENV = "STATEFRAME_READINESS_AUTHORITY"
@@ -43,7 +44,7 @@ BLOCKED_BY_LABEL = "CERTIFICATION BLOCKED BY CHECKS"
 # Repair tools that must stay reachable while a run is not ready.  ``run_tests`` is the
 # re-verification path; edit/str_replace are the scoped-repair paths.
 REPAIR_TOOLS = ("edit", "str_replace", "run_tests")
-EDIT_TOOLS = frozenset({"edit", "str_replace"})
+EDIT_TOOLS = EDIT_TOOL_NAMES
 # Tools that only make sense when blocked by a live counterexample (challenge path).
 CHALLENGE_TOOLS = frozenset({"dispute", "read_ticket"})
 

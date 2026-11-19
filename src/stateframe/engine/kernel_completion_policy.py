@@ -53,10 +53,6 @@ WITNESSED_VIOLATION_CODES = HOST_VIOLATION_CODES | frozenset({"V2_DISPOSITION"})
 NEVER_ADMIT_UNCERTIFIED_CODES = TERMINAL_CODES | WITNESSED_VIOLATION_CODES
 # Witnessed failures the post-reducer arbiter may refuse (bounded) but never waive by cap.
 NON_WAIVABLE_CODES = frozenset({"SHIP_TREE_SMOKE"})
-# Edit-class tools: a menu offering one of these can repair a violated clause.
-REPAIR_TOOLS = frozenset({"edit", "str_replace", "write", "file_create", "replace",
-                          "replace_module", *PROTOCOL_EDIT_TOOL_NAMES})
-
 # The provider inventory (verified in the earlier run lane report) is documentation only.  The
 # providers WIRED here are the three above; the rest stay independent legacy gates whose
 # refusals reach this arbiter as reason codes.
@@ -233,6 +229,9 @@ _PRODUCT_EDIT_TOOLS = frozenset({
     "edit", "str_replace", "write", "file_create", "replace", "replace_module",
     *PROTOCOL_EDIT_TOOL_NAMES,
 })
+# A menu offering a product edit can repair a violated clause.
+REPAIR_TOOLS = _PRODUCT_EDIT_TOOLS
+
 _NON_PRODUCT_PATH_PARTS = frozenset({
     ".git", ".pytest_cache", "__pycache__", "tests", "test", "probes",
     "scratch", "tmp", "private", "hidden_tests",
