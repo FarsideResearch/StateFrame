@@ -8,7 +8,8 @@ import re
 import stat
 from typing import Callable, Mapping
 
-from stateframe.workcopy import IGNORE_DIRS, _ignored
+from stateframe.engine.kernel_secret_paths import SECRET_DIRS, SECRET_PATHSPEC_GLOBS
+from stateframe.workcopy import IGNORE_DIRS, IGNORE_GLOBS, _ignored
 
 _OID = re.compile(r"[0-9a-fA-F]{40,64}\Z")
 _REF = re.compile(r"(?:refs/)?[A-Za-z0-9_./-]+(?:[~^][0-9]*)*\Z")
@@ -196,9 +197,11 @@ class GitView:
 
     def _scope(self) -> list[str]:
         # Git pathspec exclusions are a first barrier; filter_output is the second.
-        from stateframe.workcopy import SECRET_GLOBS, IGNORE_GLOBS
-        patterns = [f":(exclude,glob)**/{name}/**" for name in sorted(IGNORE_DIRS)]
-        patterns += [f":(exclude,glob)**/{name}" for name in (*SECRET_GLOBS, *IGNORE_GLOBS)]
+        patterns = [f":(exclude,glob)**/{name}/**" for name in sorted(IGNORE_DIRS - SECRET_DIRS)]
+        patterns += [f":(exclude,glob,icase)**/{name}/**" for name in sorted(SECRET_DIRS)]
+        # Git's glob exclusions have no source-suffix exception; explicit paths use _excluded.
+        patterns += [f":(exclude,glob,icase)**/{name}" for name in SECRET_PATHSPEC_GLOBS]
+        patterns += [f":(exclude,glob)**/{name}" for name in IGNORE_GLOBS]
         return [".", *patterns]
 
     def _path(self, value: object) -> str:

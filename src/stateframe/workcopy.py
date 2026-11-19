@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Callable
 
 from .engine.kernel_edit_merge import ConflictHunk, MergeApplied, MergeConflict, merge_texts
+from .engine.kernel_secret_paths import SECRET_DIRS, is_secret_file
 
 # Bounds for the conflict report shown to the user (COLLAB-DRIFT piece F).
 MAX_HUNKS_PER_FILE = 5
@@ -30,12 +31,9 @@ MAX_CONFLICT_FILES_SHOWN = 10
 
 # Never copied: VCS metadata, environments, caches, build output.
 IGNORE_DIRS = {".git", ".hg", ".svn", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
-               ".tox", ".nox", ".venv", "venv", "env", ".env", "node_modules", "dist", "build",
-               ".idea", ".vscode", ".eggs", "site-packages", ".stateframe"}
+               ".tox", ".nox", ".venv", "venv", "env", "node_modules", "dist", "build",
+               ".idea", ".vscode", ".eggs", "site-packages", ".stateframe"} | SECRET_DIRS
 IGNORE_GLOBS = ("*.pyc", "*.pyo", "*.so", "*.dylib", "*.egg-info", ".DS_Store")
-# Secrets never enter the copy, so they can never reach a request.
-SECRET_GLOBS = (".env", ".env.*", "*.pem", "*.key", "id_rsa*", "*.p12", "*.pfx", ".netrc",
-                ".npmrc", ".pypirc", "credentials*", "*secret*")
 
 
 class WorkCopyError(RuntimeError):
@@ -105,8 +103,8 @@ def _sha(data: bytes) -> str:
 
 def _ignored(name: str, is_dir: bool) -> bool:
     if is_dir:
-        return name in IGNORE_DIRS or name.endswith(".egg-info")
-    return any(fnmatch.fnmatch(name, pattern) for pattern in IGNORE_GLOBS + SECRET_GLOBS)
+        return name in IGNORE_DIRS or name.casefold() in SECRET_DIRS or name.endswith(".egg-info")
+    return is_secret_file(name) or any(fnmatch.fnmatch(name, pattern) for pattern in IGNORE_GLOBS)
 
 
 def frame_source_path_allowed(path: str) -> bool:
