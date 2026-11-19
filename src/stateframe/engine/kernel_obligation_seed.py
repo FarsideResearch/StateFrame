@@ -20,6 +20,7 @@ from typing import Literal
 
 
 MODE_ENV = "STATEFRAME_OBLIGATION_SEED"
+LOSSLESS_MODE_ENV = "STATEFRAME_OBLIGATION_SEED_LOSSLESS"
 SCHEMA = "stateframe-obligation/1"
 PROVENANCE = "HOST_BRIEF"
 MAX_OBLIGATION_TEXT = 400
@@ -34,6 +35,9 @@ _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _PATH = re.compile(r"(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.py")
 _BACKTICK = re.compile(r"`([^`]+)`")
 _WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_LEGACY_TASK_METADATA_LABEL = re.compile(
+    r"(?<![A-Za-z0-9_])(?:#{1,6}\s*)?(Title|Symptom|Focus)\s*:", re.IGNORECASE
+)
 _SENTENCE = re.compile(r"[^.!?\n]+(?:[.!?]+|$)", re.MULTILINE)
 _DIAGNOSTIC_LINE = re.compile(r"(?:^|\s)(?:at\s+)?[A-Za-z0-9_./-]+:\d+(?:\s+in\s+\w+)?\s*$",
                                re.IGNORECASE)
@@ -101,6 +105,18 @@ def mode() -> str:
 
 def enabled() -> bool:
     return mode() == "on"
+
+
+def lossless_mode() -> str:
+    """Return the strict default-off source-identity seed mode."""
+    value = os.environ.get(LOSSLESS_MODE_ENV, "off").lower()
+    if value not in {"off", "on"}:
+        raise ValueError(f"{LOSSLESS_MODE_ENV} must be off or on")
+    return value
+
+
+def lossless_enabled() -> bool:
+    return lossless_mode() == "on"
 
 
 def _canonical(value: object) -> str:
@@ -192,13 +208,16 @@ class Obligation:
             raise ValueError("new obligations must be open")
         if type(self.unmappable) is not bool:
             raise ValueError("unmappable must be a boolean")
-        if type(self.overflow) is not bool:
-            raise ValueError("overflow must be a boolean")
         if self.unmappable and self.source_label.lower() not in {"title", "symptom", "focus"}:
             raise ValueError("unmappable task metadata needs a Title, Symptom, or Focus source label")
-        if (not isinstance(self.source_spans, tuple) or len(self.source_spans) > 1
-                or any(not isinstance(span, SourceSpan) for span in self.source_spans)):
-            raise ValueError("an obligation carries at most one exact occurrence; repeated occurrences stay separate")
+        if lossless_enabled():
+            if type(self.overflow) is not bool:
+                raise ValueError("overflow must be a boolean")
+            if (not isinstance(self.source_spans, tuple) or len(self.source_spans) > 1
+                    or any(not isinstance(span, SourceSpan) for span in self.source_spans)):
+                raise ValueError(
+                    "an obligation carries at most one exact occurrence; repeated occurrences stay separate"
+                )
 
     def to_dict(self) -> dict[str, object]:
         result = {
@@ -215,10 +234,10 @@ class Obligation:
                 "source_label": self.source_label.lower(),
                 "source_disposition": "advisory_unmappable",
             })
-        if self.source_spans:
+        if self.source_spans and lossless_enabled():
             result["source_span_ids"] = [span.id for span in self.source_spans]
             result["source_spans"] = [span.to_dict() for span in self.source_spans]
-        if self.overflow:
+        if self.overflow and lossless_enabled():
             result["overflow"] = True
         return result
 
@@ -432,6 +451,8 @@ def _legacy_candidate_clauses(text: str) -> list[str]:
 
 def _candidate_spans(text: str) -> list[tuple[int, int]]:
     """Compatibility view with real character offsets, including repeated clauses."""
+    if not lossless_enabled():
+        return [(0, len(clause)) for clause in _candidate_clauses(text)]
     return [(start, end) for _clause, start, end in _clause_occurrences(text, _candidate_clauses(text))]
 
 
@@ -552,6 +573,8 @@ def extract_obligations(brief: str, manifest: object = None, *,
     """Extract stable obligations from host-provided public text and files."""
     if not isinstance(brief, str):
         raise TypeError("brief must be a string")
+    if not lossless_enabled():
+        return _extract_legacy_obligations(brief, manifest)
     files = _manifest_files(manifest)
     result: list[Obligation] = []
     # TASK.md labels describe the task, but cannot be mapped to a concrete
@@ -607,17 +630,50 @@ def extract_obligations(brief: str, manifest: object = None, *,
     return tuple(result)
 
 
+def _extract_legacy_obligations(brief: str, manifest: object = None) -> tuple[Obligation, ...]:
+    """Preserve the shipped seed's exact clauses until lossless mode is enabled."""
+    files = _manifest_files(manifest)
+    result: list[Obligation] = []
+    seen: set[str] = set()
+    tagged_candidates: list[tuple[str, str | None]] = []
+    extract = _candidate_clauses if enabled() else _legacy_candidate_clauses
+    for line in brief.splitlines() or [brief]:
+        label = _LEGACY_TASK_METADATA_LABEL.search(line)
+        if label:
+            clause = " ".join(line.split())
+            if clause:
+                tagged_candidates.append((clause, label.group(1).lower()))
+            continue
+        tagged_candidates.extend((clause, None) for clause in extract(line))
+    for clause, source_label in tagged_candidates:
+        if not clause or clause in seen:
+            continue
+        seen.add(clause)
+        symbols = _clause_symbols(clause, files)
+        mentioned_files = _clause_files(clause, files, symbols)
+        result.append(Obligation(
+            id=f"obl-{len(result):03d}", text=clause, kind=_kind(clause),
+            mentioned_symbols=symbols, mentioned_files=mentioned_files,
+            unmappable=source_label is not None,
+            source_label=source_label or "",
+        ))
+    return tuple(result)
+
+
 def _coerce_obligation(value: Obligation | Mapping[str, object]) -> Obligation:
     if isinstance(value, Obligation):
         return value
     if not isinstance(value, Mapping):
         raise TypeError("obligations must contain Obligation values or mappings")
-    origins = _coerce_source_spans(value.get("source_spans", ()))
-    if "source_span_ids" in value and value["source_span_ids"] != [span.id for span in origins]:
-        raise ValueError("source span references must match their exact origins")
-    overflow = value.get("overflow", False)
-    if type(overflow) is not bool:
-        raise ValueError("overflow must be a boolean")
+    origins: tuple[SourceSpan, ...] = ()
+    overflow = False
+    if lossless_enabled():
+        origins = _coerce_source_spans(value.get("source_spans", ()))
+        if "source_span_ids" in value and value["source_span_ids"] != [span.id for span in origins]:
+            raise ValueError("source span references must match their exact origins")
+        overflow = value.get("overflow", False)
+        if type(overflow) is not bool:
+            raise ValueError("overflow must be a boolean")
     return Obligation(
         id=str(value.get("id", "")), text=str(value.get("text", "")),
         kind=value.get("kind", "behaviour"),
@@ -659,7 +715,7 @@ def obligation_step_fields(obligation: Obligation | Mapping[str, object]) -> dic
     }
     if len(item.text) > MAX_OBLIGATION_TEXT:
         fields["source_text_bounded"] = True
-    if item.source_spans:
+    if item.source_spans and lossless_enabled():
         # A compact, lossless reference keeps 32 ordinary open steps within the
         # existing render budget. Text already lives on the step; empty target
         # lists carry no information. Do not duplicate the hash or derived id.
@@ -675,13 +731,15 @@ def obligation_step_fields(obligation: Obligation | Mapping[str, object]) -> dic
             "source_label": item.source_label.lower(),
             "source_disposition": "advisory_unmappable",
         })
-    if item.overflow:
+    if item.overflow and lossless_enabled():
         fields["overflow"] = True
     return fields
 
 
 def source_span_from_fields(fields: Mapping[str, object]) -> SourceSpan | None:
     """Recover an exact origin from a serialized work step's compact reference."""
+    if not lossless_enabled():
+        return None
     value = fields.get("origin")
     if value is None:
         return None
@@ -698,6 +756,14 @@ def source_span_from_fields(fields: Mapping[str, object]) -> SourceSpan | None:
 def host_seed_operations(obligations: Sequence[Obligation | Mapping[str, object]],
                          *, goal_id: str = "goal-0") -> list[dict[str, object]]:
     """Build the typed host operations used to add obligation steps."""
+    if not lossless_enabled():
+        result = []
+        for value in obligations:
+            item = _coerce_obligation(value)
+            result.append({"op": "add_step", "goal_id": goal_id, "text": display_text(item.text),
+                           "fields": obligation_step_fields(item)})
+        return result
+
     selected: list[Obligation] = []
     overflow_item: Obligation | None = None
     for value in obligations:
@@ -852,10 +918,11 @@ def seed_fingerprint(obligations: Sequence[Obligation]) -> str:
 
 
 __all__ = [
-    "KINDS", "MAX_EXTRACTED_OCCURRENCES", "MAX_OBLIGATION_TEXT", "MAX_OBLIGATIONS", "MODE_ENV",
+    "KINDS", "LOSSLESS_MODE_ENV", "MAX_EXTRACTED_OCCURRENCES", "MAX_OBLIGATION_TEXT",
+    "MAX_OBLIGATIONS", "MODE_ENV",
     "Obligation", "PROVENANCE",
     "PublicBrief", "SCHEMA", "SourceSpan", "display_obligations", "display_text", "enabled",
     "evidence_ref_satisfies", "extract_obligations", "host_seed_operations",
-    "mode", "obligation_step_fields", "open_obligations", "public_manifest",
+    "lossless_enabled", "lossless_mode", "mode", "obligation_step_fields", "open_obligations", "public_manifest",
     "public_manifest_for_owner", "seed_fingerprint", "source_span_from_fields",
 ]

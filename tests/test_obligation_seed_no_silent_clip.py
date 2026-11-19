@@ -8,6 +8,7 @@ from stateframe.engine import kernel_work_record as work
 @pytest.fixture(autouse=True)
 def _seed_on(monkeypatch):
     monkeypatch.setenv(seed.MODE_ENV, "on")
+    monkeypatch.setenv(seed.LOSSLESS_MODE_ENV, "on")
 
 
 def _long_tail_clause() -> str:

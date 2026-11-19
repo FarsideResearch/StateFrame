@@ -8,6 +8,7 @@ shell" without the allowlist entry).
 """
 from __future__ import annotations
 
+import json
 import re
 import sys
 from pathlib import Path
@@ -140,6 +141,24 @@ def test_terminal_parallel_schema_switch_is_documented_and_registered():
     assert name in runner.engine_switches()
     assert any("on by default" in sentence.lower() and "parallel" in sentence.lower()
                for sentence in _documented()[name])
+
+
+def test_lossless_obligation_seed_is_registered_and_off_in_shipped_profile(monkeypatch):
+    from stateframe.engine import kernel_obligation_seed as seed
+
+    name = "STATEFRAME_OBLIGATION_SEED_LOSSLESS"
+    profile = json.loads((ROOT / "src/stateframe/profiles/r2hc3.json").read_text(encoding="utf-8"))
+
+    assert runner.OPT_IN_SWITCHES[name] == ("on", "off")
+    assert name in runner.engine_switches()
+    assert name not in profile["switches"] or profile["switches"][name] != "on"
+    for switch in runner.OPT_IN_SWITCHES:
+        monkeypatch.delenv(switch, raising=False)
+    monkeypatch.setenv(name, "on")
+    assert runner.resolve_opt_in_switches()[name] == "on"
+    monkeypatch.delenv(name, raising=False)
+    assert seed.lossless_mode() == "off"
+    assert any("defaults off" in sentence.lower() for sentence in _documented()[name])
 
 
 def test_forced_manifest_switch_is_internal_benchmark_only_and_not_user_documented():

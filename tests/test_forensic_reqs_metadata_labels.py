@@ -15,6 +15,7 @@ def parser_modes(request, monkeypatch):
     monkeypatch.setenv("STATEFRAME_REQUIREMENT_ALIGNMENT", alignment)
     monkeypatch.setenv("STATEFRAME_ORACLE_GROUNDING", grounding)
     monkeypatch.setenv(seed.MODE_ENV, "on")
+    monkeypatch.setenv(seed.LOSSLESS_MODE_ENV, "on")
     ledger.clear_cache()
     yield
     ledger.clear_cache()
@@ -24,6 +25,7 @@ def test_metadata_prefix_scans_are_linear_for_many_short_lines(monkeypatch):
     monkeypatch.setenv("STATEFRAME_REQUIREMENT_ALIGNMENT", "off")
     monkeypatch.setenv("STATEFRAME_ORACLE_GROUNDING", "off")
     monkeypatch.setenv(seed.MODE_ENV, "on")
+    monkeypatch.setenv(seed.LOSSLESS_MODE_ENV, "on")
     brief = "\n".join(["Keep audit events."] * 5_000)
     original = ledger._task_metadata_label
     scanned = 0
@@ -108,6 +110,7 @@ def test_standalone_descriptive_fields_remain_advisory(parser_modes, text):
 @pytest.mark.parametrize("mode", ["off", "on"])
 def test_seed_metadata_rule_is_shared_in_both_modes(monkeypatch, mode):
     monkeypatch.setenv(seed.MODE_ENV, mode)
+    monkeypatch.setenv(seed.LOSSLESS_MODE_ENV, "on")
     for text in ("Delete entries with Title: expired.",
                  "Symptom: Leaks; Obfuscate stored tokens.",
                  "Focus: Obfuscate stored tokens."):
@@ -146,6 +149,7 @@ def test_seed_occurrences_keep_exact_identity_through_projection(parser_modes, t
 
 def test_seed_identity_includes_explicit_source_id(monkeypatch):
     monkeypatch.setenv(seed.MODE_ENV, "on")
+    monkeypatch.setenv(seed.LOSSLESS_MODE_ENV, "on")
     text = "Keep audit events."
     first = seed.extract_obligations(text, source_id="ticket-a")[0].to_dict()
     second = seed.extract_obligations(text, source_id="ticket-b")[0].to_dict()
@@ -156,6 +160,7 @@ def test_seed_identity_includes_explicit_source_id(monkeypatch):
 
 def test_long_derived_seed_origins_survive_bounded_work_fields(monkeypatch):
     monkeypatch.setenv(seed.MODE_ENV, "on")
+    monkeypatch.setenv(seed.LOSSLESS_MODE_ENV, "on")
     prefix = "Keep audit events " + " ".join(f"segment{i}" for i in range(80))
     text = prefix + " ALPHA.\n" + prefix + " BETA."
     items = seed.extract_obligations(text)
@@ -170,6 +175,7 @@ def test_long_derived_seed_origins_survive_bounded_work_fields(monkeypatch):
 
 def test_derived_surface_clauses_cite_the_exact_parent(monkeypatch):
     monkeypatch.setenv(seed.MODE_ENV, "on")
+    monkeypatch.setenv(seed.LOSSLESS_MODE_ENV, "on")
     text = "The model, parser, and API should preserve café labels."
     items = seed.extract_obligations(text)
     assert len(items) == 3
@@ -182,7 +188,8 @@ def test_derived_surface_clauses_cite_the_exact_parent(monkeypatch):
         assert seed.source_span_from_fields(seed.obligation_step_fields(item)) == origin
 
 
-def test_compatibility_candidate_offsets_are_not_synthetic():
+def test_compatibility_candidate_offsets_are_not_synthetic(monkeypatch):
+    monkeypatch.setenv(seed.LOSSLESS_MODE_ENV, "on")
     text = "   Keep café events.\r\n Keep café events."
     spans = seed._candidate_spans(text)
     assert len(spans) == 2 and spans[0] != spans[1]
@@ -192,6 +199,7 @@ def test_compatibility_candidate_offsets_are_not_synthetic():
 @pytest.mark.parametrize("mutation", ["span_id", "refs", "offset", "hash"])
 def test_forged_serialized_origins_are_rejected(monkeypatch, mutation):
     monkeypatch.setenv(seed.MODE_ENV, "on")
+    monkeypatch.setenv(seed.LOSSLESS_MODE_ENV, "on")
     item = seed.extract_obligations("Keep audit events.")[0].to_dict()
     if mutation == "span_id":
         item["source_spans"][0]["id"] = "span-wrong"
@@ -206,12 +214,14 @@ def test_forged_serialized_origins_are_rejected(monkeypatch, mutation):
 
 
 @pytest.mark.parametrize("origin", [[], ["brief", "!", 0, 1], ["brief", "AAAA", 0, 1]])
-def test_malformed_compact_origins_are_rejected(origin):
+def test_malformed_compact_origins_are_rejected(monkeypatch, origin):
+    monkeypatch.setenv(seed.LOSSLESS_MODE_ENV, "on")
     with pytest.raises(ValueError):
         seed.source_span_from_fields({"origin": origin})
 
 
-def test_legacy_manual_obligations_still_project_without_an_origin():
+def test_legacy_manual_obligations_still_project_without_an_origin(monkeypatch):
+    monkeypatch.delenv(seed.LOSSLESS_MODE_ENV, raising=False)
     item = seed.Obligation("obl-000", "Keep audit events.", "constraint")
     fields = seed.host_seed_operations([item.to_dict()])[0]["fields"]
     assert fields["source_text"] == item.text

@@ -810,6 +810,7 @@ OPT_IN_SWITCHES = {
     "STATEFRAME_EDIT_SCOPE_WIDEN": ("on", "off"),  # scoped runs admit an edited product file outside the scope
     "STATEFRAME_REQUIREMENT_RECHECK": ("on", "off"),  # first done answered once with the task's requirement checklist
     "STATEFRAME_QGATES": ("off", "on"),  # typed intake and first-edit question gates; off by default
+    "STATEFRAME_OBLIGATION_SEED_LOSSLESS": ("on", "off"),  # exact seed occurrences and overflow reporting
     "STATEFRAME_FINAL_CACHE_LAYOUT": ("on", "off"),  # cacheable final request layout: volatile authority last; on by default
     "STATEFRAME_PROVIDER": ("llama.cpp",),  # operator-confirmed llama.cpp dialect override
     "STATEFRAME_STABLE_WIRE": ("on", "off"),  # append-only source windows and a split stable frame
