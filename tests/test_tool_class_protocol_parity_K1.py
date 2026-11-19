@@ -5,8 +5,8 @@ an edit call being recognised, or repair/budget accounting. Those literals must 
 the protocol edit tools (edit_source, rewrite_source) alongside every legacy editor they
 named before, otherwise a run on the protocol menu silently misses the edit.
 
-Line numbers are the post-migration positions in
-src/stateframe/engine/kernel_stateframe_runtime.py (the protocol import sits at line 28).
+Line numbers pin the literals in kernel_stateframe_runtime.py after the protocol
+import on the 0.7.60 release base.
 """
 from __future__ import annotations
 
@@ -23,40 +23,40 @@ PROTOCOL_SPLICE = "PROTOCOL_EDIT_TOOL_NAMES"
 
 # (line, legacy members the literal named before the protocol splice was added)
 MIGRATED: tuple[tuple[int, tuple[str, ...]], ...] = (
-    (1922, ("edit", "file_create", "str_replace")),
-    (6691, ("create_file", "delete_file", "edit", "edit_file", "file_create", "rename_file", "replace", "replace_module", "shell", "str_replace", "write")),
-    (9528, ("edit", "file_create", "str_replace")),
-    (11995, ("edit", "file_create", "file_delete", "file_move", "replace", "replace_module", "shell", "str_replace", "write")),
-    (13266, ("edit", "file_create", "file_delete", "file_move", "replace", "replace_module", "shell", "shell_effect", "str_replace", "write")),
-    (14297, ("edit", "file_create", "file_delete", "file_move", "replace", "replace_module", "shell", "str_replace", "write")),
-    (14514, ("edit", "file_create", "file_delete", "file_move", "replace", "replace_module", "shell", "str_replace", "write")),
-    (14567, ("edit", "file_create", "replace", "replace_module", "shell", "str_replace", "write")),
-    (14619, ("edit", "file_create", "str_replace")),
-    (14632, ("edit", "file_create", "replace_module", "str_replace")),
-    (14634, ("edit", "file_create", "replace", "replace_module", "str_replace", "write")),
-    (14637, ("edit", "file_create", "replace", "replace_module", "str_replace", "write")),
-    (14669, ("done", "edit", "file_create", "replace", "replace_module", "shell", "shell_effect", "str_replace", "write")),
-    (14817, ("edit", "file_create", "file_delete", "file_move", "replace", "replace_module", "shell", "shell_effect", "str_replace", "write")),
-    (14997, ("edit", "file_create", "replace", "replace_module", "shell_effect", "str_replace", "write")),
-    (15071, ("edit", "file_create", "replace", "replace_module", "shell_effect", "str_replace", "write")),
-    (15106, ("edit", "file_create", "replace", "replace_module", "shell_effect", "str_replace", "write")),
-    (15126, ("edit", "file_create", "replace", "replace_module", "shell_effect", "str_replace", "write")),
-    (15159, ("edit", "file_create", "replace_module", "shell_effect", "str_replace")),
-    (15185, ("edit", "file_create", "replace", "replace_module", "shell_effect", "str_replace", "write")),
-    (15217, ("edit", "file_create", "replace", "replace_module", "shell_effect", "str_replace", "write")),
-    (15223, ("edit", "file_create", "replace", "replace_module", "shell_effect", "str_replace", "write")),
-    (15235, ("edit", "file_create", "replace", "replace_module", "shell_effect", "str_replace", "write")),
-    (15255, ("edit", "file_create", "str_replace")),
-    (15279, ("edit", "file_create", "replace", "replace_module", "shell_effect", "str_replace", "write")),
-    (15346, ("edit", "replace", "replace_module", "str_replace", "write")),
-    (15474, ("edit", "replace", "replace_module", "str_replace", "write")),
-    (15558, ("edit", "replace_module", "str_replace")),
-    (15700, ("edit", "file_create", "file_delete", "file_move", "replace", "replace_module", "shell", "shell_effect", "str_replace", "write")),
-    (15896, ("edit", "file_create", "str_replace")),
-    (16485, ("edit", "file_create", "str_replace")),
-    (16627, ("edit", "file_create", "str_replace")),
-    (18584, ("edit", "file_create", "replace_module", "shell_effect", "str_replace")),
-    (21025, ("edit", "str_replace")),
+    (1929, ("edit", "file_create", "str_replace")),
+    (6698, ("create_file", "delete_file", "edit", "edit_file", "file_create", "rename_file", "replace", "replace_module", "shell", "str_replace", "write")),
+    (9535, ("edit", "file_create", "str_replace")),
+    (12002, ("edit", "file_create", "file_delete", "file_move", "replace", "replace_module", "shell", "str_replace", "write")),
+    (13273, ("edit", "file_create", "file_delete", "file_move", "replace", "replace_module", "shell", "shell_effect", "str_replace", "write")),
+    (14304, ("edit", "file_create", "file_delete", "file_move", "replace", "replace_module", "shell", "str_replace", "write")),
+    (14521, ("edit", "file_create", "file_delete", "file_move", "replace", "replace_module", "shell", "str_replace", "write")),
+    (14574, ("edit", "file_create", "replace", "replace_module", "shell", "str_replace", "write")),
+    (14626, ("edit", "file_create", "str_replace")),
+    (14639, ("edit", "file_create", "replace_module", "str_replace")),
+    (14641, ("edit", "file_create", "replace", "replace_module", "str_replace", "write")),
+    (14644, ("edit", "file_create", "replace", "replace_module", "str_replace", "write")),
+    (14676, ("done", "edit", "file_create", "replace", "replace_module", "shell", "shell_effect", "str_replace", "write")),
+    (14824, ("edit", "file_create", "file_delete", "file_move", "replace", "replace_module", "shell", "shell_effect", "str_replace", "write")),
+    (15004, ("edit", "file_create", "replace", "replace_module", "shell_effect", "str_replace", "write")),
+    (15078, ("edit", "file_create", "replace", "replace_module", "shell_effect", "str_replace", "write")),
+    (15113, ("edit", "file_create", "replace", "replace_module", "shell_effect", "str_replace", "write")),
+    (15133, ("edit", "file_create", "replace", "replace_module", "shell_effect", "str_replace", "write")),
+    (15166, ("edit", "file_create", "replace_module", "shell_effect", "str_replace")),
+    (15192, ("edit", "file_create", "replace", "replace_module", "shell_effect", "str_replace", "write")),
+    (15224, ("edit", "file_create", "replace", "replace_module", "shell_effect", "str_replace", "write")),
+    (15230, ("edit", "file_create", "replace", "replace_module", "shell_effect", "str_replace", "write")),
+    (15242, ("edit", "file_create", "replace", "replace_module", "shell_effect", "str_replace", "write")),
+    (15262, ("edit", "file_create", "str_replace")),
+    (15286, ("edit", "file_create", "replace", "replace_module", "shell_effect", "str_replace", "write")),
+    (15353, ("edit", "replace", "replace_module", "str_replace", "write")),
+    (15481, ("edit", "replace", "replace_module", "str_replace", "write")),
+    (15565, ("edit", "replace_module", "str_replace")),
+    (15707, ("edit", "file_create", "file_delete", "file_move", "replace", "replace_module", "shell", "shell_effect", "str_replace", "write")),
+    (15903, ("edit", "file_create", "str_replace")),
+    (16492, ("edit", "file_create", "str_replace")),
+    (16634, ("edit", "file_create", "str_replace")),
+    (18591, ("edit", "file_create", "replace_module", "shell_effect", "str_replace")),
+    (21032, ("edit", "str_replace")),
 )
 
 
