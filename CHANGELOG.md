@@ -7,7 +7,14 @@
 - Task brief requirements remain actionable when labels appear in mixed instruction text, and coverage retains exact ownership and occurrence origins.
 - Metadata parsing now tracks quote and boundary state in one pass, so large briefs avoid repeated prefix scans.
 - Requirement extraction and work-step generation cap retained occurrences and add an open overflow record when additional occurrences remain.
-- Seed occurrence identity, structural labels, and overflow reporting require a new default-off switch, preserving shipped-profile request bytes.
+- Parent-wide requirements now reach every child task and remain available in typed scope.
+- Subframes can receive bounded, quoted interface behavior notes while preserving the default request bytes.
+- Closed subframe diagnostics can show source-backed visible assertions while withholding hidden content and runtime values.
+- Ticket sentence splitting preserves dotted names, URLs, abbreviations, and closing punctuation across seed and alignment.
+- Verification reuse checks open blockers and advisories against the selected requirement.
+- Unit dependency admission treats dynamic imports conservatively so coupled work is not admitted as independent.
+- Static planning creates a unit for an explicitly requested function with an empty body and leaves missing targets unplanned.
+- Seed occurrence identity, structural labels, overflow reporting, and shared sentence boundaries require the default-off `STATEFRAME_OBLIGATION_SEED_LOSSLESS` switch. With it off, shipped seed, alignment, and request bytes remain unchanged.
 
 ## 0.7.81 (2026-11-19)
 
