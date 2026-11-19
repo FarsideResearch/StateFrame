@@ -7,19 +7,78 @@ is a set of handlers whose *entire* safety argument is "the failure becomes a
 typed outcome / a propagated error".  Those arguments are pinned here so a
 future edit that turns one of them into a silent ``pass`` fails loudly.
 
-Site ids follow the census: ``T8-<MODULE>-<line>`` at the batch base.
+SITE keys use the module, qualified scope, exception clause, and containing try AST shape; they contain no source lines.
 """
 from __future__ import annotations
 
+import ast
+import re
+from collections import Counter
+from pathlib import Path
+
 import pytest
 
+from _ast_site_keys import BroadExceptSite, find_broad_except_sites, rename_broad_except_site
 import kernel_execution_policy as exec_policy
 import kernel_guarded_effects as guarded_effects
 import kernel_test_artifact_policy as artifact_policy
 
+ENGINE = Path(__file__).resolve().parents[1] / "src" / "stateframe" / "engine"
+GOVERNOR_MODULES = ("kernel_guarded_effects", "kernel_execution_policy", "kernel_test_artifact_policy")
+GOVERNOR_SCOPES = frozenset({
+    ("kernel_guarded_effects", "GuardedEffectSequence._lookup"),
+    ("kernel_guarded_effects", "GuardedEffectSequence.dispatch"),
+    ("kernel_execution_policy", "_ResidentMemorySupervisor._record_error"),
+    ("kernel_execution_policy", "supervised_process.cleanup"),
+    ("kernel_test_artifact_policy", "normalize_public_test_bindings_for_mode"),
+})
+SITE_TAG = re.compile(
+    r"SITE\[([a-z0-9_]+)\|([A-Za-z0-9_.<>]+)\|(Exception|BaseException|bare)\|([0-9a-f]{12})\]"
+)
+GOVERNOR_REVIEWED = frozenset({
+    BroadExceptSite("kernel_guarded_effects", "GuardedEffectSequence._lookup", "Exception", "517e4dfa63b9"),
+    BroadExceptSite("kernel_guarded_effects", "GuardedEffectSequence.dispatch", "Exception", "bb7509a57b8b"),
+    BroadExceptSite("kernel_guarded_effects", "GuardedEffectSequence.dispatch", "BaseException", "6b8e894e6c21"),
+    BroadExceptSite("kernel_execution_policy", "_ResidentMemorySupervisor._record_error", "BaseException", "fbf177513949"),
+    BroadExceptSite("kernel_execution_policy", "supervised_process.cleanup", "BaseException", "e6d54340564a"),
+    BroadExceptSite("kernel_execution_policy", "supervised_process.cleanup", "BaseException", "36934005d619"),
+    BroadExceptSite("kernel_execution_policy", "supervised_process.cleanup", "BaseException", "e6d3865a570d"),
+    BroadExceptSite("kernel_execution_policy", "supervised_process.cleanup", "BaseException", "742eacbbd39e"),
+    BroadExceptSite("kernel_execution_policy", "supervised_process.cleanup", "BaseException", "4bb6ece3b0ef"),
+    BroadExceptSite("kernel_execution_policy", "supervised_process.cleanup", "BaseException", "cff2d73448b0"),
+    BroadExceptSite("kernel_test_artifact_policy", "normalize_public_test_bindings_for_mode", "Exception", "f4ef18b13b73"),
+    BroadExceptSite("kernel_test_artifact_policy", "normalize_public_test_bindings_for_mode", "Exception", "fc0844881b3a"),
+})
+
+
+def _paths() -> dict[str, Path]:
+    return {stem: ENGINE / f"{stem}.py" for stem in GOVERNOR_MODULES}
+
+
+def _inventory_error(paths: dict[str, Path]) -> str | None:
+    found = Counter(
+        site
+        for path in paths.values()
+        for site in find_broad_except_sites(path)
+        if (site.module, site.scope) in GOVERNOR_SCOPES
+    )
+    expected = Counter(GOVERNOR_REVIEWED)
+    untriaged = sorted((found - expected).elements(), key=lambda site: site.label)
+    stale = sorted((expected - found).elements(), key=lambda site: site.label)
+    if not untriaged and not stale:
+        return None
+    details = []
+    if untriaged:
+        details.append("untriaged: " + "; ".join(site.label for site in untriaged))
+    if stale:
+        details.append("stale: " + "; ".join(site.label for site in stale))
+    return " | ".join(details)
+
 
 # --------------------------------------------------------------------------
-# kernel_guarded_effects: T8-KERNEL_GUARDED_EFFECTS-329 / -382
+# SITE[kernel_guarded_effects|GuardedEffectSequence._lookup|Exception|517e4dfa63b9]
+# SITE[kernel_guarded_effects|GuardedEffectSequence.dispatch|Exception|bb7509a57b8b]
+# SITE[kernel_guarded_effects|GuardedEffectSequence.dispatch|BaseException|6b8e894e6c21] preserves process-death re-raise
 # --------------------------------------------------------------------------
 class _Journal:
     """Minimal append-only journal with the surface GuardedEffectSequence reads."""
@@ -54,7 +113,7 @@ class _Destination:
         return {"ok": True}
 
 
-def test_t8_kernel_guarded_effects_329_lookup_failure_is_typed_unknown() -> None:
+def test_guarded_effects_lookup_failure_is_typed_unknown() -> None:
     """A destination whose ``result_for`` raises yields UNKNOWN with the error class, no retry."""
     journal = _Journal()
     destination = _Destination(lookup_error=ConnectionError("boom"))
@@ -70,7 +129,7 @@ def test_t8_kernel_guarded_effects_329_lookup_failure_is_typed_unknown() -> None
     assert outcome["reason"] == "destination lookup failed: ConnectionError"
 
 
-def test_t8_kernel_guarded_effects_382_submit_failure_is_typed_unknown() -> None:
+def test_guarded_effects_submit_failure_is_typed_unknown() -> None:
     """A destination whose ``submit`` raises yields UNKNOWN naming the class and forbids retry."""
     journal = _Journal()
     destination = _Destination(submit_error=TimeoutError("late"))
@@ -89,8 +148,14 @@ def test_t8_kernel_guarded_effects_382_submit_failure_is_typed_unknown() -> None
 
 
 # --------------------------------------------------------------------------
-# kernel_execution_policy: T8-KERNEL_EXECUTION_POLICY-631 and the
-# supervised_process cleanup ladder (-1139 / -1159 / -1168 / -1173 / -1182 / -1189)
+# SITE[kernel_execution_policy|_ResidentMemorySupervisor._record_error|BaseException|fbf177513949]
+# The supervised_process.cleanup ladder is keyed by its guarded operation:
+# SITE[kernel_execution_policy|supervised_process.cleanup|BaseException|e6d54340564a] poll at context exit
+# SITE[kernel_execution_policy|supervised_process.cleanup|BaseException|36934005d619] terminate survivors
+# SITE[kernel_execution_policy|supervised_process.cleanup|BaseException|e6d3865a570d] poll after termination
+# SITE[kernel_execution_policy|supervised_process.cleanup|BaseException|742eacbbd39e] finish supervision
+# SITE[kernel_execution_policy|supervised_process.cleanup|BaseException|4bb6ece3b0ef] close streams
+# SITE[kernel_execution_policy|supervised_process.cleanup|BaseException|cff2d73448b0] bounded wait
 # --------------------------------------------------------------------------
 class _UnprintableError(RuntimeError):
     def __str__(self) -> str:
@@ -109,7 +174,7 @@ class _RecordingOwner:
         self.stop_causes.append(reason)
 
 
-def test_t8_kernel_execution_policy_631_unprintable_error_is_still_recorded() -> None:
+def test_kernel_execution_policy_unprintable_error_is_still_recorded() -> None:
     """``str(error)`` raising degrades the message, never the record of the failure."""
     owner = _RecordingOwner()
     error = _UnprintableError()
@@ -161,7 +226,7 @@ class _ExitedProcess:
         return self.returncode
 
 
-def test_t8_kernel_execution_policy_1182_stream_close_failure_propagates() -> None:
+def test_supervised_process_stream_close_failure_propagates() -> None:
     """A pipe that cannot be closed is raised from the context, not swallowed."""
     process = _ExitedProcess(stream_error=OSError("pipe close failed"))
 
@@ -173,7 +238,7 @@ def test_t8_kernel_execution_policy_1182_stream_close_failure_propagates() -> No
     assert process.waited
 
 
-def test_t8_kernel_execution_policy_1189_wait_failure_propagates() -> None:
+def test_supervised_process_wait_failure_propagates() -> None:
     """A bounded wait that raises is the context's own failure on the clean path."""
     process = _ExitedProcess(wait_error=TimeoutError("wait stalled"))
 
@@ -182,7 +247,7 @@ def test_t8_kernel_execution_policy_1189_wait_failure_propagates() -> None:
             pass
 
 
-def test_t8_kernel_execution_policy_1139_cleanup_error_chains_to_original() -> None:
+def test_supervised_process_cleanup_error_chains_to_original() -> None:
     """When the body raised, the first cleanup failure becomes the cause of the body error."""
     process = _ExitedProcess(stream_error=OSError("pipe close failed"))
 
@@ -204,7 +269,8 @@ def test_t8_kernel_execution_policy_cleanup_keeps_only_the_first_error() -> None
 
 
 # --------------------------------------------------------------------------
-# kernel_test_artifact_policy: T8-KERNEL_TEST_ARTIFACT_POLICY-701 / -711
+# SITE[kernel_test_artifact_policy|normalize_public_test_bindings_for_mode|Exception|f4ef18b13b73]
+# SITE[kernel_test_artifact_policy|normalize_public_test_bindings_for_mode|Exception|fc0844881b3a]
 # --------------------------------------------------------------------------
 def _bindings() -> tuple[dict[str, object], list[dict[str, object]]]:
     current = {"public_tests": {"tests/test_a.py": "def test_a(): pass\n"}}
@@ -212,7 +278,7 @@ def _bindings() -> tuple[dict[str, object], list[dict[str, object]]]:
     return current, receipts
 
 
-def test_t8_kernel_test_artifact_policy_701_optimized_failure_is_named(monkeypatch) -> None:
+def test_kernel_test_artifact_policy_optimized_failure_is_named(monkeypatch) -> None:
     """A crash in the optimized normalizer falls back to legacy AND says so."""
     def _broken(current, receipts):
         raise RuntimeError("optimized path exploded")
@@ -229,7 +295,7 @@ def test_t8_kernel_test_artifact_policy_701_optimized_failure_is_named(monkeypat
     assert result[3] == "optimized_path_error"
 
 
-def test_t8_kernel_test_artifact_policy_711_mismatch_crash_is_a_mismatch(monkeypatch) -> None:
+def test_kernel_test_artifact_policy_mismatch_crash_is_a_mismatch(monkeypatch) -> None:
     """If the shadow comparison itself crashes, the output is reported as mismatched."""
     def _broken(optimized, legacy):
         raise ValueError("comparison exploded")
@@ -255,3 +321,76 @@ def test_t8_kernel_test_artifact_policy_mode_on_does_not_touch_legacy(monkeypatc
 
     assert result[2] == ()
     assert result[3] is None
+
+
+def test_governor_site_keys_are_current() -> None:
+    source = Path(__file__).read_text(encoding="utf-8")
+    tags = {BroadExceptSite(*match) for match in SITE_TAG.findall(source)}
+    assert tags == GOVERNOR_REVIEWED, (
+        f"governor SITE tags changed: missing={GOVERNOR_REVIEWED - tags}, "
+        f"extra={tags - GOVERNOR_REVIEWED}")
+    error = _inventory_error(_paths())
+    assert error is None, error
+
+
+def _add_unreviewed_lookup_handler(source: str) -> str:
+    tree = ast.parse(source)
+    target: ast.FunctionDef | None = None
+
+    def visit(node: ast.AST, scope: tuple[str, ...]) -> None:
+        nonlocal target
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            scope = (*scope, node.name)
+        if isinstance(node, ast.FunctionDef) and scope == ("GuardedEffectSequence", "_lookup"):
+            target = node
+            return
+        for child in ast.iter_child_nodes(node):
+            visit(child, scope)
+
+    visit(tree, ())
+    if target is None or target.end_lineno is None or not target.body:
+        raise AssertionError("GuardedEffectSequence._lookup: could not locate mutation target")
+    lines = source.splitlines(keepends=True)
+    indentation = " " * target.body[0].col_offset
+    addition = (
+        f"{indentation}try:\n"
+        f"{indentation}    raise RuntimeError('unreviewed site')\n"
+        f"{indentation}except Exception:\n"
+        f"{indentation}    return {{}}\n"
+    )
+    lines.insert(target.end_lineno, addition)
+    return "".join(lines)
+
+
+def test_governor_site_locator_survives_shift_and_rejects_removed_or_new_sites(tmp_path: Path) -> None:
+    original_paths = _paths()
+    shifted_paths: dict[str, Path] = {}
+    for stem, original_path in original_paths.items():
+        copy_path = tmp_path / "shifted" / original_path.name
+        copy_path.parent.mkdir(parents=True, exist_ok=True)
+        copy_path.write_text("\n" * 5 + "# shifted copy\n" + original_path.read_text(encoding="utf-8"),
+                             encoding="utf-8")
+        shifted_paths[stem] = copy_path
+    assert _inventory_error(shifted_paths) is None
+
+    for site in sorted(GOVERNOR_REVIEWED, key=lambda item: item.label):
+        original_path = original_paths[site.module]
+        copy_path = tmp_path / "removed" / site.module / original_path.name
+        copy_path.parent.mkdir(parents=True, exist_ok=True)
+        source = original_path.read_text(encoding="utf-8")
+        copy_path.write_text(rename_broad_except_site(original_path, source, site), encoding="utf-8")
+        changed_paths = dict(original_paths)
+        changed_paths[site.module] = copy_path
+        error = _inventory_error(changed_paths)
+        assert error is not None and f"stale: {site.label}" in error, error
+
+    module_path = original_paths["kernel_guarded_effects"]
+    copy_path = tmp_path / "added" / module_path.name
+    copy_path.parent.mkdir(parents=True, exist_ok=True)
+    source = _add_unreviewed_lookup_handler(module_path.read_text(encoding="utf-8"))
+    copy_path.write_text(source, encoding="utf-8")
+    changed_paths = dict(original_paths)
+    changed_paths["kernel_guarded_effects"] = copy_path
+    error = _inventory_error(changed_paths)
+    assert error is not None and (
+        "untriaged: kernel_guarded_effects.GuardedEffectSequence._lookup" in error), error
