@@ -23,6 +23,8 @@ with pytest.MonkeyPatch.context() as patch:
         patch.setenv("STATEFRAME_WORKING_SET_ALLOCATOR", sys.argv[3])
     patch.setenv("SF_LAB_DETFIX3", "on")
     from stateframe import runner
+    if "STATEFRAME_WORKING_SET_STABLE_FIRST" in runner.engine_switches():
+        patch.setenv("STATEFRAME_WORKING_SET_STABLE_FIRST", "off")
     runner.test_interpreter.choose = lambda *args, **kwargs: (sys.executable, "parity test interpreter")
     hashes, _, _ = _run_scripted_example(patch, "discount_bug", EXAMPLES["discount_bug"], Path(sys.argv[1]))
     Path(sys.argv[2]).write_text(json.dumps(hashes))

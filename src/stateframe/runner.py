@@ -824,6 +824,7 @@ OPT_IN_SWITCHES = {
     "STATEFRAME_QGATES": ("off", "on"),  # typed intake and first-edit question gates; off by default
     "STATEFRAME_OBLIGATION_SEED_LOSSLESS": ("on", "off"),  # exact seed occurrences and overflow reporting
     "STATEFRAME_FINAL_CACHE_LAYOUT": ("on", "off"),  # cacheable final request layout: volatile authority last; on by default
+    "STATEFRAME_WORKING_SET_STABLE_FIRST": ("on", "off"),
     "STATEFRAME_PROVIDER": ("llama.cpp",),  # operator-confirmed llama.cpp dialect override
     "STATEFRAME_STABLE_WIRE": ("on", "off"),  # append-only source windows and a split stable frame
     "STATEFRAME_HOST_ROW_IDENTITY": ("off", "shadow", "on"),  # host-authored rows tracked out of band; off by default

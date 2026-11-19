@@ -4,12 +4,16 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, replace
 
 from kernel_reason_log import emit_refusal
 from kernel_request_seal import RequestSealError
 from kernel_working_set_cache import transaction
+
+
+STABLE_FIRST_ENV = "STATEFRAME_WORKING_SET_STABLE_FIRST"
 
 
 def assert_certified_body(body, prepared) -> None:
@@ -303,10 +307,30 @@ def prepare_live(capture, runtime, body, *, dialect, reasoning_mode):
         return sorted({str(row.get("kind", "unknown")) for row in
                        receipt.get("proof_failures", ()) if isinstance(row, dict)})
 
-    prepared = prepare_candidate(snapshot, measure=measure)
-    if isinstance(prepared, Blocked):
-        _blocked(runtime, snapshot, prepared)
-    body, closure, sources, receipt = qualify(prepared)
+    prepared = None
+    if (os.environ.get(STABLE_FIRST_ENV, "off").strip().lower() == "on"
+            and "final_cache" in snapshot.layouts):
+        # Measure and certify the preferred layout separately from the legacy search.
+        stable_snapshot = replace(snapshot, layouts=("stable_first",))
+        stable = prepare_candidate(stable_snapshot, measure=measure)
+        if isinstance(stable, Blocked):
+            capture.journal.emit("final_cache_layout_failed_open", request_id=capture.request_id,
+                                 reason="stable_first_preparation_failed",
+                                 allocator_reason=stable.reason.value, vital=True)
+        else:
+            proof = qualify(stable)
+            if source_delivery_satisfied(proof[3]):
+                snapshot, prepared = stable_snapshot, stable
+                body, closure, sources, receipt = proof
+            else:
+                capture.journal.emit("final_cache_layout_failed_open", request_id=capture.request_id,
+                                     reason="stable_first_closure_proof_failed",
+                                     failures=proof_failures(proof[3]), vital=True)
+    if prepared is None:
+        prepared = prepare_candidate(snapshot, measure=measure)
+        if isinstance(prepared, Blocked):
+            _blocked(runtime, snapshot, prepared)
+        body, closure, sources, receipt = qualify(prepared)
     retried_plain = False
     if (not source_delivery_satisfied(receipt)
             and prepared.rendered.certificate.layout == "final_cache"

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- With `STATEFRAME_WORKING_SET_STABLE_FIRST=on`, the working-set allocator prefers a certified layout that places current source windows before changing typed state and authority.
+
 ## 0.8.1 (2026-11-19)
 
 - Fixed: offline installs now include the syntax-aware repo map by default; `--no-repomap` skips it.

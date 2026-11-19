@@ -114,7 +114,7 @@ class PreparationSnapshot:
     frame_limit: int | None = None
     context_limit: int | None = None
     output_tokens: int | None = None
-    layouts: tuple[Literal["plain", "final_cache"], ...] = ("plain",)
+    layouts: tuple[Literal["plain", "final_cache", "stable_first"], ...] = ("plain",)
     # Position in fixed messages before the opaque newest user suffix/exchange.
     insertion_index: int | None = None
     dialect: str = "llama.cpp"
@@ -180,7 +180,7 @@ class PreparationSnapshot:
                 or type(self.due_ordinal) is not int or self.due_ordinal < 1
                 or type(self.prompt_limit) is not int or self.prompt_limit < 0
                 or len({slot.key for slot in self.sources}) != len(self.sources)
-                or not self.layouts or not set(self.layouts) <= {"plain", "final_cache"}
+                or not self.layouts or not set(self.layouts) <= {"plain", "final_cache", "stable_first"}
                 or self.dialect not in {"llama.cpp", "openai-strict", "openai-compatible"}
                 or self.reasoning_mode not in {"on", "off", "passthrough"}
                 or not isinstance(self.recovery_schema, bytes)
