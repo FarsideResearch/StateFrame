@@ -185,6 +185,30 @@ def test_mutation_fences_pre_edit_graph(tmp_path, monkeypatch):
     assert _ready(root).find_definition("renamed").file == path.name
 
 
+def test_request_keeps_its_graph_until_a_workspace_mutation(tmp_path, monkeypatch):
+    from kernel_live_projection import WorkspaceViewStore
+    from kernel_repo_dependencies import DependencyView
+
+    root = _repo(tmp_path / "workspace")
+    _enable(monkeypatch, tmp_path / "cache")
+    monkeypatch.setenv("CODE_GRAPH_LSP", "off")
+    test = root / "test_service.py"
+    test.write_text("from file_00 import run\n\ndef test_service(): run()\n")
+    view = DependencyView(lambda: None)
+    view.advance(root)
+    _ready(root)
+
+    assert view.fact(root, test.name, 0) == (("file_00.py",), False)
+    view.advance(root)
+    assert view.fact(root, test.name, 0) == (("file_00.py",), True)
+
+    monkeypatch.setenv("STATEFRAME_TURN_REPO_INTEL", "off")
+    test.write_text("from file_01 import run\n\ndef test_service(): run()\n")
+    WorkspaceViewStore(root, "fixture").note_mutation((test.name,), "applied")
+
+    assert view.fact(root, test.name, 1) == (("file_01.py",), False)
+
+
 def test_intake_does_not_join_the_map_worker(tmp_path, monkeypatch):
     from kernel_repo_intel import intake_orientation
 
