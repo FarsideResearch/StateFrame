@@ -339,21 +339,25 @@ def _continuation_contract(manifest: Mapping[str, object], *, cold_resume: bool)
 
 def _cache_contract(*, cache_prompt: object, id_slot: object,
                     cold_resume: bool) -> dict[str, object]:
+    unpinned = os.environ.get("STATEFRAME_PROMPT_CACHE_UNPINNED", "off") == "on"
     if cache_prompt is not None and type(cache_prompt) is not bool:
         _fail("cache_prompt must be boolean")
     if id_slot is not None and (type(id_slot) is not int or id_slot < 0):
         _fail("id_slot must be a nonnegative integer")
+    if unpinned and id_slot is not None:
+        _fail("unpinned prompt cache must not select id_slot")
     requested = cache_prompt is True
-    if requested and id_slot is None:
+    if requested and id_slot is None and not unpinned:
         _fail("cache_prompt requires a pinned slot id_slot")
-    if cold_resume and requested:
+    if cold_resume and requested and not unpinned:
         _fail("provider cache is not eligible during cold resume")
     return {
         "requested": requested,
-        "eligible": requested and not cold_resume,
+        "eligible": requested and (not cold_resume or unpinned),
         "id_slot": id_slot,
-        "reason": "cold_resume_forces_cold_prefix" if cold_resume
-        else ("pinned_slot" if requested else "not_requested"),
+        "reason": "cold_resume_forces_cold_prefix" if cold_resume and not unpinned
+        else ("unpinned_slot" if requested and unpinned else
+              "pinned_slot" if requested else "not_requested"),
     }
 
 

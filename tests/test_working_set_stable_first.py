@@ -27,7 +27,9 @@ def _source(prefix: str) -> bytes:
 
 
 def _scenario() -> Scenario:
-    switches = {**shipped_switches(), SWITCH: "off"}
+    # The release allocator reserves the edit scope before the first send.
+    # Fit that mandatory envelope while measuring layout reuse in both arms.
+    switches = {**shipped_switches(), SWITCH: "off", "STATEFRAME_CONTEXT_TOKENS": "131072"}
     return Scenario(
         files={"pricing.py": _source("price"), "shipping.py": _source("shipping")},
         task="Update pricing.py and shipping.py. In pricing.py set price_001 to 2. "

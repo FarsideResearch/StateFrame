@@ -286,6 +286,10 @@ def configure_transport(body: MutableMapping[str, object], endpoint: str, key: s
     env = _source(environ)
     if mode(env) == "off":
         return None
+    if env.get("STATEFRAME_PROMPT_CACHE_UNPINNED", "off") == "on":
+        # Slot save/restore addresses one physical slot and cannot accompany
+        # server-selected placement. Keep the request's unpinned cache fields.
+        return {"transport_applied": False, "restore_status": "unpinned_slot"}
     if capabilities is None:
         from kernel_provider_dialect import capabilities_for
         capabilities = capabilities_for(endpoint, key, environ=env)

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add `STATEFRAME_PROMPT_CACHE_UNPINNED=on` to let llama.cpp select each request's slot while retaining `cache_prompt:true`; the default preserves pinned request bytes.
 - Allow profiles to prelist the run's tool schemas from minimal launch while keeping first-turn dispatch limited to navigation and dynamic guidance in request messages.
 - With `STATEFRAME_WORKING_SET_STABLE_FIRST=on`, the working-set allocator prefers a certified layout that places current source windows before changing typed state and authority.
 
