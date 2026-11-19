@@ -294,3 +294,71 @@ def test_terminal_menu_authority_records_unavailability_and_preserves_menu(monke
         "error_type": "RuntimeError",
     })]
     assert "private detail" not in repr(events)
+
+
+@pytest.mark.parametrize("editor", ["str_replace", "edit_source", "rewrite_source"])
+def test_evidence_gap_does_not_admit_product_repair(monkeypatch, editor):
+    runtime = SimpleNamespace(stateframe_next_action_owner_mode="on")
+    # Isolate the evidence gate from optional governors and tool runner admission.
+    monkeypatch.setattr(owner, "_common_sense_decision", lambda *_: None)
+    monkeypatch.setattr(owner, "_premature_frame", lambda *_: None)
+    monkeypatch.setattr(owner, "_current_tool_admission", lambda *_: (True, None))
+    monkeypatch.setattr(owner, "_greenlock_predispatch", lambda *_: (True, None, False))
+    repair_action = {"tool": editor}
+    tools = [_tool(editor), _tool("read")]
+
+    actions = owner.legal_next_actions(runtime, decision={"repair_action": repair_action}, tools=tools)
+    assert [action["tool"] for action in actions] == [editor]
+
+    actions = owner.legal_next_actions(
+        runtime, decision={"reason_codes": ["LOW_COVERAGE_UNVERIFIED"], "repair_action": repair_action},
+        tools=tools,
+    )
+    assert [action["tool"] for action in actions] == ["read"]
+
+
+@pytest.mark.parametrize(
+    ("tool", "expected_route"),
+    [("str_replace", "repair"), ("edit_source", "repair"), ("rewrite_source", "repair"),
+     ("file_create", "submit")],
+)
+def test_green_open_work_recognizes_source_repair_on_terminal_surface(
+        monkeypatch, tool, expected_route):
+    runtime = SimpleNamespace()
+    monkeypatch.setattr(owner, "_green_open_work", lambda _: True)
+    owner.record_owner_block(runtime, "terminal_line", owner.GREEN_TERMINAL_LINE,
+                             block_id="terminal:green")
+
+    assert owner._contract_route(runtime, [], ["done", tool], provider_request=True) == (
+        expected_route, None,
+    )
+
+
+@pytest.mark.parametrize(
+    ("tool", "expected_route"),
+    [("str_replace", "repair"), ("edit_source", "repair"), ("rewrite_source", "repair"),
+     ("file_create", "verify")],
+)
+def test_contract_distinguishes_source_repair_from_verification(tool, expected_route):
+    assert owner._contract_route(
+        SimpleNamespace(), [], [tool, "run_tests"], provider_request=True,
+    ) == (expected_route, None)
+
+
+@pytest.mark.parametrize("editor", ["str_replace", "edit_source", "rewrite_source"])
+def test_green_open_repair_contract_records_retained_source_edit(monkeypatch, editor):
+    runtime, events = _journal()
+    monkeypatch.setattr(owner, "_green_open_work", lambda _: True)
+    monkeypatch.setattr(owner, "open_ids", lambda _: ("R1",))
+    runtime.completion_menu = (editor,)
+    runtime._completion_owner_dispatch_tools = [_tool(editor)]
+
+    contract = owner.establish_request_action_contract(
+        runtime, [], [_tool(editor)], request_id="request-1", preserve_input_surface=True,
+    )
+
+    assert contract["route"] == "repair"
+    assert contract["advertised_actions"] == [editor]
+    kept = [fields for kind, fields in events if kind == "owner_green_open_repair_kept"]
+    assert [(event["open_ids"], event["advertised_actions"], event["dispatch_actions"])
+            for event in kept] == [(["R1"], [editor], [editor])]

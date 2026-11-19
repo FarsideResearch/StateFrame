@@ -170,8 +170,12 @@ _EVIDENCE_GAP_CODES = frozenset({
 _EVIDENCE_ROUTE_TOOLS = frozenset({
     "authored_check", "dispute_check", "probe", "read_check_receipt", "run_tests",
 })
+# Repair routes recognize source-content edits; file creation and moves keep
+# their existing routing on legacy surfaces.
+_SOURCE_REPAIR_EDIT_TOOLS = frozenset({"edit", "str_replace", *PROTOCOL_EDIT_TOOL_NAMES})
 _PRODUCT_EDIT_TOOLS = frozenset({
     "edit", "file_create", "file_delete", "file_move", "shell", "replace", "replace_module", "str_replace", "write",
+    *PROTOCOL_EDIT_TOOL_NAMES,
 })
 _ADVISORY_ERROR_KIND = "completion_owner_advisory_gate_error"
 _ADVISORY_FAILURE_CAP = 100_000
@@ -5808,7 +5812,7 @@ def _contract_route(runtime: object, messages: object, tool_names: Sequence[str]
     if not tool_names:
         return _empty_tool_route(runtime)
     if (_green_open_work(runtime)
-            and {"edit", "str_replace", "read", "run_tests", "work", "work_update"}
+            and (_SOURCE_REPAIR_EDIT_TOOLS | {"read", "run_tests", "work", "work_update"})
             .intersection(tool_names)):
         return "repair", None
     terminal_text = _contract_terminal_text(runtime)
@@ -5822,7 +5826,8 @@ def _contract_route(runtime: object, messages: object, tool_names: Sequence[str]
             and state.get("final_submit_request_pending")
             and _reserved_terminal_menu_names(runtime, terminal_menu)):
         return "submit", None
-    if "run_tests" in tool_names and not {"edit", "str_replace", "work", "work_update"}.intersection(tool_names):
+    if ("run_tests" in tool_names
+            and (_SOURCE_REPAIR_EDIT_TOOLS | {"work", "work_update"}).isdisjoint(tool_names)):
         return "verify", None
     return "repair", None
 
@@ -6717,7 +6722,7 @@ def establish_request_action_contract(
         if isinstance(tool, Mapping)
     )
     if (_green_open_work(runtime) and route == "repair"
-            and any(name in {"edit", "str_replace", "read", "run_tests"} for name in names)
+            and (_SOURCE_REPAIR_EDIT_TOOLS | {"read", "run_tests"}).intersection(names)
             and tuple(names) == tuple(getattr(runtime, "completion_menu", ()) or ())
             and tuple(names) == dispatch_names):
         _emit(runtime, "owner_green_open_repair_kept",

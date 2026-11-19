@@ -7,8 +7,9 @@ every literal list that names ``str_replace`` and checks it against the
 shared constants in ``kernel_edit_tool_names``:
 
 * every edit-shaped member must be a known edit tool name (drift guard);
-* every list must name ``edit_source`` (strict xfail until the list is wired
-  onto the shared constant; the xfail id carries ``file:line``).
+* every detection list must name ``edit_source`` (strict xfail until the list
+  is wired onto the shared constant; the xfail id carries ``file:line``);
+* reviewed offer and wire lists retain their existing members.
 """
 from __future__ import annotations
 
@@ -41,13 +42,67 @@ NON_EDIT_TOOL_NAMES: frozenset[str] = frozenset({
 })
 
 
-def _literal_tool_lists() -> list[tuple[str, int, frozenset[str]]]:
+OFFER_REVIEWED = {
+    "src/stateframe/engine/kernel_completion_owner.py:_STALL_RULE_TOOLS":
+        "Default stall recovery menu and order.",
+    "src/stateframe/engine/kernel_completion_owner.py:_DECLARED_REPAIR_TOOLS":
+        "Declared repair menu and order.",
+    "src/stateframe/engine/kernel_completion_owner.py:_common_sense_decision":
+        "Chooses the current or full tool surface for the governor's menu projection.",
+    "src/stateframe/engine/kernel_completion_owner.py:_reserved_terminal_menu_names":
+        "Admits the existing reserved submit menu shapes.",
+    "src/stateframe/engine/kernel_completion_owner.py:_expanded_zero_edit_submit_menu":
+        "Projects the reserved submit menu in its existing order.",
+    "src/stateframe/engine/kernel_completion_owner.py:_preserve_zero_edit_terminal_menu":
+        "Retains a reserved terminal menu only for the existing menu shapes.",
+    "src/stateframe/engine/kernel_completion_owner.py:stall_open_work_frame":
+        "No-progress stall recovery menu rendered into the frame.",
+    "src/stateframe/engine/kernel_completion_owner.py:legal_next_actions.add":
+        "Admission rule for offering legacy repair actions after a green check.",
+    "src/stateframe/engine/kernel_completion_owner.py:legal_next_actions":
+        "Fixed menu of open-work actions offered after a green check.",
+    "src/stateframe/engine/kernel_completion_owner.py:align_tools_to_completion_route":
+        "Keeps specific legacy repair tools on the projected wire menu.",
+    "src/stateframe/engine/kernel_completion_owner.py:_rejection_template_tool_admissible":
+        "Rejected-edit recovery admits the single str_replace schema.",
+    "src/stateframe/engine/kernel_completion_owner.py:_rejection_menu_admission":
+        "Required-context lookup is tied to the str_replace-only rejection menu.",
+    "src/stateframe/engine/kernel_completion_owner.py:_terminal_tool_menu_impl":
+        "Fixed terminal menu and order for runs without host checks.",
+}
+
+
+def _list_symbol(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> str:
+    scopes = []
+    while node in parents:
+        node = parents[node]
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            scopes.append(node.name)
+        elif isinstance(parents.get(node), ast.Module):
+            if isinstance(node, ast.Assign) and len(node.targets) == 1:
+                target = node.targets[0]
+            elif isinstance(node, ast.AnnAssign):
+                target = node.target
+            else:
+                continue
+            if isinstance(target, ast.Name):
+                scopes.append(target.id)
+    return ".".join(reversed(scopes))
+
+
+def _literal_tool_lists() -> tuple[
+        list[tuple[str, int, frozenset[str]]], dict[str, list[int]]]:
     """Every set/tuple/list literal of strings in the engine naming str_replace."""
     found: list[tuple[str, int, frozenset[str]]] = []
+    reviewed: dict[str, list[int]] = {key: [] for key in OFFER_REVIEWED}
+    reviewed_paths = {key.split(":", 1)[0] for key in OFFER_REVIEWED}
     for path in sorted(ENGINE.rglob("*.py")):
         if path.name == "kernel_edit_tool_names.py":
             continue
+        rel = path.relative_to(ROOT).as_posix()
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        parents = ({child: parent for parent in ast.walk(tree)
+                    for child in ast.iter_child_nodes(parent)} if rel in reviewed_paths else {})
         for node in ast.walk(tree):
             if not isinstance(node, (ast.Set, ast.Tuple, ast.List)):
                 continue
@@ -65,12 +120,19 @@ def _literal_tool_lists() -> list[tuple[str, int, frozenset[str]]]:
                     members |= set(names.PROTOCOL_EDIT_TOOL_NAMES)
             members = frozenset(members)
             if SENTINEL in members:
-                rel = path.relative_to(ROOT).as_posix()
                 found.append((rel, node.lineno, members))
-    return found
+                if parents and not members & names.PROTOCOL_EDIT_TOOL_NAMES:
+                    key = f"{rel}:{_list_symbol(node, parents)}"
+                    if key in reviewed:
+                        reviewed[key].append(node.lineno)
+    return found, reviewed
 
 
-LITERAL_LISTS = _literal_tool_lists()
+LITERAL_LISTS, REVIEWED_OFFER_LINES = _literal_tool_lists()
+REVIEWED_OFFER_IDS = {
+    f"{key.split(':', 1)[0]}:{lines[0]}"
+    for key, lines in REVIEWED_OFFER_LINES.items() if len(lines) == 1
+}
 
 
 def _list_id(entry: tuple[str, int, frozenset[str]]) -> str:
@@ -135,6 +197,11 @@ def test_legacy_only_lists_never_name_protocol_tools() -> None:
         assert not members & names.PROTOCOL_EDIT_TOOL_NAMES
 
 
+def test_reviewed_offers_identify_one_legacy_list_each() -> None:
+    for symbol, lines in REVIEWED_OFFER_LINES.items():
+        assert len(lines) == 1, f"{symbol} must identify one reviewed tool list, found {lines}"
+
+
 @pytest.mark.parametrize("entry", [
     pytest.param(
         entry, id=_list_id(entry),
@@ -142,7 +209,8 @@ def test_legacy_only_lists_never_name_protocol_tools() -> None:
             strict=True,
             reason=f"{_list_id(entry)} hardcodes edit tools without "
                    f"{names.EDIT_SOURCE_TOOL}; derive it from EDIT_TOOL_NAMES"))
-    for entry in LITERAL_LISTS if entry[0] not in LEGACY_ONLY_LISTS
+    for entry in LITERAL_LISTS
+    if entry[0] not in LEGACY_ONLY_LISTS and _list_id(entry) not in REVIEWED_OFFER_IDS
 ])
 def test_literal_list_names_edit_source(entry: tuple[str, int, frozenset[str]]) -> None:
     """Each literal edit-tool list derives from the constant (names edit_source)."""
