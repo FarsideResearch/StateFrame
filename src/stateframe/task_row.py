@@ -21,7 +21,7 @@ TEXT_SUFFIXES = {
     ".csv", ".sql", ".html", ".css", ".js", ".ts", ".sh", ".in",
 }
 TEST_FILE = re.compile(r"(^|/)(test_[^/]*\.py|[^/]*_test\.py)$")
-TASK_PATH = re.compile(r"(?<![\w./-])(?:[\w.-]+/)+[\w.-]*")
+TASK_PATH = re.compile(r"(?<![\w./-])(?:(?:[\w.-]+/)+[\w.-]*|[\w.-]+\.[\w-]+)")
 TASK_ACTION = re.compile(r"\b(build|create|write|produce|save|generate|add|read|load|use)\b",
                          re.IGNORECASE)
 NONPUBLIC_PARTS = frozenset({
@@ -128,9 +128,9 @@ def auto_scope(task: str, product: dict[str, str], checks: dict[str, str]) -> li
     """Editable files chosen for an over-limit repository when no --target/--edit was given.
 
     Product files the task names, then product modules the given checks import, then one more
-    import hop from those, at most AUTO_SCOPE_LIMIT in that order. An empty result makes the
-    caller fall back to the whole product set (see resolve_edit_scope). Deterministic: the same
-    repository and task give the same scope.
+    import hop from those, at most AUTO_SCOPE_LIMIT in that order. An empty result means the
+    caller must ask for an explicit scope rather than grant the whole product set. Deterministic:
+    the same repository and task give the same scope.
     """
     chosen: list[str] = []
 
@@ -170,14 +170,9 @@ def auto_scope(task: str, product: dict[str, str], checks: dict[str, str]) -> li
 # is still present in the engine's sandbox as read-only context (see _child.py).
 DECLARE_ALL_LIMIT = 200
 
-# A fallback_full row lists at most this many extra tests/ files in public_tests (the checks the
-# run was given are always listed); the count of the rest is row["public_tests_omitted"].
-FALLBACK_PUBLIC_TESTS_CAP = 25
-
 # Where a row's editable scope came from, recorded as row["scope_source"] so a run shows it.
 SCOPE_EXPLICIT = "explicit"          # --target and/or --edit given
 SCOPE_INFERRED = "inferred"          # over the limit: auto_scope found files from the task/checks
-SCOPE_FALLBACK_FULL = "fallback_full"  # over the limit: nothing named or inferred, whole product set
 SCOPE_WHOLE_REPO = "whole_repo"      # at or below the limit with no flags: unscoped, as before
 
 
@@ -188,8 +183,8 @@ def resolve_edit_scope(task: str, product: dict[str, str], *, target: str | None
     ``target``/``edits`` are already validated against ``product``. ``--edit`` always scopes; a
     ``--target`` alone scopes only over the limit (small repos keep it as a hint, as before). A repo
     at or below DECLARE_ALL_LIMIT with no flags stays unscoped. Over the limit with no flags,
-    auto_scope chooses the files; when it finds none, the whole product set is the scope and the
-    row is unscoped, the same as a small repo, so the run is never refused before turn 1.
+    auto_scope chooses the files; if it finds none, refuse before the run so every product file
+    cannot accidentally become editable.
     """
     large = len(product) > DECLARE_ALL_LIMIT
     if edits or (large and target):
@@ -200,7 +195,9 @@ def resolve_edit_scope(task: str, product: dict[str, str], *, target: str | None
     inferred = auto_scope(task, product, steering)
     if inferred:
         return {path: product[path] for path in inferred}, True, SCOPE_INFERRED
-    return product, False, SCOPE_FALLBACK_FULL
+    raise TaskRowError(
+        f"could not infer an editable file in a repository with more than {DECLARE_ALL_LIMIT} "
+        "product files; pass --target or --edit to choose the scope")
 
 
 # Opt-in edit scope widening (STATEFRAME_EDIT_SCOPE_WIDEN / --edit-scope widen) admits at most
@@ -305,16 +302,9 @@ def build_row(work: WorkCopy, *, task: str, checks: list[str] | None = None,
     # sandbox as context. Other tests stay in the repository copy, not the row.
     product, scoped, scope_source = resolve_edit_scope(
         task, all_product, target=target, edits=edits, steering=steering)
-    omitted_tests = 0
     if not scoped:
         # Other tests under tests/ (fixtures, conftest, helpers) stay visible as public test files.
-        # A whole-product-set fallback in a large repo keeps only a capped sample in the row (the
-        # full tests/ tree is still in the sandbox and protected there); omitted_tests counts the rest.
         extra = [path for path in texts if path.startswith("tests/") and path not in public_tests]
-        if scope_source == SCOPE_FALLBACK_FULL:
-            extra.sort()
-            omitted_tests = max(0, len(extra) - FALLBACK_PUBLIC_TESTS_CAP)
-            extra = extra[:FALLBACK_PUBLIC_TESTS_CAP]
         for path in extra:
             public_tests[path] = texts[path]
     entry = target or guess_entry(product, {p: public_tests[p] for p in declared_checks})
@@ -358,8 +348,6 @@ def build_row(work: WorkCopy, *, task: str, checks: list[str] | None = None,
         "test_src": public_tests[first_check],
         "_skip_db": True,
     }
-    if omitted_tests:
-        row["public_tests_omitted"] = omitted_tests
     if protect_tests != "all":
         row.update(protect_tests=protect_tests,
                    test_file_paths=sorted(test_files),

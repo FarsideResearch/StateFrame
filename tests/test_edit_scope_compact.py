@@ -1,7 +1,4 @@
-"""A fallback_full run (every product file editable, nothing named or inferred) must keep the
-frame and per-call cost bounded: the edit contract carries a whole-product-set marker and a count,
-never a path list, and editing any product file stays authorized.  Explicit, inferred and small
-whole_repo rows are byte-identical to the listed form (digest pinned at 71739465)."""
+"""Compact edit contracts keep even explicitly declared large product sets bounded."""
 from __future__ import annotations
 
 import json
@@ -13,8 +10,7 @@ import pytest
 import edit_scope_parity as parity
 import kernel_edit_affordance as affordance
 from probes import react_repair as rr
-from stateframe.task_row import (DECLARE_ALL_LIMIT, FALLBACK_PUBLIC_TESTS_CAP,
-                                 SCOPE_FALLBACK_FULL, build_row)
+from stateframe.task_row import DECLARE_ALL_LIMIT, TaskRowError, build_row
 from stateframe.workcopy import create
 
 # Digest of parity.surfaces(50) computed at 71739465 (before the compact scope existed).
@@ -155,7 +151,7 @@ def test_receipt_paths_are_bounded_over_the_limit_only():
     assert bounded["paths_count"] == 6800 and len(bounded["paths"]) == DECLARE_ALL_LIMIT
 
 
-def _fallback_repo(tmp_path, extra_tests):
+def _large_repo_with_tests(tmp_path, extra_tests):
     repo = tmp_path / "repo"
     (repo / "pkg").mkdir(parents=True)
     for index in range(DECLARE_ALL_LIMIT + 5):
@@ -168,34 +164,32 @@ def _fallback_repo(tmp_path, extra_tests):
     return create(repo, tmp_path / "copy")
 
 
-def test_fallback_row_caps_public_tests_with_a_typed_count(tmp_path):
-    extra = FALLBACK_PUBLIC_TESTS_CAP + 30
-    work = _fallback_repo(tmp_path, extra)
-    row = build_row(work, task="Something is broken.", checks=["tests/test_main.py"])
-    assert row["scope_source"] == SCOPE_FALLBACK_FULL
-    assert "tests/test_main.py" in row["public_tests"]
-    assert len(row["public_tests"]) == 1 + FALLBACK_PUBLIC_TESTS_CAP
-    total_extra = extra + 1  # + conftest.py
-    assert row["public_tests_omitted"] == total_extra - FALLBACK_PUBLIC_TESTS_CAP
-    assert isinstance(row["public_tests_omitted"], int)
+def test_large_uninferred_row_requires_explicit_scope(tmp_path):
+    work = _large_repo_with_tests(tmp_path, 30)
+    with pytest.raises(TaskRowError, match="pass --target or --edit"):
+        build_row(work, task="Something is broken.", checks=["tests/test_main.py"])
 
 
-def test_small_fallback_row_keeps_every_test_and_adds_no_count(tmp_path):
-    work = _fallback_repo(tmp_path, 3)
-    row = build_row(work, task="Something is broken.", checks=["tests/test_main.py"])
-    assert len(row["public_tests"]) == 1 + 3 + 1
-    assert "public_tests_omitted" not in row
+def test_explicit_scope_still_builds_a_large_repo_row(tmp_path):
+    work = _large_repo_with_tests(tmp_path, 3)
+    row = build_row(work, task="Something is broken.", checks=["tests/test_main.py"],
+                    target="pkg/mod_000.py")
+    assert row["scope_source"] == "explicit"
+    assert list(row["files"]) == ["pkg/mod_000.py"]
+    assert list(row["public_tests"]) == ["tests/test_main.py"]
 
 
-def test_real_fallback_row_yields_a_bounded_contract_that_authorizes_any_file(tmp_path):
-    work = _fallback_repo(tmp_path, 0)
-    row = build_row(work, task="Something is broken.", checks=["tests/test_main.py"])
-    assert row["scope_source"] == SCOPE_FALLBACK_FULL and row["scoped_edits"] is False
+def test_inferred_scope_contract_only_authorizes_the_named_file(tmp_path):
+    work = _large_repo_with_tests(tmp_path, 0)
+    row = build_row(work, task="Something is broken in pkg/mod_000.py.",
+                    checks=["tests/test_main.py"])
+    assert row["scope_source"] == "inferred" and row["scoped_edits"] is True
     declared = [p for p in row["files"] if p.endswith(".py")]
     contract = affordance.contract(multi_file=True, entry_path=None, entry_fn=None,
                                    product_paths=declared)
     assert len(parity.serialize(contract)) < EDIT_SCOPE_BOUND
-    assert affordance.path_editable(contract, "pkg/mod_204.py", row=row)
+    assert affordance.path_editable(contract, "pkg/mod_000.py", row=row)
+    assert not affordance.path_editable(contract, "pkg/mod_204.py", row=row)
 
 
 # --- Compact-scope follow-ups: bundle targets, whole-set membership, widening, racy stat cache,
