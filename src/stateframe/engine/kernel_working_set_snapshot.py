@@ -5,7 +5,7 @@ runtime, workspace, environment, journal, clock or residency index.
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 import hashlib
 import json
 from pathlib import Path
@@ -128,6 +128,8 @@ class PreparationSnapshot:
     # Fixed-message coordinates, explicitly owned by assignment-derived truth.
     # Other fixed messages remain opaque regardless of host-looking contents.
     truth_message_indexes: tuple[int, ...] | None = None
+    # Complete native grep pages have no continuation footer to carry this.
+    grep_result_digests: tuple[tuple[str, str], ...] = field(default=(), repr=False)
 
     @property
     def slots(self) -> tuple[SourceSlot, ...]:
@@ -146,6 +148,15 @@ class PreparationSnapshot:
         if not isinstance(self.current_revisions, (list, tuple)):
             raise ValueError("current revisions must be finite")
         object.__setattr__(self, "current_revisions", tuple(tuple(row) for row in self.current_revisions))
+        if not isinstance(self.grep_result_digests, (list, tuple)):
+            raise TypeError("grep result-set bindings must be a list or tuple")
+        grep_digests = tuple(tuple(row) if isinstance(row, (list, tuple)) else ()
+                             for row in self.grep_result_digests)
+        if (any(len(row) != 2 or not isinstance(row[0], str) or not row[0]
+                or not isinstance(row[1], str) or not re.fullmatch(r"[0-9a-f]{24}", row[1])
+                for row in grep_digests) or len(dict(grep_digests)) != len(grep_digests)):
+            raise ValueError("invalid grep result-set bindings")
+        object.__setattr__(self, "grep_result_digests", grep_digests)
         if not isinstance(self.fixed_body, bytes):
             raise ValueError("snapshot provider body must be immutable bytes")
         body = json.loads(self.fixed_body)
@@ -192,7 +203,8 @@ class PreparationSnapshot:
 
     @property
     def snapshot_digest(self) -> str:
-        return digest(repr(self).encode())
+        extra = f"grep_result_digests={self.grep_result_digests!r}" if self.grep_result_digests else ""
+        return digest((repr(self) + extra).encode())
 
     @property
     def ledger_digest(self) -> str:
@@ -270,6 +282,43 @@ def _check_output_paths(output: str, runtime: object, editable: set[str]) -> set
     return paths
 
 
+def _freeze_grep_digests(exchange, owner) -> tuple[tuple[str, str], ...]:
+    """Match host page receipts to native result rows before detaching."""
+    if not exchange:
+        return ()
+    grep_calls = {call["id"] for call in exchange[0]["tool_calls"]
+                  if isinstance(call.get("function"), dict) and call["function"].get("name") == "grep"}
+    pending = {}
+    for row in exchange[1:]:
+        call_id, content = row["tool_call_id"], row.get("content")
+        if call_id not in grep_calls or row.get("name", "grep") != "grep" or not isinstance(content, str):
+            continue
+        header = content.partition("\n")[0]
+        if (header.startswith("[search page] shown=") and " complete=true" in header
+                and not header.startswith(("[search page] shown=0 ", "[search page] shown=1 "))):
+            pending[call_id] = content
+    if not pending:
+        return ()
+    bindings = []
+    for receipt in reversed(getattr(owner, "_receipts", ())):
+        page = receipt.get("grep_page") if isinstance(receipt, dict) and receipt.get("kind") == "grep" else None
+        if not isinstance(page, dict):
+            continue
+        call_id = page.get("provider_call_id")
+        if not isinstance(call_id, str) or call_id not in pending:
+            continue
+        content = pending.pop(call_id)
+        chars, result = page.get("chars"), receipt.get("result_set_digest")
+        if (type(chars) is int and 0 < chars <= len(content)
+                and (chars == len(content) or content[chars] == "\n")
+                and isinstance(result, str) and re.fullmatch(r"[0-9a-f]{24}", result)
+                and digest(content[:chars].encode()) == page.get("sha256")):
+            bindings.append((call_id, result))
+        if not pending:
+            break
+    return tuple(sorted(bindings))
+
+
 def freeze_preparation(body, runtime, *, request_id: str, byte_cap: int,
                        prompt_limit: int = 33_344, frame_limit: int | None = None,
                        layouts=("plain",), dialect="llama.cpp",
@@ -318,8 +367,9 @@ def freeze_preparation(body, runtime, *, request_id: str, byte_cap: int,
 
     # Only assembler-owned user windows before the suffix can be optional.
     try:
-        _exchange, boundary, _tail = _validated_exchange_and_volatile_tail(messages)
+        exchange, boundary, _tail = _validated_exchange_and_volatile_tail(messages)
     except (ValueError, FrameFit5Error):
+        exchange = ()
         default_boundary = len(messages)
         if messages and str(messages[-1].get("content", "")).startswith("[WIRE VOLATILE TAIL]"):
             default_boundary -= 1
@@ -476,6 +526,7 @@ def freeze_preparation(body, runtime, *, request_id: str, byte_cap: int,
         prompt_limit, frame_limit, layouts=tuple(layouts), insertion_index=insertion,
         dialect=dialect, reasoning_mode=reasoning_mode,
         truth_message_indexes=tuple(truth_indexes),
+        grep_result_digests=_freeze_grep_digests(exchange, getattr(runtime, "owner", None)),
         recovery_allowed=any(isinstance(t, dict) and isinstance(t.get("function"), dict)
             and t["function"].get("name") == "read" for t in frozen.get("tools", ())),
         recovery_owner_allowed=owner_actions is not None and "read" in owner_actions,

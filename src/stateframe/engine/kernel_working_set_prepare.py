@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from functools import lru_cache
@@ -181,8 +182,8 @@ def _compact_history(frame: dict[str, object], *, minimum: bool) -> None:
 
 
 # Tool calls whose replies are opaque process observations. Their delivery may
-# be shortened because the tool tape retains the whole observation; every
-# other tool row (read pages, source carriers, custom tools) stays verbatim.
+# be shortened because the tool tape retains the whole observation. Native
+# grep pages have a separate continuation contract. Source carriers stay verbatim.
 EXECUTION_TOOLS = frozenset({"shell", "job_wait", "job_output"})
 # Descending per-row byte allowances, priced as envelope variants. Replies and
 # narrative rows at or under the legacy 512-byte threshold are never bounded.
@@ -199,14 +200,76 @@ def _excerpt(output: bytes, allowance: int) -> tuple[str, str, int]:
     return left, right, len(output) - len(left.encode()) - len(right.encode())
 
 
-def _bound_exchange(body: dict[str, object], boundary: int, allowance: int) -> bool:
+def _bounded_search_page(content, arguments, schema, allowance, *, result_set_digest=None):
+    """Keep whole hits. Resume the same result set at the first omitted row."""
+    from kernel_completion_owner import validate_json_schema
+    from kernel_navigation_pages import _cursor, _offset
+
+    rows = content.split("\n")
+    header = re.fullmatch(r"\[search page\] shown=([0-9]{1,9}) total=([0-9]{1,12}) "
+                          r"offset=([0-9]{1,12}) complete=(true|false)( .*)?", rows[0])
+    if not header or len(rows) < 3:
+        return content
+    shown, total, offset = map(int, header.groups()[:3])
+    if shown < 2 or len(rows) < shown + 2:
+        return content
+    complete = header[4] == "true"
+    if complete:
+        footer = re.fullmatch(r"0 more; complete=true(;.*)?", rows[1])
+        if not footer or offset + shown != total:
+            return content
+        warning = footer[1]
+        result_digest = result_set_digest
+    else:
+        footer = re.fullmatch(
+            r"([0-9]{1,12}) more, page with cursor=nav1:([0-9a-f]{24}):([0-9]{1,12})(;.*)?", rows[1])
+        if (not footer or offset + shown >= total or int(footer[1]) != total - offset - shown
+                or int(footer[3]) != offset + shown):
+            return content
+        result_digest, warning = footer[2], footer[4]
+    kept = 1
+    size = len(rows[2].encode())
+    for row in rows[3:2 + shown]:
+        size += 1 + len(row.encode())
+        if size > allowance:
+            break
+        kept += 1
+    if kept == shown:
+        return content
+    try:
+        args = json.loads(arguments) if isinstance(arguments, str) else arguments
+        if not isinstance(args, dict):
+            return content
+        requested = args.get("cursor")
+        if complete and offset > 0 and result_digest is None and isinstance(requested, str):
+            incoming = re.fullmatch(r"nav1:([0-9a-f]{24}):[0-9]{1,12}", requested)
+            if incoming:
+                result_digest = incoming[1]
+        if result_digest is None or _offset(requested, result_digest) != offset:
+            return content
+    except ValueError:
+        return content
+    cursor = _cursor(result_digest, offset + kept)
+    properties = schema.get("properties")
+    if (not isinstance(properties, Mapping) or "cursor" not in properties
+            or validate_json_schema(schema, {**args, "cursor": cursor})):
+        return content
+    # Preserve scan warnings, symbol evidence and host annotations after the hits.
+    return "\n".join([f"[search page] shown={kept} total={total} offset={offset} complete=false{header[5] or ''}",
+                      f"{total-offset-kept} more, page with cursor={cursor}{warning or ''}",
+                      *rows[2:2 + kept], *rows[2 + shown:]])
+
+
+def _bound_exchange(body: dict[str, object], boundary: int, allowance: int,
+                    grep_schema: Mapping | None = None,
+                    grep_digests: Mapping[str, str] | None = None) -> bool:
     """Bound oversized execution replies and narrative rows in place.
 
     This is the allocator's priced counterpart of the legacy fit_execution_
     replies and optional-message trim, which ON skips. Markers match the legacy
     delivery grammar so downstream readers see one vocabulary. Task rows,
-    host-marker user rows, the opaque user suffix, non-execution tool rows and
-    already-bounded rows are never rewritten. Returns whether anything changed.
+    host-marker user rows and the opaque user suffix retain their contents.
+    A native grep may yield a shorter page with a callable continuation.
     """
     from kernel_execution_reply_budget import _parts
 
@@ -217,7 +280,7 @@ def _bound_exchange(body: dict[str, object], boundary: int, allowance: int) -> b
             continue
         for call in row.get("tool_calls") or ():
             if isinstance(call, Mapping) and isinstance(call.get("function"), Mapping):
-                calls[call.get("id")] = call["function"].get("name")
+                calls[call.get("id")] = call["function"]
     threshold = max(allowance, 512)
     changed = False
     for index, row in enumerate(messages):
@@ -226,7 +289,16 @@ def _bound_exchange(body: dict[str, object], boundary: int, allowance: int) -> b
             continue
         if role == "tool":
             call_id = row.get("tool_call_id")
-            name = calls.get(call_id)
+            function = calls.get(call_id, {})
+            name = function.get("name")
+            if (name == "grep" and row.get("name", name) == name and grep_schema is not None
+                    and len(content.encode()) > threshold):
+                bounded = _bounded_search_page(content, function.get("arguments"), grep_schema, allowance,
+                    result_set_digest=grep_digests.get(call_id) if grep_digests else None)
+                if bounded != content:
+                    row["content"] = bounded
+                    changed = True
+                continue
             if name not in EXECUTION_TOOLS or _EXECUTION_MARKER in content:
                 continue
             head, output, tail, prior_omitted = _parts(content, str(name))
@@ -255,7 +327,8 @@ def _bound_exchange(body: dict[str, object], boundary: int, allowance: int) -> b
 
 @lru_cache(maxsize=8)
 def _envelope_bodies(fixed_body: bytes, boundary: int, recovery: bool,
-                     recovery_schema: bytes) -> tuple[bytes, ...]:
+                     recovery_schema: bytes, truth_indexes: tuple[int, ...],
+                     grep_result_digests: tuple[tuple[str, str], ...]) -> tuple[bytes, ...]:
     """Freeze rich, compact-site, compact-history and minimum representations.
 
     This cache only memoizes immutable JSON transformations. It never calls a
@@ -270,6 +343,20 @@ def _envelope_bodies(fixed_body: bytes, boundary: int, recovery: bool,
     from kernel_open_site_capacity import location_inventory_candidate
 
     variants = [fixed_body]
+    fixed = json.loads(fixed_body)
+    grep_schema = None
+    for index in truth_indexes:
+        row = fixed["messages"][index]
+        content = row.get("content")
+        if row.get("role") == "user" and isinstance(content, str) and content.startswith("[StateFrame]\n"):
+            payload = json.loads(content.split("\n", 1)[1])
+            owner = payload.get("state", {}).get("framefit5", {}).get("owner_protocol", {})
+            actions = owner.get("admitted_actions")
+            if isinstance(actions, list) and "grep" in actions:
+                grep_schema = next((f["parameters"] for tool in fixed.get("tools", ())
+                    if isinstance(tool, dict) and isinstance((f := tool.get("function")), dict)
+                    and f.get("name") == "grep"
+                    and isinstance(f.get("parameters"), dict)), None)
     # Site compression can grow a tiny frame through recovery-route overhead.
     # Price both forms at each history rung instead of assuming additivity or
     # that a compact-looking local representation makes the whole body smaller.
@@ -310,10 +397,11 @@ def _envelope_bodies(fixed_body: bytes, boundary: int, recovery: bool,
     # Preference follows the legacy order: bound the exchange before pricing
     # the frame's compaction, on both the richest and the smallest frame.
     frame_variants = tuple(variants)
+    grep_digests = dict(grep_result_digests)
     for allowance in EXCHANGE_ALLOWANCES:
         for base in (frame_variants[0], min(frame_variants, key=len)):
             body = json.loads(base)
-            if not _bound_exchange(body, boundary, allowance):
+            if not _bound_exchange(body, boundary, allowance, grep_schema, grep_digests):
                 continue
             value = json.dumps(body).encode()
             if value not in variants:
@@ -333,7 +421,8 @@ def _envelope_variants(snapshot: PreparationSnapshot) -> tuple[PreparationSnapsh
     boundary = _insertion_index(snapshot, messages)
     variants = tuple(replace(snapshot, fixed_body=body) for body in _envelope_bodies(
         snapshot.fixed_body, boundary, snapshot.recovery_allowed and snapshot.recovery_owner_allowed,
-        json.dumps(_schema(snapshot), sort_keys=True).encode()))
+        json.dumps(_schema(snapshot), sort_keys=True).encode(), snapshot.truth_message_indexes,
+        snapshot.grep_result_digests))
     base = base_of(snapshot)
     if base is not None:
         # Identity-only siblings share every envelope's trial bytes.

@@ -1314,6 +1314,7 @@ class KernelBolt:
                 changed_paths: tuple[str, ...] = (),
                 read_contract: Mapping[str, object] | None = None,
                  result_set_digest: str | None = None,
+                 grep_page: str | None = None,
                  test_output: str | None = None,
                  effects: tuple[dict, ...] = (),
                  exit_code: int | None = None) -> None:
@@ -1407,6 +1408,13 @@ class KernelBolt:
         if request_id is None and runtime is not None:
             request_id = getattr(runtime, "current_request_id", None)
         tool_call_id = getattr(runtime, "current_tool_call_id", None)
+        if (kind == "grep" and result_set_digest and grep_page
+                and isinstance(tool_call_id, str) and tool_call_id):
+            rec["grep_page"] = {
+                "provider_call_id": tool_call_id,
+                "chars": len(grep_page),
+                "sha256": hashlib.sha256(grep_page.encode()).hexdigest(),
+            }
         dispatch_arguments_hash = (
             dispatch.get("arguments_hash")
             if dispatch_is_current and isinstance(dispatch.get("arguments_hash"), str)

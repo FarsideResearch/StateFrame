@@ -13596,7 +13596,12 @@ def work(d, *, resume=None):
                         json.dumps(_grep_metadata, sort_keys=True, ensure_ascii=False,
                                    separators=(",", ":"))[:150]
                         if _grep_error is None else _grep_error,
-                        result_set_digest=_grep_metadata.get("result_set_digest"))
+                        result_set_digest=_grep_metadata.get("result_set_digest"),
+                        grep_page=(_grep_page.text if _grep_audit is not None
+                                   and _name == "grep" and tool_call_id and _grep_page is not None
+                                   and _grep_metadata.get("schema") == "navigation-page/1"
+                                   and _grep_metadata.get("complete") is True
+                                   and _grep_shown > 1 else None))
                     if multifile:
                         _grep_snapshot = _source_snapshot(root, fileset.paths)
                         _annotate_receipt(

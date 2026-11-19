@@ -1,5 +1,7 @@
 """Allocator carriers must survive real closure and frozen-owner boundaries."""
 import copy
+from dataclasses import replace
+import hashlib
 import json
 from types import SimpleNamespace
 
@@ -207,6 +209,53 @@ def test_user_read_page_does_not_gain_uncertified_closure_authority(tmp_path, mo
         receipt = verify_final_source_delivery(copy.deepcopy(plan), body["messages"],
             sources={"a.py": text}, payload=json.dumps(body).encode())
         assert source_delivery_satisfied(receipt) is expected
+
+
+def test_certified_user_read_page_requires_matching_wire_position_and_identity(tmp_path, monkeypatch):
+    text = "before\nexact λ source\nlast line"
+    rt, _, page, plan = retained(tmp_path, monkeypatch, text, 2, 3)
+    # Freeze the capture alone so no standalone source window can prove the plan.
+    rt._request_source_closure = {}
+    snap = freeze_preparation(envelope(), rt, request_id="native-user", byte_cap=100_000)
+    prepared = prepare_candidate(snap, measure=lambda wire: (100, 100, "test"))
+    assert isinstance(prepared, PreparedCandidate)
+    certificate = prepared.rendered.certificate
+    assert verify_certificate(prepared.wire, certificate)
+    witness, = certificate.witnesses
+    body = json.loads(prepared.wire)
+    messages = body["messages"]
+    index = witness.message_index
+    assert messages[index] == {"role": "user", "content": page.text}
+
+    def receipt(carrier, wire=prepared.wire):
+        return verify_final_source_delivery(copy.deepcopy(plan), json.loads(wire)["messages"],
+            payload=wire, verified_capture_witnesses=(carrier,))
+
+    accepted = receipt(witness)
+    assert source_delivery_satisfied(accepted), accepted
+    proof, = accepted["delivery_proofs"]["a.py"]
+    assert proof["final_message_location"] == f"$.messages[{index}].content"
+
+    for invalid in (
+        replace(witness, message_index=index + 1),
+        replace(witness, mode="DEFERRED"),
+        replace(witness, receipt_identity=replace(witness.receipt_identity, revision="sha256:" + "0" * 64)),
+        replace(witness, receipt_identity=replace(witness.receipt_identity, first_line=1)),
+        replace(witness, payload_start=witness.payload_start + 1),
+    ):
+        assert not source_delivery_satisfied(receipt(invalid))
+
+    # An index with an exact page copy cannot stand in for the certified row.
+    messages.insert(index, {"role": "user", "content": "different row"})
+    assert not source_delivery_satisfied(receipt(witness, json.dumps(body).encode()))
+    messages.pop(index)
+    altered = page.text.replace("exact λ source", "other λ source")
+    messages[index]["content"] = altered
+    altered_wire = json.dumps(body).encode()
+    assert not source_delivery_satisfied(receipt(witness, altered_wire))
+    # The read-page parser must still reject altered source under the same revision.
+    altered_witness = replace(witness, carrier_sha256=hashlib.sha256(altered.encode()).hexdigest())
+    assert not source_delivery_satisfied(receipt(altered_witness, altered_wire))
 
 
 def test_historical_capture_keeps_read_grammar_and_cannot_prove_current_source(tmp_path, monkeypatch):
