@@ -291,6 +291,78 @@ def _free_global_loads(tree: ast.Module) -> list[ast.Name]:
     return found
 
 
+def _dynamic_import_calls(tree: ast.Module) -> list[tuple[ast.Call, str | None]]:
+    """Return importlib/__import__ calls and their statically resolved module, if known."""
+    importlib_modules: set[str] = set()
+    import_module_functions: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == 'importlib':
+                    importlib_modules.add(alias.asname or 'importlib')
+                elif alias.name.startswith('importlib.') and alias.asname is None:
+                    importlib_modules.add('importlib')
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module == 'importlib':
+            for alias in node.names:
+                if alias.name == 'import_module':
+                    import_module_functions.add(alias.asname or alias.name)
+
+    found: list[tuple[ast.Call, str | None]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        api = ''
+        if isinstance(node.func, ast.Name) and node.func.id == '__import__':
+            api = '__import__'
+        elif isinstance(node.func, ast.Name) and node.func.id in import_module_functions:
+            api = 'importlib.import_module'
+        elif (isinstance(node.func, ast.Attribute) and node.func.attr == 'import_module'
+              and isinstance(node.func.value, ast.Name)
+              and node.func.value.id in importlib_modules):
+            api = 'importlib.import_module'
+        if not api:
+            continue
+
+        name_arg = node.args[0] if node.args else next(
+            (keyword.value for keyword in node.keywords if keyword.arg == 'name'), None)
+        if not isinstance(name_arg, ast.Constant) or not isinstance(name_arg.value, str):
+            found.append((node, None))
+            continue
+        module_name = name_arg.value
+        if api == '__import__':
+            level_arg = node.args[4] if len(node.args) > 4 else next(
+                (keyword.value for keyword in node.keywords if keyword.arg == 'level'), None)
+            if level_arg is not None and not (
+                    isinstance(level_arg, ast.Constant) and level_arg.value == 0):
+                found.append((node, None))
+                continue
+        if module_name.startswith('.'):
+            package_arg = node.args[1] if api == 'importlib.import_module' and len(node.args) > 1 else next(
+                (keyword.value for keyword in node.keywords if keyword.arg == 'package'), None)
+            if (api != 'importlib.import_module' or not isinstance(package_arg, ast.Constant)
+                    or not isinstance(package_arg.value, str)):
+                found.append((node, None))
+                continue
+            package_parts = package_arg.value.split('.')
+            level = len(module_name) - len(module_name.lstrip('.'))
+            if level > len(package_parts):
+                found.append((node, None))
+                continue
+            base = package_parts[:len(package_parts) - level + 1]
+            suffix = module_name[level:].split('.') if module_name[level:] else []
+            module_name = '.'.join((*base, *suffix))
+        found.append((node, module_name))
+    return found
+
+
+def _dynamic_import_targets_producer(module: str, mapping: dict[str, str],
+                                     producer: set[str]) -> bool:
+    """An import executes its module and each parent package initializer."""
+    parts = module.split('.')
+    return any(mapping.get('.'.join(parts[:index])) in producer
+               for index in range(1, len(parts) + 1))
+
+
 def _coupling_for(src: UnitContract, dst: UnitContract, snapshot: Snapshot,
                   mapping: dict[str, str], deadline: float) -> tuple[str, str, tuple[Evidence, ...], str]:
     producer = {path for path in (*src.owns, *src.creates) if snapshot.exists(path)}
@@ -315,6 +387,11 @@ def _coupling_for(src: UnitContract, dst: UnitContract, snapshot: Snapshot,
                 tree = ast.parse(data.decode('utf-8'))
             except (UnicodeError, SyntaxError):
                 return 'UNKNOWN', 'UNPARSEABLE_PYTHON', (), ''
+            for call, module in _dynamic_import_calls(tree):
+                if module is None or _dynamic_import_targets_producer(module, mapping, producer):
+                    detail = ('dynamic import with computed name' if module is None
+                              else f'dynamic import {module}')
+                    return 'COUPLED', '', (Evidence(path, call.lineno, detail),), 'dynamic_import'
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
                     for alias in node.names:

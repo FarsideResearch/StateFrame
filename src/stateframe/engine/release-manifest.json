@@ -461,7 +461,7 @@
   "kernel_owner_first.py": "eac7ea07b08d90ebf42c057fb8ec5b8ca4113af43178dd1b7dc27fd2714afa08",
   "kernel_paged_source.py": "55a6e678dae442f7e93cd0e33a17ae7199105bcbb35dc2eb5ff84bf74d31b8f0",
   "kernel_parallel.py": "8e21513fc2969cb7575378fe3fef095bccda5764510e5eccd8677efdd02083f8",
-  "kernel_parallel_admission.py": "25afde60f9a644934d027b1c70c71b8cdfed1432e3db4b40a932b47ebe2ba8d1",
+  "kernel_parallel_admission.py": "2ff110ebc9e215d2db2d197112781a037d8d5339a2fea478d92d0d281e48dd98",
   "kernel_parallel_budget.py": "4485df03bec46f96a0b4fd4bf6aa199b332b6bb1697e4d6ce01926e8c0177efb",
   "kernel_parallel_contracts.py": "9cdd43a054c68790e39d15b22d956976fa5663751e89695b47824a07d77e5aa9",
   "kernel_parallel_meter.py": "8a5b94d56db8d4814d17f131350f0eeb1fe8650677fca57afc282037f3b42755",
