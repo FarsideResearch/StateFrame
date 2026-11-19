@@ -139,8 +139,9 @@ The corresponding profile or shell settings are:
 | `--parallel-check-permits` | `STATEFRAME_PARALLEL_CHECK_PERMITS` |
 | `--parallel-max` | `STATEFRAME_PARALLEL_MAX_CONCURRENCY` |
 
-`STATEFRAME_PARALLEL_DROP_TOOL_AFTER_TERMINAL` is on by default for runs with `--parallel`; set it to `off` to
-keep the `parallel` schema available after a verified, complete fan-out. It has no effect when `--parallel` is off.
+`STATEFRAME_PARALLEL_DROP_TOOL_AFTER_TERMINAL` is on by default for runs with `--parallel`: after a verified, complete
+fan-out, that exact plan cannot be dispatched again in the same run. The `parallel` schema stays available, so a
+different plan can still be dispatched. Set it to `off` to disable the re-dispatch guard. It has no effect when `--parallel` is off.
 
 ### Validation and request allowances
 
