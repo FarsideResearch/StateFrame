@@ -49,8 +49,16 @@ def _seconds(value: object) -> float | None:
 def attribute_termination(exit_code: object, *, memory_limit_killed: bool = False,
                           memory_limit_reason: object = None, stop_cause: object = None,
                           cpu_seconds_used: object = None,
-                          cpu_limit_seconds: object = None) -> Termination | None:
+                          cpu_limit_seconds: object = None,
+                          execution_stop: object = None) -> Termination | None:
     """Return what ended the check, or None for an ordinary exit."""
+    if execution_stop is not None:
+        from kernel_check_watchdog import validate_execution_stop
+        stop = validate_execution_stop(execution_stop)
+        if stop is not None:
+            return Termination(str(stop["cause"]),
+                               str(stop["resource"]) if stop["resource"] else None,
+                               "check stopped: " + str(stop["cause"]).replace("_", " "))
     if exit_code == 124:
         return Termination("wall_timeout", None, "the check exceeded its wall-clock bound")
     number = signal_of(exit_code)
@@ -80,7 +88,7 @@ def attribute_termination(exit_code: object, *, memory_limit_killed: bool = Fals
 
 
 _EVIDENCE_KEYS = frozenset({"memory_limit_reason", "stop_cause", "cpu_seconds_used",
-                            "cpu_limit_seconds"})
+                            "cpu_limit_seconds", "execution_stop"})
 
 
 def receipt_fields(exit_code: object, *, memory_limit_killed: bool = False,

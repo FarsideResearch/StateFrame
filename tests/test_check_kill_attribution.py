@@ -88,21 +88,22 @@ def test_model_is_told_a_limit_only_when_one_was_reached():
     assert named.startswith("CHECK PROCESS STOPPED BY RLIMIT_CPU=3600s (signal 24)")
 
 
-def test_cpu_backstop_defaults_to_an_hour_and_follows_the_policy(monkeypatch):
+def test_cpu_cap_is_explicit_nullable_and_strict(monkeypatch):
     monkeypatch.delenv("STATEFRAME_PUBLIC_CHECK_CPU_SECONDS", raising=False)
-    assert policy.check_cpu_backstop_seconds() == 3600.0
+    assert policy.check_cpu_backstop_seconds() is None
     monkeypatch.setenv("STATEFRAME_PUBLIC_CHECK_CPU_SECONDS", "120")
     assert policy.check_cpu_backstop_seconds() == 120.0
-    for bad in ("nope", "-5", "0", "nan", "inf"):
+    monkeypatch.setenv("STATEFRAME_PUBLIC_CHECK_CPU_SECONDS", "0")
+    assert policy.check_cpu_backstop_seconds() is None
+    for bad in ("nope", "-5", "nan", "inf", "", "1e9"):
         monkeypatch.setenv("STATEFRAME_PUBLIC_CHECK_CPU_SECONDS", bad)
-        assert policy.check_cpu_backstop_seconds() == 3600.0
-    monkeypatch.setenv("STATEFRAME_PUBLIC_CHECK_CPU_SECONDS", "1e9")
-    assert policy.check_cpu_backstop_seconds() == policy.MAX_CPU_SECONDS
+        with pytest.raises(policy.ExecutionPolicyError):
+            policy.check_cpu_backstop_seconds()
 
 
-def test_shipped_default_profile_uses_the_backstop_not_a_budget():
+def test_shipped_default_profile_has_no_product_cpu_budget():
     profile = json.loads((ROOT / "src/stateframe/profiles/r2hc3.json").read_text())
-    assert profile["switches"]["STATEFRAME_PUBLIC_CHECK_CPU_SECONDS"] == "3600"
+    assert profile["switches"]["STATEFRAME_PUBLIC_CHECK_CPU_SECONDS"] == "0"
 
 
 def test_host_dependent_kills_do_not_change_wire_identity():
@@ -151,7 +152,7 @@ def test_real_external_sigkill_is_reported_unattributed_with_cpu_used(tmp_path):
     fields = receipt_fields(code, evidence={"cpu_seconds_used": result.cpu_seconds_used,
                                             "cpu_limit_seconds": result.cpu_limit_seconds})
     assert fields["likely_initiator"] == "external_sigkill_unattributed"
-    assert fields["termination_detail"].endswith(" of 3600s")
+    assert fields["termination_detail"].endswith(" of unknown")
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux RLIMIT_CPU")

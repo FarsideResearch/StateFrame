@@ -299,14 +299,19 @@ def monitored_group_exists(process_group_id: int) -> bool:
 
 
 def wait_for_checkpoint_saved(run_dir: Path, *, deadline: float, minimum: int = 1,
-                              what: str) -> None:
-    """Wait for complete checkpoint-save journal records before interrupting a run."""
+                              what: str,
+                              process: subprocess.Popen[object] | EngineProcess | None = None) -> None:
+    """Wait for checkpoint saves, reporting failed saves or an exited child promptly."""
     if minimum < 1:
         raise ValueError("minimum checkpoint saves must be positive")
     events = run_dir / "checkpoints" / "events.jsonl"
     while True:
         saved = 0
         last_event = None
+        failure_seen = False
+        failure_reason = None
+        disabled_seen = False
+        disabled_reason = None
         try:
             lines = events.read_bytes().splitlines(keepends=True)
         except FileNotFoundError:
@@ -321,9 +326,44 @@ def wait_for_checkpoint_saved(run_dir: Path, *, deadline: float, minimum: int = 
                 continue
             if isinstance(row, dict):
                 last_event = row.get("event")
-                saved += last_event == "checkpoint_saved"
+                if last_event == "checkpoint_saved":
+                    saved += 1
+                    failure_seen = False
+                    disabled_seen = False
+                elif last_event == "checkpoint_failed":
+                    failure_reason = row.get(
+                        "failure_reason", row.get("error", "<missing>")
+                    )
+                    failure_seen = True
+                    disabled_seen = False
+                elif last_event == "checkpoint_disabled":
+                    disabled_reason = row.get("reason", "<missing>")
+                    disabled_seen = True
+                    failure_seen = False
+                elif last_event == "checkpoint_started":
+                    # A retry is active; keep its existing deadline rather than failing on
+                    # the previous completed attempt.
+                    failure_seen = False
+                    disabled_seen = False
         if saved >= minimum:
             return
+        if process is not None:
+            returncode = process.poll()
+            if returncode is not None:
+                raise AssertionError(
+                    f"{what}: child process exited with exit code {returncode} before checkpoint save "
+                    f"in {run_dir}; saw {saved}/{minimum} saves; last event: {last_event!r}"
+                )
+        if failure_seen:
+            raise AssertionError(
+                f"{what}: checkpoint_failed before checkpoint save in {run_dir}; "
+                f"failure_reason: {failure_reason!r}; saw {saved}/{minimum} saves"
+            )
+        if disabled_seen:
+            raise AssertionError(
+                f"{what}: checkpoint_disabled before checkpoint save in {run_dir}; "
+                f"reason: {disabled_reason!r}; saw {saved}/{minimum} saves"
+            )
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise AssertionError(
@@ -346,7 +386,7 @@ def signal_run_owned(run_dir: Path, popen: subprocess.Popen[object] | EngineProc
                      require_checkpoint_saved: bool = True, group: bool = False) -> None:
     """Interrupt a held run process, optionally including its private group."""
     if require_checkpoint_saved:
-        wait_for_checkpoint_saved(run_dir, deadline=deadline, what=what)
+        wait_for_checkpoint_saved(run_dir, deadline=deadline, what=what, process=popen)
     if group:
         signal_owned(popen, sig)
     else:

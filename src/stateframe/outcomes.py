@@ -155,6 +155,13 @@ def sealed_artifact_digest(terminal: dict[str, object]) -> str | None:
     return submission["artifact_digest"]
 
 
+def check_label(result: dict[str, object]) -> str:
+    if result.get("execution_complete") is False:
+        return "NO PROGRESS" if result.get("termination_reason") == "no_progress" else "INCOMPLETE"
+    passed = result["passed"]
+    return "PASS" if passed else "FAIL" if passed is False else "NOT RUN"
+
+
 def project(summary: dict[str, object], *, cancelled: bool = False,
             timed_out: bool = False, check_output: str = "",
             check_repo: Path | None = None, declared_test_command: bool = False) -> dict[str, object]:
@@ -201,8 +208,15 @@ def project(summary: dict[str, object], *, cancelled: bool = False,
     after = summary.get("tests_after") or {}
     digest = summary.get("candidate_sha256")
     bound = bool(digest) and after.get("candidate_sha256") == digest
-    check = ("pass" if after.get("passed") is True and after.get("exit_code") == 0 else "fail") \
-        if bound else "not_run"
+    check = "not_run"
+    if bound:
+        from .engine.kernel_check_watchdog import validate_execution_stop
+
+        stop = validate_execution_stop(after.get("execution_stop"))
+        if stop is not None or after.get("execution_complete") is False:
+            check = "no_progress" if stop is not None and stop["cause"] == "no_progress" else "incomplete"
+        else:
+            check = "pass" if after.get("passed") is True and after.get("exit_code") == 0 else "fail"
     sealed_digest = sealed_artifact_digest(terminal)
     stored = sealed_digest is not None and summary.get("candidate_artifact_digest") == sealed_digest
     captured = summary.get("candidate_captured") is True
@@ -244,7 +258,10 @@ def project(summary: dict[str, object], *, cancelled: bool = False,
         detail = "; ".join(f"{item['test']} ({item['reason']}; heuristic)" for item in findings)
         count = len({item["test"].split("::", 1)[0] for item in findings})
         projected["verification"] += f", but {count} test file weakened: {detail}"
-    if status == "TEST_REPORTED_WRONG" and summary.get("wrong_test_evidence"):
+    if check in {"no_progress", "incomplete"}:
+        projected["verification"] = "verification incomplete"
+        projected["verification_detail"] = str((stop or {}).get("cause", "check interrupted")).replace("_", " ")
+    elif status == "TEST_REPORTED_WRONG" and summary.get("wrong_test_evidence"):
         projected["verification"] = "stopped: test reported wrong, see evidence"
     elif projected.get("verification"):
         projected["verification_detail"] = (

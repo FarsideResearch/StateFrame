@@ -113,6 +113,7 @@ def record_native_observation(
         wrapper_parse_error: object = None,
         counts: object = None, selector_scope: object = None,
         execution_complete: object = None, termination_reason: object = None,
+        execution_stop: Mapping[str, object] | None = None,
         output_truncated: object = None,
         memory_limit_mechanism: str | None = None,
         cgroup_leaf_pattern: str | None = None,
@@ -120,6 +121,8 @@ def record_native_observation(
         finalize: bool = True,
 ) -> dict[str, object]:
     """Forward one native observation without creating an adapter-side verdict."""
+    if execution_stop is not None:
+        typed_observation = dict(typed_observation or {}, execution_stop=execution_stop)
     row = record_check_output(
         runtime,
         selector=selector,

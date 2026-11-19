@@ -113,10 +113,6 @@ def mac_process_argv(pid: int) -> list[str] | None:
     return argv
 
 
-# Run wall applied to a worker whose spec sets none, so a stuck worker cannot hold a slot forever.
-DEFAULT_WORKER_WALL_SECONDS = 4 * 3600.0
-
-
 def run_wall_seconds(spec: Mapping[str, object]) -> float | None:
     """The run wall named by a worker spec: None when unset, an error when not numeric."""
     raw = (spec.get("environment") or {}).get("STATEFRAME_RUN_WALL_SECONDS")
@@ -1031,9 +1027,7 @@ class WorkerHandle:
             self.wall_seconds = run_wall_seconds(_read_json(self.run_dir / "spec.json", "subframe spec"))
             self._wall_loaded = True
         seconds = self.wall_seconds
-        if seconds is None:
-            seconds = DEFAULT_WORKER_WALL_SECONDS  # a worker the spec leaves unbounded is still capped
-        if not math.isfinite(seconds) or seconds <= 0:
+        if seconds is None or not math.isfinite(seconds) or seconds <= 0:
             return  # an explicit non-positive run wall means "no deadline"
         if time.monotonic() - self.deadline_origin < seconds:
             return

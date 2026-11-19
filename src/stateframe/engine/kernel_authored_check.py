@@ -578,6 +578,8 @@ def _normalize_execution(raw: object, *, check: AuthoredCheck, revision: str,
                          side: str, snapshot_digest: str) -> dict[str, object]:
     if not isinstance(raw, Mapping):
         raw = {"status": UNRUNNABLE, "reason": "adapter returned no execution mapping"}
+    from kernel_check_watchdog import validate_execution_stop
+    stop = validate_execution_stop(raw.get("execution_stop"))
     status = _text(raw.get("status", raw.get("outcome"))).upper()
     if status not in {PASS, BEHAVIOR_FAIL, UNKNOWN, UNRUNNABLE, UNSUPPORTED, ENVIRONMENT, STALE}:
         status = UNKNOWN
@@ -620,10 +622,14 @@ def _normalize_execution(raw: object, *, check: AuthoredCheck, revision: str,
     if target_exception and reached and raw.get("no_failure_assertion") is True:
         status = BEHAVIOR_FAIL
         phase_map["assertion"] = BEHAVIOR_FAIL
+    if stop is not None:
+        status, reached, integrity = UNRUNNABLE, False, False
+        phase_map = _phase_map(status)
     return {
         "side": side,
         "revision": revision,
         "snapshot_digest": snapshot_digest,
+        **({"execution_stop": stop, "execution_complete": False} if stop is not None else {}),
         "simulation": raw.get("simulation") is True,
         "status": status,
         "outcome": status,
@@ -705,12 +711,21 @@ class PythonUnittestAdapter:
                     runner = run_sandboxed
                 if not callable(runner):
                     raise TypeError("Python authored-check runner is not callable")
+                from kernel_check_watchdog import check_watchdog_config, validate_execution_stop
+                from kernel_execution_policy import check_cpu_backstop_seconds
                 result = runner(
-                    command, root, env=environment, timeout=120,
+                    command, root, env=environment, timeout=None,
+                    check_watchdog=check_watchdog_config(), cpu_seconds=check_cpu_backstop_seconds(),
                     output_limit=256 * 1024,
                 )
                 completed = result.completed
                 output = f"{completed.stdout or ''}\n{completed.stderr or ''}"
+                stop = validate_execution_stop(getattr(result, "execution_stop", None))
+                if stop is not None:
+                    return {"status": UNRUNNABLE, "reason": stop["cause"], "execution_stop": stop,
+                            "execution_complete": False, "reached_observation": False,
+                            "integrity": False, "exit_code": completed.returncode,
+                            "observation": output[-4000:]}
                 raw_events = getattr(result, "events", ())
                 events = tuple(dict(item) for item in raw_events
                                if isinstance(item, Mapping)) \

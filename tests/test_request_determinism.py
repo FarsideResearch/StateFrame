@@ -10,6 +10,7 @@ import secrets
 import shutil
 import tempfile
 from pathlib import Path
+from subprocess import CompletedProcess
 
 import pytest
 
@@ -1903,6 +1904,45 @@ def test_applied_edit_frame_detector_requires_a_real_edit_row():
     assert not _has_applied_edit_in_frame({"messages": [{"content": '{"applied_edits": []}'}]})
 
 
+def _assert_planted_example_completed(run: Path, process: CompletedProcess[str]) -> None:
+    if process.returncode == 0:
+        return
+    # The host can refuse delivery after the engine has sent every request and sealed its result.
+    diagnostics = process.stdout[-4000:] + process.stderr[-4000:]
+    summary_path = run / "summary.json"
+    assert process.returncode == 2 and summary_path.is_file(), diagnostics
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert (
+        summary.get("exit_code") == process.returncode
+        and summary.get("child_exit_code") == 0
+        and summary.get("engine_result") == "DELIVERY_REFUSED"
+        and (summary.get("engine_terminal") or {}).get("result") == "SUBMITTED"
+    ), diagnostics
+
+
+@pytest.mark.parametrize("overrides", [
+    {},
+    {"exit_code": 1},
+    {"child_exit_code": 1},
+    {"engine_result": "ENGINE_ERROR"},
+    {"engine_terminal": {"result": "RUN_INCOMPLETE"}},
+])
+def test_planted_example_requires_a_completed_engine_run(tmp_path, overrides):
+    process = CompletedProcess([], 2, "scripted example output", "")
+    summary = {
+        "exit_code": 2,
+        "child_exit_code": 0,
+        "engine_result": "DELIVERY_REFUSED",
+        "engine_terminal": {"result": "SUBMITTED"},
+    }
+    (tmp_path / "summary.json").write_text(json.dumps(summary | overrides), encoding="utf-8")
+    if overrides:
+        with pytest.raises(AssertionError, match="scripted example output"):
+            _assert_planted_example_completed(tmp_path, process)
+    else:
+        _assert_planted_example_completed(tmp_path, process)
+
+
 def _run_scripted_example(monkeypatch, example: str, task: str, work: Path,
                           *, observer: bool = False, package_root: Path | None = None):
     import os
@@ -1911,8 +1951,6 @@ def _run_scripted_example(monkeypatch, example: str, task: str, work: Path,
 
     from stateframe import cli, runner
     from stateframe.scripted_endpoint import Script, serve
-    monkeypatch.setattr(runner.test_interpreter, "choose",
-                        lambda *args, **kwargs: (sys.executable, "scripted test interpreter"))
 
     # The scripted endpoint serves llama.cpp controls. Keep discovery timeouts
     # under host load from changing the dialect between same-seed runs.
@@ -1937,7 +1975,8 @@ def _run_scripted_example(monkeypatch, example: str, task: str, work: Path,
     arguments = [
         "run", "--repo", str(repo), "--task", task,
         "--endpoint", f"http://127.0.0.1:{server.server_port}/v1",
-        "--model", "scripted", "--run-dir", str(run), "--quiet", "--json",
+        "--model", "scripted", "--run-dir", str(run), "--test-python", sys.executable,
+        "--quiet", "--json",
     ]
     try:
         if package_root is None:
@@ -1948,7 +1987,7 @@ def _run_scripted_example(monkeypatch, example: str, task: str, work: Path,
             completed = run_monitored(
                 [sys.executable, "-m", "stateframe", *arguments], env=environment,
                 capture_output=True, text=True, expected_seconds=600, check=False)
-            assert completed.returncode == 0, completed.stdout[-4000:] + completed.stderr[-4000:]
+            _assert_planted_example_completed(run, completed)
     finally:
         server.shutdown()
         server.server_close()
@@ -2094,11 +2133,12 @@ def test_bundled_example_guard_rejects_sequence_based_receipt_derivation(tmp_pat
         planted = _planted_sequence_receipt_package(Path(directory))
         seq_plain, seq_plain_requests, _ = _run_scripted_example(
             monkeypatch, example, task, tmp_path / "pln-a", package_root=planted)
-        seq_observer, _, seq_observer_events = _run_scripted_example(
+        seq_observer, seq_observer_requests, seq_observer_events = _run_scripted_example(
             monkeypatch, example, task, tmp_path / "pln-o", observer=True,
             package_root=planted)
     assert seq_observer_events > 0, "the planted observer injection did not run"
     assert _has_applied_edit_in_frame(seq_plain_requests), "planted run made no edit to receipt"
+    assert _has_applied_edit_in_frame(seq_observer_requests), "planted observer run made no edit to receipt"
     with pytest.raises(AssertionError, match="request hashes differ"):
         _assert_same_send_hashes(seq_plain, seq_observer)
 

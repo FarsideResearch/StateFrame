@@ -34,6 +34,17 @@ def sandbox_time_left() -> dict[str, float | None] | None:
             "time_allowance_seconds": limits.sandbox_time_allowance_seconds}
 
 
+def check_admission_time_left() -> float | None:
+    """Use the live or restored budget, including admission before a ledger exists."""
+    live = sandbox_time_left()
+    if live is not None:
+        return live["seconds_left"]
+    if _RESUMED_DEADLINE_MONOTONIC is not None:
+        return _RESUMED_DEADLINE_MONOTONIC - time.monotonic()
+    deadline = os.environ.get("CAPABILITY_ATTEMPT_DEADLINE_MONOTONIC")
+    return float(deadline) - time.monotonic() if deadline else None
+
+
 def resume_sandbox_deadline(seconds_left: float, *, now: float | None = None) -> None:
     """Start the time that was left when the run stopped, from now, for every budget in this process.
 

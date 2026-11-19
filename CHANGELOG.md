@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.72 (2026-11-18)
+
+- Fixed the bundled example determinism guard to compare request hashes after a completed engine run even if the host refuses candidate delivery.
+- Tests: acceptance fixtures that wait for a checkpoint now fail fast with the engine's reason and the child's exit code instead of waiting out the timeout.
+- Fixed: a submitted run's result was rejected when untouched binary files (for example .dbf test fixtures) were re-encoded during capture and so looked changed outside the edit scope, which also dropped the run's real edits. Candidates now capture files byte for byte.
+- Read admission now explains refused ranges with a resume cursor, admits at least one line whenever feasible, reserves room for a refused continuation across requests, and journals infeasible floors with their violated limits. Default path; no switch.
+- Checks now renew a host-observed inactivity watchdog from output, CPU, and process-family progress, including outer helpers and parallel checks; implicit wall and CPU budgets are removed, and no-progress stops retain typed incomplete receipts and cleanup evidence.
+
 ## 0.7.71 (2026-11-18)
 
 - Completion routing, tool menus, and provider validation share one parent product comparison per workspace generation, avoiding repeated reads of editable files.

@@ -243,7 +243,9 @@ def test_120_line_admission_uses_at_most_eight_floors_and_memoizes(monkeypatch, 
     else:
         assert result.result_class == "OK" and len(result.content.splitlines()) < 120
     assert result.metadata["next_cursor"] in result.text
-    assert len(calls) <= 8
+    # Eight search floors plus one exact boundary probe: frozen carrier-boundary
+    # prefixes are priced by cost() without a carrier-equality precheck.
+    assert len(calls) <= 9
     n = len(result.content.splitlines())
     from kernel_source_delivery import deliver_source
     candidate = deliver_source(raw, "source.py", 0, args=replace(request, max_lines=n + 1))

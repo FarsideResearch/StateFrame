@@ -288,20 +288,20 @@ def _wall_handle(tmp_path, monkeypatch, environment, clock):
     return handle, signals
 
 
-def test_worker_without_a_run_wall_is_still_capped(tmp_path, monkeypatch):
+def test_worker_without_a_run_wall_is_unbounded(tmp_path, monkeypatch):
     clock = [0.0]
     handle, signals = _wall_handle(tmp_path, monkeypatch, {}, clock)
     handle.enforce_deadline()
     assert not handle.timed_out
-    clock[0] = worker_module.DEFAULT_WORKER_WALL_SECONDS + 6.0
+    clock[0] = 4 * 3600 + 6.0
     handle.enforce_deadline()
-    assert handle.timed_out and signals == [signal.SIGTERM]
+    assert not handle.timed_out and not signals
 
 
 def test_explicit_nonpositive_wall_means_no_deadline(tmp_path, monkeypatch):
     clock = [0.0]
     handle, signals = _wall_handle(tmp_path, monkeypatch, {"STATEFRAME_RUN_WALL_SECONDS": "0"}, clock)
-    clock[0] = worker_module.DEFAULT_WORKER_WALL_SECONDS * 10
+    clock[0] = 40 * 3600
     handle.enforce_deadline()
     assert not handle.timed_out and not signals
 

@@ -440,6 +440,7 @@ class Replayer:
         self.active = bool(self.tape)
         self.diverged: dict[str, object] | None = None
         self.route_mismatch = False
+        self.check_divergence: int | None = None
         self.model_swap = model_swap if isinstance(model_swap, dict) else None
         self.model_swapped = 0  # replayed requests that matched only with the model name set back
         # strict (checkpoint resume): a divergence is a refusal, never a switch to live.
@@ -452,7 +453,7 @@ class Replayer:
         self.route_changes = list(route_changes or [])
 
     def _layout_item(self) -> dict[str, object] | None:
-        if self.diverged is not None:
+        if self.diverged is not None or self.check_divergence is not None:
             return None
         if self.active and self.cursor < len(self.tape):
             return self.tape[self.cursor]
@@ -497,9 +498,25 @@ class Replayer:
                     allowed["endpoint_host"] = urlsplit(value).netloc
         return allowed == actual
 
+    def note_check_divergence(self, index: int) -> None:
+        """Prevent a matching wire body from masking a changed check effect."""
+        if self.check_divergence is None:
+            self.check_divergence = index
+
     def answer(self, request: bytes, *, route: dict[str, object] | None = None,
                endpoint_identity: dict[str, str] | None = None) -> bytes | None:
         """The recorded response for this request, or None to send it live."""
+        if self.check_divergence is not None:
+            expected = self.tape[self.cursor] if self.active else self.pending
+            self.diverged = {
+                "reason": "check termination or execution binding changed",
+                "recorded_send": expected["send"] if expected is not None else None,
+                "check": self.check_divergence,
+            }
+            self.pending_mismatch = not self.active and self.pending is not None
+            self.active = False
+            self.pending = None
+            return None
         if not self.active:
             if self.pending is not None and self.diverged is None:
                 expected, self.pending = self.pending, None

@@ -11,12 +11,13 @@ from kernel_execution_policy import (
     policy_read_grants,
     run_sandboxed,
 )
+from kernel_check_watchdog import (IncompleteCheck, check_watchdog_config, execution_stop_outcome,
+                                   validate_execution_stop)
 from kernel_pilot import ACTIVE_RUNTIME
 
 
 CHECK_ID = "@check"
 OUTPUT_TAIL = 4000
-CHECK_TIMEOUT = 300
 OUTPUT_LIMIT = 256 * 1024
 
 
@@ -56,7 +57,8 @@ def check_result(root: Path, row: Mapping[str, object]) -> tuple[str, int]:
         return "check refused: a protected test resource is absent or unsafe", 125
     try:
         result = run_sandboxed(
-            command, root, timeout=CHECK_TIMEOUT, cpu_seconds=check_cpu_backstop_seconds(),
+            command, root, timeout=None, check_watchdog=check_watchdog_config(),
+            cpu_seconds=check_cpu_backstop_seconds(),
             output_limit=OUTPUT_LIMIT, generic_check=True)
     except (RuntimeError, OSError, ValueError) as error:
         detail = f"check refused: {type(error).__name__}: {error}"
@@ -72,7 +74,14 @@ def check_result(root: Path, row: Mapping[str, object]) -> tuple[str, int]:
     # with an ordinary exit (bwrap exits 1): no check ran, so it is never a RED check.
     exec_denial = (sandbox_exec_denial(result.completed.stderr)
                    if result.completed.returncode != 0 else None)
-    if result.timed_out:
+    execution_stop = validate_execution_stop(getattr(result, "execution_stop", None))
+    if execution_stop is not None:
+        code = result.completed.returncode
+        outcome = execution_stop_outcome(execution_stop)
+        label = "check incomplete: " + str(execution_stop["cause"]).replace("_", " ")
+    elif memory_limit_killed:
+        code, outcome, label = result.completed.returncode, "RESOURCE_LIMIT", "check stopped: memory limit"
+    elif result.timed_out:
         code, outcome, label = 124, "RESOURCE_LIMIT", "check timed out"
     elif denial is not None:
         code, outcome, label = 126, "ENVIRONMENT", denial
@@ -90,14 +99,16 @@ def check_result(root: Path, row: Mapping[str, object]) -> tuple[str, int]:
         after = _protected_state(root, row)
     except OSError:
         after = {}
-    if before != after:
+    if before != after and execution_stop is None:
         code, outcome, label = 125, "INVALID_CHECK", "protected test resource changed"
     tail = output[-OUTPUT_TAIL:]
     _record(runtime, binding, command, code, output, outcome=outcome, tail=tail,
             output_truncated=result.output_truncated,
             memory_limit_mechanism=memory_limit_mechanism,
             cgroup_leaf_pattern=getattr(result, "cgroup_leaf_pattern", None),
-            memory_limit_killed=memory_limit_killed)
+            memory_limit_killed=memory_limit_killed, execution_stop=execution_stop)
+    if execution_stop is not None:
+        return IncompleteCheck(label, execution_stop, exit_code=code), code if code else 124
     return f"check exit {code}: {label}\n{tail}", code
 
 
@@ -106,7 +117,8 @@ def _record(runtime: object | None, binding: object, command: tuple[str, ...],
             tail: str | None = None, output_truncated: bool | None = None,
             memory_limit_mechanism: str | None = None,
             cgroup_leaf_pattern: str | None = None,
-            memory_limit_killed: bool = False) -> None:
+            memory_limit_killed: bool = False,
+            execution_stop: Mapping[str, object] | None = None) -> None:
     if runtime is None:
         return
     if not isinstance(binding, dict):
@@ -124,6 +136,10 @@ def _record(runtime: object | None, binding: object, command: tuple[str, ...],
                    "passed": 1 if code == 0 else 0,
                    "failed": 1 if outcome == "BEHAVIOR_FAIL" else 0},
     }
+    if execution_stop is not None:
+        typed.update(execution_stop=execution_stop, termination_reason=execution_stop["cause"],
+                     status="UNKNOWN", execution_complete=False, reached_observation=False,
+                     counts={})
     runtime.test_observation(
         [CHECK_ID], code, binding, observation=output,
         command=command,
@@ -131,4 +147,6 @@ def _record(runtime: object | None, binding: object, command: tuple[str, ...],
         output_truncated=output_truncated,
         memory_limit_mechanism=memory_limit_mechanism,
         cgroup_leaf_pattern=cgroup_leaf_pattern,
-        memory_limit_killed=memory_limit_killed)
+        memory_limit_killed=memory_limit_killed,
+        **({"termination_evidence": {"execution_stop": execution_stop}}
+           if execution_stop is not None else {}))

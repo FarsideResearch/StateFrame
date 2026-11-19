@@ -832,14 +832,16 @@ def _source_snapshot(root: pathlib.Path, paths: Sequence[str]) -> dict[str, str 
 
 def _seal_sources_preserving_binary(root: pathlib.Path,
                                     sources: Mapping[str, str | None]) -> dict[str, str | bytes | None]:
-    """Preserve non-UTF-8 product bytes when sealing a candidate."""
+    """Preserve exact on-disk bytes, including UTF-8 files with CR/CRLF."""
     candidate: dict[str, str | bytes | None] = dict(sources)
     for path, source in sources.items():
         if source is None:
             continue
         raw = (root / path).read_bytes()
         try:
-            raw.decode("utf-8")
+            # Text snapshots normalize newlines; decode raw bytes without that
+            # translation so UTF-8-compatible binary files also round-trip.
+            candidate[path] = raw.decode("utf-8")
         except UnicodeDecodeError:
             candidate[path] = raw
     return candidate
@@ -5431,6 +5433,15 @@ def _classify_runner_failure(blob: str, fn: str = "", rel_hint: str | None = Non
 HOST_REFUSED_PREFIX = "HOST_REFUSED: host could not run tests"
 
 
+class _CheckStopped(Exception):
+    """An incomplete execution, kept out of legacy behavioral timeout handling."""
+
+    def __init__(self, completed, execution_stop):
+        super().__init__("check stopped before completion")
+        self.completed = completed
+        self.execution_stop = execution_stop
+
+
 class _HostExecutionRefused(Exception):
     """Typed carrier for a refusal raised by the central execution policy runner."""
 
@@ -5897,20 +5908,21 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
                 policy_read_grants,
                 run_sandboxed,
             )
+            from kernel_check_watchdog import check_watchdog_config
             from kernel_pilot import ParentBudgetExhausted
             _check_token = None
             if _unit is not None:
                 from kernel_unit_policy import new_check_token
                 _check_token = new_check_token()
             try:
-                # RLIMIT_CPU is only a runaway backstop here, never a budget: the old 30 s
-                # policy default SIGKILLed a 37 s public check mid-run (rc 137).
+                # Checks have no implicit lifetime or CPU budget. Host-selected
+                # CPU resource overrides remain separate from inactivity.
                 try:
                     result = run_sandboxed(
                         command,
                         root,
                         env=env if check_env is None else check_env,
-                        timeout=300,
+                        timeout=None, check_watchdog=check_watchdog_config(),
                         cpu_seconds=check_cpu_backstop_seconds(),
                         output_limit=256 * 1024,
                         **({"internal_env": {"STATEFRAME_CHECK_TOKEN": _check_token}}
@@ -5957,6 +5969,10 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
                     )
                 except Exception:  # observation failures never change the check result
                     pass
+            execution_stop = getattr(result, "execution_stop", None)
+            if execution_stop is not None:
+                result.completed.execution_stop = execution_stop
+                return result.completed
             if result.timed_out:
                 raise subprocess.TimeoutExpired(command, 300, output=result.completed.stdout,
                                                 stderr=result.completed.stderr)
@@ -5981,6 +5997,8 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
             else:
                 from unit_gate_evidence import collected_nodes
                 if collected_shadow is None:
+                    if getattr(collected_result, "execution_stop", None) is not None:
+                        raise _CheckStopped(collected_result, collected_result.execution_stop)
                     nodes = collected_nodes(
                         collected_result.stdout, collected_result.returncode, _check_output_truncated)
                     if nodes is not None:
@@ -6009,6 +6027,8 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
             runner=_run_check)
         if _shadow is not None:
             return _shadow_observation(_shadow)
+        if getattr(p, "execution_stop", None) is not None:
+            raise _CheckStopped(p, p.execution_stop)
         _is_oracle = any(str(t).endswith("_oracle.py") or "_oracle.py::" in str(t)
                          for t in targets)
         if (p.returncode == 4 and _is_oracle
@@ -6025,6 +6045,36 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
                 targets=targets, env=env, runner=_run_check)
             if _shadow is not None:
                 return _shadow_observation(_shadow)
+            if getattr(p, "execution_stop", None) is not None:
+                raise _CheckStopped(p, p.execution_stop)
+    except _CheckStopped as stopped:
+        completed = stopped.completed
+        stop = stopped.execution_stop
+        text = "check incomplete: " + str(stop["cause"]).replace("_", " ")
+        from kernel_check_watchdog import IncompleteCheck, execution_stop_outcome
+        if _runtime is not None:
+            if _unit is not None:
+                _runtime._unit_check_execution_stop = dict(stop)
+                _runtime._unit_check_exit_code = completed.returncode
+            else:
+                _runtime.test_observation(
+                    [explicit or ", ".join(str(target) for target in targets)],
+                    completed.returncode, _test_binding,
+                    observation=completed.stdout + "\n" + completed.stderr,
+                    command=_cmd, test_environment=env, execution_id=_execution_id,
+                    termination_evidence={"execution_stop": stop},
+                    typed_observation={"outcome": execution_stop_outcome(stop), "execution_complete": False,
+                                       "reached_observation": False, "termination_reason": stop["cause"],
+                                       "execution_stop": stop, "counts": {"failed": 0}})
+                from kernel_check_truth_adapter import record_native_observation
+                record_native_observation(
+                    _runtime, execution_id=str(_execution_id or ""),
+                    selector=explicit or ", ".join(str(target) for target in targets),
+                    status="UNKNOWN", outcome=execution_stop_outcome(stop), execution_complete=False,
+                    reached_observation=False, termination_reason=stop["cause"], execution_stop=stop,
+                    stdout=completed.stdout, stderr=completed.stderr,
+                    exit_code=completed.returncode, counts={"failed": 0})
+        return IncompleteCheck(text, stop, exit_code=completed.returncode)
     except _HostExecutionRefused as host_refusal:
         _refused_result = _host_refusal_observation(
             _runtime, host_refusal,
@@ -6347,6 +6397,8 @@ def run_tests(root: pathlib.Path, fn: str, explicit: str | None,
         if _journal_path is None:
             raise RuntimeError("unit check requires a durable journal path")
         _runtime._unit_pending_test_observations = []
+        _runtime._unit_check_execution_stop = None
+        _runtime._unit_check_exit_code = None
         _previous_receipt = getattr(_runtime, "_unit_check_receipt", None)
         _check_step = getattr(getattr(_runtime, "owner", None), "current_step", None)
         # The repair controller and the host auto-verify rail both check an edit within one
@@ -6375,6 +6427,8 @@ def run_tests(root: pathlib.Path, fn: str, explicit: str | None,
                           status=_receipt.status, invalid_reason=_receipt.invalid_reason,
                           wrote_paths=list(_receipt.wrote_paths), reused=False)
         _pending = _runtime._unit_pending_test_observations
+        _stop = _runtime._unit_check_execution_stop
+        _exit = _runtime._unit_check_exit_code if _stop is not None else int(_receipt.status != "PASS")
         if callable(getattr(_runtime, "test_observation", None)):
             if _pending:
                 _selectors = [selector for item in _pending for selector in item[0]]
@@ -6384,15 +6438,24 @@ def run_tests(root: pathlib.Path, fn: str, explicit: str | None,
                 _binding = _runtime.binding()
                 _command, _environment, _execution_id = (), None, None
             _runtime.test_observation(
-                _selectors, 0 if _receipt.status == "PASS" else 1, _binding,
+                _selectors, _exit, _binding,
                 observation=_receipt.projected_observation,
                 run_write_set=_receipt.wrote_paths,
                 command=_command, test_environment=_environment,
                 execution_id=_execution_id,
-                typed_observation={"status": _receipt.status,
-                                   "outcome": _receipt.status},
+                **({"termination_evidence": {"execution_stop": _stop}} if _stop is not None else {}),
+                typed_observation=({"execution_complete": False, "reached_observation": False,
+                                    "termination_reason": _stop["cause"], "execution_stop": _stop,
+                                    "counts": {"failed": 0}}
+                                   if _stop is not None else
+                                   {"status": _receipt.status, "outcome": _receipt.status}),
             )
         del _runtime._unit_pending_test_observations
+        del _runtime._unit_check_execution_stop
+        del _runtime._unit_check_exit_code
+        if _stop is not None:
+            from kernel_check_watchdog import IncompleteCheck
+            return IncompleteCheck(_receipt.projected_observation, _stop, exit_code=_exit)
         if _receipt.status == "INVALID":
             return ("pytest exit 4 — INVALID " + str(_receipt.invalid_reason)
                     + "\n" + _receipt.projected_observation)

@@ -408,11 +408,14 @@ def read_admission_snapshot(runtime, visible_messages, *, byte_cap):
 
 
 @transaction
-def read_admission_floor(snapshot, pages=(), *, require_feasible=False, measure=None):
+def read_admission_floor(snapshot, pages=(), *, require_feasible=False, measure=None,
+                         violations_out=None):
     """Render the allocator floor with every proposed fresh page FULL-only.
 
     ``measure`` is preparation's live meter (see ``live_measure``); without it
-    feasibility falls back to the frozen offline ratio.
+    feasibility falls back to the frozen offline ratio. ``violations_out``, when a
+    list is given, receives the violated limit names for this floor; the return
+    value is unchanged for every caller.
     """
     from kernel_working_set_prepare import (
         _minimum_completion,
@@ -445,11 +448,14 @@ def read_admission_floor(snapshot, pages=(), *, require_feasible=False, measure=
                     current_revisions=tuple(sorted(revisions.items())))
     _, floor = _minimum_completion(trial, tuple(propose_slots(trial)))
     verify_certificate(floor.wire, floor.certificate)
-    if require_feasible:
+    if require_feasible or violations_out is not None:
         from kernel_working_set_prepare import Measurement
         raw = measure(floor.wire) if measure is not None else _offline_measure(trial, floor.wire)
         measured = raw if isinstance(raw, Measurement) else Measurement(*raw)
-        if _violations(trial, floor, measured):
+        violations = _violations(trial, floor, measured)
+        if violations_out is not None:
+            violations_out.extend(violations)
+        if require_feasible and violations:
             return None
     return floor
 

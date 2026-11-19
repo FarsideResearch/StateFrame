@@ -17,6 +17,10 @@ from kernel_continuation_restart import SAFE_TAIL
 
 GIANT = {"path": "giant.py", "max_lines": 1000, "max_chars": 64000}
 CURSOR = re.compile(r"(\d+) more lines; page with cursor=(read1:[0-9a-f]{64}:\d+:\d+)")
+REFUSED = re.compile(
+    r"Not delivered: lines (\d+)-(\d+) of (\S+) (?:did not fit in this request's source budget"
+    r"|the request is already at its size limit)\. Nothing from this range was shown\. "
+    r"Resume with cursor=(read1:[0-9a-f]{64}:\d+:\d+)\.")
 
 
 class Journal:
@@ -149,8 +153,9 @@ def test_k2_batch_overflow_admits_in_order_and_refuses_the_rest_with_cursors(tmp
     first_refused = kinds.index(admission.REFUSED_ADMISSION)
     assert all(k == admission.REFUSED_ADMISSION for k in kinds[first_refused:])
     for observation, delivery in refused:
-        match = CURSOR.fullmatch(observation)
-        assert match and int(match.group(1)) == 330 and delivery["next_cursor"] == match.group(2)
+        match = REFUSED.fullmatch(observation)
+        assert match and int(match.group(2)) - int(match.group(1)) + 1 == 330
+        assert delivery["next_cursor"] == match.group(4)
         assert delivery["result_class"] == admission.REFUSED_ADMISSION
     # Nothing is dropped: every read has exactly one typed read_result.
     results = _results(rt)
@@ -173,12 +178,12 @@ def test_refused_resume_cursor_is_executable(tmp_path, on, monkeypatch):
     rt = runtime(tmp_path, fixed=1_000)  # allowance 0: nothing fits
     (result, observation, _), delivery = read(rt, tmp_path, "src.py", {"path": "src.py", "line": 21})
     assert result == admission.REFUSED_ADMISSION
-    match = CURSOR.fullmatch(observation)
-    assert match and int(match.group(1)) == 30
+    match = REFUSED.fullmatch(observation)
+    assert match and int(match.group(2)) - int(match.group(1)) + 1 == 30
     [res] = _results(rt)
     assert res["status"] == admission.REFUSED_ADMISSION and "payload_blob_ref" not in res
     (again, _, _), delivery2 = read(runtime(tmp_path, fixed=0), tmp_path, "src.py",
-                                   {"path": "src.py", "cursor": match.group(2)})
+                                   {"path": "src.py", "cursor": match.group(4)})
     assert again == "OK" and int(delivery2["start_line"]) == 21
 
 

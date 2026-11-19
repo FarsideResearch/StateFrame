@@ -11,7 +11,8 @@ from pathlib import Path
 
 from kernel_authored_check import admit_authored_check
 from kernel_authored_check_lifecycle import pair_executions
-from kernel_execution_policy import run_sandboxed
+from kernel_check_watchdog import check_watchdog_config, validate_execution_stop
+from kernel_execution_policy import check_cpu_backstop_seconds, run_sandboxed
 
 
 def _digest(value: object) -> str:
@@ -47,11 +48,18 @@ def _run_side(snapshot: Mapping[str, object], path: str, source: bytes,
                                  ", run_name='__main__')\n", encoding="utf-8")
             result = run_sandboxed((sys.executable, str(bootstrap)), root,
                                    generic_check=True,
-                                   timeout=120, cpu_seconds=120, output_limit=65536)
+                                   timeout=None, check_watchdog=check_watchdog_config(),
+                                   cpu_seconds=check_cpu_backstop_seconds(), output_limit=65536)
     except (OSError, RuntimeError, ValueError) as error:
         return {"check_identity": identity, "side": side, "revision": revision,
                 "status": "UNRUNNABLE", "reason": f"{type(error).__name__}: {error}"}
     output = result.completed.stdout + result.completed.stderr
+    stop = validate_execution_stop(getattr(result, "execution_stop", None))
+    if stop is not None:
+        return {"check_identity": identity, "side": side, "revision": revision,
+                "status": "UNRUNNABLE", "reason": stop["cause"], "execution_stop": stop,
+                "execution_complete": False, "reached_target": False, "integrity": False,
+                "exit_code": result.completed.returncode, "output_tail": output[-4096:]}
     reached = marker in output
     status = ("UNRUNNABLE" if result.timed_out or result.completed.returncode in {126, 127}
               else "PASS" if result.completed.returncode == 0 and reached
@@ -97,6 +105,9 @@ def run_agent_check(proposal: Mapping[str, object], *, task: str,
     before = _run_side(parent_snapshot, path, source, identity, marker, "parent", root.parent)
     after = _run_side(candidate_snapshot, path, source, identity, marker, "candidate", root.parent)
     result = pair_executions(before, after, clause_id=str(admission["clause_id"]))
+    stops = {side["side"]: side["execution_stop"] for side in (before, after) if "execution_stop" in side}
+    if stops:
+        result.update(execution_stops=stops, execution_complete=False)
     result["route"] = "NO_TESTS_AUTHORED_CHECK"
     result["parent_output_tail"] = before.get("output_tail", "")
     result["candidate_output_tail"] = after.get("output_tail", "")

@@ -1989,13 +1989,15 @@ def _file_deltas(entries: tuple[ProposalEntry, ...], root: Path, blobs: Mapping[
 
 def _check(spec, candidate: Path, evidence_dir: Path, *, test_python: str):
     if __package__:
-        from .kernel_unit_policy import (UnitPolicy, _reap_check_token, new_check_token, reap_check_group,
+        from .kernel_unit_policy import (UnitPolicy, _reap_check_token, _terminate_check_token, new_check_token, reap_check_group,
                                          run_check_command, run_frozen_check)
-        from .kernel_execution_policy import ExecutionPolicyError, run_sandboxed
+        from .kernel_execution_policy import ExecutionPolicyError, check_cpu_backstop_seconds, run_sandboxed
     else:
-        from kernel_unit_policy import (UnitPolicy, _reap_check_token, new_check_token, reap_check_group,
+        from kernel_unit_policy import (UnitPolicy, _reap_check_token, _terminate_check_token, new_check_token, reap_check_group,
                                         run_check_command, run_frozen_check)
-        from kernel_execution_policy import ExecutionPolicyError, run_sandboxed
+        from kernel_execution_policy import ExecutionPolicyError, check_cpu_backstop_seconds, run_sandboxed
+
+    from kernel_check_watchdog import check_watchdog_config
 
     def execute(clone: Path, selector: str) -> str:
         if spec.contract.check.command_kind == "run_check_command":
@@ -2003,12 +2005,23 @@ def _check(spec, candidate: Path, evidence_dir: Path, *, test_python: str):
         token = new_check_token()
         try:
             completed = run_sandboxed([test_python, "-m", "pytest", selector], clone,
-                                      timeout=300, cpu_seconds=300, output_limit=256 * 1024,
-                                      internal_env={"STATEFRAME_CHECK_TOKEN": token})
+                                      timeout=None, check_watchdog=check_watchdog_config(),
+                                      cpu_seconds=check_cpu_backstop_seconds(), output_limit=256 * 1024,
+                                      internal_env={"STATEFRAME_CHECK_TOKEN": token},
+                                      pre_reap_cleanup=lambda: _terminate_check_token(token))
         except (ExecutionPolicyError, OSError) as error:
             _reap_check_token(token)
             return f"pytest exit 4: {type(error).__name__}: {error}"
+        if getattr(completed, "cleanup_finding", None) is not None:
+            from kernel_unit_policy import UnitCheckCleanupError
+            raise UnitCheckCleanupError(completed.cleanup_finding)
         reap_check_group(completed.pid, token=token)
+        execution_stop = getattr(completed, "execution_stop", None)
+        if execution_stop is not None:
+            from kernel_check_watchdog import IncompleteCheck
+            return IncompleteCheck("check incomplete: " + str(execution_stop["cause"])
+                                   + "\n" + completed.completed.stdout + completed.completed.stderr,
+                                   execution_stop, exit_code=completed.completed.returncode)
         return (f"pytest exit {completed.completed.returncode}\n"
                 f"{completed.completed.stdout}{completed.completed.stderr}")
 

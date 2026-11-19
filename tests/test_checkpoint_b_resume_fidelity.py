@@ -385,8 +385,13 @@ def _assert_checkpoint_restored(run_dir: Path, sends: int) -> None:
 def _run_interrupted(example: str, repo: Path, run_dir: Path, launcher: Path,
                      profile: Path, home: Path, *,
                      restore_hook: Path | None = None,
-                     expect_unfaithful_restore: bool = False) -> InterruptedRun:
-    script = PauseAfterActions(_script_document(example), COMPLETED_ACTIONS)
+                     expect_unfaithful_restore: bool = False,
+                     completed_actions: int = COMPLETED_ACTIONS,
+                     checkpoint_sends: int | None = None) -> InterruptedRun:
+    if checkpoint_sends is None:
+        checkpoint_sends = completed_actions
+    next_request = f"{completed_actions + 1:04d}.request.json"
+    script = PauseAfterActions(_script_document(example), completed_actions)
     server = serve(script)
     url = f"http://127.0.0.1:{server.server_port}/v1"
     process: subprocess.Popen[str] | None = None
@@ -402,14 +407,14 @@ def _run_interrupted(example: str, repo: Path, run_dir: Path, launcher: Path,
         _wait_for_pause(script.waiting, process, 360, "first attempt")
 
         checkpoint_dir, checkpoint_meta = _wait_for_checkpoint(
-            run_dir, process, COMPLETED_ACTIONS,
+            run_dir, process, checkpoint_sends,
         )
-        request_path = run_dir / "wire" / NEXT_REQUEST
+        request_path = run_dir / "wire" / next_request
         assert request_path.is_file(), "paused provider request was not recorded"
         pending = request_path.read_bytes()
         completed = [name for name in _requests(run_dir)
                      if (run_dir / "wire" / name.replace(".request.", ".response.")).is_file()]
-        assert len(completed) == COMPLETED_ACTIONS, completed
+        assert len(completed) == completed_actions, completed
 
         engine_pid = _engine_child_pid(process.pid)
         engine_identity = record_identity(
@@ -436,7 +441,7 @@ def _run_interrupted(example: str, repo: Path, run_dir: Path, launcher: Path,
             refusal = resume_spec.get("checkpoint_refused")
             assert (isinstance(refusal, str) and "CheckpointUnfaithful" in refusal
                     and "request differs from the request in flight" in refusal), refusal
-            candidates = sorted((run_dir / "attempts").glob(f"*/wire/{NEXT_REQUEST}"))
+            candidates = sorted((run_dir / "attempts").glob(f"*/wire/{next_request}"))
             changed_requests = []
             for path in candidates:
                 data = path.read_bytes()
@@ -448,11 +453,11 @@ def _run_interrupted(example: str, repo: Path, run_dir: Path, launcher: Path,
             )
             return InterruptedRun(run_dir, pending, changed_requests[-1],
                                   checkpoint_dir, checkpoint_meta)
-        _assert_checkpoint_restored(run_dir, COMPLETED_ACTIONS)
+        _assert_checkpoint_restored(run_dir, checkpoint_sends)
         requests = _requests(run_dir)
-        assert NEXT_REQUEST in requests
-        assert b"sandbox_seconds_remaining=unbounded" in requests[NEXT_REQUEST]
-        resumed_request = requests[NEXT_REQUEST]
+        assert next_request in requests
+        assert b"sandbox_seconds_remaining=unbounded" in requests[next_request]
+        resumed_request = requests[next_request]
         resume_pid = _engine_child_pid(resume_process.pid)
         resume_identity = record_identity(
             resume_pid, launched_after=0, command_fragment="_child.py",
@@ -465,7 +470,7 @@ def _run_interrupted(example: str, repo: Path, run_dir: Path, launcher: Path,
         assert script.resumed_interrupted.wait(scaled(10)), "resumed endpoint call did not release"
         resume_process.communicate(timeout=scaled(90))
         _wait_pid_gone(resume_pid)
-        return InterruptedRun(run_dir, pending, requests[NEXT_REQUEST],
+        return InterruptedRun(run_dir, pending, requests[next_request],
                               checkpoint_dir, checkpoint_meta)
     finally:
         if resume_process is not None and resume_process.poll() is None:
@@ -616,3 +621,67 @@ def test_planted_restored_index_change_is_rejected_by_fidelity_guard(
         f"control_raw_sha256={_digest(control.next_request)} "
         f"guard={mismatch.value}"
     )
+
+
+def _progressing_discount_repo(path: Path) -> Path:
+    shutil.copytree(ROOT / "examples/discount_bug", path)
+    test_file = path / "tests/test_pricing.py"
+    with test_file.open("a") as tests:
+        tests.write(
+            "\n\ndef test_cpu_progress():\n"
+            "    import time\n"
+            "    finish = time.process_time() + 2.8\n"
+            "    while time.process_time() < finish:\n"
+            "        pass\n"
+        )
+    return path
+
+
+@pytest.mark.host_sandbox
+def test_progressing_check_rebuilds_full_pending_request_from_earlier_checkpoint(tmp_path):
+    repo = _progressing_discount_repo(tmp_path / "repo")
+    launcher = _write_launcher(tmp_path / "launcher.py")
+    profile = _write_profile(tmp_path / "profile.json")
+    doc = json.loads(profile.read_text())
+    doc["switches"]["STATEFRAME_CHECKPOINT_EVERY"] = "2"
+    profile.write_text(json.dumps(doc))
+    run = _run_interrupted("discount_bug", repo, tmp_path / "run", launcher,
+                           profile, tmp_path / "home", completed_actions=3, checkpoint_sends=2)
+    assert run.resumed_request == run.pending_request
+    body = json.loads(run.resumed_request)
+    assert body["tools"] and b"check-receipt:" in run.resumed_request
+
+
+@pytest.mark.host_sandbox
+def test_progressing_check_preserves_entire_request_bodies_and_healthy_receipts(
+        tmp_path, tmp_path_factory, monkeypatch):
+    from _journal import measurement_events
+    from test_hook_wiring_parity import _run_checkout, _write_launchers
+    from tools.pinned_tree import pinned_tree
+
+    # Compare the watchdog with its 0.7.50 base, which already omits empty
+    # sanitized_addopts from the test artifact policy in the request.
+    baseline = pinned_tree("96c675e7a23e0a5deee21108b4d5945eb681e857", tmp_path_factory)
+    repo = _progressing_discount_repo(tmp_path / "repo")
+    launcher, wrapper = tmp_path / "launcher.py", tmp_path / "child.py"
+    _write_launchers(launcher, wrapper)
+    monkeypatch.setenv("STATEFRAME_LOG_LEVEL", "debug")
+    run = tmp_path / "run"
+
+    def capture(tree, trace):
+        requests, *_ = _run_checkout(tree, repo, run, launcher, wrapper, tmp_path / trace,
+                                     stable_tool_head="off", final_cache_layout="off")
+        audit_keys = {"timestamp_ns", "previous_hash", "record_hash", "run_id",
+                      "task_id", "event_id", "sequence"}
+        receipts = [{key: value for key, value in event.items() if key not in audit_keys}
+                    for event in measurement_events(run) if event["kind"] == "check_receipt"]
+        assert receipts and any(event["outcome"] == "PASS" for event in receipts)
+        return requests, receipts
+
+    base_requests, base_receipts = capture(baseline, "base.json")
+    run.rename(tmp_path / "base")
+    requests, receipts = capture(ROOT, "current.json")
+    assert requests == base_requests
+    assert receipts == base_receipts
+    summary = json.loads((run / "summary.json").read_text())
+    assert summary["problems"]["by_cause"]["degrade:execution_progress"]["count"] >= 3

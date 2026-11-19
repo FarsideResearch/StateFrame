@@ -75,7 +75,10 @@ def _interrupted_run(tmp_path, *, network="none", script_name="resume.script.jso
             if runner.poll() is not None:
                 stdout, stderr = runner.communicate()
                 raise AssertionError(f"run ended before interruption: {stdout} {stderr}")
-            time.sleep(0.1)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AssertionError("paused model request was not reached before the deadline")
+            time.sleep(min(0.1, remaining))
         assert marker.exists(), "paused model request was not reached"
         requests_before = read_requests(run_dir)
         paused_index = pause_at - 1
@@ -84,7 +87,10 @@ def _interrupted_run(tmp_path, *, network="none", script_name="resume.script.jso
             pointer = run_dir / "checkpoints" / "LATEST"
             while not pointer.is_file():
                 assert runner.poll() is None, "run ended before the checkpoint was saved"
-                time.sleep(0.1)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise AssertionError("checkpoint was not saved before the deadline")
+                time.sleep(min(0.1, remaining))
             assert pointer.is_file(), "checkpoint was not saved before the paused request"
         child = _engine_child(runner.pid)
         assert child is not None
