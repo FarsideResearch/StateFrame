@@ -10,6 +10,7 @@ from pathlib import Path
 from threading import RLock
 
 import kernel_file_digest_memo
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 from kernel_obligation_assess import UnavailableEvidence, assessment_is_blocking
 from kernel_verdict import SATISFIED, evaluate_required_tests
 
@@ -28,6 +29,7 @@ _GREEN_STATUSES = frozenset({
 })
 _EDIT_ACTIONS = frozenset({
     "edit", "str_replace", "file_create", "replace_module", "write", "replace",
+    *PROTOCOL_EDIT_TOOL_NAMES,
 })
 _TERMINAL_ACTIONS = frozenset({"done", "run_tests"})
 _PROGRESS_ACTIONS = _EDIT_ACTIONS | frozenset({"read", "work"})

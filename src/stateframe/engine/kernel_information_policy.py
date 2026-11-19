@@ -12,6 +12,8 @@ import os
 import shlex
 from pathlib import Path, PurePosixPath
 
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
+
 VERSION = "information-policy/1"
 # PUBLIC_PATHS_UNLOCALIZED (Stage 6 live rows, capability_release_runner.child) discloses
 # strictly less than FILE_AND_SYMBOL: declared public paths only, no evaluator symbol.
@@ -260,7 +262,10 @@ class InformationPolicy:
             return False
         if not words:
             return True
-        if words[0] in {"read", "edit", "str_replace", "file_create", "file_delete", "file_move"}:
+        if words[0] in {
+            "read", "edit", "str_replace", "file_create", "file_delete", "file_move",
+            *PROTOCOL_EDIT_TOOL_NAMES,
+        }:
             paths = words[1:2]
         elif words[0] == "test":
             paths = [word for word in words[1:] if not word.startswith("-")]

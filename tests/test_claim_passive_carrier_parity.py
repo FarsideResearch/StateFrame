@@ -57,6 +57,19 @@ def test_non_passive_store_carrier_module_matches_base_bytes(monkeypatch, module
     monkeypatch.setenv(ca.MODE_ENV, setting)
     path = "src/stateframe/engine/" + module
     expected = subprocess.check_output(["git", "show", f"{BASE}:{path}"], cwd=ROOT)
+    if module == "kernel_qgates.py":
+        # Preserve the exact source pin with the targeted edit-tool migration.
+        for before, after in (
+            (b"from dataclasses import dataclass\n",
+             b"from dataclasses import dataclass\n\nfrom kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES\n"),
+            (b'EDIT_KINDS = frozenset({"edit", "str_replace", "file_create", "replace_module", "write", "replace"})\n',
+             b'EDIT_KINDS = frozenset({\n'
+             b'    "edit", "str_replace", "file_create", "replace_module", "write", "replace",\n'
+             b'    *PROTOCOL_EDIT_TOOL_NAMES,\n'
+             b'})\n'),
+        ):
+            assert expected.count(before) == 1
+            expected = expected.replace(before, after)
     assert (ROOT / path).read_bytes() == expected, path
 
 

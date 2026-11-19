@@ -17,6 +17,8 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping, Sequence
 
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
+
 
 MODE_ENV = "STATEFRAME_TOKENLAB_POSTGREEN_NO_EVIDENCE"
 EVENT = "tokenlab_v16_postgreen_no_evidence"
@@ -26,7 +28,7 @@ V20_MODE_ENV = "STATEFRAME_TOKENLAB_V20_FAIL_CLOSED_COMPLETION"
 
 WORK_ACTIONS = frozenset({
     "edit", "str_replace", "file_create", "replace_module", "write", "replace",
-    "read", "grep", "probe", "run_tests", "test", "pytest", "predict",
+    "read", "grep", "probe", "run_tests", "test", "pytest", "predict", *PROTOCOL_EDIT_TOOL_NAMES,
 })
 _CLOSED = frozenset({
     "SATISFIED", "PASS", "PASSED", "GREEN", "SUCCESS", "OK", "RESOLVED",
