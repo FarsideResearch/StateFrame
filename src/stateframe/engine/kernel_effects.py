@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
 import stat
 import tempfile
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
-from typing import BinaryIO, Callable, Literal, Mapping, Protocol
+from typing import BinaryIO, Callable, Iterator, Literal, Mapping, Protocol, TextIO
 
 
 MAX_FILE_BYTES = 16 << 20
@@ -107,16 +109,7 @@ class ContentStore:
         for relative, entry in manifest.items():
             if entry.kind != "file":
                 continue
-            path = Path(workspace) / relative
-            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-            try:
-                info = os.fstat(fd)
-                if (
-                    not stat.S_ISREG(info.st_mode)
-                    or info.st_nlink != 1
-                    or info.st_size != entry.size
-                ):
-                    raise EffectError(f"workspace changed while capturing {relative}")
+            with _capture_source(workspace, relative, entry) as fd:
                 target = self._path(entry.digest)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 if target.exists():
@@ -140,8 +133,130 @@ class ContentStore:
                         os.link(temporary, target)
                 finally:
                     os.unlink(temporary)
-            finally:
-                os.close(fd)
+
+
+class BaselineStore:
+    """The pinned rollback files for one manifest, with legacy CAS read support."""
+
+    def __init__(self, directory: Path, manifest: Manifest):
+        _validate_manifest_limits(manifest)
+        self._directory = directory
+        self._root = directory / manifest_digest(manifest)
+        self._index: dict[str, list[int]] | None = None
+        self._layout: dict[str, list[int]] = {}
+        self._files: list[tuple[str, Entry, bool]] = []
+        self._pack_size = 0
+        for relative, entry in sorted(manifest.items()):
+            if entry.kind != "file":
+                continue
+            digest = entry.digest
+            if digest is None:
+                raise EffectError("baseline file has no digest")
+            first = digest not in self._layout
+            self._files.append((relative, entry, first))
+            if first:
+                # Equal bytes share a slice. The manifest still owns each path's mode.
+                self._layout[digest] = [self._pack_size, entry.size, entry.mode]
+                self._pack_size += entry.size
+
+    def publish(self, workspace: Path) -> None:
+        if (index := self._read_index()) is None:
+            self._directory.mkdir(mode=0o700, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix=".baseline-", dir=self._directory) as name:
+                staging = Path(name)
+                self._write_pack(workspace, staging / "objects.pack")
+                with (staging / "index.json").open("w", encoding="utf-8") as output:
+                    json.dump(self._layout, output, separators=(",", ":"))
+                    _sync_baseline_file(output)
+                _sync_baseline_directory(staging)
+                # A directory rename publishes both files together, after they are durable.
+                try:
+                    os.replace(staging, self._root)
+                except OSError as error:
+                    if error.errno not in (errno.EEXIST, errno.ENOTEMPTY):
+                        raise
+                    index = self._read_index()
+                    if index is None:
+                        raise
+                else:
+                    index = self._layout
+        # Also finish the directory barriers if an earlier attempt stopped after the rename.
+        _sync_baseline_directory(self._directory)
+        _sync_baseline_directory(self._directory.parent)
+        self._index = index
+
+    def _write_pack(self, workspace: Path, pack: Path) -> None:
+        with pack.open("wb") as output:
+            for relative, entry, first in self._files:
+                with _capture_source(workspace, relative, entry, check_mode=True) as fd:
+                    _stream_source(fd, relative, entry, output if first else None)
+            _sync_baseline_file(output)
+
+    def _read_index(self) -> dict[str, list[int]] | None:
+        try:
+            info = self._root.lstat()
+        except FileNotFoundError:
+            return None
+        if not stat.S_ISDIR(info.st_mode):
+            raise EffectError("invalid rollback baseline root")
+        try:
+            # The compact representation bounds the index read even if on-disk data is damaged.
+            limit = 2 + 128 * len(self._layout)
+            with _open_baseline_file(self._root / "index.json") as source:
+                data = source.read(limit + 1)
+                if len(data) > limit:
+                    raise EffectError("rollback baseline index exceeds its size limit")
+            index = json.loads(data)
+            with _open_baseline_file(self._root / "objects.pack") as pack:
+                if os.fstat(pack.fileno()).st_size != self._pack_size:
+                    raise EffectError("rollback baseline pack has an invalid size")
+        except (OSError, ValueError, RecursionError) as error:
+            raise EffectError(f"rollback baseline is unreadable: {error}") from error
+        if index != self._layout or any(
+            type(number) is not int for record in index.values() for number in record
+        ):
+            raise EffectError("rollback baseline index does not match its manifest")
+        return index
+
+    def get(self, digest: str) -> bytes:
+        if self._index is None:
+            self._index = self._read_index()
+        if self._index is None or digest not in self._index:
+            return ContentStore(self._directory).get(digest)
+        offset, length, _ = self._index[digest]
+        try:
+            with _open_baseline_file(self._root / "objects.pack") as pack:
+                pack.seek(offset)
+                data = pack.read(length)
+        except OSError as error:
+            raise EffectError(f"rollback baseline object {digest} unavailable: {error}") from error
+        if len(data) != length or hashlib.sha256(data).hexdigest() != digest:
+            raise EffectError(f"rollback baseline object {digest} is corrupt")
+        return data
+
+
+@contextmanager
+def _open_baseline_file(path: Path) -> Iterator[BinaryIO]:
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as source:
+        if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+            raise EffectError("invalid rollback baseline file type")
+        yield source
+
+
+def _sync_baseline_file(output: BinaryIO | TextIO) -> None:
+    output.flush()
+    fd = output.fileno()
+    os.fchmod(fd, 0o444)
+    os.fsync(fd)
+
+
+def _sync_baseline_directory(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 @dataclass(frozen=True)
@@ -153,6 +268,25 @@ class Entry:
 
 
 Manifest = Mapping[str, Entry]
+
+
+@contextmanager
+def _capture_source(
+    workspace: Path, relative: str, entry: Entry, *, check_mode: bool = False
+) -> Iterator[int]:
+    fd = os.open(Path(workspace) / relative, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        info = os.fstat(fd)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or info.st_size != entry.size
+            or (check_mode and stat.S_IMODE(info.st_mode) != entry.mode)
+        ):
+            raise EffectError(f"workspace changed while capturing {relative}")
+        yield fd
+    finally:
+        os.close(fd)
 
 
 def _stream_source(
@@ -547,7 +681,7 @@ def _restore(
     relative: str,
     before: Manifest,
     store: ContentStore,
-    baseline_store: ContentStore | None,
+    baseline_store: ContentStore | BaselineStore | None,
     policy: EffectPolicy,
 ) -> None:
     target = _safe_path(root, relative)
@@ -623,7 +757,7 @@ def reconcile(
     after: Manifest,
     policy: EffectPolicy,
     store: ContentStore,
-    baseline_store: ContentStore | None,
+    baseline_store: ContentStore | BaselineStore | None,
 ) -> Reconciliation:
     _validate_manifest_limits(before)
     _validate_manifest_limits(after)

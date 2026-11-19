@@ -9,7 +9,10 @@ import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 
-from kernel_effects import ContentStore, EffectError, Manifest, effect_policy_for_run, manifest_digest, reconcile, scan
+from kernel_effects import (
+    BaselineStore, ContentStore, EffectError, Manifest, effect_policy_for_run, manifest_digest,
+    reconcile, scan,
+)
 from kernel_exec_capability import shell_capability
 from kernel_exec_session import ExecSession, ExecSessionError
 from kernel_run_env import RunEnv, RunEnvError, env_identity
@@ -166,10 +169,11 @@ class ShellTool:
         # each actual command still receives its narrower per-tool capability.
         self.session.configure(replace(self.capability, network=self.settings.shell_network))
         self.store = ContentStore(self.run_dir)
-        self.baseline_store = ContentStore(self.run_dir / "shell-baseline")
         baseline_root = Path(self.spec.get("parent_snapshot", self.root))
-        self.baseline = scan(baseline_root, exclude=lambda _: False)
-        self.baseline_store.capture(baseline_root, self.baseline)
+        baseline = scan(baseline_root, exclude=lambda _: False)
+        baseline_store = BaselineStore(self.run_dir / "shell-baseline", baseline)
+        baseline_store.publish(baseline_root)
+        self.baseline, self.baseline_store = baseline, baseline_store
         self.policy = (replace(policy, baseline_manifest=self.baseline) if policy is not None else
                        effect_policy_for_run(self.root, row, baseline_tests,
                                              baseline_manifest=self.baseline))
