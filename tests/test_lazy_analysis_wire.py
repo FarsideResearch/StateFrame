@@ -275,12 +275,15 @@ def _run(tree, work, *, minimal="off", indexed=None, hold=False, fallback=False,
         config.update(hold_until="0002", demand_at=1)
     if resume:
         config.update(wait_for_graph=True, demand_at=2, stop_at=3)
+    # The hold, provider timeout and requested send count are the proof's
+    # bounds. Leave extra time for setup when the build host is busy.
+    run_timeout = 300 if analysis else 85
 
     def launch(arguments):
         probe.write_text(f"config = {config!r}\n" + PROBE, encoding="utf-8")
         return subprocess.run([sys.executable, "-B", "-c", DRIVER, str(probe), *arguments],
                               cwd=tree, env=env, capture_output=True, text=True, check=False,
-                              timeout=scaled(160 if analysis else 100))
+                              timeout=scaled(run_timeout + 60 if analysis else 100))
 
     def diagnostic(result):
         log = run / "engine.log"
@@ -290,7 +293,7 @@ def _run(tree, work, *, minimal="off", indexed=None, hold=False, fallback=False,
         result = launch(["run", "--repo", str(repo), "--task", "Fix the pricing code so the tests pass.",
                          "--endpoint", endpoint, "--model", "scripted", "--run-dir", str(run), "--quiet",
                          "--test-python", sys.executable, "--no-run-env", "--profile", str(profile),
-                         "--timeout", "85", "--max-turns", str(sends or 9), *scope])
+                         "--timeout", str(run_timeout), "--max-turns", str(sends or 9), *scope])
         if resume:
             assert result.returncode != 0 and len(trace.requests) == 3, diagnostic(result)
             config.update(wait_for_graph=False, stop_at=None, hold_until="0003")
