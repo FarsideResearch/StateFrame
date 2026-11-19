@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Build and verify StateFrame's offline, pure-Python wheelhouse."""
+"""Build and verify an offline wheelhouse with universal and pinned platform wheels.
+
+Runtime roots come from pyproject.toml. Supply downloaded wheels with --wheel-dir;
+installed pure-Python packages can also be repacked with --site-packages. Resolution
+and verification cover CPython 3.11-3.14 on manylinux x86_64/aarch64 (glibc 2.17+)
+and macOS x86_64/arm64 (11+). Neither mode downloads anything.
+"""
 from __future__ import annotations
 
 import argparse
@@ -13,19 +19,23 @@ import re
 import subprocess
 import sys
 import tempfile
+import tomllib
 import zipfile
 from email.message import Message
 from email.parser import BytesParser
 from importlib.machinery import EXTENSION_SUFFIXES
 from pathlib import Path, PurePosixPath
+from typing import Callable
 
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SITE_PACKAGES = Path("/opt/homebrew/lib/python3.14/site-packages")
-REQUIRED_DISTRIBUTIONS = (
-    "pytest", "pluggy", "iniconfig", "packaging", "pygments", "attrs", "PyYAML",
-    "jedi", "parso", "networkx",
+SUPPORTED_PYTHON_VERSIONS = ((3, 11), (3, 12), (3, 13), (3, 14))
+SUPPORTED_PLATFORMS = (
+    "manylinux_2_17_x86_64", "manylinux_2_17_aarch64",
+    "macosx_11_0_arm64", "macosx_11_0_x86_64",
 )
+PINNED_PLATFORM_VERSIONS = {"rpds-py": "2026.6.3"}
 PINNED_LOCAL_VERSIONS = {
     "attrs": "26.1.0",
     "PyYAML": "6.0.3",
@@ -288,29 +298,35 @@ def _parse_requirements(path: Path) -> list[tuple[str, str, str]]:
         parsed.append((_canonicalize(name), version, line.strip()))
 
     names = [name for name, _, _ in parsed]
-    expected = [_canonicalize(name) for name in REQUIRED_DISTRIBUTIONS]
-    optional = [_canonicalize(name) for name, _ in OPTIONAL_VENDOR_DISTRIBUTIONS]
-    if names[:len(expected)] != expected or names[len(expected):] not in ([], optional):
-        raise WheelhouseError(
-            "requirements.txt must pin the required distributions in order, followed by the optional vendor pair"
-        )
+    if len(names) != len(set(names)):
+        raise WheelhouseError(f"duplicate distribution pin in {path}")
+    if not parsed:
+        raise WheelhouseError(f"pinned requirements file is empty: {path}")
     versions = {name: version for name, version, _ in parsed}
     for name, version in PINNED_LOCAL_VERSIONS.items():
-        if versions.get(_canonicalize(name)) != version:
-            raise WheelhouseError(f"requirements.txt must pin {name}=={version}")
-    for name, version in OPTIONAL_VENDOR_DISTRIBUTIONS:
         if _canonicalize(name) in versions and versions[_canonicalize(name)] != version:
             raise WheelhouseError(f"requirements.txt must pin {name}=={version}")
     return parsed
 
 
 def _verify_wheel(path: Path, requirement_name: str, version: str) -> None:
+    from packaging.tags import parse_tag
+    from packaging.utils import parse_wheel_filename
+
     try:
+        filename_name, filename_version, _, filename_tags = parse_wheel_filename(path.name)
+        if filename_name != requirement_name or str(filename_version) != version:
+            raise WheelhouseError(f"wheel filename does not match its pin: {path.name}")
         with zipfile.ZipFile(path) as archive:
             if archive.testzip() is not None:
                 raise WheelhouseError(f"wheel has a corrupt ZIP member: {path.name}")
             names = set(archive.namelist())
-            if any(_is_compiled_file(name) for name in names):
+            if len(names) != len(archive.namelist()):
+                raise WheelhouseError(f"wheel contains duplicate ZIP members: {path.name}")
+            platform_wheel = requirement_name in PINNED_PLATFORM_VERSIONS
+            if platform_wheel and PINNED_PLATFORM_VERSIONS[requirement_name] != version:
+                raise WheelhouseError(f"unreviewed platform wheel version: {requirement_name}=={version}")
+            if not platform_wheel and any(_is_compiled_file(name) for name in names):
                 raise WheelhouseError(f"wheel contains compiled files: {path.name}")
             info_candidates = [name for name in names if name.endswith(".dist-info/METADATA")]
             if len(info_candidates) != 1:
@@ -319,8 +335,18 @@ def _verify_wheel(path: Path, requirement_name: str, version: str) -> None:
             metadata = BytesParser().parsebytes(archive.read(info_candidates[0]))
             if _canonicalize(metadata.get("Name", "")) != requirement_name or metadata.get("Version") != version:
                 raise WheelhouseError(f"wheel metadata does not match its pin: {path.name}")
+            _license(metadata)
             wheel = archive.read(f"{info_root}/WHEEL").decode("utf-8")
-            if "Root-Is-Purelib: true" not in wheel or "Tag: py3-none-any" not in wheel:
+            wheel_tags = set().union(*(
+                parse_tag(line.removeprefix("Tag: "))
+                for line in wheel.splitlines() if line.startswith("Tag: ")
+            ))
+            if wheel_tags != filename_tags:
+                raise WheelhouseError(f"wheel tags do not match its filename: {path.name}")
+            if not platform_wheel and (
+                "Root-Is-Purelib: true" not in wheel
+                or any(tag.abi != "none" or tag.platform != "any" for tag in wheel_tags)
+            ):
                 raise WheelhouseError(f"wheel is not tagged pure Python: {path.name}")
             record_name = f"{info_root}/RECORD"
             rows = list(csv.reader(archive.read(record_name).decode("utf-8").splitlines()))
@@ -351,43 +377,192 @@ def _verify_wheel(path: Path, requirement_name: str, version: str) -> None:
         raise WheelhouseError(f"cannot read wheel {path}: {error}") from error
 
 
-def verify_wheelhouse(directory: Path) -> list[tuple[str, str, str]]:
-    if not directory.is_dir():
-        raise WheelhouseError(f"wheelhouse directory is missing: {directory}")
-    requirements = _parse_requirements(directory / "requirements.txt")
-    expected_files: set[str] = set()
-    for name, version, _ in requirements:
-        filename = _wheel_filename(name, version)
-        expected_files.add(filename)
-        wheel_path = directory / filename
-        if not wheel_path.is_file():
-            raise WheelhouseError(f"missing pinned wheel: {wheel_path}")
-        _verify_wheel(wheel_path, name, version)
-
-    actual_wheels = {path.name for path in directory.glob("*.whl")}
-    if actual_wheels != expected_files:
-        extra = sorted(actual_wheels - expected_files)
-        missing = sorted(expected_files - actual_wheels)
-        raise WheelhouseError(f"wheelhouse wheel set mismatch (extra={extra}, missing={missing})")
-
-    checksums_path = directory / "SHA256SUMS"
-    if not checksums_path.is_file():
-        raise WheelhouseError(f"wheelhouse checksum file is missing: {checksums_path}")
+def _read_checksums(directory: Path) -> dict[str, str]:
+    path = directory / "SHA256SUMS"
+    if not path.is_file():
+        raise WheelhouseError(f"wheelhouse checksum file is missing: {path}")
     checksums: dict[str, str] = {}
-    for line in checksums_path.read_text(encoding="utf-8").splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         match = re.fullmatch(r"([0-9a-f]{64})  ([^/\\]+\.whl)", line)
         if not match:
-            raise WheelhouseError(f"malformed checksum line in {checksums_path}: {line!r}")
+            raise WheelhouseError(f"malformed checksum line in {path}: {line!r}")
         digest, filename = match.groups()
         if filename in checksums:
             raise WheelhouseError(f"duplicate checksum entry for {filename}")
         checksums[filename] = digest
-    if set(checksums) != expected_files:
-        raise WheelhouseError("SHA256SUMS does not list exactly the pinned wheel files")
-    for filename, expected in checksums.items():
-        actual = hashlib.sha256((directory / filename).read_bytes()).hexdigest()
-        if actual != expected:
-            raise WheelhouseError(f"checksum mismatch for {directory / filename}")
+    return checksums
+
+
+def _prepare_packaging(directory: Path) -> None:
+    # The installer verifies before installing dependencies. Bootstrap only from
+    # a checksum-verified universal wheel when packaging is not already present.
+    try:
+        import packaging.requirements  # noqa: F401
+        return
+    except ImportError:
+        pass
+    checksums = _read_checksums(directory)
+    candidates = sorted(directory.glob("packaging-*-py3-none-any.whl"))
+    if len(candidates) != 1:
+        raise WheelhouseError("missing or ambiguous required wheel: packaging")
+    wheel = candidates[0]
+    if hashlib.sha256(wheel.read_bytes()).hexdigest() != checksums.get(wheel.name):
+        raise WheelhouseError(f"checksum mismatch for {wheel.name}")
+    sys.path.insert(0, str(wheel.resolve()))
+    try:
+        import packaging.requirements  # noqa: F401
+    except ImportError as error:
+        raise WheelhouseError("cannot load required wheel: packaging") from error
+
+
+def _wheel_metadata(path: Path) -> Message:
+    try:
+        with zipfile.ZipFile(path) as archive:
+            entries = [name for name in archive.namelist() if name.endswith(".dist-info/METADATA")]
+            if len(entries) != 1:
+                raise WheelhouseError(f"wheel must contain one METADATA file: {path.name}")
+            return BytesParser().parsebytes(archive.read(entries[0]))
+    except (OSError, KeyError, zipfile.BadZipFile) as error:
+        raise WheelhouseError(f"cannot read wheel metadata: {path.name}: {error}") from error
+
+
+def _runtime_roots() -> list[str]:
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    return list(project.get("dependencies", []))
+
+
+def _target_platform_tags(platform: str) -> list[str]:
+    from packaging.tags import mac_platforms
+
+    if platform.startswith("macosx_"):
+        arch = "arm64" if platform.endswith("arm64") else "x86_64"
+        return list(mac_platforms(version=(11, 0), arch=arch))
+    arch = "aarch64" if platform.endswith("aarch64") else "x86_64"
+    tags = [f"manylinux_2_{minor}_{arch}" for minor in range(17, 4, -1)]
+    tags.append(f"manylinux2014_{arch}")
+    if arch == "x86_64":
+        tags.extend(("manylinux2010_x86_64", "manylinux1_x86_64"))
+    return tags
+
+
+def _target_environment(version: tuple[int, int], platform: str) -> dict[str, str]:
+    linux = platform.startswith("manylinux")
+    arch = ("aarch64" if linux else "arm64") if platform.endswith(("aarch64", "arm64")) else "x86_64"
+    python = ".".join(map(str, version))
+    return {
+        "implementation_name": "cpython", "implementation_version": f"{python}.0",
+        "os_name": "posix", "platform_machine": arch,
+        "platform_python_implementation": "CPython",
+        "platform_release": "", "platform_system": "Linux" if linux else "Darwin",
+        "platform_version": "", "python_full_version": f"{python}.0",
+        "python_version": python, "sys_platform": "linux" if linux else "darwin",
+        "extra": "",
+    }
+
+
+def _runtime_closure(
+    candidates: Callable[[str], list[Path]], roots: list[str],
+) -> dict[str, tuple[str, set[Path]]]:
+    """Resolve one pinned version per distribution, evaluating every target's metadata.
+
+    Explicit target tags avoid inspecting the build machine's ABI or architecture.
+    Revisit a distribution for newly requested extras, including cycles through extras.
+    """
+    from packaging.requirements import Requirement
+    from packaging.specifiers import SpecifierSet
+    from packaging.tags import compatible_tags, cpython_tags
+    from packaging.utils import parse_wheel_filename
+
+    selected: dict[str, tuple[str, set[Path]]] = {}
+    for version in SUPPORTED_PYTHON_VERSIONS:
+        for platform in SUPPORTED_PLATFORMS:
+            env = _target_environment(version, platform)
+            target = f"CPython {env['python_version']} / {platform}"
+            interpreter = f"cp{version[0]}{version[1]}"
+            platforms = _target_platform_tags(platform)
+            tags = set(cpython_tags(version, abis=[interpreter], platforms=platforms))
+            tags.update(compatible_tags(version, interpreter=interpreter, platforms=platforms))
+            pending = [(root, ("",), "project.dependencies") for root in roots]
+            visited: set[tuple[str, tuple[str, ...]]] = set()
+            while pending:
+                text, extras, parent = pending.pop()
+                requirement = Requirement(text)
+                if requirement.marker and not any(
+                    requirement.marker.evaluate({**env, "extra": extra}) for extra in extras
+                ):
+                    continue
+                name = _canonicalize(requirement.name)
+                if requirement.url:
+                    raise WheelhouseError(f"{name}: direct URL dependencies cannot be resolved offline")
+                paths = candidates(name)
+                matching: list[tuple[Path, str, Message]] = []
+                for path in paths:
+                    _, candidate_version, _, wheel_tags = parse_wheel_filename(path.name)
+                    if candidate_version not in requirement.specifier or not wheel_tags & tags:
+                        continue
+                    metadata = _wheel_metadata(path)
+                    python_constraint = SpecifierSet(metadata.get("Requires-Python", ""))
+                    if env["python_full_version"] in python_constraint:
+                        matching.append((path, str(candidate_version), metadata))
+                if not matching:
+                    raise WheelhouseError(f"missing required wheel: {requirement} for {target} (required by {parent})")
+                versions = {item[1] for item in matching}
+                if len(versions) != 1:
+                    raise WheelhouseError(f"ambiguous versions for {name}: {sorted(versions)}; supply exact pins")
+                # Prefer a universal or stable-ABI wheel over per-interpreter wheels.
+                matching.sort(key=lambda item: ("-none-any.whl" not in item[0].name,
+                                                "-abi3-" not in item[0].name, item[0].name))
+                path, resolved_version, metadata = matching[0]
+                if name in selected and selected[name][0] != resolved_version:
+                    raise WheelhouseError(f"conflicting runtime requirements for {name}: {requirement}")
+                selected.setdefault(name, (resolved_version, set()))[1].add(path)
+                active_extras = tuple(sorted({"", *requirement.extras}))
+                key = (name, active_extras)
+                if key in visited:
+                    continue
+                visited.add(key)
+                pending.extend((dependency, active_extras, name)
+                               for dependency in metadata.get_all("Requires-Dist", []))
+    return selected
+
+
+def _indexed_wheels(directory: Path) -> tuple[list[tuple[str, str, str]], dict[str, list[Path]]]:
+    """Check pins, archive integrity, and checksums without assuming closure completeness."""
+    from packaging.utils import parse_wheel_filename
+
+    requirements = _parse_requirements(directory / "requirements.txt")
+    pins = {name: version for name, version, _ in requirements}
+    checksums = _read_checksums(directory)
+    wheels = {path.name: path for path in directory.glob("*.whl")}
+    for filename in sorted(set(checksums) - set(wheels)):
+        name, version, _, _ = parse_wheel_filename(filename)
+        raise WheelhouseError(f"missing pinned wheel: {name}=={version} ({filename})")
+    if set(wheels) - set(checksums):
+        raise WheelhouseError(f"SHA256SUMS omits wheel files: {sorted(set(wheels) - set(checksums))}")
+    by_name: dict[str, list[Path]] = {}
+    for filename, path in sorted(wheels.items()):
+        name, version, _, _ = parse_wheel_filename(filename)
+        if pins.get(name) != str(version):
+            raise WheelhouseError(f"wheel has no matching requirement pin: {filename}")
+        if hashlib.sha256(path.read_bytes()).hexdigest() != checksums[filename]:
+            raise WheelhouseError(f"checksum mismatch for {filename}")
+        _verify_wheel(path, name, str(version))
+        by_name.setdefault(name, []).append(path)
+    for name in pins:
+        if name not in by_name:
+            raise WheelhouseError(f"missing pinned wheel: {name}=={pins[name]}")
+    return requirements, by_name
+
+
+def verify_wheelhouse(directory: Path) -> list[tuple[str, str, str]]:
+    if not directory.is_dir():
+        raise WheelhouseError(f"wheelhouse directory is missing: {directory}")
+    _prepare_packaging(directory)
+    requirements, by_name = _indexed_wheels(directory)
+    closure = _runtime_closure(lambda name: by_name.get(name, []), _runtime_roots())
+    pinned = {name for name, _, _ in requirements}
+    if pinned != set(closure):
+        raise WheelhouseError(f"requirements.txt contains distributions outside runtime closure: {sorted(pinned - set(closure))}")
     return requirements
 
 
@@ -473,115 +648,95 @@ def _verified_vendor_sources(vendor_dir: Path | None) -> tuple[list[Path], list[
 
 
 def _existing_wheel_bytes(output: Path) -> dict[str, bytes]:
-    wheels = sorted(output.glob("*.whl")) if output.is_dir() else []
-    if not wheels:
+    if not output.is_dir() or not list(output.glob("*.whl")):
         return {}
-    if not (output / "requirements.txt").is_file() or not (output / "SHA256SUMS").is_file():
-        raise WheelhouseError(f"refusing to update a nonempty unindexed wheelhouse: {output}")
-    pins: dict[str, tuple[str, str]] = {}
-    for line_number, line in enumerate((output / "requirements.txt").read_text(encoding="utf-8").splitlines(), 1):
-        match = re.fullmatch(r"([A-Za-z0-9_.-]+)==([A-Za-z0-9.!+_-]+)", line.strip())
-        if not match:
-            raise WheelhouseError(f"invalid existing wheelhouse pin at {output / 'requirements.txt'}:{line_number}")
-        name, version = match.groups()
-        filename = _wheel_filename(name, version)
-        if filename in pins:
-            raise WheelhouseError(f"duplicate existing wheelhouse pin: {line}")
-        pins[filename] = (_canonicalize(name), version)
-    wheel_filenames = {path.name for path in wheels}
-    if not set(pins).issubset(wheel_filenames):
-        raise WheelhouseError(f"existing wheelhouse requirements reference missing wheels: {output}")
-    checksums: dict[str, str] = {}
-    for line in (output / "SHA256SUMS").read_text(encoding="utf-8").splitlines():
-        match = re.fullmatch(r"([0-9a-f]{64})  ([^/\\]+\.whl)", line)
-        if not match:
-            raise WheelhouseError(f"malformed existing wheelhouse checksum line: {line!r}")
-        digest, filename = match.groups()
-        if filename in checksums:
-            raise WheelhouseError(f"duplicate existing checksum entry: {filename}")
-        checksums[filename] = digest
-    if set(checksums) != set(pins):
-        raise WheelhouseError(f"existing wheelhouse checksums do not match its wheel files: {output}")
-    for filename, (name, version) in pins.items():
-        wheel = output / filename
-        _verify_wheel(wheel, name, version)
-        if hashlib.sha256(wheel.read_bytes()).hexdigest() != checksums[filename]:
-            raise WheelhouseError(f"existing wheelhouse checksum mismatch: {wheel}")
-    for wheel in wheels:
-        if wheel.name in pins:
-            continue
-        try:
-            with zipfile.ZipFile(wheel) as archive:
-                metadata_entries = [name for name in archive.namelist() if name.endswith(".dist-info/METADATA")]
-                if len(metadata_entries) != 1:
-                    raise WheelhouseError(f"unindexed wheel must contain one METADATA file: {wheel.name}")
-                message = BytesParser().parsebytes(archive.read(metadata_entries[0]))
-        except (OSError, KeyError, UnicodeDecodeError, zipfile.BadZipFile) as error:
-            raise WheelhouseError(f"cannot inspect unindexed wheel {wheel}: {error}") from error
-        name = message.get("Name", "")
-        version = message.get("Version", "")
-        if not name or not version or wheel.name != _wheel_filename(name, version):
-            raise WheelhouseError(f"unindexed wheel has an unexpected filename or identity: {wheel.name}")
-        _verify_wheel(wheel, _canonicalize(name), version)
-    return {path.name: path.read_bytes() for path in wheels}
+    _indexed_wheels(output)
+    return {path.name: path.read_bytes() for path in output.glob("*.whl")}
 
 
-def build_wheelhouse(site_packages: Path, output: Path, vendor_dir: Path | None = None) -> None:
-    if not site_packages.is_dir():
-        raise WheelhouseError(f"site-packages directory is missing: {site_packages}")
+def build_wheelhouse(
+    site_packages: Path, output: Path, vendor_dir: Path | None = None,
+    wheel_dir: Path | None = None,
+) -> None:
+    _prepare_packaging(output if (output / "SHA256SUMS").is_file() else ROOT / "wheelhouse")
+    from packaging.utils import parse_wheel_filename
 
     existing = _existing_wheel_bytes(output)
-    built = [_build_wheel(site_packages, name) for name in REQUIRED_DISTRIBUTIONS]
     vendor_sources, missing_vendor = _verified_vendor_sources(vendor_dir)
     if missing_vendor:
         print("Optional vendor distributions missing: " + ", ".join(missing_vendor))
-    else:
+    with tempfile.TemporaryDirectory(prefix="wheelhouse-") as temporary:
+        staging = Path(temporary)
+        by_name: dict[str, list[Path]] = {}
+
+        def add_wheel(filename: str, data: bytes) -> None:
+            path = staging / filename
+            if path.exists():
+                # Existing verified release wheels retain their exact bytes.
+                return
+            name, version, _, _ = parse_wheel_filename(filename)
+            path.write_bytes(data)
+            _verify_wheel(path, name, str(version))
+            by_name.setdefault(name, []).append(path)
+
+        for filename, data in existing.items():
+            add_wheel(filename, data)
+        if wheel_dir is not None:
+            if not wheel_dir.is_dir():
+                raise WheelhouseError(f"wheel source directory is missing: {wheel_dir}")
+            for path in sorted(wheel_dir.glob("*.whl")):
+                add_wheel(path.name, path.read_bytes())
         for (name, version), source in zip(OPTIONAL_VENDOR_DISTRIBUTIONS, vendor_sources):
             if source.suffix == ".whl":
                 _verify_wheel(source, _canonicalize(name), version)
                 target_name = _wheel_filename(name, version)
                 if source.name != target_name:
                     raise WheelhouseError(f"pinned vendor wheel must be named {target_name}: {source.name}")
-                with zipfile.ZipFile(source) as archive:
-                    metadata_entry = next(item for item in archive.namelist() if item.endswith(".dist-info/METADATA"))
-                    metadata = BytesParser().parsebytes(archive.read(metadata_entry))
-                built.append((target_name, source.read_bytes(), _license(metadata), f"{name}=={version}"))
+                add_wheel(source.name, source.read_bytes())
             else:
-                built.append(_build_vendor_sdist(source, name, version))
+                filename, data, _, _ = _build_vendor_sdist(source, name, version)
+                add_wheel(filename, data)
 
-    output.mkdir(parents=True, exist_ok=True)
-    by_filename = {filename: (data, license_name, pin) for filename, data, license_name, pin in built}
-    extra_existing = set(existing) - set(by_filename)
-    if extra_existing:
-        raise WheelhouseError(
-            "refusing to remove existing wheelhouse wheels no longer selected: " + ", ".join(sorted(extra_existing))
+        def candidates(name: str) -> list[Path]:
+            if name not in by_name:
+                filename, data, _, _ = _build_wheel(site_packages, name)
+                add_wheel(filename, data)
+            return by_name[name]
+
+        closure = _runtime_closure(candidates, _runtime_roots())
+        selected = {path.name: path for _, paths in closure.values() for path in paths}
+        extra_existing = set(existing) - set(selected)
+        if extra_existing:
+            raise WheelhouseError(
+                "refusing to remove existing wheelhouse wheels no longer selected: " + ", ".join(sorted(extra_existing))
+            )
+        # Index and verify the full candidate before changing any release artifacts.
+        # Sources not used by this target matrix are kept outside the final candidate.
+        candidate = staging / "selected"
+        candidate.mkdir()
+        for filename, source in selected.items():
+            (candidate / filename).write_bytes(source.read_bytes())
+        (candidate / "requirements.txt").write_text(
+            "".join(f"{name}=={version}\n" for name, (version, _) in sorted(closure.items())), encoding="utf-8",
         )
-    for filename, data, _, pin in built:
-        prior = existing.get(filename)
-        if prior is not None:
-            # Keep verified existing wheels intact; generated indexes are refreshed from their bytes below.
-            name, version = pin.split("==", 1)
-            _verify_wheel(output / filename, _canonicalize(name), version)
-            continue
-        else:
-            (output / filename).write_bytes(data)
+        (candidate / "SHA256SUMS").write_text(
+            "".join(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {filename}\n"
+                    for filename, path in sorted(selected.items())), encoding="utf-8",
+        )
+        verify_wheelhouse(candidate)
+        output.mkdir(parents=True, exist_ok=True)
+        for filename in selected:
+            if filename not in existing:
+                with (output / filename).open("xb") as handle:
+                    handle.write((candidate / filename).read_bytes())
+        for index in ("requirements.txt", "SHA256SUMS"):
+            (output / index).write_bytes((candidate / index).read_bytes())
+        verify_wheelhouse(output)
 
-    selected: dict[str, tuple[bytes, str, str]] = {}
-    for filename, (data, license_name, pin) in by_filename.items():
-        selected[filename] = (existing.get(filename, data), license_name, pin)
-    requirements_path = output / "requirements.txt"
-    checksums_path = output / "SHA256SUMS"
-    requirements_path.write_text("".join(f"{pin}\n" for _, _, _, pin in built), encoding="utf-8")
-    checksum_lines = [
-        f"{hashlib.sha256(data).hexdigest()}  {filename}"
-        for filename, (data, _, _) in sorted(selected.items())
-    ]
-    checksums_path.write_text("\n".join(checksum_lines) + "\n", encoding="utf-8")
-    verify_wheelhouse(output)
-
-    print(f"Built and verified offline wheelhouse at {output.resolve()}")
-    for filename, (_, license_name, pin) in sorted(selected.items()):
-        print(f"  {pin}: {filename} (license: {license_name})")
+        print(f"Built and verified offline wheelhouse at {output.resolve()}")
+        for filename, path in sorted(selected.items()):
+            metadata = _wheel_metadata(path)
+            print(f"  {metadata['Name']}=={metadata['Version']}: {filename} (license: {_license(metadata)})")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -592,6 +747,7 @@ def main(argv: list[str] | None = None) -> int:
         help="installed pure-Python distributions to package",
     )
     parser.add_argument("--vendor-dir", type=Path, help="local directory with SHA-256-pinned vendor files")
+    parser.add_argument("--wheel-dir", type=Path, help="downloaded universal and pinned platform wheels")
     parser.add_argument("--verify", action="store_true", help="verify an existing wheelhouse without rebuilding")
     arguments = parser.parse_args(argv)
     try:
@@ -601,8 +757,8 @@ def main(argv: list[str] | None = None) -> int:
             for _, _, pin in requirements:
                 print(f"  {pin}")
         else:
-            build_wheelhouse(arguments.site_packages, arguments.output, arguments.vendor_dir)
-    except (WheelhouseError, OSError, subprocess.SubprocessError) as error:
+            build_wheelhouse(arguments.site_packages, arguments.output, arguments.vendor_dir, arguments.wheel_dir)
+    except (WheelhouseError, OSError, ValueError, subprocess.SubprocessError) as error:
         print(f"build_wheelhouse.py: {error}", file=sys.stderr)
         return 1
     return 0

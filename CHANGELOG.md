@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fixed: offline installs now include every required dependency, so schema validation is active.
+
 ## 0.7.85 (2026-11-19)
 
 - Tests: the protocol parity (K1, K5) and fail-loud (t8) guards now locate engine sites by enclosing function and construct instead of line number, so unrelated edits that shift lines no longer turn them red; a removed or new unreviewed site still fails.
