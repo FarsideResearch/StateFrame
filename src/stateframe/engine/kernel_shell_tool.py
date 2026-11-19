@@ -417,6 +417,9 @@ class ShellTool:
             observation = "REFUSED TIMEOUT: command exceeded its wall limit\n" + observation
         if any(reason == "outside edit scope" for _, reason in effects.restored):
             observation = "REFUSED OUTSIDE_EDIT_SCOPE: workspace write was restored\n" + observation
+        if any(reason == "outside task file scope" for _, reason in effects.restored):
+            observation = ("REFUSED OUTSIDE_TASK_SCOPE: the task says to change no other file; "
+                           "workspace write was restored\n" + observation)
         if any(reason.startswith("protected test tree:") for _, reason in effects.restored):
             observation = "REFUSED PROTECTED_TEST: workspace write was restored\n" + observation
         head = observation

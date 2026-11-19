@@ -21,6 +21,7 @@ Code coverage of the catalog from this module:
 from __future__ import annotations
 
 import hashlib
+import posixpath
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
@@ -49,6 +50,23 @@ RENDERER_MARKERS: tuple[str, ...] = (
 # Label used in fingerprints for refusals that cannot be tied to one resolved path
 # (for example an unknown handle). Fixed so identical retries fingerprint identically.
 UNRESOLVED_PATH = "(unresolved)"
+
+
+def task_scope_refusal(relative: object, scope: object) -> str | None:
+    """Check the task cap independently of existing-file or new-file authority.
+
+    Callers still validate workspace containment and protected paths. Normalizing
+    here prevents harmless relative spellings from changing task membership.
+    """
+    if not isinstance(scope, (list, tuple)) or not scope:
+        return None
+    normalized = posixpath.normpath(relative) if isinstance(relative, str) and relative else ""
+    if (normalized and normalized != ".." and not normalized.startswith(("/", "../"))
+            and normalized in scope):
+        return None
+    allowed = ", ".join(path for path in scope if isinstance(path, str))
+    return ("REFUSED OUTSIDE_TASK_SCOPE: the task says to change no other file. "
+            f"Edit only these allowed files: {allowed}. Nothing was changed.")
 
 
 class BatchInputError(ValueError):
