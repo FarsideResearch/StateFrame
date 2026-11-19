@@ -1048,17 +1048,26 @@ class LedgerIndex:
 
     def dependencies_for(self, path: str) -> tuple[str, ...]:
         """Return transitive source files called by a test file."""
+        return self._dependency_fact(path, 0)[0]
+
+    def _dependency_fact(self, path: str, revision: int) -> tuple[tuple[str, ...], bool]:
         normalized = _path(path)
         if not normalized or not _is_test_path(normalized):
-            return ()
+            return (), True
         deferred_root = getattr(self, "_deferred_call_graph_root", None)
+        if deferred_root is not None:
+            from kernel_repo_dependencies import active
+
+            if active is not None:
+                return active.fact(Path(deferred_root), normalized, revision)
         if self._call_graph is None and deferred_root is not None:
             self.configure_call_graph(deferred_root)
         if self._call_graph is None:
-            return ()
+            return (), True
+        complete = getattr(self._call_graph, "index_status", "ready") == "ready"
         cached = self._test_dependency_cache.get(normalized)
         if cached is not None:
-            return cached
+            return cached, complete
         graph = self._call_graph
         dependencies: set[str] = set()
         scoped = getattr(graph, "symbols_in_file", None)
@@ -1075,7 +1084,7 @@ class LedgerIndex:
                     dependencies.add(file_name)
         result = tuple(sorted(dependencies))
         self._test_dependency_cache[normalized] = result
-        return result
+        return result, complete
 
     def _record(self, decision: InvalidationDecision) -> None:
         payload = decision.to_dict()
@@ -1127,14 +1136,14 @@ class LedgerIndex:
                 digest=digest,
                 source_kind=source_kind,
             )
+        complete = True
         if _is_test_path(node.path) and not node.dependencies:
-            derived = self.dependencies_for(node.path)
+            derived, complete = self._dependency_fact(node.path, node.workspace_revision)
             if derived:
                 node = replace(node, dependencies=derived)
         if _is_test_path(node.path) and node.source_kind == "check":
             checks = getattr(self, "_pending_graph_checks", None)
-            pending = getattr(self._call_graph, "index_status", "ready") != "ready"
-            if pending and not dependencies:
+            if not complete:
                 if checks is None:
                     checks = self._pending_graph_checks = {}
                 checks[node.path] = node.node_id
@@ -2005,9 +2014,10 @@ def runtime_invalidation_index(runtime: object) -> LedgerIndex:
         # are needed. Keep the root available for the first dependency query.
         index._deferred_call_graph_root = root
         if index._call_graph is not None:
+            from kernel_repo_dependencies import active
             from mc_repo_intel_vendor.background import enabled as background_enabled
 
-            if background_enabled():
+            if active is None and background_enabled():
                 # Refresh a graph after a dependency query has requested it.
                 index.configure_call_graph(root)
     if getattr(runtime, "decision_graph", None) is None:

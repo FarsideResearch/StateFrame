@@ -1301,10 +1301,10 @@ class CodeGraph:
     on synthetic "unresolved:<short>" nodes so their callers stay queryable.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, index_files: bool = False) -> None:
         self.defs: dict[str, SymbolDef] = {}          # symbol id -> def
         self._by_short: dict[str, list[str]] = {}     # short name -> [symbol ids]
-        if os.environ.get("STATEFRAME_TURN_INDEXED_READS") == "on":
+        if index_files or os.environ.get("STATEFRAME_TURN_INDEXED_READS") == "on":
             self._by_file: dict[str, dict[str, None]] = {}
             self._by_file_short: dict[tuple[str, str], list[str]] = {}
         # Module-level constants/variables (VALUE_KINDS). A SEPARATE namespace
@@ -1971,6 +1971,17 @@ class CodeGraph:
                 found |= self._edges.get(t, set())
         return self._as_refs(found - set(targets))
 
+    def dependency_files(self, path: str) -> tuple[str, ...]:
+        """Find file dependencies in one traversal from all symbols in a test."""
+        self._ensure_edges()
+        seeds = self.symbols_in_file(path)
+        if seeds is None:
+            seeds = [symbol for symbol, definition in self.defs.items() if definition.file == path]
+        reachable = self._reach(seeds, self._edges)
+        files = {definition.file for symbol in reachable
+                 if (definition := self.defs.get(symbol)) is not None and definition.file != path}
+        return tuple(sorted(files))
+
     def _reach(self, seeds: Iterable[str], adj: dict[str, set[str]]) -> set[str]:
         """BFS transitive closure (works with or without networkx)."""
         seen: set[str] = set()
@@ -2510,6 +2521,48 @@ def _extract_any_file(file_path: Path, repo_root: Path,
     return ts_extract.extract_ts_like(source, relpath, lang, repo_files)
 
 
+def scoped_test_dependencies(root: Path, path: str) -> tuple[str, ...]:
+    """Resolve direct Python call dependencies without walking the checkout."""
+    graph = CodeGraph()
+    modules: dict[tuple[str, ...], str | None] = {}
+    remaining = _MAX_PARSE_BYTES
+
+    def extract(relative: str) -> _FileExtract | None:
+        nonlocal remaining
+        file = root / relative
+        if (file.suffix != ".py" or _excluded_reason(Path(relative).parts)
+                or not file.is_relative_to(root) or file.resolve() != file or not file.is_file()):
+            return None
+        with file.open("rb") as stream:
+            raw = stream.read(remaining + 1)
+        if len(raw) > remaining:
+            return None
+        remaining -= len(raw)
+        source = raw.decode("utf-8-sig", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+        facts = _extract_file(file, root, source=source, resolved_modules=modules)
+        for definition in facts.defs:
+            graph._index_def(definition)
+        return facts
+
+    try:
+        test = extract(path)
+        if test is None:
+            return ()
+        imports = test.import_table
+        candidates = {_decode_import_entry(imports[alias])[0]
+                      for call in test.calls for alias in (call.hint_module or call.callee_short,)
+                      if alias in imports}
+        for relative in sorted(candidates - {path})[:32]:
+            extract(relative)
+        tables = {path: imports}
+        files = {definition.file for call in test.calls
+                 for target, _ in graph._resolve_callee(call, tables)
+                 if (definition := graph.defs.get(target)) is not None and definition.file != path}
+        return tuple(sorted(files))
+    except (OSError, RecursionError, RuntimeError, ValueError):
+        return ()
+
+
 # ── Cross-session cache warming ──────────────────────────────────────────────
 #
 # Every Code Studio session is a FRESH CLONE, so its `.mc_codegraph_cache.json`
@@ -2790,28 +2843,30 @@ def _deep_file(source, relpath, repo_root, file_path):
 def _background_graph(root: Path, use_lsp: bool) -> CodeGraph:
     from . import background
 
-    def work(publish, current):
-        basis = _tree_fingerprint(root)
-
-        def consistent():
-            return current() and basis == _tree_fingerprint(root)
-
-        def publish_static(graph):
-            if consistent():
-                publish(graph)
-
-        graph = _build_graph_uncached(
-            str(root), publish=publish_static, current=current, consistent=consistent, use_lsp=use_lsp,
-        )
-        if consistent():
-            publish(graph)
-
-    graph = background.request(root, "graph" if use_lsp else "static-graph", work)
+    graph = background.request_graph(root, use_lsp)
     if graph is not None:
         return graph
     pending = CodeGraph()
     pending.index_status = "pending"
     return pending
+
+
+def produce_graph(root: Path, use_lsp: bool, publish, current) -> None:
+    """Publish graph snapshots only for the unchanged source membership and stat basis."""
+    basis = _tree_fingerprint(root)
+
+    def consistent():
+        return current() and basis == _tree_fingerprint(root)
+
+    def publish_static(graph):
+        if consistent():
+            publish(graph)
+
+    graph = _build_graph_uncached(
+        str(root), publish=publish_static, current=current, consistent=consistent, use_lsp=use_lsp,
+    )
+    if consistent():
+        publish(graph)
 
 
 def _build_graph_uncached(
@@ -2823,7 +2878,7 @@ def _build_graph_uncached(
     deferred_basis: str | None = None,
 ) -> CodeGraph:
     """The real build (no in-process memo). See build_graph."""
-    graph = CodeGraph()
+    graph = CodeGraph(index_files=publish is not None)
     root = Path(repo_path)
     if not root.exists():
         logger.warning("call_graph: repo path does not exist: %s", repo_path)
@@ -2838,7 +2893,8 @@ def _build_graph_uncached(
         cache_path = repo_cache_file(root)
         lsp_path = None
     cache = _load_cache(cache_path) if use_cache else {}
-    facts_dir = _python_facts_dir(root, cache_path.parent / "python-call-facts") if deferred_basis else None
+    facts_dir = (_python_facts_dir(root, cache_path.parent / "python-call-facts")
+                 if deferred_basis is not None or publish is not None else None)
     new_cache: dict = {}
     file_import_tables: dict[str, dict[str, str]] = {}
     resolved_modules: dict[tuple[str, ...], str | None] = {}

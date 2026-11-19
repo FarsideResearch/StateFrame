@@ -99,7 +99,8 @@ class GraphProbe:
                 if first and hold_until:
                     # Release only once the chosen provider response is durable.
                     response = Path(f"wire/{hold_until}.response.json")
-                    wait_until(response.exists, config["gate_seconds"])
+                    if wait_until(response.exists, config["gate_seconds"]):
+                        observe("released")
                 try:
                     return original(*args, **kwargs)
                 finally:
@@ -178,7 +179,9 @@ def _run(tree, work, *, minimal="off", indexed=None, hold=False, fallback=False,
         # A repository-wide short-name match exists outside the scoped imports.
         # Using scoped facts by accident during replay changes the tape.
         (repo / "shop" / "elsewhere.py").write_text("def raises(): pass\n", encoding="utf-8")
-        steps.insert(1, {"tool": "read", "required": True, "arguments": {"path": TEST_PATH}})
+        steps = [{"tool": "read", "required": True, "arguments": {"path": path}}
+                 for path in ("shop/pricing.py", TEST_PATH, "shop/elsewhere.py", "shop/__init__.py")]
+        sends = len(steps)
     switches = profiles.load(profiles.DEFAULT)
     switches.update({MINIMAL: minimal, "STATEFRAME_TURN_REPO_INTEL": "off",
                      "STATEFRAME_PER_REQUEST_TIMEOUT_S": str(REQUEST_BUDGET)})
@@ -282,6 +285,7 @@ def test_replay_reuses_the_facts_even_while_the_graph_is_stalled(tmp_path):
         assert (run / "wire" / f"{send:04d}.request.json").read_bytes() == request
     assert [row.get("replayed", False) for row in
             map(json.loads, (run / "sends.jsonl").read_text().splitlines())] == [
-                True, True, True, False, False,
+                True, True, True, False,
             ]
     assert events[0][0] == "start"
+    assert events[1][0] == "released"

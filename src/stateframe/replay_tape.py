@@ -461,16 +461,19 @@ class Replayer:
         item = self._layout_item()
         return validate_reserves_record(item.get("stable_wire_reserves")) if item else None
 
+    def next_request_path(self) -> Path | None:
+        """Locate the recorded request currently being rebuilt, without consuming it."""
+        item = self._layout_item()
+        request_path = item.get("request") if item is not None else None
+        return Path(request_path) if isinstance(request_path, str) and request_path else None
+
     def request_for_layout_decision(self) -> bytes | None:
         """Return the recorded bytes for the send currently being rebuilt, without consuming it."""
-        item = self._layout_item()
-        if item is None:
-            return None
-        request_path = item.get("request")
-        if not isinstance(request_path, str) or not request_path:
+        request_path = self.next_request_path()
+        if request_path is None:
             return None
         try:
-            return Path(request_path).read_bytes()
+            return request_path.read_bytes()
         except OSError:
             return None
 
