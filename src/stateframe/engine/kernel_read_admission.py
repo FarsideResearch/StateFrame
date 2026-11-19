@@ -10,7 +10,9 @@ by the same oracle used at preparation. Older callers without a composed body
 retain the conservative envelope estimate, with serialized string costs.
 
 A refusal closes the current batch. All subsequent reads return the existing
-continuation cursor grammar until the next batch/request begins.
+continuation cursor grammar until the next batch/request begins. One exception: while a
+continuation refused in the previous request is pending, sibling refusals keep the batch
+open, and the carried read is priced against the whole allowance (see _record_continuation).
 """
 from __future__ import annotations
 
@@ -34,6 +36,8 @@ UNMEASURED_FRESH_ALLOWANCE_BYTES = 16_384
 EVENT = "read_admission"
 _STATE_ATTR = "_read_admission_state"
 _SEALED_ATTR = "_read_admission_sealed_fixed_bytes"
+# The one unresolved refused continuation. Survives request boundaries; see _record_continuation.
+CARRY_ATTR = "_read_admission_continuation"
 
 
 def request_byte_cap() -> int:
@@ -129,14 +133,27 @@ class _RequestState:
     pages: list[tuple[SourceSlot, str | None]] = field(default_factory=list)
     # Cache exact floor results, including infeasibility, only for this request.
     # Whole immutable slots bind ranges, payloads and native carrier call IDs.
-    floor_results: dict[tuple[str, tuple[tuple[SourceSlot, str | None], ...]], int | None] = field(
-        default_factory=dict)
+    # Value: (wire bytes or None when unmeasurable, violated limit names).
+    floor_results: dict[tuple[str, tuple[tuple[SourceSlot, str | None], ...]],
+                        tuple[int | None, tuple[str, ...]]] = field(default_factory=dict)
     # Preparation's live token meter (kernel_working_set_live.live_measure); None = offline ratio.
     measure: object = None
+    # The base-request floor diagnosis is journaled once per request, at the first refusal.
+    base_diagnosed: bool = False
 
 
 def _request_index(runtime: object) -> int:
     return int(getattr(runtime, "_frame_budget_request_count", 0))
+
+
+def _pending_carry_reserve(runtime: object, state: _RequestState) -> int:
+    """Bytes reserved for a continuation refused in the previous request."""
+    carry = getattr(runtime, CARRY_ATTR, None)
+    if (not isinstance(carry, dict)
+            or carry.get("request_index") != state.request_index - 1):
+        return 0
+    reserve = carry.get("reserve_bytes")
+    return reserve if type(reserve) is int and reserve > 0 else 0
 
 
 def _state(runtime: object, visible_messages: Sequence[Mapping[str, object]] | None) -> _RequestState:
@@ -205,9 +222,10 @@ def _state(runtime: object, visible_messages: Sequence[Mapping[str, object]] | N
 
 def remaining_allowance(runtime: object,
                         visible_messages: Sequence[Mapping[str, object]] | None) -> int:
-    """Fresh bytes still admissible in the current request (pending reads already spent)."""
+    """Fresh bytes remaining after pending reads and a carried continuation's reserve."""
     state = _state(runtime, visible_messages)
-    return max(0, state.allowance - state.pending_bytes)
+    return max(0, state.allowance - state.pending_bytes
+               - _pending_carry_reserve(runtime, state))
 
 
 def _wire_bytes(text: str) -> int:
@@ -218,11 +236,19 @@ def _wire_bytes(text: str) -> int:
 
 def _journal(runtime: object, state: _RequestState, *, decision: str, page_bytes: int,
              admitted_bytes: int, admitted_lines: int | None, path: str,
-             reason: str | None = None, failure: Mapping[str, str | None] | None = None) -> None:
+             reason: str | None = None, failure: Mapping[str, str | None] | None = None,
+             diagnosis: Mapping[str, object] | None = None,
+             refusal_cause: str | None = None, reason_code: str | None = None) -> None:
     journal = getattr(runtime, "journal", None)
     if journal is None:
         return
     try:
+        evidence: dict[str, object] = dict(failure or {})
+        evidence.update(diagnosis or {})
+        if refusal_cause is not None:
+            evidence["refusal_cause"] = refusal_cause
+        if reason_code is not None:
+            evidence["reason_code"] = reason_code
         journal.emit(
             EVENT, request_index=state.request_index, path=path, decision=decision,
             allowance=state.allowance, pending_before=state.pending_bytes - (
@@ -230,8 +256,55 @@ def _journal(runtime: object, state: _RequestState, *, decision: str, page_bytes
             page_bytes=page_bytes, admitted_bytes=admitted_bytes, admitted_lines=admitted_lines,
             admitted_count=state.admitted_count, truncated_count=state.truncated_count,
             refused_count=state.refused_count, **({"reason": reason} if reason is not None else {}),
-            **(failure or {}))
+            **evidence)
     except Exception:  # audit only; never fail a delivery
+        pass
+
+
+def _floor_diagnosis(violations: Sequence[str]) -> dict[str, object]:
+    """Typed journal fields for an infeasible floor: the violated limit names, not their values."""
+    from kernel_working_set_stop import ReasonCode
+    return {"refusal_cause": "floor_infeasible", "reason_code": ReasonCode.FLOOR_INFEASIBLE.value,
+            "violations": list(violations)}
+
+
+def _carry_for(runtime: object, state: _RequestState) -> dict[str, object] | None:
+    """The carried continuation if it was recorded in this or the previous request; else clear it."""
+    carry = getattr(runtime, CARRY_ATTR, None)
+    if not isinstance(carry, dict):
+        return None
+    if carry.get("request_index") not in (state.request_index - 1, state.request_index):
+        _clear_carry(runtime)
+        return None
+    return carry
+
+
+def _clear_carry(runtime: object) -> None:
+    try:
+        delattr(runtime, CARRY_ATTR)
+    except (AttributeError, TypeError):
+        pass
+
+
+def _record_continuation(runtime: object, state: _RequestState, *, display: str, cursor: str,
+                         carried: bool, pending: bool, reserve_bytes: int) -> None:
+    """Remember a refused continuation so the next request can admit it first.
+
+    Only one continuation is carried at a time. A refusal that is not the carried read
+    never overwrites an unresolved carry, and only the first refusal of a request is recorded.
+    """
+    existing = getattr(runtime, CARRY_ATTR, None)
+    if carried and isinstance(existing, dict):
+        refusals = int(existing.get("refusals", 0)) + 1
+    elif pending or (isinstance(existing, dict) and existing.get("request_index") == state.request_index):
+        return
+    else:
+        refusals = 1
+    try:
+        setattr(runtime, CARRY_ATTR, {"path": display, "cursor": cursor,
+                                      "request_index": state.request_index, "refusals": refusals,
+                                      "reserve_bytes": reserve_bytes})
+    except (AttributeError, TypeError):
         pass
 
 
@@ -242,20 +315,33 @@ def _resume_cursor(raw: bytes, metadata: Mapping[str, object]) -> str:
                    int(scope_end) if isinstance(scope_end, int) else None)
 
 
-def _refusal(raw: bytes, source: SourceDelivery) -> SourceDelivery:
-    """REFUSED_ADMISSION result whose text reuses the pager's own continuation wording."""
+REFUSAL_CAUSE_BUDGET = "budget"
+REFUSAL_CAUSE_FLOOR_INFEASIBLE = "floor_infeasible"
+
+
+def _refusal(raw: bytes, source: SourceDelivery, *, display: str,
+             refusal_cause: str) -> SourceDelivery:
+    """REFUSED_ADMISSION text states that nothing from the range was delivered."""
     metadata = dict(source.metadata)
     cursor = _resume_cursor(raw, metadata)
     total = int(metadata.get("total_lines", 0))
     start_line = int(metadata.get("start_line", 1))
+    scope_end = metadata.get("scope_end_line")
+    end_line = max(start_line, int(scope_end) if isinstance(scope_end, int) else total)
     remaining_lines = max(0, total - start_line + 1)
-    text = f"{remaining_lines} more lines; page with cursor={cursor}"
+    if refusal_cause == REFUSAL_CAUSE_FLOOR_INFEASIBLE:
+        cause_text = "the request is already at its size limit"
+    else:
+        cause_text = "did not fit in this request's source budget"
+    text = (f"Not delivered: lines {start_line}-{end_line} of {display} {cause_text}. "
+            f"Nothing from this range was shown. Resume with cursor={cursor}.")
     metadata.update({
         "result_class": REFUSED_ADMISSION, "shown_end_line": start_line,
         "shown_end_column": int(metadata.get("start_column", 0)), "shown_chars": 0,
         "truncated": True, "more_content_available": True, "more_lines_available": remaining_lines,
         "continuation": cursor, "next_cursor": cursor, "clip_reason": "admission",
         "effective_range": None, "byte_length": 0, "token_count": 1,
+        "refusal_cause": refusal_cause,
     })
     for key in ("byte_start", "byte_end", "page_bytes_sha256"):
         metadata.pop(key, None)
@@ -319,36 +405,60 @@ def admit(runtime: object, *, raw: bytes, display: str, start: int,
     if source.result_class != "OK":
         return source
     state = _state(runtime, visible_messages)
-    remaining = max(0, state.allowance - state.pending_bytes)
     page_bytes = _wire_bytes(source.text)
     path = display
     if state.snapshot is not None:
         from kernel_read_receipts import relative_path
         root = getattr(getattr(runtime, "owner", None), "root", None)
         path = relative_path(root, Path(root) / display) if root is not None else display
+    # A continuation refused in the previous request keeps its 1-line floor reserved.
+    # Other fresh reads spend only the rest; the carried read itself sees the whole allowance.
+    carry = _carry_for(runtime, state)
+    pending = carry is not None and carry.get("request_index") == state.request_index - 1
+    carried = (pending and display == carry.get("path")
+               and request.arguments.get("cursor") == carry.get("cursor")
+               and request.arguments.get("cursor") is not None)
+    reserve = _pending_carry_reserve(runtime, state) if pending and not carried else 0
+    remaining = max(0, state.allowance - state.pending_bytes - reserve)
 
-    def cost(candidate):
+    def price(candidate, *, alone=False):
+        """(bytes the page adds to the floor or None if unmeasurable, violated limit names).
+
+        ``alone`` prices the page on an empty batch: the reserve a carried continuation
+        needs in the next request, where this batch's pending pages do not exist yet.
+        """
         if state.snapshot is None:
-            return _wire_bytes(candidate.text)
-        from kernel_working_set_live import read_admission_floor, read_admission_slot
+            return _wire_bytes(candidate.text), ()
         if path is None:
-            return state.allowance + 1
+            return None, ()
+        from kernel_working_set_live import read_admission_floor, read_admission_slot
         ordinal = max((s.admission_ordinal for s in state.snapshot.sources), default=0) + len(state.pages) + 1
         slot = read_admission_slot(candidate, path=path, arguments=request.arguments, ordinal=ordinal)
         call_id = getattr(getattr(runtime, "_read_attempt_scope", None), "call_id", None)
-        pages = (*state.pages, (slot, call_id))
+        pages = ((slot, call_id),) if alone else (*state.pages, (slot, call_id))
         key = (state.snapshot.snapshot_digest, pages)
         if key not in state.floor_results:
+            proposed_violations: list[str] = []
             try:
                 floor = read_admission_floor(state.snapshot, pages, require_feasible=True,
-                                             measure=state.measure)
+                                             measure=state.measure,
+                                             violations_out=proposed_violations)
             except (TimeoutError, OSError, ValueError, RuntimeError):
-                floor = None  # the live meter failed: no feasibility proof, so no admission
-            state.floor_results[key] = len(floor.wire) if floor is not None else None
-        floor_bytes = state.floor_results[key]
-        if floor_bytes is None:
+                # The live meter failed: no feasibility proof and no diagnosis, so no admission.
+                floor, proposed_violations = None, []
+            state.floor_results[key] = (len(floor.wire) if floor is not None else None,
+                                        tuple(proposed_violations))
+        wire_bytes, violations = state.floor_results[key]
+        if wire_bytes is None:
+            return None, violations
+        pending = 0 if alone else state.pending_bytes
+        return max(0, wire_bytes - state.floor_bytes - pending), violations
+
+    def cost(candidate):
+        delta, violations = price(candidate)
+        if delta is None or violations:
             return remaining + 1
-        return max(0, floor_bytes - state.floor_bytes - state.pending_bytes)
+        return delta
 
     def accept(candidate, charged):
         if state.snapshot is not None:
@@ -368,6 +478,8 @@ def admit(runtime: object, *, raw: bytes, display: str, start: int,
         state.admitted_count += 1
         _journal(runtime, state, decision="FULL", page_bytes=page_bytes,
                  admitted_bytes=full_cost, admitted_lines=None, path=display)
+        if carried and len(source.content.splitlines()) >= 1:
+            _clear_carry(runtime)
         return source
     shorter: SourceDelivery | None = None
     lines = 0
@@ -378,7 +490,8 @@ def admit(runtime: object, *, raw: bytes, display: str, start: int,
     # retaining the largest feasible prefix. A 120-line page needs at most
     # one full-page evaluation plus seven prefix evaluations.
     if not state.closed and allow_shortening:
-        low, high = 1, total_lines - 1
+        # Progress bound: the search always reaches a 1-line page, including when total_lines <= 1.
+        low, high = 1, max(1, total_lines - 1)
         while low <= high:
             count = (low + high) // 2
             candidate = deliver_source(raw, display, start, args=replace(request, max_lines=count))
@@ -390,30 +503,72 @@ def admit(runtime: object, *, raw: bytes, display: str, start: int,
                 high = count - 1
         # Exact sharing creates isolated cost dips in the otherwise growing
         # prefix family. Only frozen carrier boundaries need additional probes;
-        # extra probes depend on matching frozen ranges, not the line count.
+        # extra probes depend on matching frozen ranges, not the line count. No
+        # carrier-equality precheck is needed: cost() prices each probe exactly.
         for count in _shared_prefix_counts(state, source, path):
             if count <= lines:
                 break
             candidate = deliver_source(raw, display, start, args=replace(request, max_lines=count))
-            carriers = (*state.snapshot.sources, *(slot for slot, _ in state.pages))
-            # Model source windows use a different carrier grammar and cannot
-            # share the pager's native read text, even at identical ranges.
-            if candidate.result_class == "OK" and any(s.page == candidate.text for s in carriers):
+            if candidate.result_class == "OK":
                 charged = cost(candidate)
                 if charged <= remaining:
                     shorter, lines, admitted = candidate, count, charged
                     break
     if shorter is None:
-        state.closed = True
+        # Diagnose the smallest page: an infeasible 1-line floor names the violated limits.
+        one_line = deliver_source(raw, display, start, args=replace(request, max_lines=1))
+        one_ok = one_line.result_class == "OK"
+        _, violations = price(one_line) if one_ok else (None, ())
+        # The reserve is the 1-line cost alone. It is kept only if that line can fit this
+        # request's allowance at all; an impossible reserve would starve siblings for nothing.
+        alone_bytes, alone_violations = price(one_line, alone=True) if one_ok else (None, ())
+        refusal_cause = (REFUSAL_CAUSE_FLOOR_INFEASIBLE if violations
+                         else REFUSAL_CAUSE_BUDGET)
+        reason_code = None
+        if violations:
+            from kernel_working_set_stop import ReasonCode
+            reason_code = ReasonCode.FLOOR_INFEASIBLE.value
+        # While a carry is pending, a sibling refusal must not close the batch before the carried read.
+        if not (pending and not carried):
+            state.closed = True
         state.refused_count += 1
+        if not state.base_diagnosed:
+            state.base_diagnosed = True
+            base_violations = _base_violations(state)
+            if base_violations:
+                _journal(runtime, state, decision=REFUSED_ADMISSION, page_bytes=0,
+                         admitted_bytes=0, admitted_lines=0, path="",
+                         diagnosis=_floor_diagnosis(base_violations))
         _journal(runtime, state, decision=REFUSED_ADMISSION, page_bytes=page_bytes,
-                 admitted_bytes=0, admitted_lines=0, path=display)
-        return _refusal(raw, source)
+                 admitted_bytes=0, admitted_lines=0, path=display,
+                 diagnosis=_floor_diagnosis(violations) if violations else None,
+                 refusal_cause=refusal_cause, reason_code=reason_code)
+        _record_continuation(
+            runtime, state, display=display, cursor=_resume_cursor(raw, source.metadata),
+            carried=carried, pending=pending,
+            reserve_bytes=(alone_bytes if alone_bytes is not None and not alone_violations
+                           and alone_bytes <= state.allowance else 0))
+        return _refusal(raw, source, display=display, refusal_cause=refusal_cause)
     accept(shorter, admitted)
     state.truncated_count += 1
     _journal(runtime, state, decision="TRUNCATE", page_bytes=page_bytes,
              admitted_bytes=admitted, admitted_lines=lines, path=display)
+    if carried and lines >= 1:
+        _clear_carry(runtime)
     return shorter
+
+
+def _base_violations(state: _RequestState) -> tuple[str, ...]:
+    """Limits the base request alone violates; empty when feasible or unmeasurable."""
+    if state.snapshot is None:
+        return ()
+    from kernel_working_set_live import read_admission_floor
+    violations: list[str] = []
+    try:
+        read_admission_floor(state.snapshot, (), measure=state.measure, violations_out=violations)
+    except (TimeoutError, OSError, ValueError, RuntimeError):
+        return ()
+    return tuple(violations)
 
 
 __all__ = ["EVENT", "FIXED_RESERVE_BYTES", "REFUSED_ADMISSION", "UNMEASURED_FRESH_ALLOWANCE_BYTES",
