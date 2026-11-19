@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.74 (2026-11-19)
 
 - Fixed: work copies and mutation inputs keep source modules such as `secret_binding.py` while excluding recognized secret files and `.secrets` directories.
 
