@@ -104,19 +104,23 @@ def request_graph(root: Path, use_lsp: bool = True):
 
 
 def graph_snapshot(root: Path):
-    """Pin the published graph and get a cheap check for its workspace generation."""
-    key = (root, "graph")
+    return snapshot(root, "graph")
+
+
+def snapshot(root: Path, kind: str):
+    """Pin a published result and get a cheap check for its workspace generation."""
+    key = (root, kind)
     with _lock:
         job = _jobs.get(key)
         if job is None or job.value is None:
             return None, None
-        graph = job.value
+        value = job.value
 
     def current() -> bool:
         with _lock:
             return _jobs.get(key) is job
 
-    return graph, current
+    return value, current
 
 
 def _produce_graph(root: Path, use_lsp: bool, publish, current) -> None:

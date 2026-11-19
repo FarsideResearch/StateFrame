@@ -47,10 +47,12 @@ from kernel_repo_catalog import (
     _SKIP_DIRS as _CATALOG_SKIP_DIRS,
 )
 from kernel_repo_catalog import (
+    StructuralIndex,
     StructuralIndexError,
     build_structural_index,
     full_coverage_enabled,
     scan_entry_set,
+    scan_source_paths,
 )
 from kernel_safe_paths import safe_expanduser
 from kernel_source_presentation import strip_callsite_census
@@ -534,37 +536,33 @@ def _module_candidates(paths: Sequence[str]) -> dict[str, set[str]]:
     return candidates
 
 
+def _referenced_modules(tree: ast.Module, path: str) -> set[str]:
+    modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules.update(alias.name if alias.asname else alias.name.split(".", 1)[0]
+                           for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            base = _import_base(path, node)
+            if base:
+                modules.add(base)
+                modules.update(f"{base}.{alias.name}" for alias in node.names if alias.name != "*")
+    return modules
+
+
 def _import_target_paths(
     tree: ast.Module,
     path: str,
     module_candidates: Mapping[str, set[str]],
 ) -> set[str]:
     """Map syntax-only imports to every possibly affected repository module."""
-    targets: set[str] = set()
-
-    def include(module_name: str | None) -> None:
-        if not module_name:
-            return
-        targets.update(
-            candidate
-            for name, paths in module_candidates.items()
-            if name == module_name or name.startswith(module_name + ".")
-            for candidate in paths
-        )
-
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                imported = alias.name if alias.asname else alias.name.split(".", 1)[0]
-                include(imported)
-        elif isinstance(node, ast.ImportFrom):
-            base = _import_base(path, node)
-            include(base)
-            if base:
-                for alias in node.names:
-                    if alias.name != "*":
-                        include(f"{base}.{alias.name}")
-    return targets
+    return {
+        candidate
+        for imported in _referenced_modules(tree, path)
+        for name, paths in module_candidates.items()
+        if name == imported or name.startswith(imported + ".")
+        for candidate in paths
+    }
 
 
 def _build_importer_map(
@@ -1005,6 +1003,55 @@ def _build_census_structure(
         scope_key, parser_version, parsed, trees, definitions, calls_by_path,
         unresolved_by_path, partial_paths, skipped_paths, importers,
     )
+
+
+def _parser_version() -> str:
+    return f"{EXTRACTOR_VERSION}:ast-{sys.version_info.major}.{sys.version_info.minor}"
+
+
+def build_background_census(root: Path) -> tuple[StructuralIndex, _CensusStructure]:
+    index = build_structural_index(root, include_call_graph=False)
+    return index, _build_census_structure(index, scope_key="", parser_version=_parser_version())
+
+
+def _scoped_census(
+    root: Path, paths: tuple[str, ...],
+) -> tuple[StructuralIndex, _CensusStructure] | None:
+    # The inventory supplies module names only. Parse call sites in shown or
+    # editable files, and definitions in their direct import targets.
+    sources = set(scan_source_paths(root))
+    focus = tuple(sorted(sources.intersection(paths)))
+    if not focus:
+        return None
+    index = build_structural_index(root, focus_paths=focus, include_call_graph=False, use_cache=False)
+    parsed, trees, partial, skipped = _source_paths(index)
+    definitions = {path: _definitions(tree, path) for path, tree in trees.items()}
+    module_paths = _module_names(tuple(
+        path for path in (sources - set(focus)) | parsed.keys() if not _excluded(path)
+    ))
+    imported = {name for path, tree in trees.items() for name in _referenced_modules(tree, path)}
+    targets = tuple(sorted({module_paths[name] for name in imported
+                            if module_paths.get(name) is not None} - parsed.keys()))
+    if targets:
+        imports_index = build_structural_index(
+            root, focus_paths=targets, include_call_graph=False, use_cache=False,
+        )
+        for path in targets:
+            _, tree, symbols, _, _ = _parse_census_source(imports_index, path)
+            if tree is not None and symbols is not None:
+                definitions[path] = symbols
+    calls: dict[str, tuple[_Call, ...]] = {}
+    unresolved: dict[str, int] = {}
+    for path, tree in trees.items():
+        calls[path], unresolved[path] = _collect_file_calls(
+            path, parsed[path], tree, module_paths, definitions,
+        )
+    index.stats = replace(index.stats, scan_scope="scoped", candidate_files=len(sources),
+                          omitted_files=len(sources) - len(focus))
+    structure = _CensusStructure(
+        "", "", _parser_version(), parsed, trees, definitions, calls, unresolved, partial, skipped, {},
+    )
+    return index, structure
 
 
 def _runtime_persistence_task_id(runtime: object) -> str:
@@ -1880,9 +1927,30 @@ def _build_packet(runtime: object, root: Path, messages: Sequence[Mapping[str, o
     declared_paths = sorted({path for path, _ in carriers})
     priority_paths = tuple(dict.fromkeys((*declared_paths, *editable)))
     cache_scope_key: str | None = None
-    parser_version = f"{EXTRACTOR_VERSION}:ast-{sys.version_info.major}.{sys.version_info.minor}"
+    parser_version = _parser_version()
     lease = None
-    if index_reuse:
+    structure = None
+    from kernel_repo_dependencies import active
+
+    version = "legacy"
+    if index_reuse and active is not None:
+        shown_candidates = declared_paths if possible is None else possible
+        focus = tuple(sorted({path for path in (*shown_candidates, *editable) if path.endswith(".py")}))
+        version, snapshot = active.analysis(
+            root, "census", _digest(focus),
+            ready=lambda result: all(result[0].module(path) is not None for path in focus),
+        )
+        if version == "full":
+            index, structure = snapshot
+        elif version == "scoped":
+            result = _scoped_census(root, focus)
+            if result is None:
+                return None
+            index, structure = result
+        if reuse_report is not None and version != "legacy":
+            reuse_report.status = version
+            reuse_report.reason = None
+    if version == "legacy" and index_reuse:
         cache_scope_key = _index_scope_key(runtime, root)
         lease = acquire_index(
             runtime, root, scope_key=cache_scope_key, parser_version=parser_version,
@@ -1910,7 +1978,7 @@ def _build_packet(runtime: object, root: Path, messages: Sequence[Mapping[str, o
             setattr(runtime, "_stateframe_callsite_census_index_reuse_reason", lease.reuse_reason)
         except (AttributeError, TypeError):
             pass
-    else:
+    elif version == "legacy":
         if reuse_report is not None:
             reuse_report.status = "off"
             reuse_report.reason = "disabled"
@@ -1950,7 +2018,12 @@ def _build_packet(runtime: object, root: Path, messages: Sequence[Mapping[str, o
             source_facts_out.extend(_capture_public_sources(index, cached))
         return cached if cached.decision_kind == decision_kind else replace(cached, decision_kind=decision_kind)
 
-    if index_reuse and lease is not None:
+    if structure is not None:
+        trees = structure.trees
+        parse_partial = len(structure.partial_paths)
+        files_skipped = len(structure.skipped_paths)
+        calls, unresolved = _project_call_facts(structure, shown)
+    elif index_reuse and lease is not None:
         current_structure_revision = structural_revision(
             index, scope_key=cache_scope_key or "", parser_version=parser_version,
         )
@@ -2082,7 +2155,8 @@ def _build_packet(runtime: object, root: Path, messages: Sequence[Mapping[str, o
         candidate_files, catalogued_files, files_omitted,
     )
     scan_truncated = files_omitted > 0
-    partial = bool(parse_partial or scan_truncated or priority_files_omitted or unindexed_files)
+    partial = bool(version == "scoped" or parse_partial or scan_truncated
+                   or priority_files_omitted or unindexed_files)
 
     grouped: dict[str, list[_Call]] = {}
     for call in calls:
@@ -2227,7 +2301,8 @@ def _build_packet(runtime: object, root: Path, messages: Sequence[Mapping[str, o
          "token_count": serving_tokens, "omitted_group_count": omitted_groups},
         payload, cache_key,
     )
-    if not bool(coverage["scan_truncated"]) and not priority_files_omitted and not unindexed_files:
+    if (version != "scoped" and not scan_truncated
+            and not priority_files_omitted and not unindexed_files):
         try:
             setattr(runtime, "_stateframe_callsite_census_packet", packet)
         except (AttributeError, TypeError):

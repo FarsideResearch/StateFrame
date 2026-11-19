@@ -535,6 +535,10 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
                     journal.emit("repository_dependencies_visible", request_id=capture.request_id,
                                  send=index, facts=len(dependency_rows),
                                  sha256=hashlib.sha256(encoded).hexdigest(), dispatch=False)
+            analysis_rows = dependencies.analysis_rows_for_send() if dependencies is not None else None
+            if analysis_rows:
+                atomic_bytes(stem.with_suffix(kernel_repo_dependencies.ANALYSIS_SUFFIX), json.dumps(
+                    analysis_rows, sort_keys=True, separators=(",", ":")).encode())
             if identity is not None and request_path.exists():
                 if request_path.is_symlink() or request_path.read_bytes() != wire:
                     raise ValueError("subframe wire request changed for an existing send")

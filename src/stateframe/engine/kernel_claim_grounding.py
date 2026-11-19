@@ -14,8 +14,10 @@ import os
 import re
 import sys
 import threading
+import unicodedata
 from collections import OrderedDict, deque
 from collections.abc import Mapping, Sequence
+from functools import cached_property
 from pathlib import Path
 
 import kernel_parse_cache as _parse_cache
@@ -288,26 +290,28 @@ class _AstIndex:
     def _build(self) -> None:
         symbols: dict[str, set[str]] = {}
         for relative, candidate in self._python_candidates:
-            module = relative[:-3].replace("/", ".")
-            if module.endswith(".__init__"):
-                module = module[:-9]
             try:
                 source = candidate.read_text(encoding="utf-8")
-                # L112: one parse + walk per (relative path, content); any edit is a new key.
-                # Keyed by the RELATIVE path so scratch copies of the root share entries.
-                names = _parse_cache.derived(
-                    ("claim_grounding.symbols", relative, module), source, relative,
-                    lambda tree, relative=relative, module=module: self._symbol_names(
-                        tree, relative, module))
+                names = self._file_symbols(relative, source)
             except (OSError, UnicodeError, SyntaxError):
                 continue
-            if module:
-                symbols.setdefault(module, set()).add(relative)
             for name in names:
                 symbols.setdefault(name, set()).add(relative)
         self.symbols = {
             name: tuple(sorted(files)) for name, files in sorted(symbols.items())
         }
+
+    @staticmethod
+    def _module_name(relative: str) -> str:
+        return relative[:-3].replace("/", ".").removesuffix(".__init__")
+
+    def _file_symbols(self, relative: str, source: str) -> frozenset[str]:
+        # Key by relative path and source contents so scratch copies can share the result.
+        module = self._module_name(relative)
+        return _parse_cache.derived(
+            ("claim_grounding.symbols", relative, module), source, relative,
+            lambda tree: self._symbol_names(tree, relative, module),
+        )
 
     @staticmethod
     def _target_names(target: ast.AST) -> tuple[str, ...]:
@@ -323,6 +327,7 @@ class _AstIndex:
     def _symbol_names(self, tree: ast.AST, relative: str, module: str) -> frozenset[str]:
         """Every name ``_walk`` records for one file (cacheable: pure in the tree)."""
         local: dict[str, set[str]] = {}
+        self._add(module, relative, local)
         self._walk(tree, relative, (), local, module)
         return frozenset(local)
 
@@ -399,11 +404,56 @@ class _AstIndex:
         if exists and relative:
             return ClaimCheck(cited=_display_path(raw), kind="path", exists=True,
                               resolved_path=relative, closest=())
-        choices = (_closest_paths(
-            _display_path(raw), self.files if Path(raw).suffix else self.paths
-        ) if include_closest else [])
+        choices = self._path_matches(raw) if include_closest else ()
         return ClaimCheck(cited=_display_path(raw), kind="path", exists=False,
                           resolved_path=None, closest=tuple(choices))
+
+    def _path_matches(self, raw: str) -> Sequence[str]:
+        return _closest_paths(_display_path(raw), self.files if Path(raw).suffix else self.paths)
+
+
+class _ScopedAstIndex(_AstIndex):
+    """Check live paths directly and only parse plausible files for a cited symbol."""
+
+    def __init__(self, root: Path, product_revision: str | None):
+        self.root = root
+        self.product_revision = product_revision
+
+    @cached_property
+    def _scoped_inventory(self) -> _InventoryResult:
+        return self._inventory()
+
+    def _path_matches(self, raw: str) -> Sequence[str]:
+        _, paths, files, _ = self._scoped_inventory
+        return _closest_paths(_display_path(raw), files if Path(raw).suffix else paths)
+
+    def resolve_symbol(self, cited: str, *, include_closest: bool = True,
+                       memoize_closest: bool = False) -> ClaimCheck:
+        name = cited.strip().replace("::", ".")
+        leaf = name.rsplit(".", 1)[-1]
+        candidates = self._scoped_inventory[0]
+        nearby: set[str] = set()
+        for relative, candidate in candidates:
+            try:
+                source = candidate.read_text(encoding="utf-8")
+                if (self._module_name(relative) != name and leaf not in source
+                        and (source.isascii() or leaf not in unicodedata.normalize("NFKC", source))):
+                    continue
+                names = self._file_symbols(relative, source)
+            except (OSError, UnicodeError, SyntaxError):
+                continue
+            if name in names:
+                return ClaimCheck(cited=cited, kind="symbol", exists=True,
+                                  resolved_path=relative, closest=())
+            if include_closest:
+                nearby.update(names)
+        choices = tuple(difflib.get_close_matches(name, sorted(nearby), n=3, cutoff=0.35))
+        return ClaimCheck(cited=cited, kind="symbol", exists=False,
+                          resolved_path=None, closest=choices)
+
+
+def build_ast_index(root: Path) -> _AstIndex:
+    return _AstIndex(root)
 
 
 def _remember_ast_index(
@@ -606,6 +656,20 @@ class ClaimGrounding:
         self._ungrounded: deque[_Citation] = deque(maxlen=32)
         self.last_result: dict | None = None
 
+    def _index(self, operation: str, product_revision: str | None) -> _AstIndex | None:
+        if _workspace_truth.enabled():
+            return None
+        from kernel_repo_dependencies import active
+
+        if active is not None:
+            mode, index = active.analysis(self.root, "claim", f"{operation}:{product_revision or ''}")
+            if mode == "full":
+                return index
+            if mode == "scoped":
+                return _ScopedAstIndex(self.root, product_revision)
+        return _AstIndex(self.root, product_revision=product_revision,
+                         task_id=self.task_id, journal=self.journal)
+
     def _resolve(
             self, cited: str, kind: str, index: _AstIndex | None,
             role: str | None = None, *,
@@ -656,10 +720,7 @@ class ClaimGrounding:
             workspace_root if workspace_root is not None
             else None if _workspace_truth.enabled() else self.root
         )
-        index = None if _workspace_truth.enabled() else _AstIndex(
-            self.root, product_revision=product_revision,
-            task_id=self.task_id, journal=self.journal,
-        )
+        index = self._index("resolve", product_revision)
         value = _clean_text(cited)
         inferred = kind or ("path" if _path_shape(value) else "symbol")
         if inferred == "path_symbol":
@@ -943,10 +1004,7 @@ A target reference alone does not establish execution or satisfy a requirement.
             workspace_root if workspace_root is not None
             else None if _workspace_truth.enabled() else self.root
         )
-        index = None if _workspace_truth.enabled() else _AstIndex(
-            self.root, product_revision=product_revision,
-            task_id=self.task_id, journal=self.journal,
-        )
+        index = self._index("inspect", product_revision)
         citations = self._extract(
             name, args, index, workspace_root=active_root,
             product_revision=product_revision,
