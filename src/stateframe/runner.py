@@ -3,28 +3,30 @@ from __future__ import annotations
 
 import base64
 import binascii
+import codecs
 import hashlib
 import json
 import math
 import os
 import re
 import secrets
+import selectors
 import shlex
 import shutil
 import signal
 import stat
 import subprocess
 import sys
-import queue
 import threading
 import tempfile
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from io import IncrementalNewlineDecoder
 from itertools import chain
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Mapping
+from typing import TYPE_CHECKING, Callable, Mapping, TextIO
 
 from . import (cache_metrics, outer_checks, outcomes, preflight, profiles, routes, storage_gc,
                test_interpreter, workcopy)
@@ -2682,6 +2684,8 @@ def drive(run: Path, options: RunOptions, printer=print) -> int:
         command = [str(options.python), "-B", str(CHILD), str(run)]
         child_cwd = run
     log_path = run / "engine.log"
+    result_path = run / "engine-result.json"
+    previous_result = _result_generation(result_path)
     checkpoint_warned: set[str] = set()
     if spec_path.exists() and environment.get("STATEFRAME_CHECKPOINT", "on").strip().lower() in {"off", "0"}:
         _warn_checkpoint_disabled("disabled by configuration", checkpoint_warned)
@@ -2708,8 +2712,11 @@ def drive(run: Path, options: RunOptions, printer=print) -> int:
         capture_launch_identity(process, session_leader=True)
         assert process.stdout is not None
         timed_out = threading.Event()
+        engine_status = None
 
         def on_timeout() -> None:
+            if engine_status is not None:
+                return
             timed_out.set()
             _reason_log.emit_kill(
                 "runner", target="engine process group", pid=process.pid,
@@ -2721,84 +2728,143 @@ def drive(run: Path, options: RunOptions, printer=print) -> int:
         watchdog = (threading.Timer(max(0, kill_at - time.monotonic()), on_timeout)
                     if math.isfinite(kill_at) else None)  # no limit set: no watchdog kill
         parallel_supervisor = None
+        output = None
         try:
             if watchdog is not None:
                 watchdog.daemon = True
                 watchdog.start()
-            # A forked checkpoint writer can inherit the engine's stdout; reading to EOF would then wait for
-            # the writer, not the engine. Read on a thread and stop at most OUTPUT_DRAIN_SECONDS after the
-            # engine itself exits (the process group is stopped in `finally`).
-            lines: queue.Queue = queue.Queue()
-            reader = threading.Thread(target=_pump_lines, args=(process.stdout, lines), daemon=True)
-            reader.start()
+            output = _EngineOutput(process.stdout.fileno(), process.stdout.encoding)
             drain_until = None
             from .engine.kernel_exec_tracker import child_exited_unreaped
             while True:
-                from .shell_host import answer_pending
-                answer_pending(run, options.shell_confirm)
-                if options.parallel_mode != "off":
-                    parallel_root = run / "parallel"
-                    if parallel_supervisor is None and parallel_root.is_dir():
-                        from .parallel_host import ParallelSupervisor
-                        parallel_supervisor = ParallelSupervisor(run)
-                    if parallel_supervisor is not None:
-                        parallel_supervisor.tick()
-                if drain_until is None and (child_exited_unreaped(process) or timed_out.is_set()):
+                exited = child_exited_unreaped(process)
+                if drain_until is None and (exited or timed_out.is_set()):
                     if parallel_supervisor is not None:
                         parallel_supervisor.cancel_all("parent engine child exited")
                         parallel_supervisor.reap()
                     drain_until = time.monotonic() + OUTPUT_DRAIN_SECONDS
-                if drain_until is not None and timed_out.is_set() and time.monotonic() >= drain_until:
+                if (output.eof and exited) or (drain_until is not None and time.monotonic() >= drain_until):
                     break
-                try:
-                    line = lines.get(timeout=0.2)
-                except queue.Empty:
-                    if drain_until is not None and time.monotonic() >= drain_until:
-                        break
-                    continue
-                if line is None:  # EOF
-                    break
-                log.write(line)
-                log.flush()
-                if line.startswith(_PROBLEM_LINE_PREFIXES):
-                    printer(line.rstrip())  # reason-log line from the child (deduped there)
-                    continue
-                if line.startswith(LOG_PREFIX):
+                if drain_until is None:
+                    from .shell_host import answer_pending
+                    answer_pending(run, options.shell_confirm)
+                    if options.parallel_mode != "off":
+                        parallel_root = run / "parallel"
+                        if parallel_supervisor is None and parallel_root.is_dir():
+                            from .parallel_host import ParallelSupervisor
+                            parallel_supervisor = ParallelSupervisor(run)
+                        if parallel_supervisor is not None:
+                            parallel_supervisor.tick()
+                lines = output.read()
+                if lines:
+                    log.writelines(lines)
+                    log.flush()
+                for line in lines:
+                    if line.startswith(_PROBLEM_LINE_PREFIXES):
+                        printer(line.rstrip())  # reason-log line from the child (deduped there)
+                        continue
+                    if not line.startswith(LOG_PREFIX):
+                        continue
                     try:
                         event = json.loads(line[len(LOG_PREFIX):])
                     except ValueError:
                         continue
                     if not isinstance(event, dict):
                         continue
+                    if event.get("kind") == "engine_end" and engine_status is None:
+                        engine_status = _published_engine_status(result_path, previous_result, event)
+                        if engine_status is not None:
+                            if watchdog is not None:
+                                watchdog.cancel()
+                            until = time.monotonic() + ENGINE_TEARDOWN_SECONDS
+                            drain_until = until if drain_until is None else min(drain_until, until)
                     _warn_checkpoint_event(event, checkpoint_warned)
                     rendered = _render_event(event)
                     if rendered and (not options.quiet or event.get("kind") in {
                             "token_counting_unavailable", "engine_error"}):
                         printer(rendered)
-            exit_deadline = time.monotonic() + 60
-            while not child_exited_unreaped(process) and time.monotonic() < exit_deadline:
-                time.sleep(.02)
+            log.write(output.finish())
+            if not exited and engine_status is not None:
+                _kill_engine_tree(process, "engine teardown deadline after engine_end")
             _stop_group(process)
             code = process.returncode
             if code is None:
                 raise RuntimeError("engine survived process-group cleanup")
             _warn_checkpoint_journal(run, checkpoint_warned)
             _print_queue_wait_warning(run, printer)
-            if timed_out.is_set():
+            if code == -signal.SIGKILL:
+                if engine_status is None:
+                    # The child watchdog can stop a completed engine even if
+                    # an inherited writer garbled the terminal log line.
+                    engine_status = _published_engine_status(result_path, previous_result)
+                if engine_status is not None:
+                    _reason_log.emit_kill(
+                        "runner", target="engine process group", pid=process.pid,
+                        why="engine was stopped after publishing its result",
+                        signal_name="SIGKILL", level="WARN", cause_key="engine_teardown_deadline")
+                    return engine_status
+            if timed_out.is_set() and (engine_status is None or code != engine_status):
                 printer("engine timed out: deadline exhausted; engine stopped")
                 return 124
             return code
+        except KeyboardInterrupt:
+            _request_engine_stop(process, output, log)
+            raise
         finally:
             if watchdog is not None:
                 watchdog.cancel()
-            _stop_group(process)
-            if parallel_supervisor is not None:
-                parallel_supervisor.cancel_all("parent engine child exited")
-                parallel_supervisor.reap()
-            process.stdout.close()
+            try:
+                _stop_group(process)
+            finally:
+                if output is not None:
+                    output.close()
+                process.stdout.close()
+                if parallel_supervisor is not None:
+                    parallel_supervisor.cancel_all("parent engine child exited")
+                    parallel_supervisor.reap()
 
 
 OUTPUT_DRAIN_SECONDS = 10.0
+ENGINE_TEARDOWN_SECONDS = 5.0
+
+
+def _result_generation(path: Path) -> tuple[int, int, int] | None:
+    try:
+        row = path.lstat()
+    except FileNotFoundError:
+        return None
+    return _regular_file_generation(row)
+
+
+def _regular_file_generation(row: os.stat_result) -> tuple[int, int, int] | None:
+    return (row.st_dev, row.st_ino, row.st_ctime_ns) if stat.S_ISREG(row.st_mode) else None
+
+
+def _published_engine_status(path: Path, previous: tuple[int, int, int] | None,
+                             event: Mapping[str, object] | None = None) -> int | None:
+    """Read a fresh receipt and, before teardown, match its terminal event."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "r", encoding="utf-8") as stream:
+            generation = _regular_file_generation(os.fstat(stream.fileno()))
+            if generation is None or generation == previous:
+                return None
+            receipt = json.load(stream)
+    except (FileNotFoundError, ValueError):
+        return None
+    except OSError as error:
+        _reason_log.emit_reason("degrade", "engine_receipt_unreadable", "runner",
+                                "could not verify the engine's terminal receipt",
+                                str(error)[:240], journal=False, level="WARN")
+        return None
+    if not isinstance(receipt, dict) or "result" not in receipt:
+        return None
+    result = receipt["result"]
+    kind = result.get("result") if isinstance(result, dict) else str(result)
+    status = receipt.get("exit_status")
+    if type(status) is int and status in (0, 1) and (event is None or kind == event.get("result")):
+        return status
+    return None
 
 
 def _queue_wait_warning(run: Path) -> str | None:
@@ -2830,14 +2896,95 @@ def _print_queue_wait_warning(run: Path, printer) -> None:
         printer(warning)
 
 
-def _pump_lines(stream, lines: "queue.Queue") -> None:
+class _EngineOutput:
+    """Read progress without blocking on a line, even if its writer outlives the engine."""
+
+    def __init__(self, fd: int, encoding: str):
+        self.fd = fd
+        self.eof = False
+        self.partial: list[str] = []
+        decoder = codecs.getincrementaldecoder(encoding)(errors="replace")
+        self.decoder = IncrementalNewlineDecoder(decoder, translate=True)
+        os.set_blocking(fd, False)
+        self.selector = selectors.PollSelector()
+        try:
+            self.selector.register(fd, selectors.EVENT_READ)
+        except BaseException:
+            self.selector.close()
+            raise
+
+    def read(self) -> list[str]:
+        if self.eof:
+            time.sleep(0.2)
+            return []
+        if not self.selector.select(0.2):
+            return []
+        try:
+            block = os.read(self.fd, 65536)
+        except BlockingIOError:
+            return []
+        self.eof = not block
+        chunks = self.decoder.decode(block, final=self.eof).split("\n")
+        if len(chunks) == 1:
+            self.partial.append(chunks[0])
+            return [self.finish()] if self.eof else []
+        self.partial.append(chunks[0])
+        lines = ["".join(self.partial) + "\n", *(line + "\n" for line in chunks[1:-1])]
+        self.partial = [chunks[-1]]
+        if self.eof and self.partial[0]:
+            lines.append(self.finish())
+        return lines
+
+    def finish(self) -> str:
+        """Keep any tail already read when an inherited pipe never reaches EOF."""
+        if not self.eof:
+            self.partial.append(self.decoder.decode(b"", final=True))
+        tail = "".join(self.partial)
+        self.partial.clear()
+        return tail
+
+    def close(self) -> None:
+        self.selector.close()
+
+
+def _request_engine_stop(process: subprocess.Popen[str], output: _EngineOutput | None, log: TextIO) -> None:
+    from .engine.kernel_exec_tracker import (child_exited_unreaped, recorded_launch_identity,
+                                             signal_launch_group)
+
+    if not child_exited_unreaped(process):
+        try:
+            if signal_launch_group(process, recorded_launch_identity(process), signal.SIGTERM):
+                _reason_log.emit_kill("runner", target="engine process group", pid=process.pid,
+                                      why="runner received a stop request",
+                                      signal_name="SIGTERM", level="INFO", cause_key="engine_stop_requested")
+        except PermissionError:
+            pass  # the forced cleanup below checks and reports containment
+    until = time.monotonic() + ENGINE_TEARDOWN_SECONDS
+    while time.monotonic() < until:
+        if child_exited_unreaped(process) and (output is None or output.eof):
+            break
+        if output is None:
+            time.sleep(0.02)
+        else:
+            log.writelines(output.read())
+            log.flush()
+    if not child_exited_unreaped(process):
+        _kill_engine_tree(process, "engine teardown deadline after stop request")
+    if output is not None:
+        log.write(output.finish())
+
+
+def _kill_engine_tree(process: subprocess.Popen, reason: str) -> None:
+    from .engine.kernel_exec_tracker import kill_launch_unit, recorded_launch_identity
+
     try:
-        for line in stream:
-            lines.put(line)
-    except (OSError, ValueError):
-        pass  # the stream was closed by cleanup
-    finally:
-        lines.put(None)
+        kill_launch_unit(process, deadline_seconds=1, launch_identity=recorded_launch_identity(process),
+                         reason=reason)
+    except (OSError, RuntimeError, ValueError) as error:
+        _reason_log.emit_reason("invariant", "engine_teardown_unverified", "runner",
+                                "engine process tree cleanup could not be verified",
+                                str(error)[:240], journal=False, level="ERROR")
+    # The caller always follows with the launch group's existing cleanup path.
 
 
 def keep_checkpoints_requested(flag: bool = False) -> bool:

@@ -74,9 +74,10 @@ import json
 import logging
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FutureTimeout
+from concurrent.futures import Future, wait
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Thread
 from typing import Iterable, Optional
 
 logger = logging.getLogger(__name__)
@@ -394,7 +395,8 @@ def _resolve_sites_blocking(
         pure Python it keeps HOLDING THE GIL. One timed-out file then starved
         every file after it, so a single slow module cascaded into a whole build
         of timeouts with zero resolutions. Checking the deadline in the loop
-        means no worker ever outlives its budget, so there is nothing to leak.
+        limits work between lookups. The hard backstop covers a single lookup
+        that never returns.
       * returning early with what it has turns "5 seconds spent, 0 answers" into
         "5 seconds spent, N answers", and the shared dict means even the hard
         backstop can salvage partial work.
@@ -423,22 +425,6 @@ def _resolve_sites_blocking(
             target = _to_target(names[0], repo_root)
         results[ref.key] = target
     return results
-
-
-def _snapshot(results: dict) -> dict:
-    """Copy a dict a worker thread may still be writing to.
-
-    Only reached on the hard-backstop path, where the worker is by definition
-    still alive. A plain `dict(d)` can raise "dictionary changed size during
-    iteration" there — losing the partial results we came to salvage — so retry
-    briefly, then give up cleanly rather than propagate.
-    """
-    for _ in range(3):
-        try:
-            return dict(results)
-        except RuntimeError:
-            time.sleep(0.01)
-    return {}
 
 
 def resolve_file(
@@ -495,32 +481,39 @@ def resolve_file_full(
     # Written in place by the worker so a hard-backstop timeout still salvages
     # everything resolved before the hang.
     results: dict[tuple[int, int], Optional[ResolvedTarget]] = {}
-    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="lsp-resolve")
-    try:
-        future = executor.submit(
-            _resolve_sites_blocking, root, abs_path, source, site_list, deadline, results)
+    future: Future[dict[tuple[int, int], Optional[ResolvedTarget]]] = Future()
+
+    def resolve() -> None:
+        if not future.set_running_or_notify_cancel():
+            return
         try:
-            future.result(timeout=budget + _HARD_TIMEOUT_GRACE_SECONDS)
-        except _FutureTimeout:
-            # The cooperative deadline did NOT stop it, so a single goto hung.
-            # Its own telemetry line, at WARNING: a silently-skipped file is how
-            # an accuracy layer rots into a no-op nobody notices.
-            logger.warning(
-                "lsp_resolve: HARD TIMEOUT after %.1fs in %s — a single lookup hung; "
-                "salvaged %d/%d site(s) (backend=%s), failing open for the rest",
-                budget + _HARD_TIMEOUT_GRACE_SECONDS, relpath,
-                len(results), len(site_list), backend_name(),
-            )
-            future.cancel()
-            return _snapshot(results)
-        except Exception as exc:
-            logger.debug("lsp_resolve: resolution failed for %s: %s", relpath, exc)
-            return _snapshot(results)
-    except Exception as exc:  # thread pool exhaustion etc. — never fatal
+            value = _resolve_sites_blocking(root, abs_path, source, site_list, deadline, results)
+        except BaseException as error:
+            future.set_exception(error)
+        else:
+            future.set_result(value)
+
+    try:
+        # ThreadPoolExecutor registers an interpreter exit join even with wait=False.
+        Thread(target=resolve, name="lsp-resolve", daemon=True).start()
+    except Exception as exc:  # thread exhaustion etc. — never fatal
         logger.debug("lsp_resolve: could not schedule resolution for %s: %s", relpath, exc)
         return {}
-    finally:
-        executor.shutdown(wait=False)
+    if not wait((future,), timeout=budget + _HARD_TIMEOUT_GRACE_SECONDS).done:
+        future.cancel()
+        snapshot = results.copy()
+        logger.warning(
+            "lsp_resolve: HARD TIMEOUT after %.1fs in %s — a single lookup hung; "
+            "salvaged %d/%d site(s) (backend=%s), failing open for the rest",
+            budget + _HARD_TIMEOUT_GRACE_SECONDS, relpath,
+            len(snapshot), len(site_list), backend_name(),
+        )
+        return snapshot
+    try:
+        future.result()
+    except Exception as exc:
+        logger.debug("lsp_resolve: resolution failed for %s: %s", relpath, exc)
+        return results.copy()
 
     if len(results) < len(site_list):
         # Cooperative deadline hit — bounded, expected on very large files, and

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Timed-out Jedi lookups no longer hold the interpreter open. Engine teardown after completion or cancellation bounds output draining and worker cleanup while preserving the published result.
+
 ## 0.7.74 (2026-11-19)
 
 - Fixed: work copies and mutation inputs keep source modules such as `secret_binding.py` while excluding recognized secret files and `.secrets` directories.
