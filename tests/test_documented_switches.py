@@ -99,6 +99,15 @@ def test_every_documented_switch_takes_effect():
     assert unsupported(_documented(), runner.OPT_IN_SWITCHES, _product_reads()) == []
 
 
+def test_qgates_shell_switch_reaches_engine(monkeypatch):
+    for name in (*runner.OPT_IN_SWITCHES, *runner.CHECK_SETTINGS):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("STATEFRAME_QGATES", "on")
+
+    assert runner.OPT_IN_SWITCHES["STATEFRAME_QGATES"] == ("off", "on")
+    assert runner.resolve_opt_in_switches()["STATEFRAME_QGATES"] == "on"
+
+
 def test_retired_switch_is_not_registered_anywhere():
     for name in RETIRED_SWITCHES:
         assert name not in runner.OPT_IN_SWITCHES

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fixed: the runner now forwards the documented `STATEFRAME_QGATES=on` shell setting so the engine can enable its typed question gates.
+- Fixed: the protocol edit tools (edit_source, rewrite_source) now count as edits in every edit-detection list and engine guard that named edit tools; offered menus and request bytes are unchanged.
 ## 0.7.80 (2026-11-19)
 
 - Fixed (subframes, kept edits): the parent now keeps a stopped subframe's capture when any file differs from the bytes it started from or a file was deleted. Before, only a change to the capture's single target file counted, so an edit to another owned file (a test file, say) was not kept. A capture cut short by a killed worker falls back to the previous one, captures past 9999 order numerically, a subframe whose submission was not accepted is kept too, and a failure while keeping or journaling a capture can no longer end the call. The `parallel_unit_salvaged` entry now lists changed files only (at most 64, with `files_total`) and names an error by type, without host paths.

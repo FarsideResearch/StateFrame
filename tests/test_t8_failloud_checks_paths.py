@@ -526,7 +526,7 @@ _TRIAGED: set[tuple[str, int]] = {
     ("kernel_check_receipts", 1214), ("kernel_check_receipts", 1284), ("kernel_check_receipts", 1347),
     ("kernel_check_receipts", 1360), ("kernel_check_receipts", 1376),
     ("kernel_check_truth_adapter", 69), ("kernel_check_truth_adapter", 95),
-    ("kernel_check_truth_adapter", 405), ("kernel_check_truth_adapter", 414),
+    ("kernel_check_truth_adapter", 408), ("kernel_check_truth_adapter", 417),
     ("kernel_test_run_spans", 251), ("kernel_test_run_spans", 294), ("kernel_test_run_spans", 301),
     ("kernel_test_run_spans", 314), ("kernel_test_run_spans", 321), ("kernel_test_run_spans", 339),
     ("kernel_test_run_spans", 362), ("kernel_test_run_spans", 376), ("kernel_test_run_spans", 435),

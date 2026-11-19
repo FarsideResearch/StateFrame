@@ -6,8 +6,8 @@ When a run uses the protocol menu, the protocol edit tools (``edit_source``,
 ``rewrite_source``) must be counted alongside the legacy editors, or those
 edits silently go unrecognised.
 
-Each case pins a list by ``file:line`` (line numbers after this change) and its
-exact legacy membership. The check is: the list still names every legacy
+Each case pins a list by ``file:line`` in the 0.7.79 source and its exact legacy
+membership. The check is: the list still names every legacy
 member, and it names exactly the protocol tools on top of them.
 """
 from __future__ import annotations
@@ -86,7 +86,7 @@ MIGRATED_LISTS = [
     ("kernel_stateframe_v2_s1.py", 36, {"edit", "file_create", "str_replace"}),
     ("kernel_stateframe_v2_s1.py", 280,
      {"edit", "file_create", "probe", "read", "run_tests", "str_replace", "test"}),
-    ("kernel_working_set_snapshot.py", 450,
+    ("kernel_working_set_snapshot.py", 500,
      {"edit", "file_create", "file_delete", "file_move", "insert_before", "str_replace"}),
 ]
 
