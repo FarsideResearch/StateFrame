@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.7.84 (2026-11-19)
 
 - Test guard: the kill-barrier allowlist now covers the resolver shutdown test's teardown `child.kill()`, which only runs if the synthetic interpreter failed to exit. The release gates no longer need an override for it.
