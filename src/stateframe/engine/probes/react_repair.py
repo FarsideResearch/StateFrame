@@ -10431,7 +10431,7 @@ def work(d, *, resume=None):
                                         "unit_hidden_path", producer=_name, path=_requested_path)
                             if _unit_refusal is None and _name == "run_tests":
                                 _unit_refusal = _unit.authorize_check_target(_args)
-                            if _unit_refusal is None and _name in _unit.mutating_tools:
+                            if _unit_refusal is None and _unit.is_mutating_tool(_name):
                                 _requested_path = str(_args.get("path") or "")
                                 _created_by_unit = str(root / _requested_path) in created_this_run
                                 _op = "create" if _name == "file_create" else "edit"

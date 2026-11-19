@@ -325,7 +325,13 @@ class UnitPolicy:
 
     @property
     def mutating_tools(self) -> frozenset[str]:
-        return EDIT_TOOL_NAMES
+        """Return the mutation capabilities available on this unit's menu."""
+        return self.allowed_tools & EDIT_TOOL_NAMES
+
+    @staticmethod
+    def is_mutating_tool(name: str) -> bool:
+        """Classify an edit independently of its admission to the unit's menu."""
+        return name in EDIT_TOOL_NAMES
 
     def digest(self) -> str:
         return self.spec.policy_digest
