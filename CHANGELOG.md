@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.7.81 (2026-11-19)
 
 - Fixed: the runner now forwards the documented `STATEFRAME_QGATES=on` shell setting so the engine can enable its typed question gates.
