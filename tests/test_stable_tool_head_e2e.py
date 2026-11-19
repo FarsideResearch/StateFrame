@@ -15,6 +15,7 @@ import pytest
 
 from stateframe.scripted_endpoint import Script, serve
 from engine_run import run_monitored
+from enginecheck import Scenario, run as run_scenario
 from enginecheck.wire import common_prefix_length
 from test_hook_wiring_parity import baseline_checkout  # noqa: F401 -- pytest registers this fixture
 
@@ -220,6 +221,27 @@ def test_switch_off_keeps_per_turn_menus(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     assert not any(str(message.get("content", "")).startswith("[Tool menu | this turn]")
                    for request in _wire(run) for message in request["messages"])
+
+
+def test_shipped_profile_finishes_scripted_symbol_lookup(tmp_path):
+    files = {
+        "pkg/value.py": b"VALUE = 1\n\n\ndef get():\n    return VALUE\n",
+        "pkg/use.py": b"from pkg.value import get\n\n\ndef run():\n    return get()\n",
+        "pkg/__init__.py": b"",
+    }
+    steps = [{"tool": "read", "arguments": {"path": path}} for path in files]
+    steps.append({"tool": "done", "arguments": {"summary": "Looked up get."}})
+    # Exercise the profile's unbounded loop and assert a bounded result below.
+    scenario = Scenario(files=files, task="Look up symbol get in this repository.",
+                        steps=steps, max_turns=0)
+
+    trace = run_scenario(scenario, tmp_path)
+
+    assert trace.exit_code == 0, trace.output
+    summary = json.loads((trace.run_dir / "summary.json").read_bytes())
+    assert summary["engine_result"] == "SUBMITTED"
+    assert len(steps) <= summary["steps"] <= 8
+    assert len(steps) <= len(trace.requests) <= 8
 
 
 def _constant_menu_run(tmp_path: Path, switch: str) -> tuple[subprocess.CompletedProcess, Path]:
