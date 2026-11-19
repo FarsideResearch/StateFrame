@@ -1,0 +1,61 @@
+"""Guard repository intelligence source and documentation against old identifiers."""
+
+from pathlib import Path
+import re
+
+
+ROOT = Path(__file__).resolve().parents[1]
+OLD_MODULE = "_".join(("mc", "repo", "intel", "vendor"))
+PRIVATE_PHRASES = (
+    " ".join(("project", "rules")),
+    r"rule\s*\#\s*\d+",
+    "-".join(("agent", "runner")),
+    " ".join(("agent", "runner")),
+    " ".join(("mission", "control")),
+    "-".join(("mission", "control")),
+    "".join(("a", "h", "a")),
+    "".join(("far", "side")),
+    " ".join(("Code", "Studio")),
+    "_".join(("blast", "radius")) + r"\.py",
+    "_".join(("repo", "intel")) + r"[./]signatures",
+)
+PRIVATE_PATTERN = re.compile(
+    r"(?<!\w)(?:" + "|".join(PRIVATE_PHRASES) + r")(?!\w)", re.IGNORECASE
+)
+OLD_MODULE_PATTERN = re.compile(r"(?<!\w)" + re.escape(OLD_MODULE) + r"(?!\w)")
+
+
+def _source_files(directory: str):
+    for path in (ROOT / directory).rglob("*"):
+        if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc":
+            yield path
+
+
+def _hits(path: Path, pattern: re.Pattern[str]) -> list[str]:
+    text = path.read_bytes().decode("utf-8", errors="replace")
+    return [
+        f"{path.relative_to(ROOT)}:{text.count(chr(10), 0, match.start()) + 1}: {match.group()}"
+        for match in pattern.finditer(text)
+    ]
+
+
+def test_old_repository_intelligence_module_is_absent():
+    paths = [ROOT / "pyproject.toml"]
+    paths.extend(path for directory in ("src", "tests", "docs") for path in _source_files(directory))
+    hits = [hit for path in paths for hit in _hits(path, OLD_MODULE_PATTERN)]
+    hits.extend(
+        str(path.relative_to(ROOT))
+        for path in paths
+        if OLD_MODULE_PATTERN.search(path.relative_to(ROOT).as_posix())
+    )
+    assert not hits, "Old repository intelligence module references:\n" + "\n".join(hits)
+
+
+def test_private_product_and_rule_references_are_absent():
+    hits = [
+        hit
+        for directory in ("src", "docs")
+        for path in _source_files(directory)
+        for hit in _hits(path, PRIVATE_PATTERN)
+    ]
+    assert not hits, "Private references:\n" + "\n".join(hits)
