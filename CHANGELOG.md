@@ -14,7 +14,7 @@
 - Verification reuse checks open blockers and advisories against the selected requirement.
 - Unit dependency admission treats dynamic imports conservatively so coupled work is not admitted as independent.
 - Static planning creates a unit for an explicitly requested function with an empty body and leaves missing targets unplanned.
-- Seed occurrence identity, structural labels, overflow reporting, and shared sentence boundaries require the default-off `STATEFRAME_OBLIGATION_SEED_LOSSLESS` switch. With it off, shipped seed, alignment, and request bytes remain unchanged.
+- Seed occurrence identity, structural labels, overflow reporting, and shared sentence boundaries require a new default-off switch. With it off, shipped seed, alignment, and request bytes remain unchanged.
 
 ## 0.7.81 (2026-11-19)
 
