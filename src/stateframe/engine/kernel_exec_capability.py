@@ -53,6 +53,22 @@ def symlink_hops(path: Path) -> tuple[Path, ...]:
     return _walk_symlinks(path)[0]
 
 
+_PUBLIC_CA_PATHS = ("/etc/ssl/certs", "/etc/ssl/cert.pem", "/etc/pki/tls/certs",
+                     "/etc/pki/ca-trust/extracted", "/etc/ca-certificates")
+
+
+def public_ca_read_roots() -> tuple[Path, ...]:
+    """Linux public CA trust store paths (with their symlink chains); macOS admits /etc/ssl elsewhere."""
+    if sys.platform == "darwin":
+        return ()
+    roots: list[Path] = []
+    for raw in _PUBLIC_CA_PATHS:
+        path = Path(raw)
+        if path.exists():
+            roots.extend(symlink_hops(path))
+    return tuple(dict.fromkeys(roots))
+
+
 def executable_symlinks(paths: tuple[Path, ...]) -> dict[Path, str]:
     """Links to recreate in a private mount tree; targets are admitted separately."""
     return {link: target for path in paths for link, target in _walk_symlinks(path)[1].items()}
@@ -319,6 +335,9 @@ def shell_capability(*, workspace, run_env_dir, scratch_home, network, writable,
     system_gitconfig = Path("/etc/gitconfig")
     # Freeze executable and shebang authority for shell, jobs and derived custom
     # capabilities. Runtime libraries retain the existing resolved-root policy.
+    # Offline commands still load TLS trust at import time (Debian's bundled pip reads its CA bundle
+    # when imported, so ensurepip fails without it). Admit the public CA store only, never /etc/ssl/private.
+    roots += public_ca_read_roots()
     if network == "full":
         roots += [Path(p).resolve() for p in ("/etc/hosts", "/etc/resolv.conf",
                   "/etc/nsswitch.conf", "/etc/ssl", "/etc/pki") if Path(p).exists()]
