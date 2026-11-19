@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.86 (2026-11-19)
 
 - Fixed: offline installs now include every required dependency, so schema validation is active.
 
