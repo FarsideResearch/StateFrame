@@ -3,10 +3,10 @@
 Scope: comment_facts.py, line_stage.py, unit_planner_v2.py (T8H-PLANNER unit).
 
 Loudness bar: a raised exception, a WARNING-or-higher record from the owning module, or a typed
-journal event / typed field that a reader checks. Tags (T8-<MODULE>-<line>) name the broad except each
-test covers. Pins cover default-path sites whose only safety argument is a typed field. Opt-in coalescer sites all route
-through ``unit_planner_v2._coalesce_error`` (WARNING + ``unit_coalesce_error`` journal event), so one
-sink test covers them and the inventory guard keeps every site named.
+journal event / typed field that a reader checks. SITE tags name each broad except by module, qualified scope,
+clause, and containing try AST. Reviewed sites cover default-path sites whose only safety argument is a typed field.
+Opt-in coalescer sites all route through ``unit_planner_v2._coalesce_error`` (WARNING + ``unit_coalesce_error``
+journal event), so one sink test covers them and the inventory guard keeps every site named.
 """
 from __future__ import annotations
 
@@ -15,10 +15,12 @@ import logging
 import re
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from _ast_site_keys import BroadExceptSite, find_broad_except_sites, rename_broad_except_site
 
 import comment_facts
 import line_stage
@@ -26,7 +28,57 @@ import unit_planner_v2
 
 ENGINE = Path(__file__).resolve().parents[1] / "src" / "stateframe" / "engine"
 MODULES = ("comment_facts", "line_stage", "unit_planner_v2")
-BROAD = re.compile(r"^\s*except\s*(?:\(|Exception\b|BaseException\b|:)")
+SITE_TAG = re.compile(
+    r"SITE\[([a-z0-9_]+)\|([A-Za-z0-9_.<>]+)\|(Exception|BaseException|bare)\|([0-9a-f]{12})\]"
+)
+
+PLANNER_REVIEWED = frozenset({
+    BroadExceptSite("comment_facts", "_blame_committer_times", "Exception", "215f5cf813c6"),
+    BroadExceptSite("comment_facts", "_blame_committer_times", "Exception", "5ec7bd7971dc"),
+    BroadExceptSite("comment_facts", "_blame_committer_times", "Exception", "e8d0effc58aa"),
+    BroadExceptSite("comment_facts", "_comment_lines", "Exception", "a3d7002d4842"),
+    BroadExceptSite("comment_facts", "extract_comment_facts", "Exception", "1d5687d14227"),
+    BroadExceptSite("line_stage", "_dataflow", "Exception", "8f2224e95dae"),
+    BroadExceptSite("line_stage", "_dataflow", "Exception", "3e07843083ec"),
+    BroadExceptSite("line_stage", "_run_probes", "Exception", "e22a622ecd67"),
+    BroadExceptSite("line_stage", "_run_menu", "Exception", "84a59f9fb5c2"),
+    BroadExceptSite("line_stage", "_run_menu", "Exception", "5866ed29e050"),
+    BroadExceptSite("unit_planner_v2", "_coalesce_error", "Exception", "8d8682da6b14"),
+    BroadExceptSite("unit_planner_v2", "_partial_repair_changed", "Exception", "6515420d1edd"),
+    BroadExceptSite("unit_planner_v2", "coalesce_pytest_command", "Exception", "6ead1acd30c4"),
+    BroadExceptSite("unit_planner_v2", "coalesce_observation", "Exception", "e70321acd675"),
+    BroadExceptSite("unit_planner_v2", "coalesce_combined_observation", "Exception", "1a3ff58a5d33"),
+    BroadExceptSite("unit_planner_v2", "coalesce_collection", "Exception", "45f4795f52df"),
+    BroadExceptSite("unit_planner_v2", "_coalesce_results", "Exception", "6428eaf2c205"),
+    BroadExceptSite("unit_planner_v2", "_revoke_coalesce_passes", "Exception", "c23fae26966d"),
+    BroadExceptSite("unit_planner_v2", "_coalesce_gate_hook", "Exception", "03e8684aa1aa"),
+    BroadExceptSite("unit_planner_v2", "seed_coalesce", "Exception", "0e65c977b3b2"),
+    BroadExceptSite("unit_planner_v2", "refresh_coalesced_plan", "Exception", "61c742788965"),
+    BroadExceptSite("unit_planner_v2", "unit_plan_state", "Exception", "f5399bef7406"),
+    BroadExceptSite("unit_planner_v2", "consume_coalesce_escalation", "Exception", "5a1e2df7cc74"),
+    BroadExceptSite("unit_planner_v2", "install_unit_plan", "Exception", "3fd1f8532a00"),
+    BroadExceptSite("unit_planner_v2", "weld_initial_plan", "Exception", "3d2dbdebe809"),
+    BroadExceptSite("unit_planner_v2", "weld_initial_plan", "Exception", "5d5765ba8272"),
+})
+
+
+def _paths() -> dict[str, Path]:
+    return {stem: ENGINE / f"{stem}.py" for stem in MODULES}
+
+
+def _inventory_error(paths: dict[str, Path]) -> str | None:
+    found = Counter(site for path in paths.values() for site in find_broad_except_sites(path))
+    expected = Counter(PLANNER_REVIEWED)
+    untriaged = sorted((found - expected).elements(), key=lambda site: site.label)
+    stale = sorted((expected - found).elements(), key=lambda site: site.label)
+    if not untriaged and not stale:
+        return None
+    details = []
+    if untriaged:
+        details.append("untriaged: " + "; ".join(site.label for site in untriaged))
+    if stale:
+        details.append("stale: " + "; ".join(site.label for site in stale))
+    return " | ".join(details)
 
 
 def _loud(caplog: pytest.LogCaptureFixture, module_name: str) -> bool:
@@ -67,7 +119,7 @@ class _Ask:
 # documented fail-soft, so a failure drops the hint (abstain) and never yields a wrong verdict.
 
 def test_blame_subprocess_failure_drops_age_map(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """T8-COMMENT_FACTS-79 (DEGRADE-OK): git blame unavailable -> empty age map, no raise."""
+    """SITE[comment_facts|_blame_committer_times|Exception|215f5cf813c6] (DEGRADE-OK): git blame unavailable -> empty age map, no raise."""
     calls: list[object] = []
 
     def boom(cmd, **_kwargs):
@@ -80,7 +132,7 @@ def test_blame_subprocess_failure_drops_age_map(tmp_path: Path, monkeypatch: pyt
 
 
 def test_blame_undecodable_output_drops_age_map(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """T8-COMMENT_FACTS-86 (DEGRADE-OK): non-UTF-8 porcelain output -> empty age map, no raise."""
+    """SITE[comment_facts|_blame_committer_times|Exception|5ec7bd7971dc] (DEGRADE-OK): non-UTF-8 porcelain output -> empty age map, no raise."""
     calls: list[object] = []
 
     def fake_run(cmd, **_kwargs):
@@ -93,7 +145,7 @@ def test_blame_undecodable_output_drops_age_map(tmp_path: Path, monkeypatch: pyt
 
 
 def test_comment_facts_builder_defect_fails_soft(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """T8-COMMENT_FACTS-284 (DEGRADE-OK): a builder defect returns [] (no hints), never raises."""
+    """SITE[comment_facts|extract_comment_facts|Exception|1d5687d14227] (DEGRADE-OK): a builder defect returns [] (no hints), never raises."""
     (tmp_path / "mod.py").write_text("def f():\n    # the note\n    return 1\n", encoding="utf-8")
     calls: list[str] = []
 
@@ -112,7 +164,7 @@ def _fn_node(src: str = "def f():\n    return 1\n") -> ast.AST:
     return ast.parse(src).body[0]
 
 
-# T8-LINE_STAGE-484: a missing dataflow layer is logged and typed, not swallowed.
+# SITE[line_stage|_dataflow|Exception|8f2224e95dae]: a missing dataflow layer is logged and typed, not swallowed.
 def test_dataflow_import_failure_is_visible(monkeypatch: pytest.MonkeyPatch,
                                             caplog: pytest.LogCaptureFixture) -> None:
     monkeypatch.setitem(sys.modules, "graphs.dataflow", None)
@@ -123,7 +175,7 @@ def test_dataflow_import_failure_is_visible(monkeypatch: pytest.MonkeyPatch,
     assert _loud(caplog, "line_stage")
 
 
-# T8-LINE_STAGE-492: a dataflow analysis defect is logged and typed with the exception name.
+# SITE[line_stage|_dataflow|Exception|3e07843083ec]: a dataflow analysis defect is logged and typed with the exception name.
 def test_dataflow_analysis_failure_is_visible(monkeypatch: pytest.MonkeyPatch,
                                               caplog: pytest.LogCaptureFixture) -> None:
     import graphs.dataflow as dataflow_module
@@ -181,7 +233,7 @@ def test_dataflow_healthy_path_is_not_degraded_and_quiet(caplog: pytest.LogCaptu
     assert not _loud(caplog, "line_stage")
 
 
-# T8-LINE_STAGE-1100: probe transport failure becomes MODEL_UNAVAILABLE with the exception type recorded.
+# SITE[line_stage|_run_probes|Exception|e22a622ecd67]: probe transport failure becomes MODEL_UNAVAILABLE with the exception type recorded.
 def test_probe_transport_failure_is_typed() -> None:
     def boom(_item):
         raise RuntimeError("forced: transport down")
@@ -193,7 +245,7 @@ def test_probe_transport_failure_is_typed() -> None:
     assert detail["transport_error"] == "RuntimeError"
 
 
-# T8-LINE_STAGE-1130: menu transport failure is typed on the cert detail.
+# SITE[line_stage|_run_menu|Exception|84a59f9fb5c2]: menu transport failure is typed on the cert detail.
 def test_menu_transport_failure_is_typed() -> None:
     def boom(_items):
         raise RuntimeError("forced: transport down")
@@ -205,7 +257,7 @@ def test_menu_transport_failure_is_typed() -> None:
     assert detail["transport_error"] == "RuntimeError"
 
 
-# T8-LINE_STAGE-1151: a failed thin-margin re-ask keeps the first answer and records the error type.
+# SITE[line_stage|_run_menu|Exception|5866ed29e050]: a failed thin-margin re-ask keeps the first answer and records the error type.
 def test_menu_reask_failure_keeps_first_answer_and_is_typed() -> None:
     calls = {"n": 0}
 
@@ -223,7 +275,7 @@ def test_menu_reask_failure_keeps_first_answer_and_is_typed() -> None:
     assert detail["reask_error"] == "RuntimeError"
 
 
-# T8-LINE_STAGE-1130 (owner decision): a programming error in the menu call is ENGINE_ERROR, not a
+# SITE[line_stage|_run_menu|Exception|84a59f9fb5c2] (owner decision): a programming error in the menu call is ENGINE_ERROR, not a
 # model outage; the exception type is kept and the failure is logged.
 @pytest.mark.parametrize("exc_type", [TypeError, AttributeError, KeyError, NotImplementedError])
 def test_menu_programming_error_is_engine_error(exc_type: type,
@@ -241,7 +293,7 @@ def test_menu_programming_error_is_engine_error(exc_type: type,
     assert _loud(caplog, "line_stage")
 
 
-# T8-LINE_STAGE-1100: the probe path classifies the same way as the menu path.
+# SITE[line_stage|_run_probes|Exception|e22a622ecd67]: the probe path classifies the same way as the menu path.
 def test_probe_programming_error_is_engine_error(caplog: pytest.LogCaptureFixture) -> None:
     def boom(_item):
         raise AttributeError("forced: adapter bug")
@@ -288,7 +340,7 @@ def test_engine_error_is_non_selecting_and_keeps_every_anchor() -> None:
 
 # ---------------------------------------------------------------- unit_planner_v2 (default + opt-in)
 
-# T8-UNIT_PLANNER_V2-584: default-path pytest rewrite fails open with a WARNING when the gate read raises.
+# SITE[unit_planner_v2|coalesce_pytest_command|Exception|6ead1acd30c4]: default-path pytest rewrite fails open with a WARNING when the gate read raises.
 def test_pytest_command_gate_failure_fails_open_loudly(monkeypatch: pytest.MonkeyPatch,
                                                        caplog: pytest.LogCaptureFixture) -> None:
     def boom(*_args, **_kwargs):
@@ -301,7 +353,7 @@ def test_pytest_command_gate_failure_fails_open_loudly(monkeypatch: pytest.Monke
     assert _loud(caplog, "unit_planner_v2")
 
 
-# T8-UNIT_PLANNER_V2-954: default-path weld fails open with a WARNING and leaves the transcript untouched.
+# SITE[unit_planner_v2|weld_initial_plan|Exception|3d2dbdebe809]: default-path weld fails open with a WARNING and leaves the transcript untouched.
 def test_weld_gate_failure_leaves_transcript_and_is_loud(monkeypatch: pytest.MonkeyPatch,
                                                          caplog: pytest.LogCaptureFixture) -> None:
     class _Plan:
@@ -323,8 +375,7 @@ def test_weld_gate_failure_leaves_transcript_and_is_loud(monkeypatch: pytest.Mon
     assert bolt.events and bolt.events[0][1] == "unit_coalesce_error"
 
 
-# Opt-in coalescer sites (573, 600, 623, 636, 702, 757, 797, 815, 833,
-# 866, 928, 943, 962) all funnel through _coalesce_error: one WARNING plus one typed journal event.
+# Opt-in coalescer sites in PLANNER_REVIEWED all funnel through _coalesce_error: one WARNING plus one typed journal event.
 def test_coalesce_error_sink_is_loud_and_journaled(caplog: pytest.LogCaptureFixture) -> None:
     bolt = _FakeBolt()
     caplog.set_level(logging.DEBUG)
@@ -333,7 +384,7 @@ def test_coalesce_error_sink_is_loud_and_journaled(caplog: pytest.LogCaptureFixt
     assert bolt.events == [("unit_plan", "unit_coalesce_error", "u1 RuntimeError: forced")]
 
 
-# T8-UNIT_PLANNER_V2-561: when the journal itself fails, the sink still leaves a WARNING.
+# SITE[unit_planner_v2|_coalesce_error|Exception|8d8682da6b14]: when the journal itself fails, the sink still leaves a WARNING.
 def test_coalesce_error_journal_failure_still_logs(caplog: pytest.LogCaptureFixture) -> None:
     bolt = _FakeBolt(fail=True)
     caplog.set_level(logging.DEBUG)
@@ -345,41 +396,47 @@ def test_coalesce_error_journal_failure_still_logs(caplog: pytest.LogCaptureFixt
 # ---------------------------------------------------------------- guards
 
 def test_planner_broad_excepts_are_triaged() -> None:
-    pilot: set[tuple[str, int]] = set()
-    triaged = {
-        # comment_facts.py (default path)
-        ("comment_facts", 79), ("comment_facts", 86), ("comment_facts", 109),
-        ("comment_facts", 155), ("comment_facts", 284),
-        # line_stage.py (default path)
-        ("line_stage", 484), ("line_stage", 492), ("line_stage", 1100),
-        ("line_stage", 1130), ("line_stage", 1151),
-        # unit_planner_v2.py (default: 584, 954; opt-in: the rest; 561 is the census-LOUD journal sink)
-        ("unit_planner_v2", 561), ("unit_planner_v2", 573), ("unit_planner_v2", 584),
-        ("unit_planner_v2", 600), ("unit_planner_v2", 623), ("unit_planner_v2", 636),
-        ("unit_planner_v2", 702), ("unit_planner_v2", 757), ("unit_planner_v2", 797),
-        ("unit_planner_v2", 815), ("unit_planner_v2", 833), ("unit_planner_v2", 866),
-        ("unit_planner_v2", 928), ("unit_planner_v2", 943), ("unit_planner_v2", 954),
-        ("unit_planner_v2", 962),
-    }
-    found: set[tuple[str, int]] = set()
-    for stem in MODULES:
-        path = ENGINE / f"{stem}.py"
-        for number, text in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            if not BROAD.match(text):
-                continue
-            if re.match(r"^\s*except\s*\(", text) and not re.search(r"Exception|BaseException", text):
-                continue  # narrow tuple
-            found.add((stem, number))
-    assert found == pilot | triaged, (
-        f"untriaged: {sorted(found - (pilot | triaged))}; stale: {sorted((pilot | triaged) - found)}")
+    error = _inventory_error(_paths())
+    assert error is None, error
 
 
 def test_t8_planner_tags_point_at_broad_except_sites() -> None:
-    """Every T8-<MODULE>-<line> tag in this file names an existing broad except line."""
+    """Every SITE key names a reviewed broad-except AST construct."""
     source = Path(__file__).read_text(encoding="utf-8")
-    tags = set(re.findall(r"T8-([A-Z0-9_]+)-(\d+)", source))
+    tags = {BroadExceptSite(*match) for match in SITE_TAG.findall(source)}
     assert tags
-    for module, line in sorted(tags):
-        lines = (ENGINE / (module.lower() + ".py")).read_text(encoding="utf-8").splitlines()
-        assert BROAD.match(lines[int(line) - 1]), (
-            f"{module}:{line} is no longer a broad except; retag or promote the test")
+    assert tags <= PLANNER_REVIEWED, f"tags outside the reviewed inventory: {tags - PLANNER_REVIEWED}"
+
+
+def test_planner_site_locator_survives_shift_and_rejects_removed_or_new_sites(tmp_path: Path) -> None:
+    original_paths = _paths()
+    shifted_paths: dict[str, Path] = {}
+    for stem, original_path in original_paths.items():
+        copy_path = tmp_path / "shifted" / original_path.name
+        copy_path.parent.mkdir(parents=True, exist_ok=True)
+        copy_path.write_text("\n" * 5 + "# shifted copy\n" + original_path.read_text(encoding="utf-8"),
+                             encoding="utf-8")
+        shifted_paths[stem] = copy_path
+    assert _inventory_error(shifted_paths) is None
+
+    for site in sorted(PLANNER_REVIEWED, key=lambda item: item.label):
+        original_path = original_paths[site.module]
+        copy_path = tmp_path / "removed" / site.module / original_path.name
+        copy_path.parent.mkdir(parents=True, exist_ok=True)
+        source = original_path.read_text(encoding="utf-8")
+        copy_path.write_text(rename_broad_except_site(original_path, source, site), encoding="utf-8")
+        changed_paths = dict(original_paths)
+        changed_paths[site.module] = copy_path
+        error = _inventory_error(changed_paths)
+        assert error is not None and f"stale: {site.label}" in error, error
+
+    module_path = original_paths["comment_facts"]
+    copy_path = tmp_path / "added" / module_path.name
+    copy_path.parent.mkdir(parents=True, exist_ok=True)
+    source = module_path.read_text(encoding="utf-8")
+    source += "\n\ndef _unreviewed_engine_site():\n    try:\n        raise RuntimeError()\n    except Exception:\n        return None\n"
+    copy_path.write_text(source, encoding="utf-8")
+    changed_paths = dict(original_paths)
+    changed_paths["comment_facts"] = copy_path
+    error = _inventory_error(changed_paths)
+    assert error is not None and "untriaged: comment_facts._unreviewed_engine_site" in error, error

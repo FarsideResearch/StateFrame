@@ -15,12 +15,21 @@ swallow cannot land untriaged.
 """
 from __future__ import annotations
 
-import re
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+from _except_sites import (
+    UNREVIEWED_HANDLER,
+    ExceptSite,
+    _broad_except_sites,
+    assert_site_tags,
+    assert_triaged,
+    edited_module_paths,
+    shifted_module_paths,
+)
 
 ENGINE = Path(__file__).resolve().parents[1] / "src" / "stateframe" / "engine"
 
@@ -37,7 +46,8 @@ class _UnreadableRuntime:
 
 
 def test_wire_revision_property_failure_fails_closed_to_unknown() -> None:
-    """Site kernel_check_receipts:156. A failing revision accessor yields UNKNOWN, which the stale-wire
+    """Site T8-[kernel_check_receipts | current_wire_revision | except Exception: | 1].
+    A failing revision accessor yields UNKNOWN, which the stale-wire
     consumers (kernel_greenfact, kernel_request_tool_surface) treat as unverified rather than trusting a revision."""
     from kernel_check_receipts import current_wire_revision
 
@@ -51,14 +61,16 @@ class _MemoModeRuntime:
 
 
 def test_receipt_memo_mode_failure_defaults_to_off() -> None:
-    """Site kernel_check_receipts:1380. A failing mode read falls back to the 'off' default (no memo reuse)."""
+    """Site T8-[kernel_check_receipts | _check_receipt_memo_mode | except Exception: | 1].
+    A failing mode read falls back to the 'off' default (no memo reuse)."""
     from kernel_check_receipts import _check_receipt_memo_mode
 
     assert _check_receipt_memo_mode(_MemoModeRuntime()) == "off"
 
 
 def test_shadow_emit_failure_never_fails_receipt_recording() -> None:
-    """Site kernel_check_receipts:754. Shadow telemetry is advisory: a failing journal emit must not raise."""
+    """Site T8-[kernel_check_receipts | _emit_shadow_mismatch | except Exception: | 1].
+    Shadow telemetry is advisory: a failing journal emit must not raise."""
     from kernel_check_receipts import _emit_shadow_mismatch
 
     class Journal:
@@ -79,7 +91,8 @@ class _BrokenItems(dict):
 
 
 def test_receipt_content_compare_failure_reports_changed() -> None:
-    """Site kernel_check_receipts:794. A comparison failure returns False, so the receipt is rewritten
+    """Site T8-[kernel_check_receipts | _receipt_content_equal | except Exception: | 1].
+    A comparison failure returns False, so the receipt is rewritten
     (generation bump) instead of being suppressed as unchanged. This is the safe direction."""
     from kernel_check_receipts import _receipt_content_equal
 
@@ -91,7 +104,8 @@ def test_receipt_content_compare_failure_reports_changed() -> None:
 
 
 def test_profile_event_failure_never_replaces_completed_check(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Site kernel_test_run_spans:294. A profile that cannot build its event finalizes quietly."""
+    """Site T8-[kernel_test_run_spans | TestRunProfile.finalize | except Exception: | 1].
+    A profile that cannot build its event finalizes quietly."""
     from kernel_test_run_spans import TestRunProfile
 
     profile = TestRunProfile("on")
@@ -104,7 +118,8 @@ def test_profile_event_failure_never_replaces_completed_check(monkeypatch: pytes
 
 
 def test_profile_publish_failure_never_replaces_completed_check() -> None:
-    """Site kernel_test_run_spans:314. A journal that rejects the profile event does not fail finalize."""
+    """Site T8-[kernel_test_run_spans | TestRunProfile.finalize | except Exception: | 3].
+    A journal that rejects the profile event does not fail finalize."""
     from kernel_test_run_spans import TestRunProfile
 
     class Journal:
@@ -116,7 +131,8 @@ def test_profile_publish_failure_never_replaces_completed_check() -> None:
 
 
 def test_loaded_runtime_lookup_failure_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Site kernel_test_run_spans:339. A failing active-runtime getter yields no runtime, never an import."""
+    """Site T8-[kernel_test_run_spans | _loaded_runtime | except Exception: | 1].
+    A failing active-runtime getter yields no runtime, never an import."""
     import sys
 
     from kernel_test_run_spans import _loaded_runtime
@@ -130,7 +146,8 @@ def test_loaded_runtime_lookup_failure_returns_none(monkeypatch: pytest.MonkeyPa
 
 
 def test_profile_scope_fails_open_when_profile_cannot_start(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Site kernel_test_run_spans:362. When the profile cannot start the check still runs with no profile."""
+    """Site T8-[kernel_test_run_spans | profile_scope | except Exception: | 1].
+    When the profile cannot start the check still runs with no profile."""
     import kernel_test_run_spans as spans
 
     monkeypatch.setenv(spans.MODE_ENV, "on")
@@ -144,7 +161,8 @@ def test_profile_scope_fails_open_when_profile_cannot_start(monkeypatch: pytest.
 
 
 def test_profile_cleanup_failure_does_not_mask_check_result(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Site kernel_test_run_spans:376. A failure while finalizing the outer profile leaves the check result intact."""
+    """Site T8-[kernel_test_run_spans | profile_scope | except Exception: | 2].
+    A failure while finalizing the outer profile leaves the check result intact."""
     import kernel_test_run_spans as spans
 
     monkeypatch.setenv(spans.MODE_ENV, "on")
@@ -185,7 +203,8 @@ _SNAPSHOT = {"revision": "sha256:rev", "side": "candidate", "binding_stable": Tr
 
 
 def test_adapter_exception_becomes_typed_unrunnable(lifecycle: object) -> None:
-    """Site kernel_authored_check_lifecycle:520. An adapter exception is a typed UNRUNNABLE result with a reason."""
+    """Site T8-[kernel_authored_check_lifecycle | execute_check | except Exception as error: | 2].
+    An adapter exception is a typed UNRUNNABLE result with a reason."""
 
     def crashing_run(artifact: object, payload: object, **_kwargs: object) -> object:
         raise RuntimeError("forced: adapter crashed")
@@ -196,7 +215,8 @@ def test_adapter_exception_becomes_typed_unrunnable(lifecycle: object) -> None:
 
 
 def test_adapter_positional_retry_exception_becomes_typed_unrunnable(lifecycle: object) -> None:
-    """Site kernel_authored_check_lifecycle:518. The TypeError retry path also turns a crash into UNRUNNABLE."""
+    """Site T8-[kernel_authored_check_lifecycle | execute_check | except Exception as error: | 1].
+    The TypeError retry path also turns a crash into UNRUNNABLE."""
     calls: list[str] = []
 
     def legacy_signature(artifact: object, payload: object, *args: object, **kwargs: object) -> object:
@@ -239,7 +259,8 @@ class _ContextsUnwritableRuntime:
 
 
 def test_binding_on_registration_failure_fails_loud() -> None:
-    """Site kernel_check_truth_adapter pin (binding on). The pinned binding is the contract in 'on' mode, so a
+    """Site T8-[kernel_check_truth_adapter | pin_check_execution_context | except Exception as error: | 1] (binding on).
+    The pinned binding is the contract in 'on' mode, so a
     failed registration must raise a typed error instead of letting the receipt fall back to the current revision."""
     from kernel_check_truth_adapter import pin_check_execution_context
 
@@ -327,7 +348,8 @@ def _stored(runtime: SimpleNamespace) -> dict[str, object]:
 
 
 def test_binding_on_scope_fallback_does_not_claim_pinned_scope(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Site kernel_check_receipts pinned-scope fallback (binding on). When the pinned scope cannot be applied the
+    """Site T8-[kernel_check_receipts | record_check_output | except Exception as error: | 1] (binding on).
+    When the pinned scope cannot be applied the
     receipt falls back to the legacy scope; it must not report the pinned scope as applied and overwrite the
     scope an earlier view of the same execution already settled."""
     import kernel_check_receipts as receipts
@@ -390,7 +412,8 @@ def _vacuity_runtime(journal: object) -> SimpleNamespace:
 
 
 def test_vacuity_journal_failure_does_not_keep_completed_certificate(vacuity_on: object) -> None:
-    """Site kernel_check_truth_adapter journal projection (vacuity truth on). Without journal truth the certificate
+    """Site T8-[kernel_check_truth_adapter | _refresh_vacuity_view | except Exception as error: | 1] (vacuity truth on).
+    Without journal truth the certificate
     cannot see a change since the check or a never-run gate, so it must not be presented as a current PASS."""
     from kernel_check_truth_adapter import _refresh_vacuity_view
 
@@ -491,19 +514,6 @@ def test_switch_pairs_binding_x_vacuity_truth(
 # --- inventory guard ----------------------------------------------------------------------------------
 
 
-def _broad_except_sites(paths: tuple[Path, ...]) -> set[tuple[str, int]]:
-    broad = re.compile(r"^\s*except\s*(?:\(|Exception\b|BaseException\b|:)")
-    found: set[tuple[str, int]] = set()
-    for path in paths:
-        for number, text in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            if not broad.match(text):
-                continue
-            if re.match(r"^\s*except\s*\(", text) and not re.search(r"Exception|BaseException", text):
-                continue  # narrow tuple
-            found.add((path.stem, number))
-    return found
-
-
 _MODULE_PATHS = (
     ENGINE / "kernel_authored_check_lifecycle.py",
     ENGINE / "kernel_check_receipts.py",
@@ -511,41 +521,121 @@ _MODULE_PATHS = (
     ENGINE / "kernel_test_run_spans.py",
 )
 
-# No pilot sites live in these modules (checked against tests/test_t8_failloud_pilot.py).
-_PILOT: set[tuple[str, int]] = set()
+# No pilot sites live in these modules.
+_PILOT: set[ExceptSite] = set()
 
-# Every broad except in the modules. The census lists 25 silent sites; receipts 1247 (re-raise, census LOUD),
-# truth adapter 405 (raise on a non-callable projection) and spans 525 (terminal stats fallback, child template) are
-# triaged here too. Opt-in fixes: truth adapter 69 (raises in binding 'on'), 414 (UNKNOWN certificate), receipts 934
-# (honest pinned-scope flag); receipts 775 is the journal emit those fixes report through (logs if the journal fails).
-_TRIAGED: set[tuple[str, int]] = {
-    ("kernel_authored_check_lifecycle", 70), ("kernel_authored_check_lifecycle", 518),
-    ("kernel_authored_check_lifecycle", 520),
-    ("kernel_check_receipts", 156), ("kernel_check_receipts", 213), ("kernel_check_receipts", 754),
-    ("kernel_check_receipts", 775), ("kernel_check_receipts", 794), ("kernel_check_receipts", 934),
-    ("kernel_check_receipts", 1247), ("kernel_check_receipts", 1317), ("kernel_check_receipts", 1380),
-    ("kernel_check_receipts", 1393), ("kernel_check_receipts", 1409),
-    ("kernel_check_truth_adapter", 69), ("kernel_check_truth_adapter", 95),
-    ("kernel_check_truth_adapter", 408), ("kernel_check_truth_adapter", 417),
-    ("kernel_test_run_spans", 251), ("kernel_test_run_spans", 294), ("kernel_test_run_spans", 301),
-    ("kernel_test_run_spans", 314), ("kernel_test_run_spans", 321), ("kernel_test_run_spans", 339),
-    ("kernel_test_run_spans", 362), ("kernel_test_run_spans", 376), ("kernel_test_run_spans", 435),
-    ("kernel_test_run_spans", 525), ("kernel_test_run_spans", 565),
+# The census lists 25 silent sites. Also triaged here are retrieve_check_output (re-raise, census LOUD),
+# _refresh_vacuity_view (raise on a non-callable projection) and _PYTEST_RUNNER_SOURCE._build_report
+# (terminal stats fallback, child template). Opt-in fixes: pin_check_execution_context (raises in binding 'on'),
+# _refresh_vacuity_view (UNKNOWN certificate), record_check_output (honest pinned-scope flag);
+# emit_check_truth_failure is the journal emit those fixes report through (logs if the journal fails).
+_TRIAGED: set[ExceptSite] = {
+    ("kernel_authored_check_lifecycle", "_await.resolve", "except BaseException as error:", 1),
+    ("kernel_authored_check_lifecycle", "execute_check", "except Exception as error:", 1),
+    ("kernel_authored_check_lifecycle", "execute_check", "except Exception as error:", 2),
+    ("kernel_check_receipts", "current_wire_revision", "except Exception:", 1),
+    ("kernel_check_receipts", "_fingerprint", "except Exception:", 1),
+    ("kernel_check_receipts", "_emit_shadow_mismatch", "except Exception:", 1),
+    ("kernel_check_receipts", "emit_check_truth_failure", "except Exception as journal_error:", 1),
+    ("kernel_check_receipts", "_receipt_content_equal", "except Exception:", 1),
+    ("kernel_check_receipts", "record_check_output", "except Exception as error:", 1),
+    ("kernel_check_receipts", "retrieve_check_output", "except BaseException as error:", 1),
+    ("kernel_check_receipts", "_retrieve_check_output", "except Exception:", 1),
+    ("kernel_check_receipts", "_check_receipt_memo_mode", "except Exception:", 1),
+    ("kernel_check_receipts", "_invalidate_check_receipt_memo", "except Exception:", 1),
+    ("kernel_check_receipts", "_store_check_receipt_page", "except Exception:", 1),
+    ("kernel_check_truth_adapter", "pin_check_execution_context", "except Exception as error:", 1),
+    ("kernel_check_truth_adapter", "finish_check_execution", "except Exception:", 1),
+    ("kernel_check_truth_adapter", "_refresh_vacuity_view", "except Exception:", 1),
+    ("kernel_check_truth_adapter", "_refresh_vacuity_view", "except Exception as error:", 1),
+    ("kernel_test_run_spans", "TestRunProfile._compare_shadow", "except Exception:", 1),
+    ("kernel_test_run_spans", "TestRunProfile.finalize", "except Exception:", 1),
+    ("kernel_test_run_spans", "TestRunProfile.finalize", "except Exception:", 2),
+    ("kernel_test_run_spans", "TestRunProfile.finalize", "except Exception:", 3),
+    ("kernel_test_run_spans", "TestRunProfile.finalize", "except Exception:", 4),
+    ("kernel_test_run_spans", "_loaded_runtime", "except Exception:", 1),
+    ("kernel_test_run_spans", "profile_scope", "except Exception:", 1),
+    ("kernel_test_run_spans", "profile_scope", "except Exception:", 2),
+    ("kernel_test_run_spans", "_PYTEST_RUNNER_SOURCE", "except Exception:", 1),
+    ("kernel_test_run_spans", "_PYTEST_RUNNER_SOURCE._build_report", "except Exception:", 1),
+    ("kernel_test_run_spans", "_PYTEST_RUNNER_SOURCE", "except BaseException:", 1),
 }
 
 
 def test_checks_broad_excepts_are_triaged() -> None:
-    found = _broad_except_sites(_MODULE_PATHS)
-    expected = _PILOT | _TRIAGED
-    assert found == expected, (
-        f"untriaged: {sorted(found - expected)}; stale: {sorted(expected - found)}")
+    assert_triaged(_broad_except_sites(_MODULE_PATHS), _PILOT | _TRIAGED)
 
 
 def test_checks_tags_point_at_broad_except_sites() -> None:
-    """Any T8-<MODULE>-<line> tag in this file must name a real broad except line in its module."""
-    broad = re.compile(r"^\s*except\s*(?:\(|Exception\b|BaseException\b|:)")
-    source = Path(__file__).read_text(encoding="utf-8")
-    for module, line in re.findall(r"T8-([A-Z0-9_]+)-(\d+)", source):
-        path = ENGINE / f"{module.lower()}.py"
-        lines = path.read_text(encoding="utf-8").splitlines()
-        assert broad.match(lines[int(line) - 1]), f"T8-{module}-{line} does not point at a broad except"
+    assert_site_tags(Path(__file__), _broad_except_sites(_MODULE_PATHS))
+
+
+def test_checks_inventory_survives_line_shift(tmp_path: Path) -> None:
+    found = _broad_except_sites(shifted_module_paths(_MODULE_PATHS, tmp_path))
+    assert_triaged(found, _PILOT | _TRIAGED)
+    assert_site_tags(Path(__file__), found)
+
+
+def test_checks_inventory_rejects_missing_site(tmp_path: Path) -> None:
+    paths = edited_module_paths(
+        _MODULE_PATHS, tmp_path, "kernel_test_run_spans",
+        "def _build_report(", "def _renamed_build_report(",
+    )
+    stale = ("kernel_test_run_spans", "_PYTEST_RUNNER_SOURCE._build_report", "except Exception:", 1)
+    found = _broad_except_sites(paths)
+    with pytest.raises(AssertionError) as failure:
+        assert_triaged(found, _PILOT | _TRIAGED)
+    assert f"stale: [{stale!r}]" in str(failure.value)
+
+
+def test_checks_inventory_rejects_untriaged_site(tmp_path: Path) -> None:
+    paths = edited_module_paths(_MODULE_PATHS, tmp_path, "kernel_test_run_spans", None, UNREVIEWED_HANDLER)
+    untriaged = ("kernel_test_run_spans", "_t8_unreviewed", "except Exception:", 1)
+    with pytest.raises(AssertionError) as failure:
+        assert_triaged(_broad_except_sites(paths), _PILOT | _TRIAGED)
+    assert f"untriaged: [{untriaged!r}]; stale: []" in str(failure.value)
+
+
+def test_broad_except_locator_keys_nested_and_multiline_clauses(tmp_path: Path) -> None:
+    path = tmp_path / "handlers.py"
+    path.write_text('''\
+class Owner:
+    async def run(self):
+        """Example text:
+        except Exception:
+        """
+        try:
+            pass
+        except (
+            ValueError,
+            Exception,
+        ) as error:
+            pass
+
+        def nested():
+            try:
+                pass
+            except:
+                pass
+
+        try:
+            pass
+        except (ValueError, Exception) as error:  # Same clause, second occurrence.
+            pass
+
+        try:
+            pass
+        except (ValueError, OSError):
+            pass
+
+        try:
+            pass
+        except* BaseException:
+            pass
+''', encoding="utf-8")
+    assert _broad_except_sites((path,)) == {
+        ("handlers", "Owner.run", "except (ValueError, Exception) as error:", 1),
+        ("handlers", "Owner.run", "except (ValueError, Exception) as error:", 2),
+        ("handlers", "Owner.run.nested", "except:", 1),
+        ("handlers", "Owner.run", "except* BaseException:", 1),
+    }

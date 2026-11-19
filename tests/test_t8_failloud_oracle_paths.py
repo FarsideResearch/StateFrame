@@ -4,17 +4,21 @@ Scope: src/stateframe/engine/check_selection.py, func_index.py, intent_oracle.py
 four reads a STATEFRAME_* switch, so every site is on the shipped path.
 
 Loudness bar: a raise, a WARNING-or-higher record from the owning module, or a typed outcome that a reader checks.
-Each forcing test forces the guarded failure and asserts one of those. Tags T8-<MODULE>-<line> name the guarded site.
+Each forcing test forces the guarded failure and asserts one of those. SITE tags use module, qualified scope, clause,
+and a fingerprint of the containing try AST; source line numbers are not part of the key.
 
-Verdicts (line: class). CRASH-HIDER, now fixed and asserted loud: check_selection 200, func_index 633,
-intent_oracle 773 and 894, witness_replay 842, 1032 and 1151 (1032 also records the failure on the surviving
-evidence rows). ALREADY-COVERED or DEGRADE-OK pins: check_selection 123 (prints and logs),
-intent_oracle 847, 865, 871, 948, witness_replay 371, 519, 523, 981, 985 (519/523 are the documented
-"no opinion" fallback of _span_facts). intent_oracle 871 keeps SystemExit from candidate code as a typed
-outcome; KeyboardInterrupt (Ctrl-C, and SIGTERM in the engine child) re-raises before it. DEAD: intent_oracle 219.
-PARSER-BOUNDARY: intent_oracle 239 and 338. AMBIGUOUS (no test, owner question): func_index 436,
-intent_oracle 364 and 368, witness_replay 936 and 1271. Wiring: check_selection imports the corpus fix module by
-its package-qualified name (probes.apply_corpus_fixes), never by the bare name that needs probes/ on sys.path.
+Verdicts (stable site: class). CRASH-HIDER, now fixed and asserted loud: check_selection.fail_to_pass_ids,
+func_index.load_repo_files, intent_oracle.extract and evaluate, witness_replay.family_witness,
+witness_replay._apply_intent_oracle and is_mirror_candidate (_apply_intent_oracle also records the failure on
+surviving evidence rows). ALREADY-COVERED or DEGRADE-OK: check_selection.overlay_fix_tests (prints and logs),
+intent_oracle._load, run_call's Exception and BaseException clauses, discriminate, witness_replay._row_key,
+_span_facts (both documented "no opinion" fallbacks), and _call_capture (both sites). intent_oracle.run_call's
+BaseException clause keeps SystemExit from candidate code as a typed outcome; KeyboardInterrupt (Ctrl-C, and SIGTERM
+in the engine child) re-raises before it. DEAD: intent_oracle._docstring. PARSER-BOUNDARY: intent_oracle._literal
+and _build_example. AMBIGUOUS (no test, owner question): func_index.rank_name_phrase_anchors._feasible,
+intent_oracle._same (both sites), witness_replay._define_fn and _boundary_tiebreak. Wiring: check_selection imports
+the corpus fix module by its package-qualified name (probes.apply_corpus_fixes), never by the bare name that needs
+probes/ on sys.path.
 """
 from __future__ import annotations
 
@@ -24,27 +28,96 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
+from collections import Counter
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from _ast_site_keys import BroadExceptSite, find_broad_except_sites, rename_broad_except_site
 
 ENGINE = Path(__file__).resolve().parents[1] / "src" / "stateframe" / "engine"
 MODULES = ("check_selection", "func_index", "intent_oracle", "witness_replay")
-BROAD = re.compile(r"^\s*except\s*(?:\(|Exception\b|BaseException\b|:)")
+SITE_TAG = re.compile(
+    r"SITE\[([a-z0-9_]+)\|([A-Za-z0-9_.<>]+)\|(Exception|BaseException|bare)\|([0-9a-f]{12})\]"
+)
 
-# No pilot sample site lives in these four modules.
-PILOT: set[tuple[str, int]] = set()
-TRIAGED: set[tuple[str, int]] = {
-    ("check_selection", 123), ("check_selection", 200),
-    ("func_index", 436), ("func_index", 633),
-    ("intent_oracle", 219), ("intent_oracle", 239), ("intent_oracle", 338), ("intent_oracle", 364),
-    ("intent_oracle", 368), ("intent_oracle", 773), ("intent_oracle", 847), ("intent_oracle", 865),
-    ("intent_oracle", 871), ("intent_oracle", 894), ("intent_oracle", 948),
-    ("witness_replay", 371), ("witness_replay", 519), ("witness_replay", 523), ("witness_replay", 842),
-    ("witness_replay", 936), ("witness_replay", 981), ("witness_replay", 985), ("witness_replay", 1032),
-    ("witness_replay", 1151), ("witness_replay", 1271),
+
+# No pilot sample site lives in these four modules. Reasons retain the census verdict for every site.
+PILOT: frozenset[BroadExceptSite] = frozenset()
+TRIAGED: dict[BroadExceptSite, str] = {
+    BroadExceptSite("check_selection", "overlay_fix_tests", "Exception", "a0bccfe0c4af"):
+        "ALREADY-COVERED: prints and logs",
+    BroadExceptSite("check_selection", "fail_to_pass_ids", "Exception", "5af74aa0fd68"):
+        "CRASH-HIDER: now fixed and asserted loud",
+    BroadExceptSite("func_index", "rank_name_phrase_anchors._feasible", "Exception", "fed3d44e4271"):
+        "AMBIGUOUS: no test, owner question",
+    BroadExceptSite("func_index", "load_repo_files", "Exception", "5001c9b0a2da"):
+        "CRASH-HIDER: now fixed and asserted loud",
+    BroadExceptSite("intent_oracle", "_docstring", "Exception", "a2824271e700"):
+        "DEAD",
+    BroadExceptSite("intent_oracle", "_literal", "Exception", "5dbafa4141bf"):
+        "PARSER-BOUNDARY",
+    BroadExceptSite("intent_oracle", "_build_example", "Exception", "c7bb067d5f71"):
+        "PARSER-BOUNDARY",
+    BroadExceptSite("intent_oracle", "_same", "Exception", "118dd60ddfbf"):
+        "AMBIGUOUS: no test, owner question",
+    BroadExceptSite("intent_oracle", "_same", "Exception", "270fb9df4ae6"):
+        "AMBIGUOUS: no test, owner question",
+    BroadExceptSite("intent_oracle", "extract", "Exception", "a1079c3c75c5"):
+        "CRASH-HIDER: now fixed and asserted loud",
+    BroadExceptSite("intent_oracle", "_load", "Exception", "25527aec82ce"):
+        "ALREADY-COVERED",
+    BroadExceptSite("intent_oracle", "run_call", "Exception", "da854a74ec16"):
+        "ALREADY-COVERED",
+    BroadExceptSite("intent_oracle", "run_call", "BaseException", "d4f82bf7e754"):
+        "ALREADY-COVERED: SystemExit is typed; KeyboardInterrupt re-raises",
+    BroadExceptSite("intent_oracle", "evaluate", "Exception", "d5e990b120da"):
+        "CRASH-HIDER: now fixed and asserted loud",
+    BroadExceptSite("intent_oracle", "discriminate", "Exception", "c9de71dfaa29"):
+        "ALREADY-COVERED",
+    BroadExceptSite("witness_replay", "_row_key", "Exception", "0a067200d8be"):
+        "ALREADY-COVERED",
+    BroadExceptSite("witness_replay", "_span_facts", "Exception", "52d4e98dfef8"):
+        "DEGRADE-OK: documented no-opinion fallback",
+    BroadExceptSite("witness_replay", "_span_facts", "Exception", "b6276c81048c"):
+        "DEGRADE-OK: documented no-opinion fallback",
+    BroadExceptSite("witness_replay", "family_witness", "Exception", "bd07a5223c14"):
+        "CRASH-HIDER: now fixed and asserted loud",
+    BroadExceptSite("witness_replay", "_define_fn", "Exception", "c5ff3682421e"):
+        "AMBIGUOUS: no test, owner question",
+    BroadExceptSite("witness_replay", "_call_capture", "Exception", "5052a919834b"):
+        "ALREADY-COVERED",
+    BroadExceptSite("witness_replay", "_call_capture", "Exception", "496e697dd8bb"):
+        "ALREADY-COVERED",
+    BroadExceptSite("witness_replay", "_apply_intent_oracle", "Exception", "c01eb6b16bcf"):
+        "CRASH-HIDER: now fixed and asserted loud; failure remains on surviving evidence rows",
+    BroadExceptSite("witness_replay", "is_mirror_candidate", "Exception", "3033a7e62428"):
+        "CRASH-HIDER: now fixed and asserted loud",
+    BroadExceptSite("witness_replay", "_boundary_tiebreak", "Exception", "9f3d4b416238"):
+        "AMBIGUOUS: no test, owner question",
 }
+
+
+def _paths() -> dict[str, Path]:
+    return {stem: ENGINE / f"{stem}.py" for stem in MODULES}
+
+
+def _inventory_error(paths: dict[str, Path]) -> str | None:
+    found = Counter(site for path in paths.values() for site in find_broad_except_sites(path))
+    expected = Counter(PILOT | TRIAGED.keys())
+    untriaged = sorted((found - expected).elements(), key=lambda site: site.label)
+    stale = sorted((expected - found).elements(), key=lambda site: site.label)
+    if not untriaged and not stale:
+        return None
+    details = []
+    if untriaged:
+        details.append("untriaged: " + "; ".join(site.label for site in untriaged))
+    if stale:
+        details.append("stale: " + "; ".join(
+            f"{site.label} ({TRIAGED.get(site, 'pilot sample')})" for site in stale))
+    return " | ".join(details)
 
 
 def _loud(caplog: pytest.LogCaptureFixture, module_name: str) -> bool:
@@ -53,28 +126,68 @@ def _loud(caplog: pytest.LogCaptureFixture, module_name: str) -> bool:
                for record in caplog.records)
 
 
+@pytest.fixture
+def _func_index_repo() -> Iterator[Path]:
+    """Create a visible repo root; func_index intentionally skips hidden path components."""
+    with tempfile.TemporaryDirectory(prefix="stateframe-func-index-") as root:
+        yield Path(root)
+
+
 def test_oracle_broad_excepts_are_triaged() -> None:
-    found: set[tuple[str, int]] = set()
-    for stem in MODULES:
-        path = ENGINE / f"{stem}.py"
-        for number, text in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            if not BROAD.match(text):
-                continue
-            if re.match(r"^\s*except\s*\(", text) and not re.search(r"Exception|BaseException", text):
-                continue  # narrow tuple
-            found.add((path.stem, number))
-    assert found == PILOT | TRIAGED, (
-        f"untriaged: {sorted(found - (PILOT | TRIAGED))}; stale: {sorted((PILOT | TRIAGED) - found)}")
+    error = _inventory_error(_paths())
+    assert error is None, error
 
 
 def test_oracle_tags_point_at_broad_except_sites() -> None:
     source = Path(__file__).read_text(encoding="utf-8")
-    tags = re.findall(r"T8-([A-Z0-9_]+)-(\d+)", source)
-    assert tags
-    for module, line in tags:
-        lines = (ENGINE / (module.lower() + ".py")).read_text(encoding="utf-8").splitlines()
-        assert BROAD.match(lines[int(line) - 1]), (
-            f"{module}:{line} is no longer a broad except; retag or promote the test")
+    tags = {BroadExceptSite(*match) for match in SITE_TAG.findall(source)}
+    expected = {
+        BroadExceptSite("check_selection", "fail_to_pass_ids", "Exception", "5af74aa0fd68"),
+        BroadExceptSite("func_index", "load_repo_files", "Exception", "5001c9b0a2da"),
+        BroadExceptSite("intent_oracle", "extract", "Exception", "a1079c3c75c5"),
+        BroadExceptSite("intent_oracle", "evaluate", "Exception", "d5e990b120da"),
+        BroadExceptSite("witness_replay", "_span_facts", "Exception", "52d4e98dfef8"),
+        BroadExceptSite("witness_replay", "_span_facts", "Exception", "b6276c81048c"),
+        BroadExceptSite("witness_replay", "family_witness", "Exception", "bd07a5223c14"),
+        BroadExceptSite("witness_replay", "_apply_intent_oracle", "Exception", "c01eb6b16bcf"),
+        BroadExceptSite("witness_replay", "is_mirror_candidate", "Exception", "3033a7e62428"),
+    }
+    assert tags == expected, f"behavior-site tags changed: missing={expected - tags}, extra={tags - expected}"
+    assert tags <= PILOT | TRIAGED.keys(), "a behavior-site tag is not in the reviewed inventory"
+
+
+def test_oracle_site_locator_survives_shift_and_rejects_removed_or_new_sites(tmp_path: Path) -> None:
+    original_paths = _paths()
+    shifted_paths: dict[str, Path] = {}
+    for stem, original_path in original_paths.items():
+        copy_path = tmp_path / "shifted" / original_path.name
+        copy_path.parent.mkdir(parents=True, exist_ok=True)
+        copy_path.write_text("\n" * 5 + "# shifted copy\n" + original_path.read_text(encoding="utf-8"),
+                             encoding="utf-8")
+        shifted_paths[stem] = copy_path
+    assert _inventory_error(shifted_paths) is None
+
+    for site in sorted(PILOT | TRIAGED.keys(), key=lambda item: item.label):
+        original_path = original_paths[site.module]
+        copy_path = tmp_path / "removed" / site.module / original_path.name
+        copy_path.parent.mkdir(parents=True, exist_ok=True)
+        source = original_path.read_text(encoding="utf-8")
+        copy_path.write_text(rename_broad_except_site(original_path, source, site), encoding="utf-8")
+        changed_paths = dict(original_paths)
+        changed_paths[site.module] = copy_path
+        error = _inventory_error(changed_paths)
+        assert error is not None and f"stale: {site.label}" in error, error
+
+    module_path = original_paths["check_selection"]
+    copy_path = tmp_path / "added" / module_path.name
+    copy_path.parent.mkdir(parents=True, exist_ok=True)
+    source = module_path.read_text(encoding="utf-8")
+    source += "\n\ndef _unreviewed_engine_site():\n    try:\n        raise RuntimeError()\n    except Exception:\n        return None\n"
+    copy_path.write_text(source, encoding="utf-8")
+    changed_paths = dict(original_paths)
+    changed_paths["check_selection"] = copy_path
+    error = _inventory_error(changed_paths)
+    assert error is not None and "untriaged: check_selection._unreviewed_engine_site" in error, error
 
 
 # --- check_selection --------------------------------------------------------------------------------
@@ -99,7 +212,7 @@ def test_corpus_overlay_failure_prints_a_visible_line(monkeypatch: pytest.Monkey
 
 def test_fail_to_pass_corpus_fix_failure_is_loud(monkeypatch: pytest.MonkeyPatch,
                                                  caplog: pytest.LogCaptureFixture) -> None:
-    """T8-CHECK_SELECTION-200: a failing corpus lookup still falls back to the commit selector, but logs it."""
+    """SITE[check_selection|fail_to_pass_ids|Exception|5af74aa0fd68]: a failing corpus lookup still falls back to the commit selector, but logs it."""
     import check_selection as selection
     from probes import apply_corpus_fixes as corpus
 
@@ -145,13 +258,13 @@ def test_registered_corpus_fix_selector_used_without_bare_module(monkeypatch: py
 # --- func_index -------------------------------------------------------------------------------------
 
 
-def test_unreadable_repo_file_is_loud(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+def test_unreadable_repo_file_is_loud(_func_index_repo: Path, monkeypatch: pytest.MonkeyPatch,
                                       caplog: pytest.LogCaptureFixture) -> None:
-    """T8-FUNC_INDEX-633: an unreadable file is still skipped, but one WARNING names it."""
+    """SITE[func_index|load_repo_files|Exception|5001c9b0a2da]: an unreadable file is still skipped, but one WARNING names it."""
     import func_index
 
-    (tmp_path / "alpha.py").write_text("def a():\n    return 1\n", encoding="utf-8")
-    (tmp_path / "beta.py").write_text("def b():\n    return 2\n", encoding="utf-8")
+    (_func_index_repo / "alpha.py").write_text("def a():\n    return 1\n", encoding="utf-8")
+    (_func_index_repo / "beta.py").write_text("def b():\n    return 2\n", encoding="utf-8")
     real_read = Path.read_text
 
     def flaky(self: Path, *args: object, **kwargs: object) -> str:
@@ -161,33 +274,33 @@ def test_unreadable_repo_file_is_loud(tmp_path: Path, monkeypatch: pytest.Monkey
 
     monkeypatch.setattr(Path, "read_text", flaky)
     caplog.set_level(logging.WARNING)
-    files = func_index.load_repo_files(tmp_path)
+    files = func_index.load_repo_files(_func_index_repo)
     assert sorted(files) == ["alpha.py"]
     assert _loud(caplog, "func_index"), f"beta.py dropped without a trace: {sorted(files)}"
     assert any("beta.py (OSError)" in record.getMessage() for record in caplog.records)
 
 
-def test_readable_repo_loads_without_warning(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+def test_readable_repo_loads_without_warning(_func_index_repo: Path, caplog: pytest.LogCaptureFixture) -> None:
     """Regression: the skip report never fires on a clean tree."""
     import func_index
 
-    (tmp_path / "alpha.py").write_text("def a():\n    return 1\n", encoding="utf-8")
+    (_func_index_repo / "alpha.py").write_text("def a():\n    return 1\n", encoding="utf-8")
     caplog.set_level(logging.WARNING)
-    assert sorted(func_index.load_repo_files(tmp_path)) == ["alpha.py"]
+    assert sorted(func_index.load_repo_files(_func_index_repo)) == ["alpha.py"]
     assert not _loud(caplog, "func_index")
 
 
 @pytest.mark.parametrize(("unreadable", "truncated"), [(0, False), (5, False), (6, True)])
-def test_unreadable_file_report_boundaries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+def test_unreadable_file_report_boundaries(_func_index_repo: Path, monkeypatch: pytest.MonkeyPatch,
                                            caplog: pytest.LogCaptureFixture, unreadable: int,
                                            truncated: bool) -> None:
     """Boundary: one WARNING per call, at most five names listed, the count always exact."""
     import func_index
 
-    (tmp_path / "keep.py").write_text("def k():\n    return 0\n", encoding="utf-8")
+    (_func_index_repo / "keep.py").write_text("def k():\n    return 0\n", encoding="utf-8")
     bad = {f"bad_{index}.py" for index in range(unreadable)}
     for name in bad:
-        (tmp_path / name).write_text("def b():\n    return 1\n", encoding="utf-8")
+        (_func_index_repo / name).write_text("def b():\n    return 1\n", encoding="utf-8")
     real_read = Path.read_text
 
     def flaky(self: Path, *args: object, **kwargs: object) -> str:
@@ -197,7 +310,7 @@ def test_unreadable_file_report_boundaries(tmp_path: Path, monkeypatch: pytest.M
 
     monkeypatch.setattr(Path, "read_text", flaky)
     caplog.set_level(logging.WARNING)
-    assert sorted(func_index.load_repo_files(tmp_path)) == ["keep.py"]
+    assert sorted(func_index.load_repo_files(_func_index_repo)) == ["keep.py"]
     messages = [r.getMessage() for r in caplog.records
                 if r.levelno >= logging.WARNING and "func_index" in r.name]
     if not unreadable:
@@ -262,7 +375,7 @@ def test_candidate_keyboard_interrupt_stops_the_run(interrupt: type[BaseExceptio
 
 def test_broken_expectation_miner_is_loud(monkeypatch: pytest.MonkeyPatch,
                                           caplog: pytest.LogCaptureFixture) -> None:
-    """T8-INTENT_ORACLE-773: a broken miner is skipped so the rest still run, and the skip is logged."""
+    """SITE[intent_oracle|extract|Exception|a1079c3c75c5]: a broken miner is skipped so the rest still run, and the skip is logged."""
     import intent_oracle as oracle
 
     def broken(fn: object, doc: str) -> list[object]:
@@ -277,7 +390,7 @@ def test_broken_expectation_miner_is_loud(monkeypatch: pytest.MonkeyPatch,
 
 
 def test_raising_expectation_check_is_loud(caplog: pytest.LogCaptureFixture) -> None:
-    """T8-INTENT_ORACLE-894: a raising check still abstains (None), and the cause is logged."""
+    """SITE[intent_oracle|evaluate|Exception|d5e990b120da]: a raising check still abstains (None), and the cause is logged."""
     import intent_oracle as oracle
 
     def boom(outs: list[object]) -> bool:
@@ -333,7 +446,7 @@ def test_unrunnable_witness_call_returns_sentinel() -> None:
 
 
 def test_missing_mutations_module_is_no_opinion(monkeypatch: pytest.MonkeyPatch) -> None:
-    """T8-WITNESS_REPLAY-519 (DEGRADE-OK): mutations unavailable -> None, the documented "no opinion"."""
+    """SITE[witness_replay|_span_facts|Exception|52d4e98dfef8] (DEGRADE-OK): mutations unavailable -> None, the documented "no opinion"."""
     import witness_replay as wr
 
     monkeypatch.setitem(sys.modules, "mutations", None)
@@ -341,7 +454,7 @@ def test_missing_mutations_module_is_no_opinion(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_span_facts_runtime_failure_is_no_opinion(monkeypatch: pytest.MonkeyPatch) -> None:
-    """T8-WITNESS_REPLAY-523 (DEGRADE-OK): a span_facts crash -> None, so the witness does not apply."""
+    """SITE[witness_replay|_span_facts|Exception|b6276c81048c] (DEGRADE-OK): a span_facts crash -> None, so the witness does not apply."""
     import mutations
     import witness_replay as wr
 
@@ -358,7 +471,7 @@ def test_span_facts_runtime_failure_is_no_opinion(monkeypatch: pytest.MonkeyPatc
 
 def test_witness_probe_failure_is_loud(monkeypatch: pytest.MonkeyPatch,
                                        caplog: pytest.LogCaptureFixture) -> None:
-    """T8-WITNESS_REPLAY-842: a probe bug still falls through to the boolean judges, and is logged."""
+    """SITE[witness_replay|family_witness|Exception|bd07a5223c14]: a probe bug still falls through to the boolean judges, and is logged."""
     import witness_replay as wr
 
     def refusing(*args: object) -> object:
@@ -373,7 +486,7 @@ def test_witness_probe_failure_is_loud(monkeypatch: pytest.MonkeyPatch,
 
 def test_intent_oracle_discrimination_failure_is_loud(monkeypatch: pytest.MonkeyPatch,
                                                       caplog: pytest.LogCaptureFixture) -> None:
-    """T8-WITNESS_REPLAY-1032: survivors stay (fail-open); the failure is logged and recorded on the rows."""
+    """SITE[witness_replay|_apply_intent_oracle|Exception|c01eb6b16bcf]: survivors stay (fail-open); the failure is logged and recorded on the rows."""
     import intent_oracle
     import witness_replay as wr
 
@@ -400,7 +513,7 @@ def test_intent_oracle_discrimination_failure_is_loud(monkeypatch: pytest.Monkey
 
 def test_mirror_prefilter_failure_is_loud(monkeypatch: pytest.MonkeyPatch,
                                           caplog: pytest.LogCaptureFixture) -> None:
-    """T8-WITNESS_REPLAY-1151: a pre-filter bug keeps the candidate ('not a mirror'), and is logged."""
+    """SITE[witness_replay|is_mirror_candidate|Exception|3033a7e62428]: a pre-filter bug keeps the candidate ('not a mirror'), and is logged."""
     import witness_replay as wr
 
     def refusing(old: str, new: str) -> str:

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.85 (2026-11-19)
+
+- Tests: the protocol parity (K1, K5) and fail-loud (t8) guards now locate engine sites by enclosing function and construct instead of line number, so unrelated edits that shift lines no longer turn them red; a removed or new unreviewed site still fails.
+
 ## 0.7.84 (2026-11-19)
 
 - Test guard: the kill-barrier allowlist now covers the resolver shutdown test's teardown `child.kill()`, which only runs if the synthetic interpreter failed to exit. The release gates no longer need an override for it.
