@@ -622,6 +622,7 @@
   "kernel_self_plan_prefill.py": "c7e5176f6175c604bbcdaa962cbc3dd221e174c5a2decb09938af53804f93a94",
   "kernel_semantic_ir.py": "6fbcdbe852bdbc4defc967511e0ee358aedb1e5f2e171d27ba36e6a9fe0ec250",
   "kernel_semantics.py": "8a4e4523e4e1df9d01b5f1f56f744dfd2528693317564ea60f00b681ec0da5ae",
+  "kernel_sentence_boundaries.py": "5d99c505204836873d691f5da8f172cb353fb417cb7e6bd62b20a80cf14b68f1",
   "kernel_serve_reads.py": "f3997b3371ea17f609cd33773a7137a19161fb380c51eb925aeabde5b88efbc5",
   "kernel_shell_policy.py": "1e3f7f57a31c02e78971f92532424b3e35169e8f6d6fe50aa99c1433a675ce29",
   "kernel_shell_read_receipts.py": "6aa4f2607f44b411884cad0e9038d277851a76cb4c69132a75608691b7360861",
