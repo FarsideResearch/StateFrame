@@ -140,6 +140,9 @@ APPROVED_TEST_SIGNALS: dict[tuple[str, str, str], tuple[int, str]] = {
     ("test_check_permits.py", "test_two_permits_allow_two_holders_and_refuse_third",
      "child.kill()"):
         (1, "stop the synthetic permit holder after the lock assertion"),
+    ("test_lsp_resolve_shutdown.py", "test_stalled_lookup_allows_interpreter_exit",
+     "child.kill()"):
+        (1, "stop the synthetic resolver interpreter only if it failed to exit"),
     ("e2e/test_parallel_interrupt_safety.py", "test_signal_helpers_verify_launch_identity_before_delivery",
      "signal_verified(process.pid, type(identity)(process.pid, identity.started_epoch, 'different command', identity.kernel_identity), signal.SIGTERM)"):
         (1, "assert that a mismatched command cannot signal the standalone fixture"),
