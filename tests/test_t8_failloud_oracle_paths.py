@@ -28,7 +28,9 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from collections import Counter
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -122,6 +124,13 @@ def _loud(caplog: pytest.LogCaptureFixture, module_name: str) -> bool:
     """True when the module emitted a WARNING-or-higher record during the call."""
     return any(record.levelno >= logging.WARNING and module_name in record.name
                for record in caplog.records)
+
+
+@pytest.fixture
+def _func_index_repo() -> Iterator[Path]:
+    """Create a visible repo root; func_index intentionally skips hidden path components."""
+    with tempfile.TemporaryDirectory(prefix="stateframe-func-index-") as root:
+        yield Path(root)
 
 
 def test_oracle_broad_excepts_are_triaged() -> None:
@@ -249,13 +258,13 @@ def test_registered_corpus_fix_selector_used_without_bare_module(monkeypatch: py
 # --- func_index -------------------------------------------------------------------------------------
 
 
-def test_unreadable_repo_file_is_loud(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+def test_unreadable_repo_file_is_loud(_func_index_repo: Path, monkeypatch: pytest.MonkeyPatch,
                                       caplog: pytest.LogCaptureFixture) -> None:
     """SITE[func_index|load_repo_files|Exception|5001c9b0a2da]: an unreadable file is still skipped, but one WARNING names it."""
     import func_index
 
-    (tmp_path / "alpha.py").write_text("def a():\n    return 1\n", encoding="utf-8")
-    (tmp_path / "beta.py").write_text("def b():\n    return 2\n", encoding="utf-8")
+    (_func_index_repo / "alpha.py").write_text("def a():\n    return 1\n", encoding="utf-8")
+    (_func_index_repo / "beta.py").write_text("def b():\n    return 2\n", encoding="utf-8")
     real_read = Path.read_text
 
     def flaky(self: Path, *args: object, **kwargs: object) -> str:
@@ -265,33 +274,33 @@ def test_unreadable_repo_file_is_loud(tmp_path: Path, monkeypatch: pytest.Monkey
 
     monkeypatch.setattr(Path, "read_text", flaky)
     caplog.set_level(logging.WARNING)
-    files = func_index.load_repo_files(tmp_path)
+    files = func_index.load_repo_files(_func_index_repo)
     assert sorted(files) == ["alpha.py"]
     assert _loud(caplog, "func_index"), f"beta.py dropped without a trace: {sorted(files)}"
     assert any("beta.py (OSError)" in record.getMessage() for record in caplog.records)
 
 
-def test_readable_repo_loads_without_warning(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+def test_readable_repo_loads_without_warning(_func_index_repo: Path, caplog: pytest.LogCaptureFixture) -> None:
     """Regression: the skip report never fires on a clean tree."""
     import func_index
 
-    (tmp_path / "alpha.py").write_text("def a():\n    return 1\n", encoding="utf-8")
+    (_func_index_repo / "alpha.py").write_text("def a():\n    return 1\n", encoding="utf-8")
     caplog.set_level(logging.WARNING)
-    assert sorted(func_index.load_repo_files(tmp_path)) == ["alpha.py"]
+    assert sorted(func_index.load_repo_files(_func_index_repo)) == ["alpha.py"]
     assert not _loud(caplog, "func_index")
 
 
 @pytest.mark.parametrize(("unreadable", "truncated"), [(0, False), (5, False), (6, True)])
-def test_unreadable_file_report_boundaries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+def test_unreadable_file_report_boundaries(_func_index_repo: Path, monkeypatch: pytest.MonkeyPatch,
                                            caplog: pytest.LogCaptureFixture, unreadable: int,
                                            truncated: bool) -> None:
     """Boundary: one WARNING per call, at most five names listed, the count always exact."""
     import func_index
 
-    (tmp_path / "keep.py").write_text("def k():\n    return 0\n", encoding="utf-8")
+    (_func_index_repo / "keep.py").write_text("def k():\n    return 0\n", encoding="utf-8")
     bad = {f"bad_{index}.py" for index in range(unreadable)}
     for name in bad:
-        (tmp_path / name).write_text("def b():\n    return 1\n", encoding="utf-8")
+        (_func_index_repo / name).write_text("def b():\n    return 1\n", encoding="utf-8")
     real_read = Path.read_text
 
     def flaky(self: Path, *args: object, **kwargs: object) -> str:
@@ -301,7 +310,7 @@ def test_unreadable_file_report_boundaries(tmp_path: Path, monkeypatch: pytest.M
 
     monkeypatch.setattr(Path, "read_text", flaky)
     caplog.set_level(logging.WARNING)
-    assert sorted(func_index.load_repo_files(tmp_path)) == ["keep.py"]
+    assert sorted(func_index.load_repo_files(_func_index_repo)) == ["keep.py"]
     messages = [r.getMessage() for r in caplog.records
                 if r.levelno >= logging.WARNING and "func_index" in r.name]
     if not unreadable:
