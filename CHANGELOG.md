@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.65 (2026-11-18)
 
 - Fixed: offline sandboxed commands can read the system's public CA certificates (never `/etc/ssl/private`). Debian's bundled pip loads them on import, so building a run env failed inside the sandbox on Debian and Ubuntu and checks then ran a bare `python` that does not exist.
 
