@@ -842,6 +842,7 @@ OPT_IN_SWITCHES = {
     "STATEFRAME_PARALLEL_USAGE_FEEDBACK": ("observe", "off"),
     "STATEFRAME_PARALLEL_DROP_TOOL_AFTER_TERMINAL": ("on", "off"),
     "STATEFRAME_PARALLEL_SALVAGE_ADOPT": ("off", "on"),  # opt-in: offer a stopped subframe's kept edits to the commit gates
+    "STATEFRAME_SUBFRAME_INTERFACE_BEHAVIOR": ("off", "on"),
     "STATEFRAME_PARALLEL_FORCE_MANIFEST": (),  # internal benchmark-only; stability may change
     "STATEFRAME_QUEUE_WAIT_MAX_S": (),  # finite positive seconds; a profile may set it too
     "STATEFRAME_SEND_STALL_S": (),  # 10-600 seconds without request-body progress
