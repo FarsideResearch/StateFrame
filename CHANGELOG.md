@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.7.77 (2026-11-19)
 
 - New opt-in switch `STATEFRAME_SHARED_CHECK_CACHE=on` (off by default, so the shipped profile and default runs are unchanged). When on, the check run after each edit and the check run at closure share one proof cache, so a check that already ran on the same snapshot, with the same inputs, is reused (pass or fail) instead of run again.
