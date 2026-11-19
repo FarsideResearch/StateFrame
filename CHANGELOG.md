@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.7.72 (2026-11-18)
 
 - Fixed the bundled example determinism guard to compare request hashes after a completed engine run even if the host refuses candidate delivery.
