@@ -4,7 +4,7 @@ StateFrame's own code is licensed under AGPL-3.0-only or a commercial license (s
 
 ## 1. Bundled in the source package (offline wheelhouse)
 
-The source package includes these wheels in `wheelhouse/` for `./install.sh --offline`. They are redistributed with their license files kept inside each wheel. PyYAML is repackaged: the wheelhouse builder rebuilds it as a pure-Python wheel (without the optional compiled libyaml accelerator), so its packaging is modified; its code and its MIT license are unchanged.
+The source package includes universal and platform wheels in `wheelhouse/` for `./install.sh --offline`, covering the complete required runtime dependency closure. They are redistributed with their license files kept inside each wheel. PyYAML is repackaged: the wheelhouse builder rebuilds it as a pure-Python wheel (without the optional compiled libyaml accelerator), so its packaging is modified; its code and its MIT license are unchanged.
 
 | Package | Version | License |
 | --- | --- | --- |
@@ -18,10 +18,15 @@ The source package includes these wheels in `wheelhouse/` for `./install.sh --of
 | Pygments | 2.20.0 | BSD-2-Clause |
 | pytest | 9.0.2 | MIT |
 | PyYAML | 6.0.3 | MIT |
+| jsonschema | 4.26.0 | MIT |
+| jsonschema-specifications | 2025.9.1 | MIT |
+| referencing | 0.37.0 | MIT |
+| rpds-py | 2026.6.3 | MIT |
+| typing-extensions | 4.15.0 | PSF-2.0 (BSD-style) |
 
-## 2. Installed by pip (declared dependencies, not bundled)
+## 2. Installed by pip (declared dependencies)
 
-The default install downloads these from PyPI, pinned and hash-checked (`requirements.txt`, `requirements-repomap.txt`). StateFrame does not redistribute them. Each exact pinned release was checked against both its PyPI license metadata and the license file inside that release's wheel.
+The default install downloads these from PyPI, pinned and hash-checked (`requirements.txt`, `requirements-repomap.txt`). The required runtime wheels are also redistributed in the offline wheelhouse. Each exact pinned release was checked against both its PyPI license metadata and the license file inside that release's wheel.
 
 ### Core (requirements.txt)
 

@@ -217,6 +217,8 @@ def guard_child_installer_globals(request, pristine_installer_attributes):
 
 def pytest_configure(config):
     config.addinivalue_line(
+        "markers", "slow: performs a clean offline installation in a temporary environment")
+    config.addinivalue_line(
         "markers", "host_sandbox: starts an OS sandbox (sandbox-exec/bwrap) or a local socket service")
     config.addinivalue_line(
         "markers", "expected_installer_leak: the test leaks _child installer state on purpose; the guard restores it")

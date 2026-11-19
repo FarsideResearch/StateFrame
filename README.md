@@ -178,7 +178,7 @@ The [agent tools guide](docs/guide/tools.md) lists the tool arguments, command p
 ## What works today
 
 
-- **Install:** one command. Dependencies are pinned and hash-checked from PyPI, with an offline fallback.
+- **Install:** one command. Dependencies are pinned and hash-checked from PyPI, with a complete offline wheelhouse including platform wheels for CPython 3.11-3.14 on manylinux x86_64/aarch64 and macOS arm64/x86_64.
 - **Demos on this build:** a small bug fix, building a multi-file static site from a short spec, and an interactive chat session with diff, undo and apply all pass.
 - **Real repositories** (measured on an earlier release; not re-measured since): 13 of 14 recorded real tasks complete, with no crashes. The 14th is a long task that stops with a clear refusal once its task state no longer fits the prompt budget (see KNOWN_LIMITATIONS.md). A real multi-file bug fix in a production Python codebase was solved live with a local model and passed hidden tests. The refusal on some large files from the previous build is fixed.
 - **A bigger task** (measured on an earlier release; the 0.2.0 live check of the same task is under "Live checks on 0.2.0" above): with a local model, a 7-file feature passed all of its protected tests and 17 of 18 independent edge-case tests. On that preview build, changes of around 10 files or more could stop with a refusal (see KNOWN_LIMITATIONS.md).
