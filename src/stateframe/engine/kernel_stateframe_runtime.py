@@ -5370,6 +5370,8 @@ class StateFrameRuntime:
         self._pattern_cards_previous_source: object = None
         self._pattern_cards_previous_receipts: object = ()
         self._pattern_cards_previous_interventions: tuple[object, ...] = ()
+        from kernel_obligation_assess import shared_check_cache_mode
+        self.stateframe_shared_check_cache_mode = shared_check_cache_mode(self)
         self.host_check_cache: dict[str, object] = {}
         from kernel_recall import ensure_runtime_store
         self.recall_store = ensure_runtime_store(self)
@@ -5390,7 +5392,11 @@ class StateFrameRuntime:
             self.timeline_index, session_id=str(self.journal.run_id),
             project_id=project_id, subject_id=subject_id)
         self.host_check_receipts: list[object] = []
-        self.host_repair_check_cache: dict[str, object] = {}
+        # STATEFRAME_SHARED_CHECK_CACHE=on: the repair path and the closure path
+        # share one exact-instance cache (the same dict object). Rehydration below
+        # then fills it from both journal kinds, and each event kind is unchanged.
+        self.host_repair_check_cache: dict[str, object] = (
+            self.host_check_cache if self.stateframe_shared_check_cache_mode == "on" else {})
         self.host_repair_check_receipts: list[object] = []
         self.host_closure_assessments: tuple[object, ...] = ()
         self.host_closure_payload: dict | None = None
