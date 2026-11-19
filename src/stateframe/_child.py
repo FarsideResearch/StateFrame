@@ -37,6 +37,7 @@ if __package__:
         Replayer,
         ReplayUnfaithful,
         mask_volatile,
+        wire_stem,
     )
     from .skills import SkillError, skills_digest, verify_records
     from .state_dirs import private_directory
@@ -52,6 +53,7 @@ else:  # Executed by path under the selected project interpreter.
         Replayer,
         ReplayUnfaithful,
         mask_volatile,
+        wire_stem,
     )
     from skills import SkillError, skills_digest, verify_records
     from state_dirs import private_directory
@@ -486,7 +488,7 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
                     "an earlier routed replay differed; nothing more is sent")
             counter["n"] += 1
             index = counter["n"]
-            stem = wire_dir / f"{index:04d}"
+            stem = wire_stem(wire_dir, index)
             from kernel_measurement import ACTIVE_REQUEST
             from kernel_stable_wire_record import validate_reserves_record
 
@@ -499,7 +501,7 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
                     reserves, sort_keys=True, separators=(",", ":")).encode())
             identity = route_identity(wire, endpoint) if send_ledger is not None else None
             if identity is not None:
-                identity_path = wire_dir / f"{index:04d}.endpoint.json"
+                identity_path = stem.with_suffix(".endpoint.json")
                 encoded_identity = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
                 try:
                     with identity_path.open("xb") as output:
@@ -612,7 +614,7 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
                 error_name = type(settlement_error).__name__
                 # Best-effort reporting must not replace the transport or budget exception.
                 with suppress(BaseException), wire_lock:
-                    atomic_bytes(wire_dir / f"{send:04d}.settle-error.txt",
+                    atomic_bytes(wire_stem(wire_dir, send).with_suffix(".settle-error.txt"),
                                  (error_name + "\n").encode("utf-8"))
                 with suppress(BaseException):
                     emit("send_settlement_error", send=send, error=error_name)
@@ -628,7 +630,7 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
             settle_after_error(index, transport_attempts)
             detail = getattr(error, "error_detail", None)
             detail = detail if isinstance(detail, str) and detail else None
-            error_path = wire_dir / f"{index:04d}.error.txt"
+            error_path = stem.with_suffix(".error.txt")
             error_text = type(error).__name__ + (f": {detail}" if detail else "") + "\n"
             if transport_attempts:
                 with wire_lock, (run / "sends.jsonl").open("a") as stream:
@@ -645,7 +647,7 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
         except SubframeBudgetExhausted:
             settle_after_error(index, transport_attempts)
             with wire_lock:
-                atomic_bytes(wire_dir / f"{index:04d}.error.txt", b"SubframeBudgetExhausted\n")
+                atomic_bytes(stem.with_suffix(".error.txt"), b"SubframeBudgetExhausted\n")
             raise
         if hook_wiring is not None:
             from kernel_measurement import ACTIVE_REQUEST
