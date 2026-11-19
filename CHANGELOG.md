@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.7.70 (2026-11-18)
 
 - Fixed: `edit_source` and `rewrite_source` now pass the before-first-product-edit question gate (`STATEFRAME_QGATES=on`). The gate's edit set listed only legacy edit names, so protocol edits skipped it until the gate was answered.
