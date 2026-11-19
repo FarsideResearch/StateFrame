@@ -62,8 +62,28 @@ _CLAUSE_BOUNDARY = re.compile(
                     r"unknown|rows?\s+that|unsubscribed|should|must|do\s+not)\b))",
     re.IGNORECASE,
 )
+_SHIPPED_CLAUSE_BOUNDARY = re.compile(
+    r"(?:;\s*|:\s*(?=(?:[`A-Za-z]|\d))|\s+(?=(?:without|while|still)\b)|"
+    r",\s+(?=(?:while|without|still|also|so|reject|preserve|carry|accept|"
+    r"include|allow|make|leave|remain|restore|rename|replace)\b)|"
+    r"\s+(?=and\s+(?:keep|preserve|carry|reject|accept|include|allow|make|"
+    r"leave|remain|restore|rename|replace|apply|expose|handle|retain|support|"
+    r"thread\w*|update|promis\w*|the\s+(?:cli|caller)|"
+    r"unknown|rows?\s+that|unsubscribed|should|must|do\s+not)\b))",
+    re.IGNORECASE,
+)
 _LEGACY_CLAUSE_BOUNDARY = re.compile(
     r"(?:;\s*|:\s+(?=(?:[`A-Za-z]|\d))|"
+    r",\s+(?=(?:while|without|still|also|reject|preserve|carry|accept|"
+    r"include|allow|make|leave|remain|restore|rename|replace)\b)|"
+    r"\s+(?=and\s+(?:keep|preserve|carry|reject|accept|include|allow|make|"
+    r"leave|remain|restore|rename|replace|apply|expose|handle|retain|support|"
+    r"thread\w*|update|promis\w*|the\s+(?:cli|caller)|unknown)\b)|"
+    r"\s+(?=without\b)|\s+(?=still\b))",
+    re.IGNORECASE,
+)
+_SHIPPED_LEGACY_CLAUSE_BOUNDARY = re.compile(
+    r"(?:;\s*|:\s*(?=(?:[`A-Za-z]|\d))|"
     r",\s+(?=(?:while|without|still|also|reject|preserve|carry|accept|"
     r"include|allow|make|leave|remain|restore|rename|replace)\b)|"
     r"\s+(?=and\s+(?:keep|preserve|carry|reject|accept|include|allow|make|"
@@ -322,7 +342,37 @@ def _normalized_brief(text: str) -> str:
 
 def _sentence_chunks(text: str) -> list[str]:
     """Split prose while keeping references and their exact source text whole."""
+    if not lossless_enabled():
+        return _shipped_sentence_chunks(text)
     return [text[start:end] for start, end in sentence_ranges(text)]
+
+
+def _shipped_sentence_chunks(text: str) -> list[str]:
+    """Retain the shipped punctuation splitter while lossless mode is off."""
+    chunks: list[str] = []
+    start = 0
+    in_backticks = False
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == "`":
+            in_backticks = not in_backticks
+        elif not in_backticks and char in ".!?":
+            if (char == "." and index > 0 and index + 1 < len(text)
+                    and text[index - 1].isdigit() and text[index + 1].isdigit()):
+                index += 1
+                continue
+            end = index + 1
+            while end < len(text) and text[end] in ".!?":
+                end += 1
+            chunks.append(text[start:end])
+            start = end
+            index = end
+            continue
+        index += 1
+    if text[start:].strip():
+        chunks.append(text[start:])
+    return chunks
 
 
 def _clean_clause(value: str) -> str:
@@ -367,11 +417,12 @@ def _is_preamble(clause: str) -> bool:
 def _candidate_clauses(text: str) -> list[str]:
     normalized = _normalized_brief(text)
     candidates: list[str] = []
+    boundary_pattern = _CLAUSE_BOUNDARY if lossless_enabled() else _SHIPPED_CLAUSE_BOUNDARY
     for raw in _sentence_chunks(normalized):
         if (_DIAGNOSTIC_LINE.search(raw.strip())
                 or raw.strip().lower().startswith(("at ", "keyerror"))):
             continue
-        local_boundaries = [match.start() for match in _CLAUSE_BOUNDARY.finditer(raw)]
+        local_boundaries = [match.start() for match in boundary_pattern.finditer(raw)]
         points = [0, *local_boundaries, len(raw)]
         merged: list[str] = []
         raw_parts = [raw[left:right] for left, right in zip(points, points[1:])]
@@ -412,12 +463,18 @@ def _legacy_candidate_clauses(text: str) -> list[str]:
     """Keep the pre-seed punctuation-boundary extraction outside the opt-in lane."""
     normalized = _normalized_brief(text)
     result: list[str] = []
-    for start, end in sentence_ranges(normalized):
-        raw = normalized[start:end].strip()
+    if lossless_enabled():
+        sentence_chunks = [normalized[start:end] for start, end in sentence_ranges(normalized)]
+        boundary_pattern = _LEGACY_CLAUSE_BOUNDARY
+    else:
+        sentence_chunks = [match.group(0) for match in _SENTENCE.finditer(normalized)]
+        boundary_pattern = _SHIPPED_LEGACY_CLAUSE_BOUNDARY
+    for sentence in sentence_chunks:
+        raw = sentence.strip()
         if (_DIAGNOSTIC_LINE.search(raw)
                 or raw.lower().startswith(("at ", "keyerror"))):
             continue
-        points = [0, *[item.start() for item in _LEGACY_CLAUSE_BOUNDARY.finditer(raw)], len(raw)]
+        points = [0, *[item.start() for item in boundary_pattern.finditer(raw)], len(raw)]
         for left, right in zip(points, points[1:]):
             clause = raw[left:right].strip()
             if clause and _REQUIREMENT.search(clause):

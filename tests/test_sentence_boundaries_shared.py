@@ -22,6 +22,7 @@ _CASES = (
 @pytest.mark.parametrize(("ticket", "required_text"), _CASES)
 def test_seed_keeps_reference_in_one_exact_source_span(monkeypatch, mode, ticket, required_text):
     monkeypatch.setenv(seed.MODE_ENV, mode)
+    monkeypatch.setenv(seed.LOSSLESS_MODE_ENV, "on")
     monkeypatch.setenv("STATEFRAME_ORACLE_GROUNDING", "off")
     monkeypatch.setenv("STATEFRAME_REQUIREMENT_ALIGNMENT", "off")
 
@@ -37,6 +38,7 @@ def test_seed_keeps_reference_in_one_exact_source_span(monkeypatch, mode, ticket
 
 @pytest.mark.parametrize(("ticket", "required_text"), _CASES)
 def test_alignment_keeps_reference_in_one_source_span(monkeypatch, ticket, required_text):
+    monkeypatch.setenv(seed.LOSSLESS_MODE_ENV, "on")
     monkeypatch.setenv("STATEFRAME_ORACLE_GROUNDING", "off")
 
     spans = alignment.extract_ticket_spans(ticket)
@@ -47,7 +49,8 @@ def test_alignment_keeps_reference_in_one_source_span(monkeypatch, ticket, requi
     assert ticket[start:end] == sentence == ticket
 
 
-def test_alignment_keeps_closers_with_the_ending_sentence():
+def test_alignment_keeps_closers_with_the_ending_sentence(monkeypatch):
+    monkeypatch.setenv(seed.LOSSLESS_MODE_ENV, "on")
     text = "Return the value?!)]}'\" Next request."
     sentence_end = text.index(" Next request.")
 
@@ -58,7 +61,8 @@ def test_alignment_keeps_closers_with_the_ending_sentence():
     )
 
 
-def test_alignment_keeps_quoted_and_backticked_punctuation_inside_sentence():
+def test_alignment_keeps_quoted_and_backticked_punctuation_inside_sentence(monkeypatch):
+    monkeypatch.setenv(seed.LOSSLESS_MODE_ENV, "on")
     text = 'Keep `file.py:12` and "https://example.com/api?q=1" intact. Then stop.'
 
     assert alignment._split_sentences(text) == [
@@ -67,7 +71,8 @@ def test_alignment_keeps_quoted_and_backticked_punctuation_inside_sentence():
     ]
 
 
-def test_abbreviation_matching_does_not_swallow_a_real_sentence_boundary():
+def test_abbreviation_matching_does_not_swallow_a_real_sentence_boundary(monkeypatch):
+    monkeypatch.setenv(seed.LOSSLESS_MODE_ENV, "on")
     text = "Use streams. Reject stale rows."
 
     assert alignment._split_sentences(text) == ["Use streams.", "Reject stale rows."]

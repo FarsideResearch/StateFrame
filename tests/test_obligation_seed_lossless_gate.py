@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from stateframe.engine import kernel_requirement_alignment as alignment
 from stateframe.engine import kernel_obligation_seed as seed
 from stateframe.engine import kernel_work_record as work
 
@@ -45,6 +46,7 @@ def _tickets() -> dict[str, str]:
 def _shipped_profile_seed(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(seed.MODE_ENV, "on")
     monkeypatch.setenv("STATEFRAME_WORK_RECORD", "on")
+    monkeypatch.setenv("STATEFRAME_REQUIREMENT_ALIGNMENT", "on")
     monkeypatch.delenv(LOSSLESS_SWITCH, raising=False)
 
 
@@ -58,6 +60,7 @@ def test_seed_output_and_request_message_match_untouched_shipped_profile() -> No
     assert baseline["profile"] == "r2hc3"
     assert baseline["profile_switches"] == {
         "STATEFRAME_OBLIGATION_SEED": "on",
+        "STATEFRAME_REQUIREMENT_ALIGNMENT": "on",
         "STATEFRAME_WORK_RECORD": "on",
     }
 
@@ -88,6 +91,29 @@ def test_seed_output_and_request_message_match_untouched_shipped_profile() -> No
         if (request_hash != expected["request_message_sha256"]
                 or request_base64 != expected["request_message_base64"]):
             mismatches.append(f"{name}: request message bytes changed")
+
+    assert not mismatches, "; ".join(mismatches)
+
+
+def test_alignment_sentence_spans_match_untouched_shipped_profile_when_lossless_is_off() -> None:
+    baseline = json.loads(
+        (ROOT / "tests/fixtures/obligation_seed_lossless_baseline.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert baseline["profile_switches"]["STATEFRAME_REQUIREMENT_ALIGNMENT"] == "on"
+
+    mismatches: list[str] = []
+    for name, brief in _tickets().items():
+        expected = baseline["cases"][name]
+        spans = [list(row) for row in alignment.extract_ticket_spans(brief)]
+        canonical = json.dumps(spans, ensure_ascii=False, sort_keys=True,
+                               separators=(",", ":")).encode("utf-8")
+        if (len(spans) != expected["alignment_span_count"]
+                or hashlib.sha256(canonical).hexdigest() != expected["alignment_span_sha256"]
+                or spans[:1] != expected["alignment_span_first"]
+                or spans[-1:] != expected["alignment_span_last"]):
+            mismatches.append(f"{name}: shipped alignment sentence spans changed")
 
     assert not mismatches, "; ".join(mismatches)
 

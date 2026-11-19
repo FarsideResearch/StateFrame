@@ -12,6 +12,7 @@ import os
 import re
 from collections.abc import Mapping, Sequence
 
+from kernel_obligation_seed import lossless_enabled
 from kernel_sentence_boundaries import sentence_ranges
 
 
@@ -54,10 +55,58 @@ def _join_lines(lines: Sequence[str]) -> str:
     return _normal_text(" ".join(line.strip() for line in lines if line.strip()))
 
 
+def _opens_quote(text: str, index: int, char: str) -> bool:
+    if char != "'" or index == 0 or index + 1 >= len(text):
+        return True
+    return not (text[index - 1].isalnum() and text[index + 1].isalnum())
+
+
+def _shipped_sentence_ranges(text: str) -> list[tuple[int, int]]:
+    """Keep the shipped alignment boundaries until lossless mode is enabled."""
+    result: list[tuple[int, int]] = []
+    start = 0
+    in_backticks = False
+    quote = ""
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == "`":
+            in_backticks = not in_backticks
+        elif not in_backticks:
+            if quote:
+                if char == quote and (index == 0 or text[index - 1] != "\\"):
+                    quote = ""
+            elif char in "'\"" and _opens_quote(text, index, char):
+                quote = char
+            elif char in ".!?":
+                if (char == "." and index > 0 and index + 1 < len(text)
+                        and text[index - 1].isdigit() and text[index + 1].isdigit()):
+                    index += 1
+                    continue
+                end = index + 1
+                while end < len(text) and text[end] in ".!?":
+                    end += 1
+                if _normal_text(text[start:end]):
+                    result.append((start, end))
+                start = end
+                index = end
+                continue
+        index += 1
+    if _normal_text(text[start:]):
+        result.append((start, len(text)))
+    return result
+
+
+def _active_sentence_ranges(text: str) -> Sequence[tuple[int, int]]:
+    if lossless_enabled():
+        return sentence_ranges(text)
+    return _shipped_sentence_ranges(text)
+
+
 def _split_sentences(text: str) -> list[str]:
-    """Split prose at shared sentence boundaries, preserving punctuation."""
+    """Split using lossless boundaries only when their opt-in switch is on."""
     pieces: list[str] = []
-    for start, end in sentence_ranges(text):
+    for start, end in _active_sentence_ranges(text):
         piece = _normal_text(text[start:end])
         if piece:
             pieces.append(piece)
@@ -65,8 +114,8 @@ def _split_sentences(text: str) -> list[str]:
 
 
 def _sentence_boundaries(text: str) -> list[tuple[int, int]]:
-    """Return exact character ranges from the shared sentence scanner."""
-    return list(sentence_ranges(text))
+    """Return exact ranges from the active sentence scanner."""
+    return list(_active_sentence_ranges(text))
 
 
 def _ticket_groups(ticket: str) -> list[tuple[bool, list[tuple[int, str]]]]:
