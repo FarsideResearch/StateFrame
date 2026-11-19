@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.7.63 (2026-11-18)
 
 - Fixed: the project test interpreter handoff is no longer described as a shell override. The guide now records CLI selection precedence and explains that `--test-python` selects an alternate project interpreter.
