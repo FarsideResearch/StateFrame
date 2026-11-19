@@ -8,8 +8,11 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-_SECRET = (".env*", "*.pem", "*.key", "id_*", "*.p12", "*credential*",
-           "*secret*", ".netrc", ".npmrc", ".pypirc")
+if __package__:
+    from .kernel_secret_paths import SECRET_DIRS, is_secret_file
+else:
+    from kernel_secret_paths import SECRET_DIRS, is_secret_file
+
 _EXCLUDED_DIRS = {".git", ".stateframe"}
 
 
@@ -70,8 +73,9 @@ def _parts(value: str) -> tuple[str, ...]:
     if any(part in ("", ".", "..") or "\\" in part or "\x00" in part for part in parts):
         raise ValueError("invalid input path")
     folded = tuple(part.casefold() for part in parts)
-    if any(part in _EXCLUDED_DIRS or any(fnmatch.fnmatchcase(part, pattern) for pattern in _SECRET)
-           for part in folded):
+    if (any(part in _EXCLUDED_DIRS for part in folded)
+            or any(part in SECRET_DIRS for part in folded[:-1])
+            or is_secret_file(parts[-1])):
         raise ValueError("secret input path is excluded")
     return parts
 

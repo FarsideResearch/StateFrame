@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fixed: work copies and mutation inputs keep source modules such as `secret_binding.py` while excluding recognized secret files and `.secrets` directories.
+
 ## 0.7.73 (2026-11-19)
 
 - Fixed working-set failures by paging oversized complete grep results at whole-hit boundaries, recovering bounded omission ranges for deferred required paths with no selected units, and crediting certified resident read pages in the final source closure proof.
