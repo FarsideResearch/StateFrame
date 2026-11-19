@@ -1,11 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.7.77 (2026-11-19)
 
-- Fixed: pricing-only route settings now persist separately from inactive wire routes, apply to attributed sends, and report missing attribution as unknown; damaged run specs retain typed diagnostics and mark dependent summary fields unavailable.
 - New opt-in switch `STATEFRAME_SHARED_CHECK_CACHE=on` (off by default, so the shipped profile and default runs are unchanged). When on, the check run after each edit and the check run at closure share one proof cache, so a check that already ran on the same snapshot, with the same inputs, is reused (pass or fail) instead of run again.
 - Subframe checks: a passing check from a worker is now reused when the host accepts its edit, instead of being re-run. The host and worker now compute the same environment fingerprint, which previously never matched.
 - Unit plans (opt-in v2 planner): a gate test that a red test run never reported now counts as failing instead of passing, so the unit no longer advances on an unverified result.
+- Fixed: pricing-only route settings now persist separately from inactive wire routes, apply to attributed sends, and report missing attribution as unknown; damaged run specs retain typed diagnostics and mark dependent summary fields unavailable.
 
 ## 0.7.76 (2026-11-19)
 
