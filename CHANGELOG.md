@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.76 (2026-11-19)
+
+- Added: exact decimal helpers for the data workspace (`kernel_data_exact.py`): strict plain-decimal parsing, int-only sums and rational means, and a native int64 sum safety bound. Nothing calls them yet.
+- Added: the data workspace SQLite catalog (`kernel_data_catalog.py`) with an 18-table STRICT schema, WAL safety gate, process-wide writer lock, and read-only reader. Engine operations do not use the catalog yet.
+
 ## 0.7.75 (2026-11-19)
 
 - Timed-out Jedi lookups no longer hold the interpreter open. Engine teardown after completion or cancellation bounds output draining and worker cleanup while preserving the published result.
