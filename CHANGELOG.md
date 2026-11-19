@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.69 (2026-11-18)
 
 - Fixed: system Python remains available for repository tests when StateFrame itself runs on system Python. Only StateFrame's own virtual environment is excluded from the PATH fallback.
 
