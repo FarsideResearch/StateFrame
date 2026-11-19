@@ -22,11 +22,15 @@ import copy
 import os
 from collections.abc import Mapping, Sequence
 
+from kernel_request_tool_surface import CONSTANT_MENU_ATTR
 from kernel_tokenlab_cache_stable import ToolLayout
+from kernel_wire_stability import VOLATILE_TAIL_MARKER
 
 MODE_ENV = "STATEFRAME_STABLE_TOOL_HEAD"
+CONSTANT_MENU_ENV = "STATEFRAME_CONSTANT_TOOL_MENU"
 EVENT = "stable_tool_head_applied"
 NOTE_HEADER = "[Tool menu | this turn]"
+GUIDANCE_NOTE_HEADER = "[Tool guidance | this turn]"
 _STATE_ATTR = "_stable_tool_head_layout"
 _OFFERABLE_ATTR = "_stable_tool_head_offerable_tools"
 _MODES = frozenset({"off", "on"})
@@ -42,6 +46,24 @@ def mode(environ: Mapping[str, str] | None = None) -> str:
 
 def enabled(environ: Mapping[str, str] | None = None) -> bool:
     return mode(environ) == "on"
+
+
+def constant_menu_mode(environ: Mapping[str, str] | None = None) -> str:
+    source = os.environ if environ is None else environ
+    value = str(source.get(CONSTANT_MENU_ENV, "off")).strip().lower()
+    if value not in _MODES:
+        raise ValueError(f"{CONSTANT_MENU_ENV} must be off or on")
+    return value
+
+
+def constant_menu_enabled(environ: Mapping[str, str] | None = None) -> bool:
+    return constant_menu_mode(environ) == "on"
+
+
+def constant_menu_active(runtime: object, *, minimal_launch: bool = False) -> bool:
+    return constant_menu_enabled() and enabled() and (
+        minimal_launch or getattr(runtime, CONSTANT_MENU_ATTR, None) is not None
+    )
 
 
 def _name(tool: object) -> str:
@@ -101,6 +123,18 @@ def listed_tools(
     return registry.tools()
 
 
+def constant_menu_tools(runtime: object, offerable_tools: Sequence[Mapping[str, object]]) -> list[dict]:
+    """Keep first-seen schemas byte-stable, including parameter changes in later phases."""
+    snapshot = getattr(runtime, CONSTANT_MENU_ATTR, None)
+    if snapshot is None:
+        snapshot = [copy.deepcopy(dict(tool)) for tool in offerable_tools
+                    if isinstance(tool, Mapping) and _name(tool)]
+        setattr(runtime, CONSTANT_MENU_ATTR, snapshot)
+    if not isinstance(snapshot, list):
+        return []
+    return copy.deepcopy(snapshot)
+
+
 def callable_subset(listed: Sequence[object], names: Sequence[str]) -> list[dict]:
     """Listed schemas restricted to the callable names, in listed order (the dispatch authority)."""
     allowed = set(names)
@@ -108,19 +142,41 @@ def callable_subset(listed: Sequence[object], names: Sequence[str]) -> list[dict
             if isinstance(tool, Mapping) and _name(tool) in allowed]
 
 
-def apply_menu_note(body: dict, listed: Sequence[object], names: Sequence[str]) -> None:
-    """Keep exactly one current menu note at the tail (before a continuation prefill, if any).
+def apply_menu_note(
+        body: dict, listed: Sequence[object], names: Sequence[str], *,
+        guidance: object = None, volatile_tail: bool = False,
+) -> None:
+    """Keep current menu notes at the tail (before a continuation prefill, if any).
 
     Re-authoring the surface for the same request replaces the note instead of stacking a second one.
     """
     messages = body.get("messages")
     if not isinstance(messages, list):
         return
+    headers = (NOTE_HEADER, GUIDANCE_NOTE_HEADER) if volatile_tail else (NOTE_HEADER,)
     kept = [message for message in messages
             if not (isinstance(message, Mapping) and message.get("role") == "user"
-                    and str(message.get("content", "")).startswith(NOTE_HEADER))]
-    note = menu_note(listed, names)
-    if note is not None:
+                    and str(message.get("content", "")).startswith(headers))]
+    notes = []
+    menu = menu_note(listed, names)
+    if menu is not None:
+        notes.append(menu)
+    if isinstance(guidance, str) and guidance.strip():
+        notes.append(f"{GUIDANCE_NOTE_HEADER} {guidance.strip()}")
+    if volatile_tail:
+        for index, message in enumerate(kept):
+            if not isinstance(message, Mapping) or message.get("role") != "user":
+                continue
+            content = message.get("content")
+            if not isinstance(content, str) or not content.startswith(VOLATILE_TAIL_MARKER):
+                continue
+            # Keep the notes inside the tail so complete-envelope fitting retains them.
+            lines = [line for line in content.split("\n") if not line.startswith(headers)]
+            lines[1:1] = [" ".join(note.splitlines()) for note in notes]
+            kept[index] = {**message, "content": "\n".join(lines)}
+            body["messages"] = kept
+            return
+    for note in notes:
         entry = {"role": "user", "content": note}
         last = kept[-1] if kept else None
         if isinstance(last, Mapping) and last.get("role") == "assistant" and not last.get("tool_calls"):

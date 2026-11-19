@@ -164,7 +164,7 @@ def _strip_descriptions(value: object) -> object:
     return value
 
 
-def _parameters(tool: Mapping[str, object]) -> object:
+def tool_argument_schema(tool: Mapping[str, object]) -> object:
     """The argument contract: parameter schema with every prose ``description`` removed."""
     function = tool.get("function") if isinstance(tool, Mapping) else None
     return _strip_descriptions(function.get("parameters")) if isinstance(function, Mapping) else None
@@ -188,7 +188,7 @@ class ToolLayout:
             if name not in self._schemas:
                 self._order.append(name)
                 self.additions += 1
-            elif _canon(_parameters(self._schemas[name])) != _canon(_parameters(tool)):
+            elif _canon(tool_argument_schema(self._schemas[name])) != _canon(tool_argument_schema(tool)):
                 self.replacements += 1      # the argument CONTRACT changed: the model must see it
             else:
                 continue                    # description-only churn (verbose <-> "Host X action."): keep

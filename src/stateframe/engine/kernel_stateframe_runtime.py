@@ -7790,6 +7790,10 @@ class StateFrameRuntime:
     ) -> list[dict]:
         """Project the reducer's current typed actions onto the live menu."""
         from kernel_idealpath import TOOL_NAME
+        if hasattr(self, "_stateframe_tool_menu_notice"):
+            delattr(self, "_stateframe_tool_menu_notice")
+        from kernel_stable_tool_head import constant_menu_active
+        constant_tool_menu = constant_menu_active(self)
         idealpath_owner = self._idealpath_owner()
         result = [dict(tool) for tool in selected if isinstance(tool, Mapping)]
         targetless = getattr(self, "target", None) is None
@@ -7841,7 +7845,8 @@ class StateFrameRuntime:
                 tool for tool in result
                 if str(tool.get("function", {}).get("name", "")) in live_actions
             ]
-        menu = idealpath_owner.menu()
+        menu = (idealpath_owner.menu(stable_descriptions=True) if constant_tool_menu
+                else idealpath_owner.menu())
         additions = []
         if isinstance(menu.get("current_tool"), Mapping):
             current_tool = copy.deepcopy(dict(menu["current_tool"]))
@@ -7853,8 +7858,17 @@ class StateFrameRuntime:
                 properties["base_revision"] = {"const": idealpath_owner.base_revision}
             additions.append(current_tool)
         if idealpath_owner.stage == "S1":
-            from kernel_idealpath import requirement_table_tool_schema
-            requirement_tool = requirement_table_tool_schema(idealpath_owner.host_draft)
+            from kernel_idealpath import (
+                requirement_table_tool_guidance,
+                requirement_table_tool_schema,
+            )
+            requirement_tool = requirement_table_tool_schema(
+                idealpath_owner.host_draft, include_draft=not constant_tool_menu,
+            )
+            if constant_tool_menu:
+                requirement_guidance = requirement_table_tool_guidance(idealpath_owner.host_draft)
+                if requirement_guidance:
+                    self._stateframe_tool_menu_notice = requirement_guidance
             parameters = requirement_tool.get("function", {}).get("parameters")
             if isinstance(parameters, dict) and isinstance(parameters.get("properties"), dict):
                 properties = parameters["properties"]
@@ -7942,11 +7956,24 @@ class StateFrameRuntime:
             if str(tool.get("function", {}).get("name", "")) in final_actions
         ]
         menu_notice = idealpath_owner.s2_force_menu_notice()
+        guidance_parts = []
+        existing_guidance = getattr(self, "_stateframe_tool_menu_notice", None)
+        if isinstance(existing_guidance, str) and existing_guidance.strip():
+            guidance_parts.append(existing_guidance.strip())
         if isinstance(menu_notice, Mapping) and result:
             function = result[0].get("function")
             if isinstance(function, dict):
-                description = str(function.get("description", "")).strip()
-                function["description"] = f"{description} [{menu_notice['message']}]"[:2000]
+                notice_message = menu_notice.get("message")
+                if constant_tool_menu:
+                    if isinstance(notice_message, str) and notice_message.strip():
+                        guidance_parts.append(notice_message.strip()[:2000])
+                else:
+                    description = str(function.get("description", "")).strip()
+                    function["description"] = f"{description} [{menu_notice['message']}]"[:2000]
+        if constant_tool_menu and guidance_parts:
+            self._stateframe_tool_menu_notice = "\n\n".join(guidance_parts)
+        elif hasattr(self, "_stateframe_tool_menu_notice"):
+            delattr(self, "_stateframe_tool_menu_notice")
         from kernel_idealpath import assert_stage_exit_liveness
         exit_liveness = assert_stage_exit_liveness(
             idealpath_owner.stage,
@@ -25598,6 +25625,9 @@ class StateFrameRuntime:
                     if not isinstance(surface, Mapping):
                         raise FrameFit5Error("final allocation tool surface unavailable")
                     tools = copy.deepcopy(menu_body["tools"])
+                    from kernel_stable_tool_head import constant_menu_active
+                    if constant_menu_active(self):
+                        prepared = copy.deepcopy(menu_body["messages"])
                     request_action_contract = capture.request_action_contract
                 if allocation_requested and isinstance(request_action_contract, Mapping):
                     from kernel_request_seal import OwnerPresentation
@@ -25964,6 +25994,9 @@ class StateFrameRuntime:
                         or any(not isinstance(tool, Mapping) for tool in final_tools)):
                     raise RuntimeError("final FrameFit5 tool surface could not be rebound")
                 tools = copy.deepcopy(final_tools)
+                from kernel_stable_tool_head import constant_menu_active
+                if constant_menu_active(self):
+                    prepared = copy.deepcopy(final_body["messages"])
                 request_action_contract = getattr(
                     capture, "request_action_contract", request_action_contract,
                 )
