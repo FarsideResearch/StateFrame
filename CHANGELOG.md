@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.7.82 (2026-11-19)
 
 - Task brief requirements remain actionable when labels appear in mixed instruction text, and coverage retains exact ownership and occurrence origins.
