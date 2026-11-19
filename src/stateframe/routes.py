@@ -24,6 +24,8 @@ MAIN_FRAME_ROLES = frozenset({"read", "plan", "edit", "finish"})
 FIELDS = ("endpoint", "model", "api_key_env", "temperature", "top_p", "top_k", "min_p",
           "max_tokens", "timeout_s", "slot", "context_tokens", "tokenizer", "allow_remote",
           "cost_input_per_mtok", "cost_cached_input_per_mtok", "cost_output_per_mtok")
+ACCOUNTING_SCHEMA = "stateframe-route-accounting/1"
+ACCOUNTING_FIELDS = frozenset({"cost_input_per_mtok", "cost_cached_input_per_mtok", "cost_output_per_mtok"})
 _CLASS = re.compile(r"[a-z][a-z0-9_-]*\Z")
 _ENV_FIELDS = sorted(FIELDS, key=len, reverse=True)
 _SPEC_ONLY = {"STATEFRAME_ROUTE_SCOPE", "STATEFRAME_ROUTE_UNIT_CLASS", "STATEFRAME_ROUTE_SLOT"}
@@ -337,6 +339,27 @@ def request_settings_changed(table: RouteTable, default: Mapping[str, object], *
                              environ: Mapping[str, str] | None = None) -> bool:
     """Compare every request role in main and unit scope with its unrouted request."""
     return first_request_setting_change(table, default, environ=environ) is not None
+
+
+def accounting_config(table: RouteTable) -> dict[str, object] | None:
+    """Return configured prices without turning accounting into wire routing."""
+    roles = {
+        role: {field: value for field, value in settings.items() if field in ACCOUNTING_FIELDS}
+        for role, settings in table.roles.items()
+    }
+    roles = {role: prices for role, prices in roles.items() if prices}
+    if not roles:
+        return None
+    roles = {role: roles.get(role, {}) for role in table.roles
+             if role in ROLES or role in roles}
+    unit_overrides = {
+        role: sorted(field for field in ACCOUNTING_FIELDS
+                     if field in roles.get(role, {}) and table.sources[role].get(field) != "default")
+        for role in roles if role == "unit" or role.startswith("unit.")
+    }
+    unit_overrides = {role: fields for role, fields in unit_overrides.items() if fields}
+    return {"schema": ACCOUNTING_SCHEMA, "roles": roles,
+            **({"unit_overrides": unit_overrides} if unit_overrides else {})}
 
 
 def first_request_setting_change(table: RouteTable, default: Mapping[str, object], *,

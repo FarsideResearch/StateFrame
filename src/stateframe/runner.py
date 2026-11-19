@@ -488,6 +488,7 @@ class RunOptions:
     route_cli: list[str] = field(default_factory=list)
     routes_file: Path | None = None
     _routes: routes.RouteTable | None = field(default=None, init=False, repr=False)
+    _route_accounting: dict[str, object] | None = field(default=None, init=False, repr=False)
     _recorded_routes: object = field(default=None, init=False, repr=False)
     _recorded_route_default: dict[str, object] | None = field(default=None, init=False, repr=False)
     _provider_capabilities: dict[str, object] = field(default_factory=dict, init=False, repr=False)
@@ -1886,6 +1887,8 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
         spec["powerups"] = powerup_selection.record()
     if options._routes is not None:
         spec["routes"] = options._routes.public()
+    elif options._route_accounting is not None:
+        spec["route_accounting"] = options._route_accounting
     if mcp is not None:
         spec.update(mcp_tools_digest=mcp.digest, mcp_omitted=list(mcp.omitted),
                     mcp_tools=[tool.name for tool in mcp.tools])
@@ -2151,9 +2154,11 @@ def _route_defaults(options: RunOptions) -> dict[str, object]:
 
 
 def _resolve_routes(options: RunOptions) -> routes.RouteTable:
-    return routes.resolve(_route_defaults(options), cli=options.route_cli, file=options.routes_file,
-                          profile=profiles.load_routes(options.profile), recorded=options._recorded_routes,
-                          recorded_default=options._recorded_route_default)
+    table = routes.resolve(_route_defaults(options), cli=options.route_cli, file=options.routes_file,
+                           profile=profiles.load_routes(options.profile), recorded=options._recorded_routes,
+                           recorded_default=options._recorded_route_default)
+    options._route_accounting = routes.accounting_config(table)
+    return table
 
 
 def _routed_endpoint(settings: dict[str, object]) -> Endpoint:
@@ -3537,12 +3542,33 @@ def summarize(run: Path, started: float) -> dict[str, object]:
     capabilities: dict[str, object] = {}
     provider_capabilities: dict[str, object] = {}
     spec: dict = {}
+    spec_diagnostic: dict[str, str] | None = None
     spec_path = run / "spec.json"
-    if spec_path.is_file():
-        try:
-            spec = json.loads(spec_path.read_text())
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            spec = {}
+    try:
+        spec_stat = spec_path.stat()
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        spec_diagnostic = {"kind": "read_error", "error_type": type(error).__name__}
+    else:
+        if stat.S_ISREG(spec_stat.st_mode):
+            try:
+                spec_text = spec_path.read_text(encoding="utf-8")
+            except FileNotFoundError as error:
+                spec_diagnostic = {"kind": "read_error", "error_type": type(error).__name__}
+            except (OSError, UnicodeError) as error:
+                spec_diagnostic = {"kind": "read_error", "error_type": type(error).__name__}
+            else:
+                try:
+                    recorded_spec = json.loads(spec_text)
+                except (TypeError, ValueError, RecursionError) as error:
+                    spec_diagnostic = {"kind": "parse_error", "error_type": type(error).__name__}
+                else:
+                    if isinstance(recorded_spec, dict):
+                        spec = recorded_spec
+                    else:
+                        spec_diagnostic = {"kind": "invalid_shape", "error_type": type(recorded_spec).__name__}
+    if spec_diagnostic is None:
         if isinstance(spec, dict) and isinstance(spec.get("prompt_cache_slot"), dict):
             slot_info = spec["prompt_cache_slot"]
         if isinstance(spec, dict) and isinstance(spec.get("capabilities"), dict):
@@ -3571,11 +3597,21 @@ def summarize(run: Path, started: float) -> dict[str, object]:
         "prompt_cache_slot": slot_info,
         "wall_seconds": round(time.monotonic() - started, 1),
     }
+    if spec_diagnostic is not None:
+        summary.update(run_spec_diagnostic=spec_diagnostic,
+                       capabilities=None, provider_capabilities=None, prompt_cache_slot=None,
+                       route_costs=None)
     if (run / "parallel").exists():
         summary["parallel"] = _parallel_summary(run)
     summary["cached_share_display"] = _cache_share_line(summary)
-    if isinstance(spec.get("routes"), dict) and isinstance(spec["routes"].get("roles"), dict):
-        summary["route_costs"] = _route_costs(run, spec["routes"], sends, metrics)
+    if spec_diagnostic is None:
+        route_spec = spec.get("routes")
+        accounting = spec.get("route_accounting")
+        if isinstance(route_spec, dict) and isinstance(route_spec.get("roles"), dict):
+            summary["route_costs"] = _route_costs(run, route_spec, sends, metrics)
+        elif (isinstance(accounting, dict) and accounting.get("schema") == routes.ACCOUNTING_SCHEMA
+              and isinstance(accounting.get("roles"), dict)):
+            summary["route_costs"] = _route_costs(run, accounting, sends, metrics)
     result = outcomes.terminal_receipt(run)
     summary["engine_result"] = result.get("result")
     summary["engine_terminal"] = {key: result[key] for key in (
