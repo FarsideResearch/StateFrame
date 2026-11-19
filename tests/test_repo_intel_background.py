@@ -251,6 +251,22 @@ def test_claim_and_census_snapshots_retire_on_edit(tmp_path, monkeypatch):
     assert view.analysis_rows_for_send()["census"]["fixture"] == ["full", "scoped"]
 
 
+def test_workspace_edit_retires_analysis_without_a_workspace_view(tmp_path, monkeypatch):
+    import kernel_repo_dependencies as visibility
+    from kernel_stateframe_runtime import StateFrameRuntime
+
+    root = tmp_path.resolve()
+    view = visibility.DependencyView(lambda: None)
+    monkeypatch.setattr(visibility, "active", view)
+    invalidated = []
+    monkeypatch.setattr(background, "invalidate", invalidated.append)
+    runtime = SimpleNamespace(owner=SimpleNamespace(root=root))
+
+    StateFrameRuntime.note_mutation(runtime, ("models.py",), "applied")
+
+    assert invalidated == [root]
+
+
 def test_intake_does_not_join_the_map_worker(tmp_path, monkeypatch):
     from kernel_repo_intel import intake_orientation
 
