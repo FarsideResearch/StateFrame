@@ -17,6 +17,7 @@ import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from kernel_frame_request_allocation import (
     FrameRequestAllocation,
@@ -41,6 +42,9 @@ import kernel_workspace_truth as _workspace_truth
 from kernel_tree_digest import compatible_revision, read_row
 from kernel_evictfix_mode import enabled as evictfix_enabled
 from kernel_obligation_assess import UnavailableEvidence, _unavailable_evidence
+
+if TYPE_CHECKING:
+    from kernel_working_set_render import CarrierWitness
 
 
 SCHEMA = "stateframe-request-source-window/1"
@@ -487,6 +491,7 @@ def _wire_deferred_notice_state(
 def _read_page_source_range(
         content: object, source_map: Mapping[str, str],
         declared_revisions: Mapping[str, object],
+        *, witness: CarrierWitness | None = None,
 ) -> tuple[str, tuple[int, int], str | None] | None:
     """Accept only an exact, revision-bound, whole-line host read page."""
     if not isinstance(content, str):
@@ -527,6 +532,15 @@ def _read_page_source_range(
             or start != effective_start or end != effective_end or start < 1
             or end < start or end > total or start_column != 0):
         return None
+    if witness is not None:
+        identity = witness.receipt_identity
+        payload_start = len(f"{header}\n{more_line}\n".encode())
+        if (identity.path != path or identity.revision != fields["revision"]
+                or (identity.first_line, identity.last_line) != (start, end)
+                or witness.payload_start != payload_start
+                or witness.payload_end != payload_start + byte_count
+                or hashlib.sha256(content.encode()).hexdigest() != witness.carrier_sha256):
+            return None
     full_source_from_page = None
     if isinstance(source, str) and source_revision(source) == fields["revision"]:
         page_source = source
@@ -3192,12 +3206,14 @@ def verify_final_source_delivery(
         plan: Mapping[str, object], messages: Sequence[Mapping[str, object]],
         *, payload: object | bytes | None = None,
         sources: Mapping[str, str] | None = None,
+        verified_capture_witnesses: Sequence[CarrierWitness] = (),
 ) -> dict[str, object]:
     """Recompute delivered spans from the post-diet provider payload.
 
     Metadata is only a locator.  A final source receipt is complete when the
     declared revision, parsed body/ranges, workspace authorization, and exact
     bytes all agree with a ``DeliveryProof`` over the submitted payload.
+    Capture witnesses must come from a host certificate verified on this wire.
     """
 
     from kernel_read_reuse import ReadKey, content_handle, proof_for_serialized_request
@@ -3272,10 +3288,13 @@ def verify_final_source_delivery(
         decoded_wire = None
     if isinstance(decoded_wire, Mapping) and isinstance(decoded_wire.get("messages"), list):
         message_location_prefix = "$.messages"
+        wire_messages = decoded_wire["messages"]
     elif isinstance(decoded_wire, list):
         message_location_prefix = "$"
+        wire_messages = decoded_wire
     else:
         message_location_prefix = None
+        wire_messages = ()
     raw_deferred_paths = plan.get("deferred_paths", ())
     deferred_paths = _normalized_deferred_paths(
         raw_deferred_paths
@@ -3619,11 +3638,20 @@ def verify_final_source_delivery(
             and type(row.get("end_line")) is int
         )
         remember_ranges(path, window_range_values, message_index, content)
+    # A retained capture can be a generated user row. Only its certified
+    # physical carrier has native read-page authority in that role.
+    capture_by_index = {w.message_index: w for w in verified_capture_witnesses if w.mode == "FULL"}
     for message_index, message in enumerate(messages):
-        if not isinstance(message, Mapping) or str(message.get("role", "")) != "tool":
+        if not isinstance(message, Mapping):
             continue
+        witness = None
+        if str(message.get("role", "")) != "tool":
+            witness = capture_by_index.get(message_index)
+            if (witness is None or message.get("role") != "user"
+                    or message_index >= len(wire_messages) or wire_messages[message_index] != message):
+                continue
         read_page = _read_page_source_range(
-            message.get("content"), source_map, declared_revisions,
+            message.get("content"), source_map, declared_revisions, witness=witness,
         )
         if read_page is not None:
             read_path, read_range, source_from_page = read_page

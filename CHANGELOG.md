@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fixed working-set failures by paging oversized complete grep results at whole-hit boundaries, recovering bounded omission ranges for deferred required paths with no selected units, and crediting certified resident read pages in the final source closure proof.
 ## 0.7.72 (2026-11-18)
 
 - Fixed the bundled example determinism guard to compare request hashes after a completed engine run even if the host refuses candidate delivery.

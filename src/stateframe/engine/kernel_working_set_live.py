@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import asdict, replace
 import hashlib
 import json
+from collections.abc import Mapping, Sequence
+from dataclasses import asdict, replace
 
 from kernel_reason_log import emit_refusal
 from kernel_request_seal import RequestSealError
@@ -197,6 +198,41 @@ def pending_result_reserve(call):
     return bound_tool_result("é" * MAX_TOOL_RESULT_CHARS)
 
 
+def _source_plan_with_deferred_omissions(plan):
+    """Add bounded read evidence for deferred paths with no selected units."""
+    if not isinstance(plan, Mapping):
+        return plan
+    units = plan.get("units")
+    deferred = plan.get("deferred_paths")
+    omissions = plan.get("omissions")
+    if not (
+        isinstance(units, list)
+        and isinstance(deferred, Sequence) and not isinstance(deferred, (str, bytes, bytearray))
+        and isinstance(omissions, Sequence) and not isinstance(omissions, (str, bytes, bytearray))
+    ):
+        return plan
+
+    from kernel_request_source_window import _normalized_deferred_paths
+
+    selected = {unit["path"] for unit in units if isinstance(unit, Mapping)
+                and isinstance(unit.get("path"), str)}
+    unselected = set(_normalized_deferred_paths(deferred)) - selected
+    if not unselected:
+        return plan
+    relevant = [row for row in omissions if isinstance(row, Mapping)
+                and str(row.get("path", "")).replace("\\", "/").strip() in unselected]
+    if not relevant:
+        return plan
+
+    from kernel_request_budget import _materialize_bounded_omission_units
+
+    # Only the detached units list changes. Keep all original omission rows for
+    # the final verifier and spend the recovery cap solely on unselected paths.
+    recovered = units.copy()
+    _materialize_bounded_omission_units(dict(plan, units=recovered, omissions=relevant))
+    return dict(plan, units=recovered) if len(recovered) > len(units) else plan
+
+
 def prepare_live(capture, runtime, body, *, dialect, reasoning_mode):
     """Prepare a certified wire, retrying plain if its cache-layout proof fails."""
     from kernel_frame_allocation_capture import FrozenRequestCounter
@@ -209,7 +245,7 @@ def prepare_live(capture, runtime, body, *, dialect, reasoning_mode):
     from kernel_working_set_prepare import Blocked, prepare_candidate
     from kernel_working_set_shadow import freeze_shadow, SnapshotFailure
 
-    plan = copy.deepcopy(candidate_source_plan(capture, runtime))
+    plan = _source_plan_with_deferred_omissions(copy.deepcopy(candidate_source_plan(capture, runtime)))
     runtime._request_source_closure = plan
     snapshot = freeze_shadow(body, runtime, request_id=capture.request_id,
                              dialect=dialect, reasoning_mode=reasoning_mode)
@@ -243,6 +279,9 @@ def prepare_live(capture, runtime, body, *, dialect, reasoning_mode):
         # CARRY-NOTE: bind closure proof to this certified assignment, never a legacy selector.
         from kernel_working_set_facts import _covered
         full = [slot for slot in certificate.snapshot.sources if selected[slot.key] == "FULL"]
+        full_capture_ids = {slot.key for slot in full if slot.capture_ids}
+        verified_capture_witnesses = tuple(w for w in certificate.witnesses
+                                           if w.slot_id in full_capture_ids)
         # Every plan unit not covered FULL by whole lines is deferred. The
         # renderer declares the same set via uncovered_plan_unit_paths, so
         # late-deferral reconciliation finds each notice on re-verification.
@@ -256,7 +295,8 @@ def prepare_live(capture, runtime, body, *, dialect, reasoning_mode):
         closure["source_contents"] = sources
         capture._request_source_closure_override = closure
         receipt = verify_final_source_delivery(closure, body["messages"], sources=sources,
-                                               payload=prepared.wire)
+                                               payload=prepared.wire,
+                                               verified_capture_witnesses=verified_capture_witnesses)
         return body, closure, sources, receipt
 
     def proof_failures(receipt):
@@ -382,7 +422,13 @@ def read_admission_snapshot(runtime, visible_messages, *, byte_cap):
     certificate = getattr(capture, "_working_set_certificate", None)
     authority = getattr(certificate, "snapshot", None) or getattr(
         runtime, "_read_admission_provider_authority", None)
-    snapshot = freeze_shadow(body, runtime, request_id="read-admission",
+    plan = getattr(runtime, "_request_source_closure", None)
+    admission_plan = _source_plan_with_deferred_omissions(plan)
+    snapshot_runtime = runtime
+    if admission_plan is not plan:
+        snapshot_runtime = copy.copy(runtime)
+        snapshot_runtime._request_source_closure = admission_plan
+    snapshot = freeze_shadow(body, snapshot_runtime, request_id="read-admission",
                              dialect=getattr(authority, "dialect", "llama.cpp"),
                              reasoning_mode=getattr(authority, "reasoning_mode", "on"))
     if snapshot is None or isinstance(snapshot, SnapshotFailure):
