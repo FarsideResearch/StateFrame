@@ -335,11 +335,11 @@ def derive_unit_plan_v2(row: Mapping[str, object], index, paths: Sequence[str]) 
         raise ValueError("unit planner found no test functions")
     test_refs = {t.name: _test_refs(t, helpers, sym_alias, mod_alias, symbols) for t in tests}
     touched = {key for refs in test_refs.values() for key in refs}
-    if not touched:
-        raise ValueError("unit planner found no tested project symbol")
 
     spec_kinds = _symbol_kinds(spec)
-    wanted = set(touched) | {key for key in symbols if key[1] in spec_kinds}
+    wanted = _initial_wanted(touched, symbols, spec_kinds, index, row)
+    if not wanted:
+        raise ValueError("unit planner found no tested project symbol")
     edges = _edges(index, paths, symbols)
     # providers of anything wanted are wanted too (transitively), so order is complete
     providers_of: dict[SymKey, set[SymKey]] = {}
@@ -476,7 +476,7 @@ def derive_with_index(row: Mapping[str, object], root: Path) -> UnitPlanV2 | Non
     try:
         paths = project_paths(root)
         index = build_index(root, paths)
-        return None if index is None else derive_unit_plan_v2(row, index, paths)
+        return None if index is None else _derive_with_stub_targets(row, root, index, paths)
     except (ValueError, OSError, KeyError, TypeError, AttributeError):
         return None
 
@@ -994,6 +994,145 @@ def render_unit_progress(bolt) -> str:
     if hasattr(bolt, "unit_gate_passed") and pointer >= len(plan.units):
         return f"[planner] all unit gates passed; digest={plan.plan_digest}"
     return render_current_unit_line(plan, pointer)
+
+
+class _StubTargetIndex:
+    """Carry source context without changing the public index-planner signature."""
+
+    def __init__(self, index: object, root: Path, paths: Sequence[str]) -> None:
+        self._index = index
+        self._stub_root = Path(root)
+        self._stub_paths = tuple(paths)
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._index, name)
+
+
+def _initial_wanted(
+    touched: set[SymKey], symbols: Mapping[SymKey, object], spec_kinds: Mapping[str, str],
+    index: object, row: Mapping[str, object],
+) -> set[SymKey]:
+    if touched:
+        return set(touched) | {key for key in symbols if key[1] in spec_kinds}
+    root = getattr(index, "_stub_root", None)
+    paths = getattr(index, "_stub_paths", ())
+    if not isinstance(root, Path) or not isinstance(paths, tuple):
+        return set()
+    return set(_empty_function_targets(row, root, paths, symbols, spec_kinds))
+
+
+def _is_stub_function(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """Recognize an unimplemented function without treating arbitrary short code as a stub."""
+    body = list(node.body)
+    if (body and isinstance(body[0], ast.Expr)
+            and isinstance(body[0].value, ast.Constant)
+            and isinstance(body[0].value.value, str)):
+        body.pop(0)
+    if not body:
+        return True
+    if len(body) != 1:
+        return False
+    statement = body[0]
+    if isinstance(statement, ast.Pass):
+        return True
+    if (isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Constant)
+            and statement.value.value is Ellipsis):
+        return True
+    if not isinstance(statement, ast.Raise) or statement.exc is None:
+        return False
+    error = statement.exc.func if isinstance(statement.exc, ast.Call) else statement.exc
+    return isinstance(error, ast.Name) and error.id == "NotImplementedError"
+
+
+def _row_source_path(row: Mapping[str, object], root: Path, paths: Sequence[str]) -> str | None:
+    path_set = frozenset(paths)
+    root_path = Path(root).resolve()
+    for field in ("path", "rel", "fn"):
+        raw = row.get(field)
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        candidate = Path(raw.strip())
+        if candidate.is_absolute():
+            try:
+                candidate = candidate.resolve().relative_to(root_path)
+            except (OSError, ValueError):
+                continue
+        normalized = candidate.as_posix().removeprefix("./")
+        if normalized in path_set:
+            return normalized
+    return None
+
+
+_STUB_SOURCE_LIMIT = 1_000_000
+
+
+def _stub_functions_in_file(
+    root: Path, path: str, definitions: Mapping[str, object],
+) -> set[str]:
+    found: set[str] = set()
+    ordered = sorted(definitions.items(),
+                     key=lambda item: (getattr(item[1], "lineno", 0), item[0]))
+    line_number = 0
+    try:
+        with (Path(root) / path).open("rb") as source_file:
+            for name, definition in ordered:
+                start = getattr(definition, "lineno", None)
+                end = getattr(definition, "end_lineno", None)
+                if type(start) is not int or type(end) is not int or start <= line_number or end < start:
+                    continue
+                while line_number < start - 1:
+                    if not source_file.readline():
+                        return found
+                    line_number += 1
+                lines = []
+                size = 0
+                complete = True
+                for _ in range(end - start + 1):
+                    line = source_file.readline()
+                    if not line:
+                        complete = False
+                        break
+                    line_number += 1
+                    size += len(line)
+                    if size <= _STUB_SOURCE_LIMIT:
+                        lines.append(line)
+                if not complete or size > _STUB_SOURCE_LIMIT:
+                    continue
+                try:
+                    tree = ast.parse(b"".join(lines).decode("utf-8"), filename=path)
+                except (UnicodeDecodeError, SyntaxError, ValueError, RecursionError):
+                    continue
+                if any(isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                       and node.name == name and _is_stub_function(node) for node in tree.body):
+                    found.add(name)
+    except OSError:
+        return found
+    return found
+
+
+def _empty_function_targets(
+    row: Mapping[str, object], root: Path, paths: Sequence[str],
+    symbols: Mapping[SymKey, object], spec_kinds: Mapping[str, str],
+) -> frozenset[SymKey]:
+    """Return spec-named top-level stubs from the row's source file (or candidate files)."""
+    names = {name for name, kind in spec_kinds.items() if kind == "def"}
+    if not names:
+        return frozenset()
+    target_path = _row_source_path(row, root, paths)
+    candidates: dict[str, dict[str, object]] = {}
+    for path, name in symbols:
+        if name not in names or target_path is not None and path != target_path:
+            continue
+        candidates.setdefault(path, {})[name] = symbols[(path, name)]
+    found: set[SymKey] = set()
+    for path, definitions in sorted(candidates.items()):
+        found.update((path, name) for name in _stub_functions_in_file(root, path, definitions))
+    return frozenset(found)
+
+
+def _derive_with_stub_targets(row: Mapping[str, object], root: Path, index,
+                              paths: Sequence[str]) -> UnitPlanV2:
+    return derive_unit_plan_v2(row, _StubTargetIndex(index, root, paths), paths)
 
 
 __all__ = [
