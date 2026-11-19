@@ -201,6 +201,34 @@ def _byte_span(text: str, start_char: int, end_char: int) -> tuple[int, int, str
     return start, end, quote
 
 
+def _byte_spans_from_chars(text: str, char_spans: Sequence[tuple[int, int]]) -> tuple[tuple[int, int, str], ...]:
+    """Convert ordered character spans to UTF-8 offsets with one forward scan."""
+    result: list[tuple[int, int, str]] = []
+    char_cursor = 0
+    byte_cursor = 0
+    for start_char, end_char in char_spans:
+        if not (0 <= start_char <= end_char <= len(text)):
+            raise LedgerError("invalid character span")
+        if start_char < char_cursor:
+            # Keep compatibility with unusual overlapping span providers. The
+            # normal sentence providers return ordered, disjoint ranges.
+            start_byte, end_byte, quote = _byte_span(text, start_char, end_char)
+            result.append((start_byte, end_byte, quote))
+            if end_char > char_cursor:
+                byte_cursor += len(text[char_cursor:end_char].encode("utf-8"))
+                char_cursor = end_char
+            continue
+        byte_cursor += len(text[char_cursor:start_char].encode("utf-8"))
+        start_byte = byte_cursor
+        quote = text[start_char:end_char]
+        if not quote:
+            raise LedgerError("ledger spans must contain text")
+        byte_cursor += len(quote.encode("utf-8"))
+        result.append((start_byte, byte_cursor, quote))
+        char_cursor = end_char
+    return tuple(result)
+
+
 def exact_span(source: str, start_byte: int, end_byte: int) -> str:
     """Host-slice and verify a half-open UTF-8 byte span."""
     raw = source.encode("utf-8")
@@ -218,19 +246,13 @@ def _ticket_segments(text: str) -> tuple[tuple[int, int, str], ...]:
     """Split only at sentence/newline boundaries; never at conjunctions."""
     if os.environ.get("STATEFRAME_ORACLE_GROUNDING", "off").strip().lower() == "on":
         from kernel_oracle_grounding import extract_ticket_spans
-        segments = []
-        for start_char, end_char, _clause in extract_ticket_spans(text):
-            start_byte, end_byte, quote = _byte_span(text, start_char, end_char)
-            segments.append((start_byte, end_byte, quote))
-        return tuple(segments)
+        spans = [(start_char, end_char) for start_char, end_char, _clause in extract_ticket_spans(text)]
+        return _byte_spans_from_chars(text, spans)
     if os.environ.get("STATEFRAME_REQUIREMENT_ALIGNMENT", "off").strip().lower() == "on":
         from kernel_requirement_alignment import extract_ticket_spans
-        segments = []
-        for start_char, end_char, _sentence in extract_ticket_spans(text):
-            start_byte, end_byte, quote = _byte_span(text, start_char, end_char)
-            segments.append((start_byte, end_byte, quote))
-        return tuple(segments)
-    segments: list[tuple[int, int, str]] = []
+        spans = [(start_char, end_char) for start_char, end_char, _sentence in extract_ticket_spans(text)]
+        return _byte_spans_from_chars(text, spans)
+    spans: list[tuple[int, int]] = []
     # A line is the safest unit for Markdown briefs: a semicolon or ``and``
     # remains in the same source span and therefore cannot become a stronger
     # pair of requirements.  Sentence punctuation inside a line is split only
@@ -250,25 +272,140 @@ def _ticket_segments(text: str) -> tuple[tuple[int, int, str], ...]:
         # Keep a wrapped paragraph together where a line clearly continues
         # without terminal punctuation.  The public briefs use one normative
         # sentence per line, so this conservative choice is deterministic.
-        start_byte, end_byte, quote = _byte_span(text, start, end)
-        segments.append((start_byte, end_byte, quote))
-    return tuple(segments)
+        spans.append((start, end))
+    return _byte_spans_from_chars(text, spans)
 
 
-_TASK_METADATA_LABEL = re.compile(r"(?<![A-Za-z0-9_])(?:#{1,6}\s*)?(Title|Symptom|Focus)\s*:", re.IGNORECASE)
+_TASK_METADATA_MENTION = re.compile(r"\b(Title|Symptom|Focus)\s*:", re.IGNORECASE)
+_TASK_METADATA_LABEL = re.compile(
+    r"^\s*(?:(?:[-+*]|\d+[.)])\s+)?(?:#{1,6}\s*)?(Title|Symptom|Focus)\s*:",
+    re.IGNORECASE,
+)
 
 
-def _task_metadata_label(text: str) -> str | None:
-    """Return labels that describe a task instead of stating a verifiable requirement.
+class _MetadataPrefixState:
+    """Incremental quote and line-boundary context for one source prefix."""
 
-    A ``Focus:`` line that carries words after the label states work, so it is
-    classified like any other clause instead of being kept as advisory text.
+    __slots__ = (
+        "_quote", "_escaped", "_pending_apostrophe", "_apostrophe_prev_alnum",
+        "_last_char_alnum", "_previous_line", "_has_previous_line",
+        "_current_line_parts", "_current_line_has_non_whitespace", "characters_scanned",
+    )
+
+    def __init__(self) -> None:
+        self._quote = ""
+        self._escaped = False
+        self._pending_apostrophe = False
+        self._apostrophe_prev_alnum = False
+        self._last_char_alnum = False
+        self._previous_line = ""
+        self._has_previous_line = False
+        self._current_line_parts: list[str] = []
+        self._current_line_has_non_whitespace = False
+        self.characters_scanned = 0
+
+    @property
+    def quote_open(self) -> bool:
+        # A trailing apostrophe opens a quote until a following character can
+        # prove it is an apostrophe inside a word.
+        return bool(self._quote or self._pending_apostrophe)
+
+    @property
+    def previous_line(self) -> str:
+        return self._previous_line
+
+    @property
+    def has_previous_line(self) -> bool:
+        return self._has_previous_line
+
+    @property
+    def current_line_has_non_whitespace(self) -> bool:
+        return self._current_line_has_non_whitespace
+
+    def advance(self, text: str) -> None:
+        self.characters_scanned += len(text)
+        for char in text:
+            if self._pending_apostrophe:
+                if not (self._apostrophe_prev_alnum and char.isalnum()):
+                    self._quote = "'"
+                self._pending_apostrophe = False
+            if self._escaped:
+                self._escaped = False
+            elif char == "\\":
+                self._escaped = True
+            elif self._quote:
+                if char == self._quote:
+                    self._quote = ""
+            elif char in '"`':
+                self._quote = char
+            elif char == "'":
+                self._pending_apostrophe = True
+                self._apostrophe_prev_alnum = self._last_char_alnum
+
+            if char == "\n":
+                self._previous_line = "".join(self._current_line_parts)
+                self._current_line_parts = []
+                self._current_line_has_non_whitespace = False
+                self._has_previous_line = True
+            else:
+                self._current_line_parts.append(char)
+                if not char.isspace():
+                    self._current_line_has_non_whitespace = True
+            self._last_char_alnum = char.isalnum()
+
+
+def _task_metadata_label(text: str, *, source_prefix: str = "",
+                         prefix_state: _MetadataPrefixState | None = None) -> str | None:
+    """Recognize a standalone descriptive field, conservatively retaining mixed work.
+
+    The source prefix prevents sentence extraction and soft wraps from inventing
+    field boundaries. Delimited or wrapped field/action content is ambiguous:
+    keep its exact span as work instead of guessing where a title ends. This
+    structural guard applies to arbitrary verbs, including unknown actions.
     """
-    match = _TASK_METADATA_LABEL.search(text)
+    match = _TASK_METADATA_LABEL.match(text)
     if match is None:
         return None
+    # A physical line start inside quoted content is not a field boundary.
+    if prefix_state is None:
+        quote = ""
+        escaped = False
+        for index, char in enumerate(source_prefix):
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif quote:
+                if char == quote:
+                    quote = ""
+            elif char in "\"'`":
+                if (char == "'" and index > 0 and index + 1 < len(source_prefix)
+                        and source_prefix[index - 1].isalnum() and source_prefix[index + 1].isalnum()):
+                    continue
+                quote = char
+        if quote:
+            return None
+        prefix_lines = source_prefix.rsplit("\n", 2)
+        if prefix_lines[-1].strip():
+            return None
+        previous = prefix_lines[-2].strip() if len(prefix_lines) > 1 else ""
+    else:
+        if prefix_state.quote_open or prefix_state.current_line_has_non_whitespace:
+            return None
+        previous = (prefix_state.previous_line.strip()
+                    if prefix_state.has_previous_line else "")
+    if previous:
+        explicit_marker = re.match(r"\s*(?:[-+*]|\d+[.)]|#{1,6})\s+", text)
+        if (not previous.endswith((".", "!", "?", ":"))
+                and not _TASK_METADATA_LABEL.match(previous) and not explicit_marker):
+            return None
     label = match.group(1).lower()
-    if label == "focus" and any(ch.isalpha() for ch in text[match.end():]):
+    body = text[match.end():].strip()
+    if label == "focus" and any(ch.isalnum() for ch in body):
+        return None
+    if (_is_normative(body)
+            or re.search(r"[\r\n,;:/|()]\s*\S|[.!?]\s+\S|\s[-–—]\s|\b(?:and|then|also|but)\b", body,
+                         flags=re.IGNORECASE)):
         return None
     return label
 
@@ -658,16 +795,22 @@ def parse_ticket_once(ticket_source_id: str, ticket_text: str, *, path: str = "t
     if cached is not None:
         return copy.deepcopy(cached)
     spans = _ticket_segments(ticket_text)
+    encoded = ticket_text.encode("utf-8")
+    prefix_state = _MetadataPrefixState()
+    previous_end = 0
     rows: list[dict[str, Any]] = []
     for index, (start, end, quote) in enumerate(spans, 1):
+        prefix_state.advance(encoded[previous_end:start].decode("utf-8"))
         row = {
             "span_index": index,
             "start_byte": start,
             "end_byte": end,
             "quote": quote,
-            "task_metadata_label": _task_metadata_label(quote),
+            "task_metadata_label": _task_metadata_label(quote, prefix_state=prefix_state),
         }
         rows.append(row)
+        prefix_state.advance(quote)
+        previous_end = end
     _TICKET_CACHE[key] = tuple(copy.deepcopy(rows))
     count_key = (str(ticket_source_id), sha256_text(ticket_text))
     _PARSE_COUNTS[count_key] = _PARSE_COUNTS.get(count_key, 0) + 1
@@ -939,6 +1082,14 @@ def _default_schema_path() -> Path:
     return here.parent / SCHEMA_PATH
 
 
+def _requirement_key(row: Mapping[str, object]) -> tuple[str, int]:
+    """Read an exact versioned identity, even without optional schema validation."""
+    ident, version = row.get("id"), row.get("version")
+    if not isinstance(ident, str) or not ident or type(version) is not int or version < 1:
+        raise LedgerError("requirement references need a non-empty id and positive integer version")
+    return ident, version
+
+
 def validate_ledger(ledger: Mapping[str, Any], schema_path: str | Path | None = None) -> bool:
     """Validate JSON shape plus host-only exact-span/reference invariants."""
     if not isinstance(ledger, Mapping):
@@ -975,12 +1126,20 @@ def validate_ledger(ledger: Mapping[str, Any], schema_path: str | Path | None = 
     for row in ledger.get("spans", ()):
         if any(str(context) not in span_ids for context in row.get("context_span_ids", ())):
             raise LedgerError(f"unknown context span in {row.get('id')}")
-    requirement_ids = {str(row.get("id")): row for row in ledger.get("requirements", ())
-                       if isinstance(row, Mapping)}
+    requirements_by_key = {}
+    for req in ledger.get("requirements", ()):
+        if not isinstance(req, Mapping):
+            raise LedgerError("requirement rows must be mappings")
+        key = _requirement_key(req)
+        if key in requirements_by_key:
+            raise LedgerError(f"duplicate requirement key: {key}")
+        requirements_by_key[key] = req
     binding_ids = {str(row.get("id")) for row in ledger.get("bindings", ())
                    if isinstance(row, Mapping)}
-    for req in requirement_ids.values():
-        if not set(req.get("source_span_ids", ())).issubset(span_ids):
+    for req in requirements_by_key.values():
+        owned = req.get("source_span_ids")
+        if (not isinstance(owned, Sequence) or isinstance(owned, (str, bytes, bytearray))
+                or not owned or any(not isinstance(sid, str) or sid not in span_ids for sid in owned)):
             raise LedgerError(f"requirement references unknown span: {req.get('id')}")
         for provenance_key in ("scenario_provenance", "oracle_provenance"):
             provenance = req.get(provenance_key)
@@ -1002,12 +1161,30 @@ def validate_ledger(ledger: Mapping[str, Any], schema_path: str | Path | None = 
         if not set(req.get("check_refs", ()) and [ref.get("id") for ref in req.get("check_refs", ())]
                    or ()).issubset({str(row.get("id")) for row in ledger.get("checks", ()) if isinstance(row, Mapping)}):
             raise LedgerError(f"requirement references unknown check: {req.get('id')}")
-    covered = [str(row.get("span_id")) for row in ledger.get("coverage_dispositions", ())
-               if isinstance(row, Mapping)]
+    coverage_rows = ledger.get("coverage_dispositions", ())
+    if any(not isinstance(row, Mapping) for row in coverage_rows):
+        raise LedgerError("coverage rows must be mappings")
+    covered = [str(row.get("span_id")) for row in coverage_rows]
     if set(covered) != span_ids or len(covered) != len(set(covered)):
         raise LedgerError("coverage dispositions must cover each span exactly once")
-    if any(str(row.get("span_id")) not in span_ids for row in ledger.get("coverage_dispositions", ())):
-        raise LedgerError("coverage references an unknown span")
+    ownership_edges = set()
+    for row in coverage_rows:
+        sid = row.get("span_id")
+        refs = row.get("requirement_refs")
+        if (not isinstance(refs, Sequence) or isinstance(refs, (str, bytes, bytearray))
+                or (row.get("disposition") in {"mapped", "unresolved"} and not refs)):
+            raise LedgerError("mapped and unresolved coverage must reference requirements")
+        for ref in refs:
+            if not isinstance(ref, Mapping):
+                raise LedgerError("coverage requirement references must be mappings")
+            key = _requirement_key(ref)
+            req = requirements_by_key.get(key)
+            if req is None or sid not in req["source_span_ids"]:
+                raise LedgerError(f"coverage must reference the owning requirement and version: {sid}, {key}")
+            ownership_edges.add((sid, key))
+    for key, req in requirements_by_key.items():
+        if any((sid, key) not in ownership_edges for sid in req["source_span_ids"]):
+            raise LedgerError(f"requirement source spans must reference their owner in coverage: {key}")
     coordination = ledger.get("coordination")
     if coordination is not None:
         if not isinstance(coordination, Mapping):
@@ -1306,43 +1483,12 @@ def reopen_dirty_requirements(
 
 
 def coverage_complete(ledger: Mapping[str, Any]) -> bool:
-    """True only when schema validation passes AND every span is really covered.
+    """True only when shape, exact spans and versioned ownership validate.
 
-    Checks: each span has exactly one coverage row; mapped/unresolved rows name
-    at least one existing requirement; each requirement's source spans exist.
     Pure function: any malformed input returns False rather than raising.
     """
     try:
         validate_ledger(ledger)
-        spans = ledger["spans"]
-        span_ids = [str(row["id"]) for row in spans]
-        span_id_set = set(span_ids)
-        requirements = ledger["requirements"]
-        requirement_ids = {str(row["id"]) for row in requirements}
-        coverage_rows = ledger["coverage_dispositions"]
-
-        rows_per_span: dict[str, int] = {}
-        for row in coverage_rows:
-            key = str(row["span_id"])
-            rows_per_span[key] = rows_per_span.get(key, 0) + 1
-        if any(rows_per_span.get(sid, 0) != 1 for sid in span_ids):
-            return False
-        if any(key not in span_id_set for key in rows_per_span):
-            return False
-
-        for row in coverage_rows:
-            if row.get("disposition") not in {"mapped", "unresolved"}:
-                continue
-            refs = row.get("requirement_refs") or []
-            if not refs:
-                return False
-            if any(str(ref.get("id")) not in requirement_ids for ref in refs):
-                return False
-
-        for req in requirements:
-            sources = req.get("source_span_ids") or []
-            if any(str(sid) not in span_id_set for sid in sources):
-                return False
     except Exception:  # schema validators use their own ValidationError type
         return False
     return True

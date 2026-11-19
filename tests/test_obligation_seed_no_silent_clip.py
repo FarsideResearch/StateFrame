@@ -1,9 +1,4 @@
-"""Obligation seeds keep every clause whole; only displayed text is bounded.
-
-Authority (Obligation.text, dedupe, the full obligation list) must never be
-clipped or capped silently.  Display helpers bound what the model sees, and the
-render site states how many obligations were not shown.
-"""
+"""Obligation seeds keep clauses intact and make every occurrence limit visible."""
 import pytest
 
 from stateframe.engine import kernel_obligation_seed as seed
@@ -13,6 +8,7 @@ from stateframe.engine import kernel_work_record as work
 @pytest.fixture(autouse=True)
 def _seed_on(monkeypatch):
     monkeypatch.setenv(seed.MODE_ENV, "on")
+    monkeypatch.setenv(seed.LOSSLESS_MODE_ENV, "on")
 
 
 def _long_tail_clause() -> str:
@@ -48,6 +44,53 @@ def test_260_distinct_items_are_all_extracted():
     obligations = seed.extract_obligations(brief)
     assert len(obligations) == 260
     assert [item.id for item in obligations][-1] == "obl-259"
+
+
+def test_exact_occurrence_limit_does_not_emit_overflow():
+    assert seed.MAX_EXTRACTED_OCCURRENCES + 1 == work.MAX_STEPS
+    brief = "\n".join("Add audit item." for _ in range(seed.MAX_EXTRACTED_OCCURRENCES))
+
+    obligations = seed.extract_obligations(brief)
+
+    assert len(obligations) == seed.MAX_EXTRACTED_OCCURRENCES
+    assert all(not item.overflow for item in obligations)
+    assert len(seed.host_seed_operations(obligations)) == seed.MAX_EXTRACTED_OCCURRENCES
+
+
+def test_large_repeated_brief_has_bounded_unresolved_overflow_record():
+    limit = seed.MAX_EXTRACTED_OCCURRENCES
+    brief = "\n".join("Add audit item." for _ in range(2_000))
+
+    obligations = seed.extract_obligations(brief)
+
+    assert len(obligations) <= limit + 1, "extraction must cap retained occurrence records"
+    overflow = [item for item in obligations if getattr(item, "overflow", False)]
+    assert len(overflow) == 1
+    assert sum(not getattr(item, "overflow", False) for item in obligations) == limit
+    assert len({item.id for item in obligations}) == limit + 1
+    assert "unresolved" in overflow[0].text.lower()
+    assert str(limit) in overflow[0].text
+    assert overflow[0].to_dict()["overflow"] is True
+
+    operations = seed.host_seed_operations(obligations)
+    assert len(operations) <= limit + 1
+    assert operations[-1]["fields"]["overflow"] is True
+    serialized_operations = seed.host_seed_operations([item.to_dict() for item in obligations])
+    assert len(serialized_operations) == limit + 1
+    assert serialized_operations[-1]["fields"]["overflow"] is True
+
+    store = work.WorkRecordStore(brief)
+    steps = store.snapshot()["steps"]
+    assert len(steps) == limit + 1
+    assert steps[-1]["fields"]["overflow"] is True
+    assert "unresolved" in steps[-1]["text"].lower()
+    assert overflow[0].id in seed.open_obligations(store.snapshot())
+
+    manual = [seed.Obligation(f"obl-{index:03d}", "Add audit item", "behaviour")
+              for index in range(limit + 20)]
+    manual_operations = seed.host_seed_operations(manual)
+    assert len(manual_operations) == limit + 1
+    assert manual_operations[-1]["fields"]["overflow"] is True
 
 
 def test_display_obligations_bounds_display_and_reports_hidden():
