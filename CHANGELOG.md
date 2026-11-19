@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Seed occurrence identity, structural labels, and overflow reporting require a new default-off switch, preserving shipped-profile request bytes.
 - Task brief requirements remain actionable when labels appear in mixed instruction text, and coverage retains exact ownership and occurrence origins.
 - Metadata parsing now tracks quote and boundary state in one pass, so large briefs avoid repeated prefix scans.
 - Requirement extraction and work-step generation cap retained occurrences and add an open overflow record when additional occurrences remain.
