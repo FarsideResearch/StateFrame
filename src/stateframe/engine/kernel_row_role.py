@@ -28,6 +28,7 @@ ABSENCE_ON_PARENT = "ABSENCE_ON_PARENT"
 PUBLIC_RED = "PUBLIC_RED"
 _ABSENT = frozenset({"NOT_FOUND", "REFERENCED_ONLY"})
 _MAX_TEST_FILES = 2000
+_WRITERS_UNSET = object()
 
 
 def enabled(environ: Mapping[str, str] | None = None) -> bool:
@@ -105,16 +106,18 @@ def observe(runtime: object) -> None:
         return
 
 
-def runtime_role(runtime: object) -> dict[str, str]:
+def runtime_role(runtime: object, *, owner_writers: object = _WRITERS_UNSET) -> dict[str, str]:
+    """Classify from a caller's validated writer count or refresh it on demand."""
     entry = getattr(runtime, "_site_facts_entry", None)
     entry = entry if isinstance(entry, Mapping) else {}
-    try:
-        from kernel_state_owner_inventory import owner_writer_count
-        writers = owner_writer_count(runtime)
-    except ImportError:
-        writers = None
+    if owner_writers is _WRITERS_UNSET:
+        try:
+            from kernel_state_owner_inventory import owner_writer_count
+            owner_writers = owner_writer_count(runtime)
+        except ImportError:
+            owner_writers = None
     baseline = getattr(runtime, "_row_role_baseline", None) or _row(runtime).get("public_baseline")
-    return classify(entry_status=entry.get("status"), owner_writers=writers,
+    return classify(entry_status=entry.get("status"), owner_writers=owner_writers,
                     baseline_public=baseline, new_symbol=bool(entry.get("new_symbol")))
 
 

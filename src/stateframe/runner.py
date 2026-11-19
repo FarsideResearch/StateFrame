@@ -791,6 +791,16 @@ DEFAULT_PROMPT_BUDGET = 33_344
 # Engine switches a user may set in the shell: exactly these names and values,
 # ambient over the profile. Never a blanket STATEFRAME_* passthrough.
 OPT_IN_SWITCHES = {
+    "STATEFRAME_WORKSPACE_OBJECTS": ("on", "off"),  # object-backed workspace snapshots
+    "STATEFRAME_EXACT_TOKEN_COUNT_CACHE": ("off", "on"),
+    "STATEFRAME_TURN_REPO_INTEL": ("off", "on"),
+    "STATEFRAME_TURN_TIMING": ("off", "on"),
+    "STATEFRAME_TURN_ATOMIC_PUBLICATION": ("off", "on"),
+    "STATEFRAME_TURN_BOUNDED_QUALIFICATION": ("off", "on"),
+    "STATEFRAME_TURN_DELIVERY_PROOFS": ("off", "on"),
+    "STATEFRAME_TURN_GENERATION_OVERLAP": ("off", "on"),
+    "STATEFRAME_TURN_INDEXED_READS": ("off", "on"),
+    "STATEFRAME_TURN_PANELS": ("off", "on"),
     "STATEFRAME_UNIT_PLAN_V2": ("off", "on"),  # index-ordered multi-file unit plan
     "STATEFRAME_SEAM_RECALL": ("off", "on"),  # cross-file seam_violations recall
     "STATEFRAME_UNIT_COALESCE": ("off", "on"),
@@ -807,6 +817,7 @@ OPT_IN_SWITCHES = {
     "STATEFRAME_MICROGRAPH": ("on", "off"),  # experimental; the engine defaults to off
     "STATEFRAME_STABLE_TOOL_HEAD": ("on", "off"),  # append-only tool list per run; on by default
     "STATEFRAME_SHELL_STATE": ("on", "off"),  # shell cwd and exported variables persist between calls
+    "STATEFRAME_SHELL_ENV_IDENTITY_EPOCH": ("on", "off"),  # reuse unchanged shell environment identities
     "STATEFRAME_GIT_COMMIT": ("on", "off"),  # git_commit/git_branch tools; patch series per branch after the run
     "STATEFRAME_EDIT_SCOPE_WIDEN": ("on", "off"),  # scoped runs admit an edited product file outside the scope
     "STATEFRAME_REQUIREMENT_RECHECK": ("on", "off"),  # first done answered once with the task's requirement checklist
@@ -852,6 +863,7 @@ OPT_IN_SWITCHES = {
     "STATEFRAME_FL_CHECKPOINT_CAPTURE": ("on", "off"),  # opt-in settled-boundary observer capture
     "STATEFRAME_HISTORY_DIGEST_IDS": ("on", "off"),  # tool-call id frontier in the state-frame history digest; r2hc3 ships off
     "STATEFRAME_SHARED_CHECK_CACHE": ("on", "off"),  # one exact-instance proof cache for repair and closure checks; off by default
+    "STATEFRAME_TURN_MINIMAL_LAUNCH": ("on", "off"),
     "STATEFRAME_CATALOG_FULL_COVERAGE": ("on", "off"),  # structural index covers every eligible file, not the first 512; off by default
     "STATEFRAME_CROSSFILE_INDEX": ("on", "off"),  # opt-in read-only cross-file symbol index; off by default
     "STATEFRAME_CROSSFILE_EXISTENCE_CHECK": ("on", "off"),  # opt-in report of edits leaving repo symbol references dangling; off by default
@@ -898,9 +910,9 @@ INTERNAL_BENCHMARK_SWITCHES = {
 # Accepted aliases -> the engine's own value (EVICTFIX "off" is sent as "legacy").
 OPT_IN_ALIASES = {"STATEFRAME_EVICTFIX": {"off": "legacy"}}
 # These settings are read by the host before the engine child starts; they must not enter the engine spec.
-# Parallel limits are serialized into the typed parallel_limits record and removed from the child environment.
+# Parallel and launch inputs cross the child boundary as typed spec records.
 HOST_ONLY_SWITCHES = (frozenset({"STATEFRAME_ENV_SEED", "STATEFRAME_KEEP_RUN_ENV",
-                                 "STATEFRAME_PARALLEL_SLOTS"})
+                                 "STATEFRAME_PARALLEL_SLOTS", "STATEFRAME_TURN_MINIMAL_LAUNCH"})
                       | PARALLEL_LIMIT_SHELL_SWITCHES)
 # Legacy unless the user opts in, on every engine that reads the switch (read eviction fix: slower on long runs
 # in this release, and no measured edit gain). Applied by the runner so the default never depends on the engine's own.
@@ -1522,7 +1534,37 @@ def _finish_prompt_refusal(options: RunOptions, run_dir: Path, spec: dict,
     return containment_error
 
 
+def _configure_workspace_objects(run: Path, environment: dict, extra_env: Mapping[str, str],
+                                 stateframe_home: Path | None) -> None:
+    name = "STATEFRAME_WORKSPACE_OBJECTS"
+    configured = environment.pop(name, "off")
+    value = extra_env.get(name, os.environ.get(name, configured)).strip().lower()
+    if value == "off":
+        return
+    if value != "on":
+        raise RunError(f"{name} must be off or on")
+    inherited_home = os.environ.get("STATEFRAME_HOME")
+    try:
+        if stateframe_home is None:
+            os.environ.pop("STATEFRAME_HOME", None)
+        else:
+            os.environ["STATEFRAME_HOME"] = str(stateframe_home)
+        with _workspace_engine_imports():
+            from kernel_workspace_refs import bind_run_store
+
+            bind_run_store(run, secrets.token_hex(32), run_id=secrets.token_hex(32))
+    except (ImportError, OSError, ValueError) as error:
+        raise RunError("workspace object store could not be bound to the run") from error
+    finally:
+        if inherited_home is None:
+            os.environ.pop("STATEFRAME_HOME", None)
+        else:
+            os.environ["STATEFRAME_HOME"] = inherited_home
+    environment[name] = value
+
+
 def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy, dict]:
+    prepare_started = time.monotonic_ns()
     _validate_stateframe_home_boundary(options)
     if options._stateframe_home_identity is None:
         _capture_stateframe_home_identity(options)
@@ -1773,6 +1815,18 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
     environment.update(resolve_parallel_timing_env(parallel_enabled=mode != "off"))
     environment.update(opt_in)
     environment.update(options.extra_env)
+    launch_switch = "STATEFRAME_TURN_MINIMAL_LAUNCH"
+    configured_launch = environment.pop(launch_switch, None)
+    ambient_launch = os.environ.get(launch_switch, "").strip()
+    requested_launch = options.extra_env.get(launch_switch, ambient_launch or configured_launch)
+    minimal_launch = False
+    if requested_launch is not None:
+        from .engine.kernel_turn_launch import enabled as minimal_launch_enabled
+
+        try:
+            minimal_launch = minimal_launch_enabled({launch_switch: requested_launch})
+        except ValueError as error:
+            raise RunError(str(error)) from error
     _check_settings(environment)
     if mutation_options is not None:
         environment["STATEFRAME_MUTATIONS"] = mutation_options["level"]
@@ -1786,13 +1840,20 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
             run, configured_home if isinstance(configured_home, str) else None,
         )
     _verify_stateframe_home_identity(options, stateframe_home)
+    _configure_workspace_objects(run, environment, options.extra_env, stateframe_home)
     environment[RUNNER_HOME_IDENTITY_ENV] = json.dumps(
         options._stateframe_home_identity, sort_keys=True, separators=(",", ":"))
+    repo_intel_background = environment.get("STATEFRAME_TURN_REPO_INTEL") == "on"
+    if repo_intel_background:
+        environment.pop("REPO_INTEL_CACHE_DIR", None)
     if stateframe_home is None:
         environment.pop("STATEFRAME_HOME", None)
     else:
         # The child uses the same resolved home as the host for identity and snapshot boundaries.
         environment["STATEFRAME_HOME"] = str(stateframe_home)
+        if repo_intel_background:
+            repo_key = hashlib.sha256(os.fsencode(options.repo.resolve())).hexdigest()
+            environment["REPO_INTEL_CACHE_DIR"] = str(stateframe_home / "repo-intel" / repo_key)
     # This host-only pool is serialized separately and is not an engine STATEFRAME switch.
     environment.pop("STATEFRAME_PARALLEL_SLOTS", None)
     if mode == "off":
@@ -1885,6 +1946,7 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
         "runner_kind": options.runner_kind,
         "protected_test_globs": list(protected_globs),
         "protect_tests": options.protect_tests,
+        **({"turn_launch": {"prepare_started_ns": prepare_started}} if minimal_launch else {}),
         # The engine's run-scoped ids derive from this (see _child.install_run_identity), so a resume can
         # rebuild the run's requests byte for byte.
         "run_identity_seed": secrets.token_hex(16),
@@ -3125,6 +3187,20 @@ def _artifact_digest(files: dict[str, bytes | None]) -> str | None:
         return None
 
 
+@contextmanager
+def _workspace_engine_imports():
+    # The candidate/checkpoint codecs are also loaded by the standalone engine.
+    path = str(ENGINE_DIR)
+    add = path not in sys.path
+    if add:
+        sys.path.insert(0, path)
+    try:
+        yield
+    finally:
+        if add:
+            sys.path.remove(path)
+
+
 def final_candidate(run: Path) -> dict[str, bytes | None] | None:
     """Export the immutable DoneSeal artifact; unsealed captures are partial only."""
     folder = run / "worker" / "candidates"
@@ -3148,6 +3224,14 @@ def final_candidate(run: Path) -> dict[str, bytes | None] | None:
                for index in range(1, len(path.relative_to(run).parts) + 1)):
             raise RunError("sealed candidate artifact contains a symlink")
         record = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(record, dict) and record.get("schema") == "stateframe-candidate-trees/1":
+            try:
+                with _workspace_engine_imports():
+                    from .engine.kernel_workspace_candidate import export_seal
+
+                    return export_seal(run, path, digest)
+            except (OSError, TypeError, ValueError) as error:
+                raise RunError("sealed candidate workspace record is unavailable") from error
         writes = record.get("writes") if isinstance(record, dict) else None
         deletes = record.get("deletes") if isinstance(record, dict) else None
         schema = record.get("schema") if isinstance(record, dict) else None
@@ -3182,7 +3266,16 @@ def final_candidate(run: Path) -> dict[str, bytes | None] | None:
         return files
     if not captures:
         return None
-    record = json.loads(captures[-1].read_text())
+    boundary = captures[-1]
+    record = json.loads(boundary.read_text())
+    if isinstance(record, dict) and "schema" in record:
+        try:
+            with _workspace_engine_imports():
+                from .engine.kernel_workspace_candidate import export_candidate
+
+                return export_candidate(run, boundary, parent=run / "parent")
+        except (OSError, TypeError, ValueError) as error:
+            raise RunError("candidate workspace record is unavailable") from error
     files = record.get("files_base64") if isinstance(record, dict) else None
     if not isinstance(files, dict) or not all(isinstance(k, str) and isinstance(v, str)
                                              for k, v in files.items()):
@@ -4508,6 +4601,11 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
             for path in selection}
         row["test_wrong_hashes"] = {path: work.baseline[path] for path in selection}
         _write_json_atomic(run_dir / "spec.json", spec)
+    if "turn_launch" in spec:
+        spec["turn_launch"]["baseline"] = {
+            "passed": before["passed"], "exit_code": before["exit_code"],
+        }
+        _write_run_spec_atomic(run_dir, spec)
     cancelled = False
     _remaining(options)
     try:

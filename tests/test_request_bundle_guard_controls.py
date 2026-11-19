@@ -2,12 +2,34 @@
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
 from stateframe import request_records, runner
 from stateframe.engine import kernel_checkpoint as checkpoint
 from test_checkpoint_home_boundary import _isolated_home, _repo, _scripted_real_run
+
+
+def test_workspace_store_binding_uses_effective_home_and_restores_ambient_home(
+        tmp_path, monkeypatch):
+    ambient_home = tmp_path / "ambient-home"
+    effective_home = tmp_path / "effective-home"
+    run = tmp_path / "run"
+    run.mkdir(mode=0o700)
+    monkeypatch.setenv("HOME", str(tmp_path / "user-home"))
+    monkeypatch.setenv("STATEFRAME_HOME", str(ambient_home))
+    environment = {
+        "STATEFRAME_WORKSPACE_OBJECTS": "on",
+        "STATEFRAME_HOME": str(effective_home),
+    }
+
+    runner._configure_workspace_objects(run, environment, {}, effective_home)
+
+    assert (effective_home / "identity.key").is_file()
+    assert not (ambient_home / "identity.key").exists()
+    assert os.environ["STATEFRAME_HOME"] == str(ambient_home)
+    assert environment["STATEFRAME_WORKSPACE_OBJECTS"] == "on"
 
 
 @pytest.mark.parametrize("location", ["object-key", "duplicate-value", "nested-array"])

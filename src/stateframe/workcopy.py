@@ -76,6 +76,7 @@ class WorkCopy:
     baseline: dict[str, str] = field(default_factory=dict)  # relative path -> sha256 at start
     skipped: list[str] = field(default_factory=list)
     snapshot: Path | None = None  # immutable copy of the start state (diff baseline), if the run made one
+    snapshot_reader: Callable[[str], bytes] | None = field(default=None, repr=False)
 
     def text_files(self) -> dict[str, str]:
         """Text files in the copy, keyed by POSIX relative path."""
@@ -255,8 +256,14 @@ def _diff_text(data: bytes) -> str | None:
 
 def _read_original_bytes(work: WorkCopy, rel: str) -> bytes:
     """Baseline bytes from the immutable start snapshot, or the unchanged original."""
-    path = (work.snapshot if work.snapshot is not None else work.original) / rel
-    data = path.read_bytes() if path.is_file() else b""
+    if work.snapshot_reader is not None:
+        try:
+            data = work.snapshot_reader(rel)
+        except (OSError, ValueError) as error:
+            raise WorkCopyError(f"original {rel} snapshot is unavailable") from error
+    else:
+        path = (work.snapshot if work.snapshot is not None else work.original) / rel
+        data = path.read_bytes() if path.is_file() else b""
     if _sha(data) != work.baseline.get(rel):
         raise WorkCopyError(f"original {rel} changed during the run; diff would be wrong")
     return data

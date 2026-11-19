@@ -73,7 +73,9 @@ def oracle_value(value):
         return {"$enum": kind, "value": oracle_value(value.value)}
     if is_dataclass(value):
         return {"$type": kind, "fields": {
-            field.name: oracle_value(getattr(value, field.name)) for field in fields(value)}}
+            field.name: oracle_value(getattr(value, field.name)) for field in fields(value)
+            if not (kind == "kernel_working_set_snapshot.PreparationSnapshot"
+                    and field.name == "protected_ranges" and not value.protected_ranges)}}
     if isinstance(value, bytes):
         return {"$bytes": value.hex()}
     if isinstance(value, tuple):

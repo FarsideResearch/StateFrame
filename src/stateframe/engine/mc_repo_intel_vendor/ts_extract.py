@@ -36,6 +36,7 @@ image (tree-sitter 0.26 core), so it's a clean re-implementation, not a copy.
 from __future__ import annotations
 
 import logging
+import threading
 import re
 from dataclasses import dataclass
 from typing import Optional
@@ -60,6 +61,7 @@ except Exception as _exc:  # noqa: BLE001 - any import problem => degrade
     )
 
 _tslp_functional: Optional[bool] = None
+_probe_lock = threading.Lock()
 
 
 def is_tree_sitter_functional() -> bool:
@@ -79,9 +81,15 @@ def is_tree_sitter_functional() -> bool:
     AttributeErrors inside the walk (rules: looks parsed,
     is actually broken).
     """
+    if _tslp_functional is None:
+        with _probe_lock:
+            if _tslp_functional is None:
+                _probe_tree_sitter()
+    return bool(_tslp_functional)
+
+
+def _probe_tree_sitter() -> bool:
     global _tslp_functional
-    if _tslp_functional is not None:
-        return _tslp_functional
     if not _TSLP_IMPORTED:
         _tslp_functional = False
         return False

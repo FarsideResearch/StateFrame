@@ -64,7 +64,7 @@ def registry_signature(fn) -> str:
 
 class _Visitor(graph._FileVisitor):
     def __init__(self, relative):
-        super().__init__(relative, {})
+        super().__init__(relative)
         self.depth = 0
         self.registry = []
         # The legacy import and ledger scans are breadth-first. A depth bucket

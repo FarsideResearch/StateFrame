@@ -239,6 +239,15 @@ def _covered_by_standing_window(snapshot: PreparationSnapshot, slot: SourceSlot)
     return False
 
 
+def _range_protected(snapshot: PreparationSnapshot, slot: SourceSlot) -> bool:
+    identity = slot.identity
+    first, last = identity.first_line, identity.last_line
+    return type(first) is int and type(last) is int and any(
+        path == identity.path and low <= last and first <= high
+        for path, low, high in snapshot.protected_ranges
+    )
+
+
 @source_frozen
 def _slot_modes(snapshot: PreparationSnapshot, slot: SourceSlot) -> tuple[core.Mode, ...]:
     if slot.state == "DUE" or slot.recovery_pin:
@@ -252,6 +261,7 @@ def _slot_modes(snapshot: PreparationSnapshot, slot: SourceSlot) -> tuple[core.M
         # callable route or explicit unavailable-read notice for an unprotected
         # resident. Otherwise keep it FULL and queue the next oldest instead.
         if (slot.identity.path in snapshot.protected_paths
+                or _range_protected(snapshot, slot)
                 or (_recovery_unavailable_reason(snapshot) is None
                     and not _recoverable(snapshot, slot))):
             return (core.FULL,)
@@ -259,17 +269,16 @@ def _slot_modes(snapshot: PreparationSnapshot, slot: SourceSlot) -> tuple[core.M
     if (slot.state in {"RETIRING", "DISCHARGED", "SUPERSEDED", "DEGRADED"}
             or slot.previous_mode in {"D", "O"}):
         return (core.DEFERRED,)
-    if slot.identity.path in snapshot.protected_paths:
-        if _unit_active() and _covered_by_standing_window(snapshot, slot):
+    path_protected = slot.identity.path in snapshot.protected_paths
+    if path_protected or _range_protected(snapshot, slot):
+        if path_protected and _unit_active() and _covered_by_standing_window(snapshot, slot):
             # A page wholly inside a protected window that stays FULL adds no
             # coverage; letting it retire keeps the window plus fresh pages feasible.
             return (core.FULL, core.DEFERRED)
         if _unit_active() and snapshot.due_ordinal >= 2 and _recoverable(snapshot, slot):
-            # Subframe owned files page from ordinal 2: once the owed window is carried,
-            # delivered and plan-closure pages of the owned file may retire and be
-            # re-read. DUE debt and recovery pins returned FULL above. A span without a
-            # callable route stays FULL, since DEFERRED would certify an unrecoverable
-            # omission. Edit admission still requires complete verified coverage.
+            # Subframes can page recoverable windows from ordinal 2, including
+            # windows that overlap a proposed read. The fresh page and recovery
+            # pins stay FULL above. Edit admission still needs verified coverage.
             return (core.FULL, core.DEFERRED)
         return (core.FULL,)
     if _recovery_unavailable_reason(snapshot) is not None:
@@ -290,7 +299,8 @@ domain = _slot_modes
 def _tier(snapshot: PreparationSnapshot, slot: SourceSlot) -> core.PriorityTier:
     if slot.state == "DUE":
         return core.PriorityTier.FRESH
-    if slot.recovery_pin or slot.identity.path in snapshot.protected_paths:
+    if (slot.recovery_pin or slot.identity.path in snapshot.protected_paths
+            or _range_protected(snapshot, slot)):
         return core.PriorityTier.PROTECTED
     if slot.previous_mode is not None:
         return core.PriorityTier.CARRIED
@@ -419,7 +429,10 @@ def snapshot_digest(snapshot: PreparationSnapshot) -> str:
         if isinstance(value, bytes):
             return {"bytes": value.hex()}
         raise TypeError("unsupported preparation authority")
-    return digest(json.dumps(asdict(snapshot), default=encode,
+    authority = asdict(snapshot)
+    if not snapshot.protected_ranges:
+        authority.pop("protected_ranges")
+    return digest(json.dumps(authority, default=encode,
                              sort_keys=True, separators=(",", ":")).encode())
 
 

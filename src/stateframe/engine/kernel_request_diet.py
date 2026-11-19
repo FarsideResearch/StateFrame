@@ -8,8 +8,6 @@ cannot fit its stage budget.
 """
 from __future__ import annotations
 
-import kernel_frame_routes as _frame_routes
-
 import copy
 import hashlib
 import json
@@ -17,6 +15,7 @@ import math
 import os
 import re
 import ssl
+import stat
 import sys
 import threading
 import time
@@ -25,13 +24,19 @@ import urllib.parse
 import urllib.request
 from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
+from pathlib import Path
 
-from kernel_context import token_estimate
-from kernel_measurement import profiled_function_span
+import kernel_frame_routes as _frame_routes
 from kernel_body_serialization_memo import memoized_value, plain_wire
+from kernel_context import token_estimate
 from kernel_endpoint_size import ENDPOINT_SIZE
+from kernel_measurement import profiled_function_span
 from kernel_obligation_assess import UnavailableEvidence
 from kernel_request_auth_identity import auth_binding_for_key as _auth_binding_for_key
+
 try:
     from kernel_reason_log import emit_refusal, emit_reason, emit_timeout
 except ImportError:
@@ -154,6 +159,61 @@ _TOKENIZER_UNAVAILABLE_REASONS = frozenset({
 # pressure walk can exceed 64 distinct bodies, then revisit them on another
 # budget pass. Keep the complete walk without retaining prompt text.
 _EXACT_TOKEN_COUNT_CACHE_ENTRIES = 512
+_PREFETCHED_HTTP_COUNTS: ContextVar[
+    dict[tuple[object, str, str], Future[Sequence[int]]] | None
+] = ContextVar("prefetched_http_counts", default=None)
+
+
+def _log_count_cache_fallback(cause: str, why: str) -> None:
+    emit_reason("fallback", cause, "request_diet", "could not reuse the exact token count cache", why,
+                level="DEBUG", journal=False)
+
+
+def _read_exact_count(path: Path, key: str) -> int | None:
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+    try:
+        fd = os.open(path, flags)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                _log_count_cache_fallback("exact_count_cache_invalid", "not a regular file")
+                return None
+            with os.fdopen(fd, "rb", closefd=False) as stream:
+                raw = stream.read(96)
+        finally:
+            os.close(fd)
+        record = re.fullmatch(rb"([0-9a-f]{64}) ([0-9]{1,7})\n", raw)
+        if record is not None:
+            count = int(record[2])
+            if count <= _MAX_TOKENIZE_RESPONSE_BYTES:
+                # A valid row for a different key is an ordinary slot collision.
+                return count if record[1] == key.encode("ascii") else None
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        _log_count_cache_fallback("exact_count_cache_read_failed", type(error).__name__)
+        return None
+    _log_count_cache_fallback("exact_count_cache_invalid", "invalid count record")
+    return None
+
+
+def _write_exact_count(path: Path, key: str, count: int) -> None:
+    from tempfile import NamedTemporaryFile
+
+    temporary = None
+    try:
+        with NamedTemporaryFile(dir=path.parent, mode="wb", delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(f"{key} {count}\n".encode("ascii"))
+        temporary.replace(path)
+    except OSError as error:
+        _log_count_cache_fallback("exact_count_cache_write_failed", type(error).__name__)
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError as error:
+                _log_count_cache_fallback("exact_count_cache_cleanup_failed", type(error).__name__)
+
 
 def resolve_tokenize_url(
         runtime: object | None = None,
@@ -521,6 +581,12 @@ def _valid_token_ids(tokens: Sequence[object]) -> bool:
     return not any(type(token) is not int or token < 0 for token in tokens)
 
 
+def _exact_token_count_cache_enabled() -> bool:
+    return os.environ.get("STATEFRAME_EXACT_TOKEN_COUNT_CACHE", "").strip().casefold() in {
+        "1", "true", "yes", "on",
+    }
+
+
 class RequestTokenMeter:
     """Run-level cache/calibration with bounded recovery after tokenizer outages."""
 
@@ -832,7 +898,53 @@ class RequestTokenMeter:
             wire=wire,
         )
 
-    def _count_tokens(self, content: str) -> int:
+    def _has_pinned_tokenizer(self) -> bool:
+        # A model alias can point at a different vocabulary on a later launch.
+        # Reuse across processes only when the run contract pins its digest.
+        if not isinstance(self.provider_identity, str):
+            return False
+        try:
+            contract = json.loads(self.provider_identity)
+        except json.JSONDecodeError:
+            return False
+        pin = contract.get("tokenizer") if isinstance(contract, Mapping) else None
+        return isinstance(pin, str) and re.fullmatch(r"(?:sha256:)?[0-9a-fA-F]{64}", pin) is not None
+
+    def _tokenizer_capability_proven(self) -> bool:
+        try:
+            from kernel_provider_dialect import RUN_CAPABILITY_CACHE, origin_of
+        except ImportError:
+            from .kernel_provider_dialect import RUN_CAPABILITY_CACHE, origin_of
+        capabilities = RUN_CAPABILITY_CACHE.get(origin_of(self.endpoint or ""))
+        return capabilities is not None and capabilities.continuation
+
+    def _persistent_count_slot(self, identity: str, content_digest: str) -> tuple[Path, str] | None:
+        home = os.environ.get("STATEFRAME_HOME")
+        if (not home or not os.path.isabs(home) or self.endpoint is None
+                or self._tokenizer is not None or self._reprobe_status == "probing"
+                or not self._has_pinned_tokenizer() or not self._tokenizer_capability_proven()):
+            return None
+        if self.route_allow_remote is not None:
+            from kernel_frame_routes import require_local
+            try:
+                require_local(self.endpoint, allow_remote=self.route_allow_remote)
+            except ValueError as error:
+                _log_count_cache_fallback("exact_count_cache_route_refused", type(error).__name__)
+                return None  # The transport reports a refused route through the usual meter path.
+        from stateframe.state_dirs import private_directory
+        try:
+            directory = private_directory(Path(home), "token-counts-v1")
+        except (OSError, ValueError) as error:
+            _log_count_cache_fallback("exact_count_cache_directory_unavailable", type(error).__name__)
+            return None
+        key_payload = json.dumps((identity, content_digest), separators=(",", ":")).encode("ascii")
+        key = hashlib.sha256(key_payload).hexdigest()
+        # Fixed slots bound installation storage. The complete key in each row
+        # makes a collision a cache miss, including concurrent replacement.
+        slot = int(key[:4], 16) % _EXACT_TOKEN_COUNT_CACHE_ENTRIES
+        return directory / f"{slot:03x}", key
+
+    def _count_tokens(self, content: str, *, cache_identity: str | None = None) -> int:
         # Identical content is tokenized once per meter: re-measuring an unchanged (or normalized-to-identical)
         # request must not cost a second /tokenize round trip on the request path.
         # The memoized projection hands back the same str object for an unchanged body, so the
@@ -847,11 +959,35 @@ class RequestTokenMeter:
         if key in cache:
             cache.move_to_end(key)
             return cache[key]
-        count = self._count_tokens_uncached(content)
+        slot = self._persistent_count_slot(cache_identity, key) if cache_identity else None
+        count = _read_exact_count(*slot) if slot is not None else None
+        if count is None:
+            if (cache_identity is not None and self._tokenizer is None
+                    and self.endpoint is not None and _exact_token_count_cache_enabled()):
+                # Import only after explicit opt-in.
+                from stateframe.token_count_cache import get_or_compute
+                count = get_or_compute(
+                    cache_identity, content, lambda: self._count_tokens_uncached(content),
+                    deadline=self._deadline,
+                )
+            else:
+                count = self._count_tokens_uncached(content)
+            # A standalone first lookup may have established provider proof.
+            if slot is None and cache_identity is not None:
+                slot = self._persistent_count_slot(cache_identity, key)
+            if slot is not None:
+                _write_exact_count(*slot, count)
         cache[key] = count
         while len(cache) > _EXACT_TOKEN_COUNT_CACHE_ENTRIES:
             cache.popitem(last=False)
         return count
+
+    def _http_token_ids(self, content: str) -> Sequence[int]:
+        return _http_tokenize(content, self.endpoint, deadline=self._deadline,
+                              route_allow_remote=self.route_allow_remote,
+                              auth_key=self._tokenizer_auth_key,
+                              generation_endpoint=self._generation_endpoint,
+                              opener=self._get_http_opener())
 
     def _count_tokens_uncached(self, content: str) -> int:
         key = self._request_id
@@ -859,11 +995,9 @@ class RequestTokenMeter:
         if self._tokenizer is not None:
             result = self._tokenizer(content)
         elif self.endpoint is not None:
-            result = _http_tokenize(content, self.endpoint, deadline=self._deadline,
-                                    route_allow_remote=self.route_allow_remote,
-                                    auth_key=self._tokenizer_auth_key,
-                                    generation_endpoint=self._generation_endpoint,
-                                    opener=self._get_http_opener())
+            pending = _PREFETCHED_HTTP_COUNTS.get()
+            future = pending.pop((self, self._namespace, content), None) if pending else None
+            result = self._http_token_ids(content) if future is None else future.result()
         else:
             # No endpoint by design (offline/replay/tests): normal, so INFO. journal=False: request path.
             emit_reason("fallback", "tokenizer_endpoint_unavailable", "request_diet",
@@ -900,7 +1034,7 @@ class RequestTokenMeter:
                 raise TimeoutError("tokenizer request deadline expired")
             self._last_attempts += 1
             try:
-                count = self._count_tokens(content)
+                count = self._count_tokens(content, cache_identity=self._namespace)
             except Exception as error:
                 self._consecutive_failures += 1
                 self._failure_reason = _tokenizer_failure_reason(error)
@@ -938,6 +1072,51 @@ class RequestTokenMeter:
     def measure(self, body: Mapping[str, object]) -> tuple[int, str]:
         return self._measure_with_wire_bytes(body, None)
 
+    @contextmanager
+    def overlap_http_counts(self, bodies: Sequence[Mapping[str, object]]):
+        """Start HTTP counts while their callers prepare to measure the bodies."""
+        if (not bodies or self._availability == "unavailable" or self.endpoint is None
+                or self._tokenizer is not None or self._deadline is not None
+                or _exact_token_count_cache_enabled()
+                or not self._tokenizer_capability_proven()):
+            yield
+            return
+
+        from kernel_request_budget import FREE_STAGE, _lean_request_limits
+
+        cache = self.__dict__.get("_count_cache", {})
+        candidates = {}
+        for body in bodies:
+            byte_limit, _ = _lean_request_limits(body, FREE_STAGE, exact_tokenizer=True)
+            if len(plain_wire(body)) > byte_limit:
+                continue
+            identity = self.tokenizer_identity(body)
+            content = _tokenization_content(body)
+            try:
+                digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            except UnicodeEncodeError:
+                continue  # Leave invalid content to the normal measurement and fallback path.
+            if identity == self._namespace and digest in cache:
+                continue
+            slot = self._persistent_count_slot(identity, digest)
+            if slot is not None and _read_exact_count(*slot) is not None:
+                continue
+            candidates[(self, identity, content)] = content
+        if not candidates:
+            yield
+            return
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            pending = {key: pool.submit(self._http_token_ids, content)
+                       for key, content in candidates.items()}
+            scope = _PREFETCHED_HTTP_COUNTS.set(pending)
+            try:
+                yield
+            finally:
+                _PREFETCHED_HTTP_COUNTS.reset(scope)
+                for future in pending.values():
+                    future.cancel()
+
     def measure_subframe_cap(
             self, body: Mapping[str, object], *, tokens_per_byte: float,
             residual_tokens: int = 0,
@@ -954,29 +1133,41 @@ class RequestTokenMeter:
             if cache_key in cache:
                 cache.move_to_end(cache_key)
                 return cache[cache_key] + self.template_overhead_tokens, "tokenize"
+            def count_exact_content() -> int:
+                if self._tokenizer is not None:
+                    result = self._tokenizer(content)
+                else:
+                    result = _http_tokenize(
+                        content, self.endpoint, deadline=self._deadline,
+                        route_allow_remote=self.route_allow_remote,
+                        auth_key=self._tokenizer_auth_key,
+                        generation_endpoint=self._generation_endpoint,
+                    )
+                if type(result) is int:
+                    token_count = result
+                elif isinstance(result, Sequence) and not isinstance(
+                        result, (str, bytes, bytearray)):
+                    if any(type(token) is not int or token < 0 for token in result):
+                        raise ValueError("invalid subframe tokenizer response")
+                    token_count = len(result)
+                else:
+                    raise TypeError("subframe tokenizer must return a count or token sequence")
+                if token_count < 0:
+                    raise ValueError("subframe tokenizer returned a negative count")
+                return token_count
+
             for _attempt in range(TOKENIZE_MAX_CONSECUTIVE_FAILURES):
                 if self._deadline is not None and time.monotonic() >= self._deadline:
                     raise TimeoutError("tokenizer request deadline expired")
                 try:
-                    if self._tokenizer is not None:
-                        result = self._tokenizer(content)
+                    if (self._tokenizer is None and self.endpoint is not None
+                            and _exact_token_count_cache_enabled()):
+                        from stateframe.token_count_cache import get_or_compute
+                        token_count = get_or_compute(
+                            identity, content, count_exact_content, deadline=self._deadline,
+                        )
                     else:
-                        result = _http_tokenize(
-                            content, self.endpoint, deadline=self._deadline,
-                            route_allow_remote=self.route_allow_remote,
-                            auth_key=self._tokenizer_auth_key,
-                            generation_endpoint=self._generation_endpoint)
-                    if type(result) is int:
-                        token_count = result
-                    elif isinstance(result, Sequence) and not isinstance(
-                            result, (str, bytes, bytearray)):
-                        if any(type(token) is not int or token < 0 for token in result):
-                            raise ValueError("invalid subframe tokenizer response")
-                        token_count = len(result)
-                    else:
-                        raise TypeError("subframe tokenizer must return a count or token sequence")
-                    if token_count < 0:
-                        raise ValueError("subframe tokenizer returned a negative count")
+                        token_count = count_exact_content()
                 except Exception:
                     continue
                 if self._deadline is not None and time.monotonic() >= self._deadline:
@@ -1020,7 +1211,9 @@ class RequestTokenMeter:
                     raise TimeoutError("tokenizer request deadline expired")
                 self._last_attempts += 1
                 try:
-                    token_count = self._count_tokens(_tokenization_content(body))
+                    token_count = self._count_tokens(
+                        _tokenization_content(body), cache_identity=self._namespace,
+                    )
                 except Exception as error:
                     self._consecutive_failures += 1
                     self._failure_reason = _tokenizer_failure_reason(error)
@@ -3554,18 +3747,20 @@ def apply_diet(
     if token_meter is None:
         meter.bind_tokenizer_auth(*request_tokenizer_credentials())
     meter.begin_request(request_id)
-    read_spans_available = _read_spans_retained(
-        [message for message in messages if isinstance(message, Mapping)]
-    )
-    protected_paths = _protected_working_source_paths(
-        [message for message in messages if isinstance(message, Mapping)],
-        protected_contents=protected_contents,
-        protected_messages=protected_messages,
-        required_source_paths=(
-            frozenset(required_source_paths) if required_source_paths is not None else None
-        ),
-    )
-    request_tokens_before, measure_method = meter.measure(before)
+    overlap = meter.overlap_http_counts((before,)) if type(meter) is RequestTokenMeter else nullcontext()
+    with overlap:
+        read_spans_available = _read_spans_retained(
+            [message for message in messages if isinstance(message, Mapping)]
+        )
+        protected_paths = _protected_working_source_paths(
+            [message for message in messages if isinstance(message, Mapping)],
+            protected_contents=protected_contents,
+            protected_messages=protected_messages,
+            required_source_paths=(
+                frozenset(required_source_paths) if required_source_paths is not None else None
+            ),
+        )
+        request_tokens_before, measure_method = meter.measure(before)
     removal_accounting = None
     byte_rejected_without_measurement = False
     # Retained message objects (identity, not ids) at the last real measurement

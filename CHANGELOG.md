@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Startup reaches the first model request sooner, especially in large repositories. StateFrame postpones optional repository-wide analysis until it is needed and reuses validated startup results.
+- Later turns avoid repeating unchanged file checks and shell-environment scans. Repeated exact token counts can also be reused when caching is enabled.
+- New shell controls make optional storage and turn optimizations configurable. `STATEFRAME_WORKSPACE_OBJECTS=on` enables object-backed workspace snapshots; it is off by default.
+- `STATEFRAME_EXACT_TOKEN_COUNT_CACHE=on` reuses successful token counts for identical text and tokenizer settings. `STATEFRAME_SHELL_ENV_IDENTITY_EPOCH=off` forces a fresh shell-environment check on every command.
+- `STATEFRAME_TURN_REPO_INTEL=on` reuses verified repository symbol data. `STATEFRAME_TURN_INDEXED_READS=on` enables indexed file and symbol lookups, and `STATEFRAME_TURN_MINIMAL_LAUNCH=on` defers optional analysis while the first read-only request is prepared.
+- `STATEFRAME_TURN_GENERATION_OVERLAP=on` performs eligible preparation while the model is responding. `STATEFRAME_TURN_PANELS=on` reuses verified request sections across turns.
+- `STATEFRAME_TURN_ATOMIC_PUBLICATION=on`, `STATEFRAME_TURN_BOUNDED_QUALIFICATION=on`, and `STATEFRAME_TURN_DELIVERY_PROOFS=on` enable safer journal and checkpoint publication, reuse of unchanged request checks, and reuse of current delivery evidence.
+- `STATEFRAME_TURN_TIMING=on` records engine work and timing measurements to help explain slow runs.
+- Object-backed checkpoints and workspace captures now preserve changed files across save, restore, and final result collection. Unclear file restrictions also produce a warning instead of silently narrowing the editable files.
+
 ## 0.7.86 (2026-11-19)
 
 - Fixed: offline installs now include every required dependency, so schema validation is active.

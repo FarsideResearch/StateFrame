@@ -180,6 +180,15 @@ APPROVED_TEST_SIGNALS: dict[tuple[str, str, str], tuple[int, str]] = {
     ("test_parallel_bridge_r6_slot2.py",
      "test_failed_handoff_keeps_slot_unavailable_until_claim_or_family_proof", "child.kill()"):
         (1, "teardown of the held slot-handoff fixture child"),
+    # These newly added tests stop only their own helper workers, never a StateFrame run.
+    ("test_call_graph_facts_cache_processes.py", "test_two_engines_publish_and_read_shared_facts_atomically",
+     "child.kill()"):
+        (1, "reaps only the cache-test subprocess registered by this test"),
+    ("test_startup_disk_cache_processes.py", "run_pair", "process.kill()"):
+        (1, "bounds cleanup of startup-cache helper subprocesses launched by run_pair"),
+    ("test_workspace_state_fences.py", "test_cross_process_writer_blocks_pin_and_reconciles_after_exit",
+     "writer.kill()"):
+        (1, "bounds cleanup of this test's synthetic cross-process writer"),
 }
 
 

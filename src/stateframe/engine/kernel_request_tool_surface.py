@@ -477,6 +477,13 @@ def author_final_tool_surface(
         capture_before = _snapshot(capture, _CAPTURE_FIELDS)
         candidate_exists = bool(done_candidate_exists(runtime)) if done_enabled else False
         incoming_names = set(_tool_names(incoming_tools))
+        minimal_launch_pending = getattr(runtime, "minimal_launch_pending", None)
+        minimal_launch = callable(minimal_launch_pending) and minimal_launch_pending()
+        if minimal_launch:
+            from kernel_turn_launch import navigation_tools
+            incoming_tools = navigation_tools(incoming_tools)
+            incoming_names = set(_tool_names(incoming_tools))
+            floor_enabled = False
         floor_names: tuple[str, ...] = ()
         floor_schemas: dict[str, dict[str, object]] = {}
         floor_schema_digest: str | None = None
@@ -643,7 +650,7 @@ def author_final_tool_surface(
                     capture, runtime, request_key, "comparison",
                 )
 
-        if stabilize_cache_tools:
+        if stabilize_cache_tools and not minimal_launch:
             from kernel_cache_layout_candidate import prepare_stable_tools
             final_tools = prepare_stable_tools(capture, runtime, final_tools, body)
         final_tools = list(final_tools)
@@ -676,7 +683,7 @@ def author_final_tool_surface(
         from kernel_stable_tool_head import enabled as stable_tool_head_enabled
         listed_tools = final_tools
         dispatch_tools = final_tools
-        if stable_tool_head_enabled():
+        if stable_tool_head_enabled() and not minimal_launch:
             from kernel_stable_tool_head import (
                 callable_subset,
                 listed_tools as stable_listed_tools,

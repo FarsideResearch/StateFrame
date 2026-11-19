@@ -15,7 +15,7 @@ from threading import Lock
 from types import ModuleType
 from typing import Callable, Iterable, Mapping
 
-from .call_graph import DispatchBoundary, _scan_failed_boundary
+from .call_graph import DispatchBoundary, _parse_cache, _scan_failed_boundary
 
 logger = logging.getLogger(__name__)
 
@@ -799,14 +799,18 @@ def _python_ast_module_record(
     }
 
 
-def _ast_python_outline(source: str, relpath: str, detection: str) -> dict[str, object]:
+def _ast_python_outline(
+    source: str, relpath: str, detection: str, *, definitions_only: bool = False,
+) -> dict[str, object]:
     """Build the Python outline with stdlib AST using the tree outline contract."""
-    tree = ast.parse(source)
-    source_bytes = source.encode("utf-8", errors="replace")
+    tree = _parse_cache.parse(source)
     source_lines = source.splitlines()
     line_starts = [0]
-    for line in source.splitlines(keepends=True):
-        line_starts.append(line_starts[-1] + len(line.encode("utf-8", errors="replace")))
+    source_bytes = b""
+    if not definitions_only:
+        source_bytes = source.encode("utf-8", errors="replace")
+        for line in source.splitlines(keepends=True):
+            line_starts.append(line_starts[-1] + len(line.encode("utf-8", errors="replace")))
 
     imports: list[dict[str, object]] = []
     module_statements: list[dict[str, object]] = []
@@ -815,9 +819,9 @@ def _ast_python_outline(source: str, relpath: str, detection: str) -> dict[str, 
 
     def visit(node: ast.AST, parent_type: str | None = None, top_level: bool = False) -> None:
         current_parent = parent_type
-        if top_level and isinstance(node, (ast.Import, ast.ImportFrom)):
-            if not (isinstance(node, ast.ImportFrom) and node.module == "__future__" and node.level == 0):
-                imports.append(_python_ast_import_record(node, source))
+        if (not definitions_only and top_level and isinstance(node, (ast.Import, ast.ImportFrom))
+                and not (isinstance(node, ast.ImportFrom) and node.module == "__future__" and node.level == 0)):
+            imports.append(_python_ast_import_record(node, source))
 
         if isinstance(node, ast.ClassDef):
             start_line = _python_ast_definition_line(source_lines, node)
@@ -826,7 +830,7 @@ def _ast_python_outline(source: str, relpath: str, detection: str) -> dict[str, 
             types.append({
                 "kind": "class",
                 "name": type_name,
-                "signature": _python_ast_definition_signature(
+                "signature": "" if definitions_only else _python_ast_definition_signature(
                     source_bytes, line_starts, node, start_line),
                 "methods": [],
                 **_python_ast_line_record(node, start_line=start_line),
@@ -838,13 +842,12 @@ def _ast_python_outline(source: str, relpath: str, detection: str) -> dict[str, 
                 "kind": "method" if parent_type else "function",
                 "name": node.name or "<anonymous>",
                 "parent": parent_type,
-                "signature": _python_ast_definition_signature(
+                "signature": "" if definitions_only else _python_ast_definition_signature(
                     source_bytes, line_starts, node, start_line),
                 **_python_ast_line_record(node, start_line=start_line),
             })
 
-        module_node_type = _PYTHON_MODULE_NODE_TYPES.get(type(node))
-        if module_node_type is not None:
+        if not definitions_only and type(node) in _PYTHON_MODULE_NODE_TYPES:
             text = _python_ast_source(source, node)
             is_static_member = bool(re.search(r"\b(?:static|const|readonly|shared|final)\b", text))
             if top_level or (parent_type is not None and is_static_member):
@@ -1384,9 +1387,11 @@ def _python_ast_failure_outline(
     }
 
 
-def _python_ast_fallback(source: str, relpath: str, detection: str) -> dict[str, object]:
+def _python_ast_fallback(
+    source: str, relpath: str, detection: str, *, definitions_only: bool = False,
+) -> dict[str, object]:
     try:
-        outline = _ast_python_outline(source, relpath, detection)
+        outline = _ast_python_outline(source, relpath, detection, definitions_only=definitions_only)
     except SyntaxError:
         outline = _lexical_outline(source, relpath, "python", detection, "syntax-error")
     except Exception as exc:  # noqa: BLE001 - keep parser faults distinct from syntax errors
@@ -1532,8 +1537,11 @@ def _structure_outline(source: str, relpath: str) -> dict[str, object] | None:
     }
 
 
-def outline_source(source: str, relpath: str = "") -> dict[str, object]:
-    """Return one non-throwing, language-neutral source outline."""
+def outline_source(
+    source: str, relpath: str = "", *, allow_tree_sitter: bool = True,
+    definitions_only: bool = False,
+) -> dict[str, object]:
+    """Return an outline. Definition consumers may elide Python AST detail."""
     text = str(source)
     language, detection = _detected_language(str(relpath), text)
     if language == "vue":
@@ -1547,19 +1555,22 @@ def outline_source(source: str, relpath: str = "") -> dict[str, object]:
         return _reported_outline(_lexical_outline(
             text, str(relpath), language, detection, "unsupported-language"))
     if language == "python" and _language_pack_missing():
-        return _python_ast_fallback(text, str(relpath), detection)
+        return _python_ast_fallback(text, str(relpath), detection, definitions_only=definitions_only)
+    if not allow_tree_sitter:
+        return _reported_outline(_lexical_outline(
+            text, str(relpath), language, detection, "grammar-unavailable"))
     try:
         root = _root_node(_parse_source(language, text))
         has_syntax_error = root is not None and _node_has_error(root)
     except Exception as exc:  # noqa: BLE001 - outline is an analysis boundary
         logger.debug("outline parse failed for %s: %s", relpath, type(exc).__name__)
         if language == "python":
-            return _python_ast_fallback(text, str(relpath), detection)
+            return _python_ast_fallback(text, str(relpath), detection, definitions_only=definitions_only)
         return _reported_outline(_lexical_outline(
             text, str(relpath), language, detection, type(exc).__name__))
     if root is None or has_syntax_error:
         if language == "python":
-            return _python_ast_fallback(text, str(relpath), detection)
+            return _python_ast_fallback(text, str(relpath), detection, definitions_only=definitions_only)
         return _reported_outline(_lexical_outline(
             text, str(relpath), language, detection, "syntax-error"))
     return _reported_outline(_tree_outline(

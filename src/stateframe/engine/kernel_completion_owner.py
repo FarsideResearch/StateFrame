@@ -1033,33 +1033,51 @@ def _green_current_body(verdict: object, current: object) -> bool:
     )
 
 
+def _delivery_proofs_enabled() -> bool:
+    if "STATEFRAME_TURN_DELIVERY_PROOFS" not in os.environ:
+        return False
+    from kernel_turn_proofs import enabled
+
+    return enabled()
+
+
 def _product_parent_unchanged(runtime: object, *, reason: str) -> bool:
-    """True until the current product identity is proven different from parent."""
+    """Check whether current green was observed on the unchanged parent."""
     from kernel_green_lock import (
+        PROVEN_PARENT_UNCHANGED,
         current_public_verdict_is_green,
         note_unchanged_parent_green_suppressed,
         product_revision_change_from_parent,
     )
-    changed, _revision, _comparison = product_revision_change_from_parent(runtime)
-    from kernel_green_lock import PROVEN_PARENT_UNCHANGED as _PROVEN_UNCHANGED
-    changed = changed or _comparison not in _PROVEN_UNCHANGED  # unknown parent identity is not "unchanged"
-    if changed:
+    early_green_check = _delivery_proofs_enabled()
+    if early_green_check and not (
+            _green_current(runtime) or current_public_verdict_is_green(runtime)):
         return False
-    # suppress ONLY the 936 condition, a public GREEN observed on the UNCHANGED parent. A no-green,
-    # no-edit read loop keeps the stall rule's terminal path (J926: 226 turns left in a read loop must still end);
-    # test_stallwire::test_terminal_offer_cannot_reexpand_to_full_menu pins that.
+    comparison = product_revision_change_from_parent(runtime)
+    changed, _revision, method = comparison
+    if changed or method not in PROVEN_PARENT_UNCHANGED:
+        return False
+    # A no-green, no-edit read loop must still take its normal stall route.
     if _green_current(runtime) or current_public_verdict_is_green(runtime):
-        note_unchanged_parent_green_suppressed(runtime, reason=reason)
+        if early_green_check:
+            note_unchanged_parent_green_suppressed(runtime, reason=reason, comparison=comparison)
+        else:
+            note_unchanged_parent_green_suppressed(runtime, reason=reason)
         return True
     return False
 
 
-def postgreen_done_offer(runtime: object) -> tuple[bool, str]:
+def postgreen_done_offer(
+        runtime: object, *, include_negative_revision: bool = True) -> tuple[bool, str]:
     """Require done on a provider request only after current green on a changed product."""
     if runtime is None or _model_turns_remaining(runtime) in (None, 0):
         return False, "UNKNOWN"
     try:
         from kernel_green_lock import product_revision_change_from_parent, current_public_verdict_is_green
+        early_green_check = not include_negative_revision and _delivery_proofs_enabled()
+        if early_green_check and not (
+                _green_current(runtime) or current_public_verdict_is_green(runtime)):
+            return False, "UNKNOWN"
         changed, revision, _comparison = product_revision_change_from_parent(runtime)
     except (ImportError, AttributeError, OSError, RuntimeError, TypeError, ValueError):
         return False, "UNKNOWN"
@@ -1081,7 +1099,7 @@ def ensure_postgreen_done_on_wire(
     """Restore a proposed typed done route; serialized capture certifies delivery."""
     selected = [copy.deepcopy(dict(tool)) for tool in _sequence(tools)
                 if isinstance(tool, Mapping)]
-    required, revision = postgreen_done_offer(runtime)
+    required, revision = postgreen_done_offer(runtime, include_negative_revision=False)
     if not required:
         return selected
 
@@ -3615,7 +3633,7 @@ def _route_executed_checks(runtime: object) -> tuple[Mapping[str, object], ...]:
 def _route_dispatchable(runtime: object, name: str, action: Mapping[str, object]) -> bool:
     if name == "done":
         if (action.get("route") in {"UNCERTIFIED_SUBMIT", "CERTIFIED_ACCEPTANCE"}
-                and postgreen_done_offer(runtime)[0]):
+                and postgreen_done_offer(runtime, include_negative_revision=False)[0]):
             return True
         return _current_tool_admission(runtime, name)[0] and not _done_dependency_denied(runtime)
     return _action_dispatch_admissible(
@@ -3767,7 +3785,8 @@ def completion_route_decision(
     obligations, check_bindings = _route_bindings(source, runtime)
     executed_checks = _route_executed_checks(runtime)
     advisory_degraded = _advisory_degraded_fact(runtime)
-    postgreen_done_required, _postgreen_revision = postgreen_done_offer(runtime)
+    postgreen_done_required, _postgreen_revision = postgreen_done_offer(
+        runtime, include_negative_revision=False)
     postgreen_verification_pending = _postgreen_verification_pending(runtime)
     tool_by_name = {_tool_name(tool): tool for tool in surface}
     owner_state = _state(runtime)

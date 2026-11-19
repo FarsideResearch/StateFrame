@@ -12,6 +12,7 @@ import ast
 import hashlib
 import json
 import re
+import stat
 from functools import lru_cache
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -53,6 +54,7 @@ _CODE_IDENT = re.compile(
 _IMPORT_FROM = re.compile(r"\bfrom\s+['\"]([^'\"]+)['\"]")
 _REQUIRE = re.compile(r"\b(?:require|import)\s*\(\s*['\"]([^'\"]+)['\"]")
 _DENIED_PARTS = frozenset({".git", "backups", "evaluator", "grader", "graders", "gold", "hidden"})
+_DEPENDENCY_ROOTS = (Path("."), Path("backend"), Path("src"))
 _SOURCE_EXTENSIONS = (".py", ".go", ".rs", ".ts", ".tsx", ".js", ".jsx", ".java", ".php", ".vue")
 _SOURCE_PATH_MENTION = re.compile(
     r"(?<![A-Za-z0-9_.-])((?:\./)?(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\."
@@ -672,9 +674,70 @@ def _source_imports(source: str, language: str) -> tuple[str, ...]:
     )
 
 
+def source_resolver_key() -> tuple[object, ...]:
+    """Inputs to the request closure's local import and language selection."""
+    return _DEPENDENCY_ROOTS, _SOURCE_EXTENSIONS, tuple(_ADAPTERS.items())
+
+
+class SourceClosureWatch:
+    """Point witnesses for the files and lookup misses examined by admission."""
+
+    def __init__(self, root: Path):
+        self.root = root
+        self._entries: dict[Path, tuple[int, ...] | None] = {}
+        self._reusable = True
+
+    @staticmethod
+    def _stamp(path: Path) -> tuple[int, ...] | None:
+        try:
+            row = path.lstat()
+        except FileNotFoundError:
+            return None
+        identity = (row.st_mode, row.st_dev, row.st_ino)
+        if stat.S_ISDIR(row.st_mode):
+            return identity
+        return (*identity, row.st_size, row.st_mtime_ns, row.st_ctime_ns)
+
+    def _watch(self, path: Path) -> tuple[int, ...] | None:
+        if path in self._entries:
+            return self._entries[path]
+        if path != self.root:
+            parent = self._watch(path.parent)
+            if parent is None or not stat.S_ISDIR(parent[0]):
+                return None
+        stamp = self._stamp(path)
+        self._entries[path] = stamp
+        if stamp is not None and not (stat.S_ISDIR(stamp[0]) or stat.S_ISREG(stamp[0])):
+            self._reusable = False
+        return stamp
+
+    def observe(self, relative: str) -> None:
+        path = Path(relative.replace("\\", "/"))
+        if (path.is_absolute() or ".." in path.parts or relative.startswith("~")
+                or any(part.casefold() in _DENIED_PARTS for part in path.parts)):
+            return  # The resolver rejects it before consulting the workspace.
+        try:
+            self._watch(self.root / path)
+        except (OSError, ValueError):
+            self._reusable = False
+
+    def regular_size(self, relative: str) -> int | None:
+        row = self._entries.get(self.root / relative)
+        return row[3] if row is not None and stat.S_ISREG(row[0]) else None
+
+    def current(self) -> bool:
+        if not self._reusable:
+            return False
+        try:
+            return all(self._stamp(path) == stamp for path, stamp in self._entries.items())
+        except OSError:
+            return False
+
+
 def _dependency_candidates(root: Path, path: str, source: str, adapter: LanguageAdapter,
                            *, root_resolved: Path | None = None,
-                           safe_path: Callable[[str], str | None] | None = None) -> tuple[str, ...]:
+                           safe_path: Callable[[str], str | None] | None = None,
+                           observe_path: Callable[[str], None] | None = None) -> tuple[str, ...]:
     imports = _source_imports(source, adapter.language)
     base = Path(path).parent
     candidates: list[str] = []
@@ -686,14 +749,15 @@ def _dependency_candidates(root: Path, path: str, source: str, adapter: Language
         # Keep candidates relative to ``root``.  Passing ``root / stem`` to
         # _safe_path would make the normalizer join root twice and silently
         # drop the dependency from the revision vector.
-        roots = (Path("."), Path("backend"), Path("src"))
-        for prefix in roots:
+        for prefix in _DEPENDENCY_ROOTS:
             raw = (prefix / stem).as_posix() if not stem.is_absolute() else stem.as_posix()
             variants = [raw]
             if Path(raw).suffix == "":
                 variants.extend(raw + ext for ext in _SOURCE_EXTENSIONS)
                 variants.extend((Path(raw) / ("__init__" + ext)).as_posix() for ext in (".py",))
             for variant in variants:
+                if observe_path is not None:
+                    observe_path(variant)
                 safe = safe_path(variant) if safe_path is not None else _safe_path(
                     root, variant, root_resolved=root_resolved)
                 source_root = root_resolved if root_resolved is not None else root
@@ -1103,7 +1167,8 @@ def omission_blocks_delivery(row: object, selected_paths: set[str] | frozenset[s
 def build_source_closure(root: Path, paths: Sequence[str], ticket: TicketIdentity | str,
                          *, target_path: str = "", max_files: int = 12,
                          max_units: int = 96,
-                         parent_sources: Mapping[str, str] | None = None) -> SourceClosure:
+                         parent_sources: Mapping[str, str] | None = None,
+                         watch: SourceClosureWatch | None = None) -> SourceClosure:
     identity = ticket if isinstance(ticket, TicketIdentity) else TicketIdentity("task:anonymous", ticket)
     root_resolved = root.resolve()
     safe_path_cache: dict[str, str | None] = {}
@@ -1113,6 +1178,8 @@ def build_source_closure(root: Path, paths: Sequence[str], ticket: TicketIdentit
     def safe_path(raw: str) -> str | None:
         raw_text = str(raw)
         if raw_text not in safe_path_cache:
+            if watch is not None:
+                watch.observe(raw_text)
             safe_path_cache[raw_text] = _safe_path(
                 root, raw_text, root_resolved=root_resolved)
         return safe_path_cache[raw_text]
@@ -1129,6 +1196,8 @@ def build_source_closure(root: Path, paths: Sequence[str], ticket: TicketIdentit
         rows = []
         for relative in sorted(dict.fromkeys(str(item) for item in revision_paths)):
             if relative not in dependency_rows:
+                if watch is not None:
+                    watch.observe(relative)
                 dependency_rows[relative] = read_row(root_resolved / relative, relative)
             rows.append(dependency_rows[relative])
         return "sha256:" + compatible_revision(DEPENDENCY_DIGEST_FORMAT, rows)
@@ -1423,11 +1492,13 @@ def unit_carried(start: int, end: int, carriers: Sequence[tuple[int, int]]) -> b
 def record_source_delivery(plan: Mapping[str, object], path: str,
                            ranges: Sequence[tuple[int, int]], *,
                            acquired_spans: int | None = None,
-                           single_carrier: bool = False) -> dict[str, object]:
+                           single_carrier: bool = False,
+                           provisional: bool = False) -> dict[str, object]:
     """Record delivered semantic units without turning delivery into behavior.
 
     ``single_carrier`` (final-wire receipts): ``ranges`` lists one span per delivered carrier window, and a unit
     counts as delivered only when one of them contains it (``unit_carried``). Merged spans still drive span counts.
+    ``provisional`` records acquisition counts while final request delivery is still unverified.
     """
 
     carriers = tuple(
@@ -1529,7 +1600,8 @@ def record_source_delivery(plan: Mapping[str, object], path: str,
         acquired = sum(int(row.get("acquired_spans", 0)) for row in delivery.values()
                        if isinstance(row, Mapping))
         coverage["delivered_span"].update({
-            "status": "COMPLETE" if all_complete else "PARTIAL" if (delivery or declared_paths) else "UNKNOWN",
+            "status": ("UNVERIFIED" if provisional else "COMPLETE" if all_complete
+                       else "PARTIAL" if (delivery or declared_paths) else "UNKNOWN"),
             "delivered": delivered,
         })
         if isinstance(coverage.get("acquired_span"), dict):

@@ -98,7 +98,7 @@ def test_t1_parallel_off_golden_wire_ignores_ambient(tmp_path, parallel_args, ki
         "    runpy.run_module('stateframe', run_name='__main__')\n"
     )
     environment = {name: value for name, value in os.environ.items()
-                   if not name.startswith("STATEFRAME_")}
+                   if not name.startswith("STATEFRAME_") or name == "STATEFRAME_WORKSPACE_OBJECTS"}
     monkeypatch.setenv("STATEFRAME_HOME", str(tmp_path / "home/.stateframe"))
     environment.update({
         "PYTHONPATH": str(ROOT / "src"), "PYTHONHASHSEED": "0",

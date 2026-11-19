@@ -13,11 +13,14 @@ import hashlib
 import json
 import os
 import re
+import sys
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from types import MappingProxyType
+from typing import TYPE_CHECKING, TypeVar, cast
+from weakref import WeakKeyDictionary
 
 from kernel_frame_request_allocation import (
     FrameRequestAllocation,
@@ -25,6 +28,7 @@ from kernel_frame_request_allocation import (
 )
 from kernel_paged_source import locate_symbol, source_revision, symbol_outline
 from kernel_request_evidence_closure import (
+    SourceClosureWatch,
     build_source_closure,
     closure_plan_for_runtime,
     initialization_fact,
@@ -32,11 +36,12 @@ from kernel_request_evidence_closure import (
     record_final_source_delivery,
     record_source_delivery,
     render_closure_receipt,
+    source_resolver_key,
     ticket_identity_for_runtime,
     units_for_path,
     zero_byte_source_path,
 )
-from kernel_aha11_native_honesty import _public_path, reserve_source_unit
+from kernel_aha11_native_honesty import SourceReservation, _public_path, reserve_source_unit
 from kernel_measurement import profile_active_host_span, profiled_function_span
 import kernel_workspace_truth as _workspace_truth
 from kernel_tree_digest import compatible_revision, read_row
@@ -45,6 +50,8 @@ from kernel_obligation_assess import UnavailableEvidence, _unavailable_evidence
 
 if TYPE_CHECKING:
     from kernel_working_set_render import CarrierWitness
+    from kernel_workspace_consumers import WorkspaceConsumers
+    from kernel_workspace_tree import Directory, Entry
 
 
 SCHEMA = "stateframe-request-source-window/1"
@@ -986,12 +993,13 @@ def _digest(source: str) -> str:
     return hashlib.sha256(source.encode("utf-8")).hexdigest()
 
 
-def _source_stat_token(root: Path, relative: str) -> tuple[object, ...]:
+def _source_stat_token(root: Path, relative: str, *, strong: bool = False) -> tuple[object, ...]:
     try:
         stat = (root / relative).stat()
     except OSError:
         return (relative, None, None, None)
-    return (relative, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+    token = (relative, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+    return (*token, stat.st_dev, stat.st_mode, stat.st_ctime_ns) if strong else token
 
 
 def _line_count(source: str) -> int:
@@ -1009,8 +1017,22 @@ def _path_from_runtime(runtime: object) -> str | None | UnavailableEvidence:
     root = getattr(owner, "root", None)
     if not isinstance(target, Path) or root is None:
         return None
+    projected = project_workspace_paths(
+        runtime, lambda facts: _target_in_path_facts(runtime, facts, target),
+    )
+    if projected is not None:
+        return projected
     try:
         return target.resolve().relative_to(Path(root).resolve()).as_posix()
+    except (OSError, RuntimeError, ValueError):
+        return _source_unavailable(getattr(runtime, "journal", None),
+                                   "REQUEST_SOURCE_TARGET_UNAVAILABLE")
+
+
+def _target_in_path_facts(runtime: object, facts: WorkspacePathFacts,
+                          target: Path) -> str | UnavailableEvidence:
+    try:
+        return facts.contained_path(target.absolute())
     except (OSError, RuntimeError, ValueError):
         return _source_unavailable(getattr(runtime, "journal", None),
                                    "REQUEST_SOURCE_TARGET_UNAVAILABLE")
@@ -1061,13 +1083,60 @@ def _target_names(runtime: object, ticket: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(value for value in values if value))
 
 
-@profiled_function_span("source_anchor_resolution")
-def _anchor_ranges(source: str, runtime: object, ticket: str, *,
-                   path: str = "", is_target: bool = True) -> tuple[tuple[int, int, str], ...]:
-    lines = source.splitlines(keepends=True)
-    total = len(lines)
+_SourceAnchor = tuple[int, int, str]
+
+
+@dataclass(frozen=True)
+class _SourceBlob:
+    lines: tuple[str, ...]
+    revision: str
+
+
+@dataclass(frozen=True)
+class _SourceAdmission:
+    key: tuple[object, ...]
+    target: str
+    watch: SourceClosureWatch
+    plan: Mapping[str, object]
+
+
+class SourceFit:
+    """Derived source work scoped to a single request's budget passes."""
+
+    def __init__(self):
+        self.admission: _SourceAdmission | None = None
+        self.blobs: dict[str, _SourceBlob] = {}
+        self.lexical_anchors: dict[tuple[object, ...], tuple[tuple[_SourceAnchor, ...], bool]] = {}
+        self.anchors: dict[tuple[object, ...], tuple[_SourceAnchor, ...]] = {}
+        self.windows: dict[tuple[object, ...], str] = {}
+        self.reservations: dict[tuple[object, ...], SourceReservation] = {}
+
+    def blob(self, source: str) -> _SourceBlob:
+        if source not in self.blobs:
+            self.blobs[source] = _SourceBlob(
+                tuple(source.splitlines(keepends=True)), source_revision(source),
+            )
+        return self.blobs[source]
+
+    def anchor_ranges(self, source: str, runtime: object, ticket: str, *,
+                      path: str, is_target: bool) -> tuple[_SourceAnchor, ...]:
+        with_sites = site_facts_mode() == "on"
+        units = units_for_path(closure_plan_for_runtime(runtime), path) if with_sites else ()
+        key = (source, path, is_target, ticket, with_sites, _target_names(runtime, ticket),
+               entry_symbol(runtime) if with_sites else "", tuple(unit.key() for unit in units))
+        if key not in self.anchors:
+            self.anchors[key] = _anchor_ranges(
+                source, runtime, ticket, path=path, is_target=is_target, source_fit=self,
+            )
+        return self.anchors[key]
+
+
+def _lexical_source_anchors(
+        source: str, lines: Sequence[str], ticket: str, names: Sequence[str],
+        entry: str, *, is_target: bool, with_sites: bool,
+) -> tuple[tuple[_SourceAnchor, ...], bool]:
     anchors: list[tuple[int, int, str]] = []
-    for name in _target_names(runtime, ticket):
+    for name in names:
         located = locate_symbol(source, name)
         if located is not None:
             anchors.append((located[0], located[1], f"symbol:{name}"))
@@ -1078,8 +1147,7 @@ def _anchor_ranges(source: str, runtime: object, ticket: str, *,
                 anchors.append((index, index, f"text:{short_name}"))
                 break
     entry_absent = False
-    if site_facts_mode() == "on":
-        entry = entry_symbol(runtime)
+    if with_sites:
         # A declared entry symbol that this target never mentions is a phantom
         # (P3): the ticket-word fallback below would then anchor on an
         # arbitrary line, so it is suppressed in favour of the module head.
@@ -1095,6 +1163,27 @@ def _anchor_ranges(source: str, runtime: object, ticket: str, *,
                 if not _is_comment(line) and pattern.search(line):
                     anchors.append((index, index, f"literal:{token}"))
                     literal_hits += 1
+    return tuple(anchors), entry_absent
+
+
+@profiled_function_span("source_anchor_resolution")
+def _anchor_ranges(source: str, runtime: object, ticket: str, *,
+                   path: str = "", is_target: bool = True,
+                   source_fit: SourceFit | None = None) -> tuple[_SourceAnchor, ...]:
+    lines = (source_fit.blob(source).lines if source_fit is not None
+             else source.splitlines(keepends=True))
+    total = len(lines)
+    names = _target_names(runtime, ticket)
+    with_sites = site_facts_mode() == "on"
+    entry = entry_symbol(runtime) if with_sites else ""
+    key = (source, ticket, names, entry, is_target, with_sites)
+    lexical = source_fit.lexical_anchors if source_fit is not None else {}
+    if key not in lexical:
+        lexical[key] = _lexical_source_anchors(
+            source, lines, ticket, names, entry, is_target=is_target, with_sites=with_sites)
+    lexical_anchors, entry_absent = lexical[key]
+    anchors = list(lexical_anchors)
+    if with_sites:
         # The closure planner owns complete statement/body spans through the
         # shared outline contract.  Source-window fitting only projects those
         # already-authorized units; it does not create a second parser/index.
@@ -2511,13 +2600,14 @@ def verify_window_projection(content: object, *, path: str) -> bool:
 def bound_source_message(
         content: str, *, path: str, source: str, runtime: object,
         max_chars: int, is_target: bool = True,
-        context_lines: int | None = None,
+        context_lines: int | None = None, source_fit: SourceFit | None = None,
 ) -> str:
     """Return a bounded exact excerpt; full source remains host-owned."""
+    blob = source_fit.blob(source) if source_fit is not None else None
     reservation = getattr(runtime, "_aha11_source_reservation", None)
     if (isinstance(reservation, Mapping)
             and reservation.get("path") == path
-            and reservation.get("revision") == source_revision(source)
+            and reservation.get("revision") == (blob.revision if blob else source_revision(source))
             and reservation.get("complete") is True):
         header, separator, body = content.partition("\n")
         if header in {f"[Current source: {path}]", f"[Working source: {path}]"}:
@@ -2528,11 +2618,12 @@ def bound_source_message(
             full_content = prefix + source
             if len(full_content.encode("utf-8")) <= max_chars:
                 return full_content
-    total_lines = _line_count(source)
+    total_lines = len(blob.lines) if blob else _line_count(source)
     if not total_lines:
         return content
     ticket = _ticket_text(runtime)
-    anchors = _anchor_ranges(source, runtime, ticket, path=path, is_target=is_target)
+    resolve_anchors = _anchor_ranges if source_fit is None else source_fit.anchor_ranges
+    anchors = resolve_anchors(source, runtime, ticket, path=path, is_target=is_target)
     without_head = [anchor for anchor in anchors if anchor[2] != "module-head"]
     required = [anchor for anchor in without_head if not anchor[2].startswith("literal:")]
     optional_order: list[list[tuple[int, int, str]]] = []
@@ -2540,23 +2631,29 @@ def bound_source_message(
         if len(without_head) < len(anchors) and len(without_head) > len(required):
             optional_order.append(without_head)
         optional_order.append(required)
-    first_line = content.splitlines()[0] if content.splitlines() else ""
+    first_line = next(iter(content.splitlines()), "")
     if not anchors:
         # An all-whitespace source has no useful excerpt; final request
         # settlement will replace this header-only message with a read route.
         return first_line + "\n"
-    return first_line + "\n" + _fit_ranges(
-        source.splitlines(keepends=True), anchors,
-        path=path, revision=source_revision(source), total_lines=total_lines,
-        max_chars=max_chars,
-        required=required if optional_order else (),
-        optional_order=optional_order,
-        context_lines=context_lines,
-    )
+    # The rendered body depends on effective source space. Changes to the
+    # schema or overall budget flow through max_chars at each call site.
+    key = (source, path, anchors, max_chars, context_lines)
+    windows = source_fit.windows if source_fit is not None else {}
+    if key not in windows:
+        windows[key] = _fit_ranges(
+            blob.lines if blob else source.splitlines(keepends=True), anchors,
+            path=path, revision=blob.revision if blob else source_revision(source),
+            total_lines=total_lines, max_chars=max_chars,
+            required=required if optional_order else (),
+            optional_order=optional_order, context_lines=context_lines,
+        )
+    return first_line + "\n" + windows[key]
 
 
 def _cached_closure_is_fresh(root: Path, closure: Mapping[str, object], *,
-                             journal: object = None) -> bool | UnavailableEvidence:
+                             journal: object = None,
+                             watch: SourceClosureWatch | None = None) -> bool | UnavailableEvidence:
     """Bind cached dependency revisions to their ordered path lists as well."""
     from kernel_request_evidence_closure import (
         _dependency_candidates, dependency_revision, language_adapter_for,
@@ -2569,16 +2666,34 @@ def _cached_closure_is_fresh(root: Path, closure: Mapping[str, object], *,
             or set(dependency_revisions) != set(revisions)
             or set(dependency_paths) != set(revisions)):
         return False
+    indexed = os.environ.get("STATEFRAME_TURN_INDEXED_READS") == "on"
+    # Containment tests throughout the same freshness check share the resolved
+    # workspace root. Still test every candidate, including missing providers.
+    try:
+        resolved = root.resolve() if indexed and revisions else None
+    except (OSError, RuntimeError, ValueError):
+        return False
     for raw_path, expected in revisions.items():
         path = str(raw_path)
+        if watch is not None:
+            watch.observe(path)
         current = _read_product_file(root, path, journal=journal)
         if isinstance(current, UnavailableEvidence):
             return current
         if current is None or source_revision(current) != str(expected):
             return False
         try:
-            connected = _dependency_candidates(root, path, current, language_adapter_for(path))
+            dependency_options = {}
+            if resolved is not None:
+                dependency_options["root_resolved"] = resolved
+            if watch is not None:
+                dependency_options["observe_path"] = watch.observe
+            connected = _dependency_candidates(
+                root, path, current, language_adapter_for(path), **dependency_options)
             paths = tuple(sorted(set((path, *connected))))
+            if watch is not None:
+                for relative in paths:
+                    watch.observe(relative)
             stored = dependency_paths.get(path)
             if (not isinstance(stored, (list, tuple)) or tuple(stored) != paths
                     or dependency_revision(root, paths) != dependency_revisions.get(path)):
@@ -2649,6 +2764,7 @@ def _record_required_source_deferral(
 def bound_runtime_sources(
         messages: list[dict[str, object]], runtime: object,
         *, max_request_bytes: int, tools: Sequence[object] = (),
+        source_fit: SourceFit | None = None,
 ) -> dict[str, object]:
     """Window exact target source blocks until the protected set is bounded."""
     target = getattr(runtime, "target", None)
@@ -2766,11 +2882,24 @@ def bound_runtime_sources(
                 plan["deferred_paths"] = []
                 setattr(runtime, "_request_source_closure", plan)
         return {"changed": False, "windowed": 0, "paths": ()}
-    try:
-        source = Path(target).read_text(encoding="utf-8")
-    except (OSError, UnicodeError):
-        return {"changed": False, "windowed": 0, "paths": ()}
-    source_hash = source_revision(source)
+    base = Path(root)
+    journal = getattr(runtime, "journal", None)
+    admission = source_fit.admission if source_fit is not None else None
+    watch = None
+    if source_fit is not None:
+        resolved_base = base.resolve()
+        if (admission is not None and admission.target == path
+                and admission.watch.root == resolved_base and admission.watch.current()):
+            watch = admission.watch
+        else:
+            admission = source_fit.admission = None
+    source = admission.plan["source_contents"].get(path) if admission is not None else None
+    if source is None:
+        try:
+            source = Path(target).read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            return {"changed": False, "windowed": 0, "paths": ()}
+    source_hash = source_fit.blob(source).revision if source_fit is not None else source_revision(source)
     non_source_bytes = sum(
         len(str(item.get("content", "")).encode("utf-8"))
         for item in messages
@@ -2780,33 +2909,39 @@ def bound_runtime_sources(
     )
     non_source_bytes += sum(len(str(tool).encode("utf-8")) for tool in tools)
     non_source_bytes += len(f"[Current source: {path}]\n".encode("utf-8"))
-    anchors = _anchor_ranges(source, runtime, _ticket_text(runtime), path=path, is_target=True)
-    with profile_active_host_span("request_source_target_reservation"):
-        source_reservation = reserve_source_unit(
-            source,
-            path=path,
-            revision=source_hash,
-            max_bytes=max_request_bytes,
-            non_source_bytes=non_source_bytes,
-            required_ranges=tuple(
-                (start, end) for start, end, label in anchors if label != "module-head"),
-            signature_ranges=tuple(
-                (start, end) for start, end, label in anchors if label == "entry-symbol"),
-        )
-    setattr(runtime, "_aha11_source_reservation", source_reservation.as_dict())
+    resolve_anchors = _anchor_ranges if source_fit is None else source_fit.anchor_ranges
+    anchors = resolve_anchors(source, runtime, _ticket_text(runtime), path=path, is_target=True)
+    reservation_key = (source, path, max_request_bytes, non_source_bytes, anchors)
+    reservations = source_fit.reservations if source_fit is not None else {}
+    if reservation_key not in reservations:
+        with profile_active_host_span("request_source_target_reservation"):
+            reservations[reservation_key] = reserve_source_unit(
+                source,
+                path=path,
+                revision=source_hash,
+                max_bytes=max_request_bytes,
+                non_source_bytes=non_source_bytes,
+                required_ranges=tuple(
+                    (start, end) for start, end, label in anchors if label != "module-head"),
+                signature_ranges=tuple(
+                    (start, end) for start, end, label in anchors if label == "entry-symbol"),
+            )
+    source_reservation = reservations[reservation_key]
+    reservation = source_reservation.as_dict()
+    setattr(runtime, "_aha11_source_reservation", reservation)
     changed_paths: list[str] = []
     acquired_paths: list[str] = []
     omission_receipts: list[dict[str, object]] = []
     ticket = _ticket_text(runtime)
     identity = ticket_identity_for_runtime(runtime)
-    base = Path(root)
     declared_paths = editable_product_paths(runtime)
     if isinstance(declared_paths, UnavailableEvidence):
         return declared_paths
     parent_sources = _parent_sources(runtime)
     tokens = literal_tokens(ticket, exclude=(entry_symbol(runtime),))
     origins = _token_origins(ticket)
-    source_stats = tuple(_source_stat_token(base, item) for item in declared_paths)
+    source_stats = tuple(_source_stat_token(base, item, strong=source_fit is not None)
+                         for item in declared_paths)
     input_key = (str(base.resolve()), str(getattr(runtime, "product_revision", "")),
                  source_hash, tuple(declared_paths), source_stats)
     inventory_key = (*input_key, tuple(tokens), tuple(sorted(origins.items())))
@@ -2831,28 +2966,49 @@ def bound_runtime_sources(
         parent_key = tuple(sorted((name, source_revision(value))
                                   for name, value in parent_sources.items()))
         closure_key = (*input_key, ticket_key, path, parent_key)
-        closure_cache = getattr(runtime, "_request_source_closure_cache", None)
-        if not isinstance(closure_cache, dict):
-            closure_cache = {}
-            setattr(runtime, "_request_source_closure_cache", closure_cache)
-        cached_closure = closure_cache.get(closure_key)
-        freshness = (False if not isinstance(cached_closure, Mapping) else
-                     _cached_closure_is_fresh(base, cached_closure,
-                                              journal=getattr(runtime, "journal", None)))
-        if isinstance(freshness, UnavailableEvidence):
-            return freshness
-        if not freshness:
-            with profile_active_host_span("request_source_closure_build"):
-                closure = build_source_closure(
-                    base,
-                    declared_paths,
-                    identity or ticket,
-                    target_path=path,
-                    parent_sources=parent_sources,
-                )
-            cached_closure = closure.as_dict()
-            closure_cache[closure_key] = copy.deepcopy(cached_closure)
-        closure_plan = copy.deepcopy(cached_closure)
+        if source_fit is not None:
+            closure_key = (*closure_key, source_resolver_key())
+        admission_key = (
+            *closure_key,
+            str(getattr(runtime, "workspace_scope", base)),
+            str(getattr(runtime, "workspace_revision", getattr(runtime, "product_revision", "0"))),
+        )
+        if admission is not None and admission.key == admission_key:
+            cached_closure = admission.plan
+        else:
+            if source_fit is not None:
+                source_fit.admission = None
+                watch = SourceClosureWatch(resolved_base)
+                for relative in (path, *declared_paths):
+                    watch.observe(relative)
+            closure_cache = getattr(runtime, "_request_source_closure_cache", None)
+            if not isinstance(closure_cache, dict):
+                closure_cache = {}
+                setattr(runtime, "_request_source_closure_cache", closure_cache)
+            cached_closure = closure_cache.get(closure_key)
+            freshness = (False if not isinstance(cached_closure, Mapping) else
+                         _cached_closure_is_fresh(base, cached_closure, journal=journal, watch=watch))
+            if isinstance(freshness, UnavailableEvidence):
+                return freshness
+            if not freshness:
+                with profile_active_host_span("request_source_closure_build"):
+                    closure = build_source_closure(
+                        base, declared_paths, identity or ticket, target_path=path,
+                        parent_sources=parent_sources, watch=watch,
+                    )
+                cached_closure = closure.as_dict()
+                closure_cache[closure_key] = copy.deepcopy(cached_closure)
+            if source_fit is not None:
+                if (watch.current()
+                        and cached_closure.get("revisions", {}).get(path) == source_hash):
+                    # The cached mapping stays private; working delivery ledgers
+                    # below each receive their own detached copy.
+                    source_fit.admission = _SourceAdmission(
+                        admission_key, path, watch, MappingProxyType(copy.deepcopy(cached_closure)),
+                    )
+                else:
+                    watch = None
+        closure_plan = copy.deepcopy(dict(cached_closure))
     else:
         # Launch/completion fixtures may intentionally have no public ticket;
         # preserve an explicit unknown closure rather than inventing ticket text.
@@ -2889,7 +3045,7 @@ def bound_runtime_sources(
             if isinstance(verified_history, Sequence)
             and not isinstance(verified_history, (str, bytes, bytearray)) else []
         )
-    _ensure_target_unit(closure_plan, path, source_reservation.as_dict())
+    _ensure_target_unit(closure_plan, path, reservation)
     # A path deferred on an earlier request may have been emptied by an edit
     # since (or come from an older checkpoint). A zero-byte source is proven by
     # its revision alone and has no unit to read back, so it leaves the
@@ -2902,6 +3058,15 @@ def bound_runtime_sources(
         deferred_paths = settled_deferred_paths
         setattr(runtime, "_request_deferred_source_paths", tuple(deferred_paths))
     closure_plan["deferred_paths"] = list(deferred_paths)
+    snapshot_sources = closure_plan.get("source_contents", {})
+
+    def read_fit_source(relative: str) -> str | None | UnavailableEvidence:
+        if watch is not None and relative in snapshot_sources:
+            size = watch.regular_size(relative)
+            if size is not None:
+                return snapshot_sources[relative] if size <= _MAX_FILE_BYTES else None
+        return _read_product_file(base, relative, journal=journal)
+
     from kernel_aha10_honest_loop import bounded_source_delivery
     bounded_units: list[dict[str, object]] = []
     with profile_active_host_span("request_source_unit_materialization"):
@@ -2910,13 +3075,17 @@ def bound_runtime_sources(
                 continue
             unit = dict(raw_unit)
             unit_path = str(unit.get("path", ""))
-            unit_source = _read_product_file(base, unit_path,
-                                             journal=getattr(runtime, "journal", None))
+            unit_source = read_fit_source(unit_path)
             if isinstance(unit_source, UnavailableEvidence):
                 return unit_source
             start = int(unit.get("start_line", 0) or 0)
             end = int(unit.get("end_line", 0) or 0)
-            source_lines = unit_source.splitlines(keepends=True) if unit_source is not None else []
+            if unit_source is None:
+                source_lines = ()
+            elif source_fit is not None:
+                source_lines = source_fit.blob(unit_source).lines
+            else:
+                source_lines = unit_source.splitlines(keepends=True)
             complete = bool(source_lines and 1 <= start <= end <= len(source_lines))
             unit["text"] = "".join(source_lines[start - 1:end]) if complete else ""
             unit["complete"] = complete
@@ -3043,7 +3212,7 @@ def bound_runtime_sources(
         for _attempt in range(8):
             message["content"] = bound_source_message(
                 header, path=candidate, source=candidate_source, runtime=runtime,
-                max_chars=max_chars, is_target=candidate == path,
+                max_chars=max_chars, is_target=candidate == path, source_fit=source_fit,
             )
             window_metadata = parse_window(message["content"])
             if (candidate == path and candidate in required_paths
@@ -3092,15 +3261,14 @@ def bound_runtime_sources(
     if not deferred_target:
         _window_path_messages(messages, runtime, path=path, source=source,
                               max_request_bytes=max_request_bytes, tools=tools,
-                              changed_paths=changed_paths, is_target=True)
+                              changed_paths=changed_paths, is_target=True, source_fit=source_fit)
     if site_facts_mode() == "on":
         # P2: connected files are selected from lexical sites/imports/
         # construction responsibility, never from message history.
         for other in connected_for_delivery:
             if other == path:
                 continue
-            other_source = _read_product_file(base, other,
-                                              journal=getattr(runtime, "journal", None))
+            other_source = read_fit_source(other)
             if isinstance(other_source, UnavailableEvidence):
                 return other_source
             if other_source is None:
@@ -3108,7 +3276,7 @@ def bound_runtime_sources(
             ensure_source_message(other, other_source)
             _window_path_messages(messages, runtime, path=other, source=other_source,
                                   max_request_bytes=max_request_bytes, tools=tools,
-                                  changed_paths=changed_paths, is_target=False)
+                                  changed_paths=changed_paths, is_target=False, source_fit=source_fit)
     for item in messages:
         content = item.get("content") if isinstance(item, dict) else None
         metadata = parse_window(content)
@@ -3140,6 +3308,7 @@ def bound_runtime_sources(
                         and type(row.get("start_line")) is int
                         and type(row.get("end_line")) is int
                     ),
+                    provisional=True,
                 )
                 delivery_records.append(delivery)
     setattr(runtime, "_request_source_closure", closure_plan)
@@ -4064,9 +4233,10 @@ def settle_blank_source_windows(
 def _window_path_messages(
         messages: list[dict[str, object]], runtime: object, *, path: str, source: str,
         max_request_bytes: int, tools: Sequence[object], changed_paths: list[str],
-        is_target: bool,
+        is_target: bool, source_fit: SourceFit | None = None,
 ) -> None:
-    lines = source.splitlines(keepends=True)
+    lines = (source_fit.blob(source).lines if source_fit is not None
+             else source.splitlines(keepends=True))
     expected_prefixes = (
         f"[Current source: {path}]\n", f"[Working source: {path}]\n",
     )
@@ -4123,7 +4293,7 @@ def _window_path_messages(
                 continue
         rendered = bound_source_message(
             str(content), path=path, source=source, runtime=runtime,
-            max_chars=min(12_000, available), is_target=is_target,
+            max_chars=min(12_000, available), is_target=is_target, source_fit=source_fit,
         )
         if rendered != content:
             message["content"] = rendered
@@ -4232,11 +4402,10 @@ def _python_docstring_lines(source: str) -> frozenset[int]:
     return frozenset(lines)
 
 
-def _site_role(path: str, source: str, line: int, docstring_lines: frozenset[int]) -> str:
-    current = source.splitlines()[line - 1] if line > 0 else ""
-    if _is_comment(current):
+def _site_role(text: str, line: int, docstring_lines: frozenset[int]) -> str:
+    if _is_comment(text):
         return "comment"
-    if path.casefold().endswith(".py") and line in docstring_lines:
+    if line in docstring_lines:
         return "docstring"
     return "executable"
 
@@ -4337,13 +4506,10 @@ def entry_symbol(runtime: object) -> str:
     return ""
 
 
-def _declared_path_values(runtime: object) -> list[object] | UnavailableEvidence:
+def _declared_path_values(runtime: object, target: str | None) -> list[object]:
     owner = getattr(runtime, "owner", None)
     row = getattr(owner, "task_row", {})
     values: list[object] = []
-    target = _path_from_runtime(runtime)
-    if isinstance(target, UnavailableEvidence):
-        return target
     if target:
         values.append(target)
     contract = getattr(runtime, "edit_contract", None)
@@ -4370,36 +4536,222 @@ def _declared_path_values(runtime: object) -> list[object] | UnavailableEvidence
     return values
 
 
+_PathResult = TypeVar("_PathResult")
+
+
+def path_inputs(values: Sequence[object]) -> tuple[str, ...]:
+    """Snapshot mutable declarations by value before consulting a projection."""
+    return tuple(value if type(value) is str else str(value or "") for value in values)
+
+
+def _path_text(value: str) -> str:
+    return value.strip().replace("\\", "/")
+
+
+class WorkspacePathFacts:
+    """Derived path facts of a fenced workspace, with separate scope policies."""
+
+    def __init__(self, root: Path, tree: Directory, epoch: bytes):
+        self.root = root
+        self.tree = tree
+        self.epoch = epoch
+        self.text = functools.lru_cache(maxsize=16_384)(_path_text)
+        self._scopes: dict[str, tuple[tuple[object, ...], object]] = {}
+        self._indexed_paths: dict[Path, tuple[Path, Entry] | None] = {}
+        self._page: tuple[tuple[str, ...], tuple[str, ...], dict[str, bool]] | None = None
+
+    def scope(self, policy: str, inputs: tuple[object, ...],
+              build: Callable[[], _PathResult]) -> _PathResult:
+        cached = self._scopes.get(policy)
+        if cached is not None and cached[0] == inputs:
+            return cast(_PathResult, cached[1])
+        result = build()
+        self._scopes[policy] = (inputs, result)
+        return result
+
+    def indexed_path(self, relative: Path) -> tuple[Path, Entry] | None:
+        """Follow only paths whose full resolution is covered by the tree."""
+        # Cache only within the pinned generation, including misses.
+        if relative in self._indexed_paths:
+            return self._indexed_paths[relative]
+        result = self._walk_indexed_path(relative)
+        if len(self._indexed_paths) >= 128:
+            self._indexed_paths.clear()
+        self._indexed_paths[relative] = result
+        return result
+
+    def _walk_indexed_path(self, relative: Path) -> tuple[Path, Entry] | None:
+        from kernel_workspace_tree import Directory, Symlink, lookup
+
+        for _ in range(40):
+            node = self.tree
+            parts = relative.parts
+            for index, part in enumerate(parts):
+                if not isinstance(node, Directory) or "\x00" in part or part == "/":
+                    return None
+                if part == "..":
+                    if index == 0:
+                        return None
+                    relative = Path(*parts[:index - 1], *parts[index + 1:])
+                    break
+                node = lookup(node, (os.fsencode(part),))
+                if node is None:
+                    return None
+                if isinstance(node, Symlink):
+                    target = Path(os.fsdecode(node.target))
+                    if target.is_absolute():
+                        if not target.is_relative_to(self.root):
+                            return None
+                        target = target.relative_to(self.root)
+                    else:
+                        target = Path(*parts[:index]) / target
+                    relative = target.joinpath(*parts[index + 1:])
+                    break
+            else:
+                return relative, node
+        return None
+
+    def contained_path(self, path: Path) -> str:
+        if path.is_absolute():
+            if path.is_relative_to(self.root):
+                relative = path.relative_to(self.root)
+            else:
+                return path.resolve().relative_to(self.root).as_posix()
+        else:
+            relative = path
+        indexed = self.indexed_path(relative)
+        if indexed is not None:
+            return indexed[0].as_posix()
+        # Missing/filtered entries and links use the live containment check.
+        return (self.root / relative).resolve().relative_to(self.root).as_posix()
+
+    def page(self, names: tuple[str, ...]) -> tuple[str, ...]:
+        from kernel_workspace_tree import File
+
+        if self._page is not None and self._page[0] is names:
+            _, page, live_checks = self._page
+            if all(_eligible_editable_path(self.root, path) == eligible
+                   for path, eligible in live_checks.items()):
+                return page
+        live_checks = {}
+
+        def eligible(relative: str) -> bool:
+            indexed = self.indexed_path(Path(relative))
+            if indexed is not None:
+                return isinstance(indexed[1], File)
+            # Alias referents can depend on paths beyond the observed tree.
+            live_checks[relative] = _eligible_editable_path(self.root, relative)
+            return live_checks[relative]
+
+        result = _first_editable_page(names, eligible)
+        self._page = (names, result, live_checks)
+        return result
+
+
+_workspace_path_facts: WeakKeyDictionary[WorkspaceConsumers, WorkspacePathFacts] = WeakKeyDictionary()
+
+
+def project_workspace_paths(runtime: object,
+                            project: Callable[[WorkspacePathFacts], _PathResult],
+                            ) -> _PathResult | None:
+    """Reuse only under the attempt's current workspace observation."""
+    if (os.environ.get("STATEFRAME_TURN_INDEXED_READS") != "on"
+            or os.environ.get("STATEFRAME_WORKSPACE_OBJECTS", "").strip().lower() != "on"):
+        return None
+    root = getattr(getattr(runtime, "owner", None), "root", None)
+    module = sys.modules.get("kernel_workspace_consumers")
+    consumers = (module.consumers_for(root)
+                 if module is not None and isinstance(root, (str, os.PathLike)) else None)
+    if consumers is None:
+        return None
+    from kernel_workspace_state import WorkspaceUnavailable
+
+    boundary = "editable-path-facts"
+    try:
+        with consumers.state.pin(boundary) as observation:
+            facts = _workspace_path_facts.get(consumers)
+            if (facts is None or facts.tree.digest != observation.tree.digest
+                    or facts.epoch != observation.epoch):
+                facts = WorkspacePathFacts(consumers.state.fence.root, observation.tree,
+                                           observation.epoch)
+                _workspace_path_facts[consumers] = facts
+            result = project(facts)
+            if observation.validate_for_use(boundary):
+                return result
+    except WorkspaceUnavailable:
+        pass
+    return None
+
+
+def _first_editable_page(names: Sequence[str], eligible: Callable[[str], bool]) -> tuple[str, ...]:
+    result: list[str] = []
+    for relative in names:
+        if eligible(relative):
+            result.append(relative)
+            if len(result) == _MAX_EDITABLE_FILES:
+                break
+    return tuple(result)
+
+
+def _prioritized_paths(values: Sequence[object], target: str | None,
+                       text: Callable[[str], str] = _path_text) -> tuple[str, ...]:
+    names = set(_editable_path_names(values, text))
+    return tuple(sorted(names, key=lambda path: (path != target, path)))
+
+
+def _projected_editable_page(runtime: object, facts: WorkspacePathFacts,
+                             ) -> tuple[str, ...] | UnavailableEvidence:
+    raw_target = getattr(runtime, "target", None)
+    target = None
+    if isinstance(raw_target, Path):
+        target = _target_in_path_facts(runtime, facts, raw_target)
+        if isinstance(target, UnavailableEvidence):
+            return target
+    values = path_inputs(_declared_path_values(runtime, target))
+    names = facts.scope("wire", (target, values), lambda: _prioritized_paths(values, target, facts.text))
+    return facts.page(names)
+
+
 def editable_product_paths(runtime: object) -> tuple[str, ...] | UnavailableEvidence:
     """Declared editable PRODUCT files (target first): existing, no tests, no evaluator scope."""
     root = getattr(getattr(runtime, "owner", None), "root", None)
     if root is None:
         return ()
+    projected = project_workspace_paths(runtime, lambda facts: _projected_editable_page(runtime, facts))
+    if projected is not None:
+        return projected
     base = Path(root).resolve()
-    result: list[str] = []
-    values = _declared_path_values(runtime)
-    if isinstance(values, UnavailableEvidence):
-        return values
-    for value in values:
-        relative = str(value or "").strip().replace("\\", "/").removeprefix("./")
-        if (not relative or relative.startswith("/") or _TEST_PATH.search(relative)
-                or any(part.casefold() in _FORBIDDEN_PARTS for part in relative.split("/"))):
-            continue
-        candidate = (base / relative).resolve()
-        try:
-            candidate.relative_to(base)
-        except ValueError:
-            continue
-        try:
-            is_file = candidate.is_file()
-        except (OSError, ValueError):
-            continue
-        if is_file:
-            result.append(relative)
     target = _path_from_runtime(runtime)
     if isinstance(target, UnavailableEvidence):
         return target
-    return tuple(sorted(set(result), key=lambda path: (path != target, path)))[:_MAX_EDITABLE_FILES]
+    values = _declared_path_values(runtime, target)
+    if os.environ.get("STATEFRAME_TURN_INDEXED_READS") == "on":
+        # The wire only carries the first eligible page. In priority order,
+        # later paths can neither displace a page member nor change its order.
+        return _first_editable_page(_prioritized_paths(values, target),
+                                    lambda relative: _eligible_editable_path(base, relative))
+    result = {relative for relative in _editable_path_names(values)
+              if _eligible_editable_path(base, relative)}
+    return tuple(sorted(result, key=lambda path: (path != target, path)))[:_MAX_EDITABLE_FILES]
+
+
+def _editable_path_names(values: Sequence[object],
+                         text: Callable[[str], str] = _path_text) -> Iterator[str]:
+    for value in values:
+        relative = text(str(value or "")).removeprefix("./")
+        if (not relative or relative.startswith("/") or _TEST_PATH.search(relative)
+                or any(part.casefold() in _FORBIDDEN_PARTS for part in relative.split("/"))):
+            continue
+        yield relative
+
+
+def _eligible_editable_path(base: Path, relative: str) -> bool:
+    try:
+        candidate = (base / relative).resolve()
+        candidate.relative_to(base)
+        return candidate.is_file()
+    except (OSError, RuntimeError, ValueError):
+        return False
 
 
 def _read_product_file(root: Path, relative: str, *,
@@ -4853,13 +5205,12 @@ def literal_site_inventory(root: Path, editable_paths: Sequence[str],
         revision = _digest(source)
         language = _LANGUAGE_BY_SUFFIX.get(Path(path).suffix.casefold(), "unknown")
         for index, line in enumerate(lines, 1):
-            role = _site_role(path, source, index, docstring_lines)
             for token, pattern in patterns:
                 if not pattern.search(line):
                     continue
                 sites.append(Site(
                     path, index, line.rstrip(), enclosing_label(path, source, index), token,
-                    role, language, revision,
+                    _site_role(line, index, docstring_lines), language, revision,
                     *(_candidate_symbol(path, source, index) or ("", "", 0, 0)),
                 ))
                 if len(sites) >= max_sites:

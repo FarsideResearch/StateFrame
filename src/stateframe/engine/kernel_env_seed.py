@@ -20,9 +20,11 @@ from typing import Callable
 if __package__:
     from .kernel_pid_liveness import pid_alive
     from .kernel_safe_paths import safe_home
+    from .kernel_turn_work_counters import count_work
 else:
     from kernel_pid_liveness import pid_alive
     from kernel_safe_paths import safe_home
+    from kernel_turn_work_counters import count_work
 
 
 FICLONE = 0x40049409
@@ -35,8 +37,11 @@ _TEMPORARY = re.compile(r"\.[0-9a-f]{64}\.tmp-([0-9]+)-[0-9]+\Z")
 def _digest(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
+        count_work("files_read")
+        count_work("files_hashed")
         for block in iter(lambda: stream.read(1 << 20), b""):
             digest.update(block)
+            count_work("bytes_hashed", len(block))
     return digest.hexdigest()
 
 
@@ -53,6 +58,7 @@ def _source_digest(root: Path) -> str:
         for name in [*dirs, *sorted(names)]:
             path = folder / name
             info = path.lstat()
+            count_work("files_statted")
             relative = path.relative_to(root).as_posix()
             mode = stat.S_IMODE(info.st_mode)
             if stat.S_ISLNK(info.st_mode):
@@ -72,11 +78,13 @@ def _tree_fingerprint(root: Path) -> list:
     for directory, dirs, names in os.walk(root):
         for name in [*dirs, *names]:
             info = (Path(directory) / name).lstat()
+            count_work("files_statted")
             count += 1
             total += info.st_size
             newest_m = max(newest_m, info.st_mtime_ns)
             newest_c = max(newest_c, info.st_ctime_ns)
         info = os.lstat(directory)
+        count_work("files_statted")
         newest_m = max(newest_m, info.st_mtime_ns)
         newest_c = max(newest_c, info.st_ctime_ns)
     return [count, total, newest_m, newest_c]
@@ -240,7 +248,7 @@ def _private(relative: str) -> bool:
 
 
 def _clone_files(seed: Path, destination: Path, files: dict[str, dict],
-                 directories: list[str]) -> None:
+                 directories: list[str], *, allow_hardlinks: bool) -> None:
     if sys.platform == "darwin":
         result = subprocess.run(["cp", "-c", "-R", str(seed), str(destination)],
                                 capture_output=True, check=False)
@@ -262,7 +270,7 @@ def _clone_files(seed: Path, destination: Path, files: dict[str, dict],
             target.symlink_to(row["link"])
         elif _reflink(source, target):
             target.chmod(row["mode"])
-        elif _private(relative) or not _link(source, target):
+        elif not allow_hardlinks or _private(relative) or not _link(source, target):
             shutil.copy2(source, target)
             target.chmod(row["mode"])
 
@@ -536,6 +544,7 @@ def _cap_bytes(event: Callable[[dict], None] | None) -> int:
 
 def clone(source: Path, destination: Path, interpreter: Path, source_repo: Path | None,
           authorized_roots: tuple[Path, ...], *,
+          allow_hardlinks: bool = True,
           event: Callable[[dict], None] | None = None) -> Path:
     """Build or verify one seed under a per-key lock, then clone it into a new run env."""
     configured = os.environ.get("STATEFRAME_HOME")
@@ -589,7 +598,8 @@ def clone(source: Path, destination: Path, interpreter: Path, source_repo: Path 
                     pass
                 raise
         manifest = json.loads((seed / "seed.json").read_text())
-        _clone_files(seed, destination, manifest["files"], manifest["directories"])
+        _clone_files(seed, destination, manifest["files"], manifest["directories"],
+                     allow_hardlinks=allow_hardlinks)
         # The seed directory's mtime records its last use; gc prunes only long-unused seeds.
         os.utime(seed)
     evict_to_cap(store, _cap_bytes(event), key, event)

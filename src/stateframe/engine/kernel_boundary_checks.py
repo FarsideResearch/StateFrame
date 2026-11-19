@@ -524,24 +524,27 @@ def _fixture(call: ast.Call, values: Mapping[str, object]) -> dict[str, object] 
     return result
 
 
+def _class_body_owners(tree: ast.AST) -> dict[ast.AST, str]:
+    return {
+        child: parent.name
+        for parent in ast.walk(tree)
+        if isinstance(parent, ast.ClassDef)
+        for child in parent.body
+    }
+
+
 def _function_signatures(sources: Mapping[str, str]) -> dict[str, tuple[str, ...]]:
     result: dict[str, tuple[str, ...]] = {}
     for path, source in sources.items():
         module = _module_for_path(path)
         tree = _parse_cache.parse(source, path)
-        # Direct-body owner per node; a later ClassDef in walk order wins, exactly
-        # as the former per-function rescan's ``parents[-1]`` did (it was O(n^2)).
-        owner: dict[int, str] = {}
-        for parent in ast.walk(tree):
-            if isinstance(parent, ast.ClassDef):
-                for child in parent.body:
-                    owner[id(child)] = parent.name
+        owners = _class_body_owners(tree)
         for node in ast.walk(tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
             prefix = module
-            if id(node) in owner:
-                prefix += "." + owner[id(node)]
+            if node in owners:
+                prefix += "." + owners[node]
             names = [item.arg for item in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs)]
             if node.args.vararg:
                 names.append(node.args.vararg.arg)
@@ -570,6 +573,7 @@ def _function_parameter_shapes(sources: Mapping[str, str]) -> dict[str, dict[str
     for path, source in sources.items():
         module = _module_for_path(path)
         tree = _parse_cache.parse(source, path)
+        owners = _class_body_owners(tree)
 
         def shape(arguments: ast.arguments, *, drop_receiver: bool = False) -> dict[str, tuple[str, ...]]:
             posonly = tuple(item.arg for item in arguments.posonlyargs)
@@ -584,10 +588,8 @@ def _function_parameter_shapes(sources: Mapping[str, str]) -> dict[str, dict[str
         for node in ast.walk(tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
-            parent = next((candidate for candidate in ast.walk(tree)
-                           if isinstance(candidate, ast.ClassDef)
-                           and any(child is node for child in candidate.body)), None)
-            prefix = f"{module}.{parent.name}." if parent is not None else f"{module}."
+            parent = owners.get(node)
+            prefix = f"{module}.{parent}." if parent is not None else f"{module}."
             result[prefix + node.name] = shape(node.args, drop_receiver=parent is not None)
         for node in tree.body:
             if not isinstance(node, ast.ClassDef):

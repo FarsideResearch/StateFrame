@@ -481,8 +481,8 @@ _UNIT_SITES: set[ExceptSite] = {
     ("ts_extract", "_has_error", "except Exception as exc:", 1),
 }
 
-# The remaining 27 are census-v2 LOUD (census counts any logger.* call as loud,
-# so several are debug-only; flagged in the md for re-triage).
+# The census counts logger calls as loud, including debug diagnostics.
+# Function-scoped anchors cover these sites after startup code moves them.
 _CENSUS_LOUD: set[ExceptSite] = {
     ("kernel_repo_catalog", "_graph_dependencies", "except Exception as exc:", 1),
     ("kernel_repo_intel", "_journal_repo_map_receipt", "except Exception:", 1),
@@ -500,6 +500,7 @@ _CENSUS_LOUD: set[ExceptSite] = {
     ("lsp_resolve", "resolve_file_full.resolve", "except BaseException as error:", 1),
     ("lsp_resolve", "resolve_file_full", "except Exception as exc:", 1),
     ("lsp_resolve", "resolve_file_full", "except Exception as exc:", 2),
+    ("lsp_resolve", "resolve_repo_background.resolve", "except Exception as error:", 1),
     ("repo_map", "build_repo_map_with_stats", "except Exception as exc:", 1),
     ("ts_dispatch", "_scan_ts", "except Exception as exc:", 1),
     ("ts_dispatch", "dispatch_boundaries_in_file", "except Exception as exc:", 1),
@@ -507,7 +508,7 @@ _CENSUS_LOUD: set[ExceptSite] = {
     ("ts_dispatch", "_structure_outline", "except Exception as exc:", 1),
     ("ts_dispatch", "outline_source", "except Exception as exc:", 1),
     ("ts_extract", "<module>", "except Exception as _exc:", 1),
-    ("ts_extract", "is_tree_sitter_functional", "except Exception as exc:", 1),
+    ("ts_extract", "_probe_tree_sitter", "except Exception as exc:", 1),
     ("ts_extract", "_TSVisitor.run", "except Exception as exc:", 1),
     ("ts_extract", "extract_ts_like", "except Exception as exc:", 1),
     ("ts_extract", "extract_ts_like", "except Exception as exc:", 2),

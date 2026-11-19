@@ -17,30 +17,43 @@ import re
 import sys
 import time
 import traceback
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
-from kernel_context import token_estimate
+import kernel_parse_cache as _parse_cache
+import kernel_turn0_persistence as _turn0
 from kernel_census_index_reuse import (
     acquire_index,
-    index_source_bytes as census_index_source_bytes,
-    reuse_enabled as census_index_reuse_enabled,
+    admitted_source_digest,
     structural_revision,
+)
+from kernel_census_index_reuse import (
+    index_source_bytes as census_index_source_bytes,
+)
+from kernel_census_index_reuse import (
+    reuse_enabled as census_index_reuse_enabled,
+)
+from kernel_census_index_reuse import (
     validation_source_byte_limit as census_validation_source_byte_limit,
+)
+from kernel_census_index_reuse import (
     validation_source_cap_mib as census_validation_source_cap_mib,
+)
+from kernel_context import token_estimate
+from kernel_measurement import profiled_function_span
+from kernel_repo_catalog import (
+    _SKIP_DIRS as _CATALOG_SKIP_DIRS,
 )
 from kernel_repo_catalog import (
     StructuralIndexError,
     build_structural_index,
+    full_coverage_enabled,
     scan_entry_set,
 )
-from kernel_source_presentation import strip_callsite_census
-from kernel_measurement import profiled_function_span
-import kernel_turn0_persistence as _turn0
-
 from kernel_safe_paths import safe_expanduser
+from kernel_source_presentation import strip_callsite_census
 
 SCHEMA = "stateframe-callsite-census/1"
 ROUTE_ID = "R_shown_crossfile"
@@ -51,6 +64,7 @@ MAX_SERVING_TOKENS = 600
 EXTRACTOR_VERSION = "python-bound-call-sites/2"
 _CENSUS_PERSIST_SCHEMA = "callsite-census-structure/1"
 MAX_CACHED_ANALYSIS_SOURCE_BYTES = 8 * 1024 * 1024
+_MAX_SOURCE_POINT_QUERIES = 16
 _MAX_ERROR_MESSAGE_CHARS = 240
 _SECRET_ASSIGNMENT = re.compile(
     r"(?i)\b(api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|passwd|"
@@ -142,6 +156,7 @@ class _Source:
     end_line: int | None
     window_ranges: tuple[tuple[int, int], ...] = ()
     window_content: str | None = None
+    revision: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -352,7 +367,11 @@ def _source_block(content: object) -> tuple[_Source, int] | None:
         )
         if metadata_end < 0:
             return None
-        return _Source(path, "", None, None, tuple(spans), clean), metadata_end + len(line_break)
+        revision = metadata.get("revision")
+        return _Source(
+            path, "", None, None, tuple(spans), clean,
+            revision if isinstance(revision, str) else None,
+        ), metadata_end + len(line_break)
     if body.startswith("[Source metadata]\n"):
         marker = f"\n[Source content: {path}]\n"
         end_marker = f"\n[End source content: {path}]"
@@ -858,30 +877,34 @@ class _Collector(ast.NodeVisitor):
 # Catalog outlines are language-generic; this relation extractor is not. Its binding
 # and shadowing rules are built on Python's ast.Module/import semantics, so other code
 # languages remain explicitly partial until they have a parser-backed resolver.
-def _source_paths(index: object) -> tuple[dict[str, tuple[object, bytes, str]], int, int]:
+def _source_paths(index: object) -> tuple[
+        dict[str, tuple[object, bytes, str]], dict[str, ast.Module], set[str], set[str]]:
     parsed: dict[str, tuple[object, bytes, str]] = {}
-    partial = skipped = 0
+    trees: dict[str, ast.Module] = {}
+    partial: set[str] = set()
+    skipped: set[str] = set()
     for module in getattr(index, "modules", ()):
         path = str(module.path)
         if _excluded(path):
-            skipped += 1
+            skipped.add(path)
             continue
         if not path.endswith(".py"):
-            skipped += 1
+            skipped.add(path)
             if PurePosixPath(path).suffix.casefold() in _NON_PYTHON_CODE_SUFFIXES:
-                partial += 1
+                partial.add(path)
             continue
         try:
             handle, raw = index.read_content(path)
             source = raw.decode(handle.encoding, errors="strict")
-            ast.parse(source, filename=path)
+            tree = _parse_cache.parse(source, path)
         except (LookupError, UnicodeError, OSError, StructuralIndexError, SyntaxError, ValueError):
-            partial += 1
+            partial.add(path)
             continue
         parsed[path] = (handle, raw, source)
+        trees[path] = tree
         if bool(getattr(module, "degraded", False)):
-            partial += 1
-    return parsed, partial, skipped
+            partial.add(path)
+    return parsed, trees, partial, skipped
 
 
 def _runtime_task_scope(runtime: object) -> str:
@@ -937,7 +960,7 @@ def _parse_census_source(
     try:
         handle, raw = index.read_content(path)
         source = raw.decode(handle.encoding, errors="strict")
-        tree = ast.parse(source, filename=path)
+        tree = _parse_cache.parse(source, path)
     except (LookupError, UnicodeError, OSError, StructuralIndexError, SyntaxError, ValueError):
         return None, None, None, True, False
     return (handle, raw, source), tree, _definitions(tree, path), bool(module.degraded), False
@@ -967,46 +990,12 @@ def _build_census_structure(
     scope_key: str,
     parser_version: str,
 ) -> _CensusStructure:
-    parsed, _partial_count, _skipped_count = _source_paths(index)
-    trees: dict[str, ast.Module] = {}
-    definitions: dict[str, dict[str, _Definition]] = {}
-    partial_paths: set[str] = set()
-    skipped_paths: set[str] = set()
-    for module in getattr(index, "modules", ()):
-        path = str(module.path)
-        if _excluded(path):
-            skipped_paths.add(path)
-            continue
-        if not path.endswith(".py"):
-            skipped_paths.add(path)
-            if PurePosixPath(path).suffix.casefold() in _NON_PYTHON_CODE_SUFFIXES:
-                partial_paths.add(path)
-            continue
-        if path not in parsed:
-            partial_paths.add(path)
-            continue
-        if bool(getattr(module, "degraded", False)):
-            partial_paths.add(path)
-        try:
-            tree = ast.parse(parsed[path][2], filename=path)
-        except (SyntaxError, ValueError):
-            partial_paths.add(path)
-            parsed.pop(path, None)
-            continue
-        trees[path] = tree
-        definitions[path] = _definitions(tree, path)
-
-    parsed = {str(module.path): parsed[str(module.path)]
-              for module in getattr(index, "modules", ()) if str(module.path) in parsed}
-    trees = {path: trees[path] for path in parsed if path in trees}
-    definitions = {path: definitions[path] for path in parsed if path in definitions}
+    parsed, trees, partial_paths, skipped_paths = _source_paths(index)
+    definitions = {path: _definitions(tree, path) for path, tree in trees.items()}
     modules = _module_names(tuple(parsed))
     calls_by_path: dict[str, tuple[_Call, ...]] = {}
     unresolved_by_path: dict[str, int] = {}
-    for path in parsed:
-        tree = trees.get(path)
-        if tree is None:
-            continue
+    for path, tree in trees.items():
         calls_by_path[path], unresolved_by_path[path] = _collect_file_calls(
             path, parsed[path], tree, modules, definitions,
         )
@@ -1608,20 +1597,43 @@ def _editable_paths(runtime: object) -> tuple[str, ...]:
     return tuple(sorted(set(paths)))
 
 
-def _declared_source_paths(messages: Sequence[Mapping[str, object]]) -> tuple[str, ...]:
-    paths: set[str] = set()
+def _source_carriers(messages: Sequence[Mapping[str, object]]) -> Iterator[tuple[str, str | None]]:
     for message in messages:
-        if message.get("role") == "tool":
-            page = _read_page_block(message.get("content"))
-            if page is not None and not _excluded(page[0]):
-                paths.add(page[0])
+        role, content = message.get("role"), message.get("content")
+        if role == "tool" and (page := _read_page_block(content)) is not None:
+            path, revision = page[:2]
+        elif role == "user" and (parsed := _source_block(content)) is not None:
+            path, revision = parsed[0].path, parsed[0].revision
+        else:
             continue
-        if message.get("role") != "user":
+        if not _excluded(path):
+            yield path, revision
+
+
+def _possible_shown_paths(root: Path, carriers: Sequence[tuple[str, str | None]]) -> set[str] | None:
+    """Bound the set of potentially shown paths using only final source carriers."""
+    revisions: dict[str, set[str | None]] = {}
+    for path, revision in carriers:
+        if not path.endswith(".py"):
             continue
-        parsed = _source_block(message.get("content"))
-        if parsed is not None and not _excluded(parsed[0].path):
-            paths.add(parsed[0].path)
-    return tuple(sorted(paths))
+        revisions.setdefault(path, set()).add(revision)
+        if len(revisions) > _MAX_SOURCE_POINT_QUERIES:
+            return None
+
+    possible: set[str] = set()
+    for path, expected in revisions.items():
+        try:
+            current = admitted_source_digest(root, path)
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError):
+            # Uncertain reads cannot prove that a delivered source is stale.
+            possible.add(path)
+        else:
+            # Unversioned blocks still need the catalog's exact span check.
+            if current in expected or None in expected:
+                possible.add(path)
+    return possible
 
 
 def _shown_sources(index: object, messages: Sequence[Mapping[str, object]]) -> tuple[
@@ -1842,8 +1854,31 @@ def _build_packet(runtime: object, root: Path, messages: Sequence[Mapping[str, o
                   incremental_mode: str = "off",
                   environ: Mapping[str, str] | None = None,
                   request_id: object = None) -> CensusPacket | None:
+    env = os.environ if environ is None else environ
+    carriers = tuple(_source_carriers(messages))
+    has_python_carrier = any(path.endswith(".py") for path, _ in carriers)
+    point_admission = index_reuse and env.get("STATEFRAME_TURN_INDEXED_READS") == "on"
+    possible = None
+    if root.name.casefold() not in _CATALOG_SKIP_DIRS and (not has_python_carrier or point_admission):
+        # Keep the catalog switch's validation even when no index is needed.
+        full_coverage_enabled()
+        # A packet needs at least one shown Python site in the current request.
+        possible = _possible_shown_paths(root, carriers) if has_python_carrier else set()
+        if possible is not None and not possible:
+            if reuse_report is not None:
+                reuse_report.status = "not_run"
+                reuse_report.reason = "no_current_source"
+            return None
     editable = _editable_paths(runtime)
-    priority_paths = tuple(dict.fromkeys((*_declared_source_paths(messages), *editable)))
+    if possible is not None and len(possible) == 1 and not any(
+            path.endswith(".py") and path not in possible for path in editable):
+        # A group needs two shown files or a shown file and an unread declared file.
+        if reuse_report is not None:
+            reuse_report.status = "not_run"
+            reuse_report.reason = "no_crossfile_candidate"
+        return None
+    declared_paths = sorted({path for path, _ in carriers})
+    priority_paths = tuple(dict.fromkeys((*declared_paths, *editable)))
     cache_scope_key: str | None = None
     parser_version = f"{EXTRACTOR_VERSION}:ast-{sys.version_info.major}.{sys.version_info.minor}"
     lease = None
@@ -1879,7 +1914,7 @@ def _build_packet(runtime: object, root: Path, messages: Sequence[Mapping[str, o
         if reuse_report is not None:
             reuse_report.status = "off"
             reuse_report.reason = "disabled"
-        # Preserve the pre-S1 path exactly when the independently switchable cache is off.
+        # Build a fresh index when reuse is disabled.
         index = build_structural_index(
             root,
             # Declared editable files are indexed first so the file cap can never hide them.
@@ -1915,7 +1950,6 @@ def _build_packet(runtime: object, root: Path, messages: Sequence[Mapping[str, o
             source_facts_out.extend(_capture_public_sources(index, cached))
         return cached if cached.decision_kind == decision_kind else replace(cached, decision_kind=decision_kind)
 
-    parse_loop_partial = False
     if index_reuse and lease is not None:
         current_structure_revision = structural_revision(
             index, scope_key=cache_scope_key or "", parser_version=parser_version,
@@ -2021,17 +2055,10 @@ def _build_packet(runtime: object, root: Path, messages: Sequence[Mapping[str, o
         files_skipped = len(structure.skipped_paths)
         calls, unresolved = _project_call_facts(structure, shown)
     else:
-        parsed, parse_partial, files_skipped = _source_paths(index)
-        trees: dict[str, ast.Module] = {}
-        definitions: dict[str, dict[str, _Definition]] = {}
-        for path, (_, _, source) in parsed.items():
-            try:
-                tree = ast.parse(source, filename=path)
-            except (SyntaxError, ValueError):
-                parse_loop_partial = True
-                continue
-            trees[path] = tree
-            definitions[path] = _definitions(tree, path)
+        parsed, trees, partial_paths, skipped_paths = _source_paths(index)
+        parse_partial = len(partial_paths)
+        files_skipped = len(skipped_paths)
+        definitions = {path: _definitions(tree, path) for path, tree in trees.items()}
 
         calls = []
         unresolved = 0
@@ -2056,7 +2083,6 @@ def _build_packet(runtime: object, root: Path, messages: Sequence[Mapping[str, o
     )
     scan_truncated = files_omitted > 0
     partial = bool(parse_partial or scan_truncated or priority_files_omitted or unindexed_files)
-    partial = bool(partial or parse_loop_partial)
 
     grouped: dict[str, list[_Call]] = {}
     for call in calls:
@@ -2213,6 +2239,9 @@ def _build_packet(runtime: object, root: Path, messages: Sequence[Mapping[str, o
 
 def _workspace_mode(runtime: object, frame: object, environ: Mapping[str, str] | None) -> tuple[str, str]:
     kind = _decision_kind(runtime, frame)
+    minimal_launch_pending = getattr(runtime, "minimal_launch_pending", None)
+    if callable(minimal_launch_pending) and minimal_launch_pending():
+        return kind, "off"
     if kind not in {"stage_l", "edit"}:
         return kind, "off"
     source = os.environ if environ is None else environ

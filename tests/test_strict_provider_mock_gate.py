@@ -88,8 +88,9 @@ def test_strict_provider_six_sends_seal_provider_bytes(tmp_path: Path) -> None:
     assert_sealed_wire(run, minimum=6)
 
 
-@pytest.mark.host_sandbox
-def test_strict_provider_forced_subframes_send_multiple_child_requests(tmp_path: Path) -> None:
+def _run_forced_subframes(
+    tmp_path: Path, *, profile_environment: dict[str, str] | None = None,
+) -> None:
     plan: dict[str, object] = {"subframes": [
         {"id": "left", "goal": "Update the left adapter.", "owns": ["left.py"],
          "creates": [], "reads": [], "exports": [], "consumes": [], "requirements": [],
@@ -147,6 +148,7 @@ def test_strict_provider_forced_subframes_send_multiple_child_requests(tmp_path:
     assert installation.returncode == 0, installation.stdout + installation.stderr
     environment = {name: value for name, value in os.environ.items()
                    if not name.startswith(("STATEFRAME_", "REACT_"))}
+    environment.update(profile_environment or {})
     environment.update({
         "PYTHONDONTWRITEBYTECODE": "1", "PYTHONHASHSEED": "0",
         "STATEFRAME_HOME": str(tmp_path / "state-home"),
@@ -183,6 +185,11 @@ def test_strict_provider_forced_subframes_send_multiple_child_requests(tmp_path:
                for row in endpoint.requests), output
     assert process.returncode == 0, output + f"\nMock errors: {endpoint.errors!r}"
     endpoint.assert_consumed()
+
+
+@pytest.mark.host_sandbox
+def test_strict_provider_forced_subframes_send_multiple_child_requests(tmp_path: Path) -> None:
+    _run_forced_subframes(tmp_path)
 
 
 @pytest.mark.host_sandbox

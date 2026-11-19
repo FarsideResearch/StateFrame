@@ -1,5 +1,6 @@
 """Task file limits survive row construction and product snapshot admission."""
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -152,10 +153,17 @@ def test_generic_task_scope_keeps_protected_globs(tmp_path):
         "src/a.py": "A = 1\n", "src/b.py": "B = 2\n",
     }),
 ))
-def test_unresolvable_task_scope_refuses_row(tmp_path, runner_kind, task, files):
+def test_unresolvable_task_scope_degrades_to_unscoped_row(
+        tmp_path, runner_kind, task, files, caplog):
     work = make_work(tmp_path, runner_kind, files)
-    with pytest.raises(TaskRowError, match="task file-scope rule"):
-        build_row(work, task=task, runner_kind=runner_kind, test_command=("true",))
+    caplog.set_level(logging.WARNING, logger="stateframe.task_row")
+    row = build_row(work, task=task, runner_kind=runner_kind, test_command=("true",))
+    assert row["scoped_edits"] is False
+    assert row["scope_source"] == "whole_repo"
+    assert "task_file_scope" not in row
+    events = [record for record in caplog.records
+              if getattr(record, "event_type", None) == "task_file_scope_degraded"]
+    assert len(events) == 1
 
 
 @pytest.mark.parametrize("task", (
@@ -163,10 +171,16 @@ def test_unresolvable_task_scope_refuses_row(tmp_path, runner_kind, task, files)
     "Do not modify config.py. Change no other file.",
     "Read Dockerfile. Change no other file.",
 ))
-def test_pathless_no_other_rule_refuses_unscoped_row(tmp_path, runner_kind, task):
+def test_pathless_no_other_rule_degrades_to_unscoped_row(tmp_path, runner_kind, task, caplog):
     work = make_work(tmp_path, runner_kind, {"README.md": "Repository\n", "config.py": "x = 1\n"})
-    with pytest.raises(TaskRowError, match="task file-scope rule"):
-        build_row(work, task=task, runner_kind=runner_kind, test_command=("true",))
+    caplog.set_level(logging.WARNING, logger="stateframe.task_row")
+    row = build_row(work, task=task, runner_kind=runner_kind, test_command=("true",))
+    assert row["scoped_edits"] is False
+    assert row["scope_source"] == "whole_repo"
+    assert "task_file_scope" not in row
+    events = [record for record in caplog.records
+              if getattr(record, "event_type", None) == "task_file_scope_degraded"]
+    assert len(events) == 1
 
 
 @pytest.mark.parametrize("protection", ("task", "off"))

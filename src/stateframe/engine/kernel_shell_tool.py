@@ -4,8 +4,11 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
+import shlex
 import time
 import tempfile
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 
@@ -89,6 +92,69 @@ def bounded_summary(text: str) -> str:
     return data[:4096].decode("utf-8", errors="ignore") + f" [... {len(data) - 4096} bytes omitted ...]"
 
 
+_ENV_IDENTITY_EPOCH_SWITCH = "STATEFRAME_SHELL_ENV_IDENTITY_EPOCH"
+_NON_MUTATING_SHELL_BUILTINS = frozenset({":", "true", "false", "pwd", "echo", "printf"})
+_SHELL_CONTROL_CHARACTERS = frozenset(";&|<>`$\n\r")
+
+
+def _known_non_mutating_command(command: str) -> bool:
+    """Recognize only simple builtins that cannot dispatch or write another command."""
+    if any(character in _SHELL_CONTROL_CHARACTERS for character in command):
+        return False
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return False
+    return not words or words[0] in _NON_MUTATING_SHELL_BUILTINS
+
+
+def _paths_overlap(first: Path, second: Path) -> bool:
+    return first == second or first.is_relative_to(second) or second.is_relative_to(first)
+
+
+def _effects_touch_environment(effects, workspace: Path, environment: RunEnv) -> bool:
+    """Catch recorded writes into the run env, its site packages, or its interpreter paths."""
+    if not effects.applied:
+        return False
+    roots = [environment.root, environment.bin_dir, environment.python]
+    site_manifest = environment.root.parent / "env-sites.json"
+    roots.append(site_manifest)
+    try:
+        roots.extend(environment.root.glob("lib/python*/site-packages"))
+        if site_manifest.is_file():
+            sites = json.loads(site_manifest.read_text())
+            if not isinstance(sites, list) or any(not isinstance(path, str) for path in sites):
+                return True
+            roots.extend(Path(path) for path in sites)
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        # If env identity inputs are unreadable, do not assume they are untouched.
+        return True
+    try:
+        resolved_roots = [root.resolve(strict=False) for root in roots]
+    except (OSError, RuntimeError):
+        return True
+    for effect in effects.applied:
+        path = Path(effect.path)
+        candidate = path if path.is_absolute() else workspace / path
+        try:
+            candidate = candidate.resolve(strict=False)
+        except (OSError, RuntimeError):
+            # A path we cannot resolve is not safe to treat as unrelated to the env.
+            return True
+        if any(_paths_overlap(candidate, root) for root in resolved_roots):
+            return True
+    return False
+
+
+def _command_may_change_environment(command: str, custom, effects,
+                                    workspace: Path, environment: RunEnv) -> bool:
+    # Custom tools, package installs, scripts, and unfamiliar shell expressions are unknown
+    # mutations. Only the simple builtin allowlist can keep the current epoch alive.
+    if custom is not None or not _known_non_mutating_command(command):
+        return True
+    return _effects_touch_environment(effects, workspace, environment)
+
+
 class ShellExecutionFailed(BaseException):
     """Fatal shell boundary failure; ordinary tool-error recovery must not swallow it."""
 
@@ -136,15 +202,73 @@ class ShellTool:
         self.environment = (RunEnv(Path(value["root"]), Path(value["root"]) / "bin/python",
                                    Path(value["root"]) / "bin", value["env"], value["kind"])
                             if value else None)
+        self._environment_identity_epoch_enabled = (
+            os.environ.get(_ENV_IDENTITY_EPOCH_SWITCH, "on").strip().lower() != "off")
+        self._environment_identity_epoch = 0
+        self._environment_identity_cache: tuple[int, str] | None = None
         self.root = None
+        self.workspace_effects = None
+        self._pending_baseline_root: Path | None = None
+        self._load_effect_policy = None
+        self._post_manifest_reuse_enabled = True
+        self._post_manifest: Manifest | None = None
+        self._post_manifest_key: tuple[str, int, int, str | None] | None = None
         # STATEFRAME_SHELL_STATE: cwd and exported variables carried between foreground calls.
         import kernel_shell_state
         self.shell_state = kernel_shell_state.ShellState() if kernel_shell_state.enabled() else None
+
+    def _clear_post_manifest(self) -> None:
+        self._post_manifest = None
+        self._post_manifest_key = None
+
+    def invalidate_manifest_cache(self) -> None:
+        """Discard a reusable shell baseline before a native workspace write."""
+        self._clear_post_manifest()
+
+    def _manifest_scan_key(self) -> tuple[str, int, int, str | None]:
+        if self.root is None:
+            raise EffectError("shell workspace is not bound")
+        info = self.root.stat(follow_symlinks=False)
+        excluded = str(self.environment.root) if self.environment is not None else None
+        return str(self.root), info.st_dev, info.st_ino, excluded
+
+    def _cached_post_manifest(self, capability) -> Manifest | None:
+        if (self._post_manifest is None or self.workspace_effects is not None
+                or not self._post_manifest_reuse_enabled or not capability.sandboxed):
+            return None
+        if replay_mode_active():
+            self._clear_post_manifest()
+            return None
+        try:
+            current_key = self._manifest_scan_key()
+        except OSError:
+            self._clear_post_manifest()
+            return None
+        if current_key != self._post_manifest_key:
+            self._clear_post_manifest()
+            return None
+        return self._post_manifest
+
+    def _remember_post_manifest(self, effects, capability) -> None:
+        # Native edit paths invalidate this cache; only a settled, unreverted state is reusable.
+        if (not self._post_manifest_reuse_enabled or self.workspace_effects is not None
+                or not capability.sandboxed or replay_mode_active()
+                or effects.restored):
+            self._clear_post_manifest()
+            return
+        try:
+            key = self._manifest_scan_key()
+        except OSError:
+            self._clear_post_manifest()
+            return
+        self._post_manifest = effects.manifest
+        self._post_manifest_key = key
 
     def bind(self, workspace: Path, row: dict, baseline_tests: set[str], *, policy=None) -> None:
         if self.root is not None:
             raise RuntimeError("shell workspace is already bound")
         self.root = workspace.resolve(strict=True)
+        self._clear_post_manifest()
         home = self.run_dir / "shell-home"
         home.mkdir(mode=0o700, exist_ok=True)
         env_root = self.environment.root if self.environment else self.run_dir / "shell-cache"
@@ -168,22 +292,88 @@ class ShellTool:
         # The session envelope admits explicitly trusted custom capabilities;
         # each actual command still receives its narrower per-tool capability.
         self.session.configure(replace(self.capability, network=self.settings.shell_network))
-        self.store = ContentStore(self.run_dir)
-        baseline_root = Path(self.spec.get("parent_snapshot", self.root))
-        baseline = scan(baseline_root, exclude=lambda _: False)
-        baseline_store = BaselineStore(self.run_dir / "shell-baseline", baseline)
-        baseline_store.publish(baseline_root)
-        self.baseline, self.baseline_store = baseline, baseline_store
+        from sys import modules
+        module = modules.get("kernel_workspace_consumers")
+        consumers = module.consumers_for(self.root) if module is not None else None
+        if consumers is None:
+            import os
+            if os.environ.get("STATEFRAME_WORKSPACE_OBJECTS") == "on":
+                if not self.capability.sandboxed:
+                    raise EffectError("workspace object storage requires isolated shell execution")
+                from kernel_workspace_consumers import bind_run_consumers
+                consumers = bind_run_consumers(
+                    self.run_dir, self.root, parent=Path(self.spec.get("parent_snapshot", self.root)),
+                    excluded=self.environment.root if self.environment else None,
+                    defer_parent=True,
+                )
+        self.workspace_consumers = consumers
+        self.workspace_effects = consumers.shell if consumers is not None else None
+        if self.workspace_effects is None:
+            self.store = ContentStore(self.run_dir)
+            baseline_root = Path(self.spec.get("parent_snapshot", self.root)).resolve(strict=True)
+            self.baseline = scan(baseline_root, exclude=lambda _: False)
+            self.baseline_store = BaselineStore(self.run_dir / "shell-baseline", self.baseline)
+            if (self.capability.sandboxed and not baseline_root.is_relative_to(self.root)
+                    and not self.root.is_relative_to(baseline_root)):
+                # The parent snapshot is outside the command workspace. Keep its
+                # manifest for policy and capture its bytes before execution.
+                self._pending_baseline_root = baseline_root
+            else:
+                self.baseline_store.publish(baseline_root)
+        elif self.workspace_effects.load_parent is not None and policy is None:
+            paths = self.workspace_effects.parent_paths
+            if paths:
+                # Freeze collection and inode policy while the startup workspace
+                # is still intact. The policy builder only uses the manifest keys.
+                policy = effect_policy_for_run(
+                    self.root, row, baseline_tests, baseline_manifest=dict.fromkeys(paths))
+                policy = replace(policy, baseline_manifest=None)
+            self._load_effect_policy = lambda: self._prepare_effect_policy(row, baseline_tests, policy)
+            return
+        else:
+            self.baseline = self.workspace_effects.baseline()
         self.policy = (replace(policy, baseline_manifest=self.baseline) if policy is not None else
                        effect_policy_for_run(self.root, row, baseline_tests,
                                              baseline_manifest=self.baseline))
 
+    def _prepare_effect_policy(self, row, baseline_tests, policy):
+        self.baseline = self.workspace_effects.baseline()
+        self.policy = (replace(policy, baseline_manifest=self.baseline) if policy is not None else
+                       effect_policy_for_run(self.root, row, baseline_tests,
+                                             baseline_manifest=self.baseline))
+        self._load_effect_policy = None
+
     def _scan(self):
+        if self.workspace_effects is not None:
+            return self.workspace_effects.scan()
         return scan(self.root, exclude=lambda p: bool(self.environment and
                     (self.root / p).is_relative_to(self.environment.root)))
 
     def identity(self) -> str:
-        return env_identity(self.environment) if self.environment else "disabled"
+        if self.environment:
+            if not self._environment_identity_epoch_enabled:
+                return env_identity(self.environment)
+            cached = self._environment_identity_cache
+            if cached is not None and cached[0] == self._environment_identity_epoch:
+                return cached[1]
+            identity = env_identity(self.environment)
+            self._environment_identity_cache = (self._environment_identity_epoch, identity)
+            return identity
+        selected = self.spec.get("capabilities", {}).get("test_python")
+        if selected is None:
+            return "disabled"
+        python = Path(selected)
+        metadata = python.stat()
+        # Replay/cache identity follows selection, not the ephemeral shim path.
+        value = ("selected-python-aliases-1", str(python), str(python.resolve(strict=True)),
+                 metadata.st_dev, metadata.st_ino, metadata.st_size,
+                 metadata.st_mtime_ns, metadata.st_ctime_ns)
+        return hashlib.sha256(json.dumps(value).encode()).hexdigest()
+
+    def invalidate_environment_identity(self) -> None:
+        """Start a fresh identity epoch after an operation that may mutate the run env."""
+        self._environment_identity_epoch += 1
+        self._environment_identity_cache = None
 
     def confirm(self, call_id: str, command: str, intent: dict, *, replay: bool) -> bool:
         tape = tape_for_run()
@@ -216,6 +406,7 @@ class ShellTool:
                 return execute_with_read_audit(self, args, call_id)
             return self._execute(args, call_id)
         except (EffectError, RunEnvError, ToolTapeError, OSError) as error:
+            self._clear_post_manifest()
             raise ShellExecutionFailed(f"{type(error).__name__}: {error}") from error
 
     def _execute(self, args: dict, call_id: str, *, custom=None) -> ShellReply:
@@ -280,8 +471,18 @@ class ShellTool:
                                          output_bytes=4 << 20 if mcp_server is not None else self.capability.limits.output_bytes))
             requires_confirmation = False
             replay_class = custom.replay
-        before = self._scan()
-        self.store.capture(self.root, before)
+        workspace_effects = self.workspace_effects
+        if workspace_effects is None:
+            if self._pending_baseline_root is not None:
+                self.baseline_store.publish(self._pending_baseline_root)
+                self._pending_baseline_root = None
+            before = self._cached_post_manifest(cap)
+            if before is None:
+                before = self._scan()
+                self.store.capture(self.root, before)
+            before_tree = None
+        else:
+            before_tree, before = workspace_effects.before(call_id)
         identity = self.identity()
         # Runtime workspace names vary on replay. Bind the same semantic authority,
         # preserving every external read root and all resource/network settings.
@@ -340,12 +541,16 @@ class ShellTool:
                     tape.complete(call_id=call_id, exit_code=None, observation=observation,
                                   post_manifest_digest=workspace_identity(before), env_identity=identity)
                     return ShellReply(observation)
+            if self._load_effect_policy is not None:
+                self._load_effect_policy()
             stdin = custom.request(tool_args) if custom is not None and mcp_server is not None else None
-            if mcp_server is not None:
-                from kernel_mcp_driver import exchange
-                result = exchange(json.loads(stdin), cap, self.root)
-            else:
-                result = self.session.run(argv, cap, cwd=self.root)
+            execution = workspace_effects.execution(cap) if workspace_effects else nullcontext()
+            with execution:
+                if mcp_server is not None:
+                    from kernel_mcp_driver import exchange
+                    result = exchange(json.loads(stdin), cap, self.root)
+                else:
+                    result = self.session.run(argv, cap, cwd=self.root)
         except (ExecSessionError, OSError) as error:
             if "requires " in str(error) and "no unsandboxed fallback" in str(error):
                 observation = f"REFUSED SANDBOX_UNAVAILABLE: {error}"
@@ -361,6 +566,7 @@ class ShellTool:
                 return ShellReply(observation)
             # A failed supervisor RPC may follow a partial execution. Keep its intent
             # incomplete, stop the run and require reconciliation on resume.
+            self._clear_post_manifest()
             return ShellReply(f"REFUSED CLEANUP_FAILED: {error}", fatal=True)
         with tempfile.NamedTemporaryFile(prefix="shell-output-", suffix=".bin",
                                          dir=self.run_dir, delete=False) as raw:
@@ -370,10 +576,19 @@ class ShellTool:
             "call_id": call_id, "total_bytes": result.output_total_bytes,
             "retained_bytes": len(result.output), "truncated": result.output_truncated}))
         if not result.cleanup.ok:
+            self._clear_post_manifest()
             return ShellReply(f"REFUSED CLEANUP_FAILED: {result.cleanup.detail}", fatal=True)
-        effects = reconcile(self.root, before, self._scan(), self.policy,
-                            self.store, self.baseline_store)
-        after_identity = self.identity()
+        if workspace_effects is None:
+            effects = reconcile(self.root, before, self._scan(), self.policy,
+                                self.store, self.baseline_store)
+        else:
+            effects = workspace_effects.settle(before_tree, before, self.policy, call_id)
+        if (self.environment and _command_may_change_environment(
+                command, custom, effects, self.root, self.environment)):
+            self.invalidate_environment_identity()
+            after_identity = self.identity()
+        else:
+            after_identity = identity
         delivery_bytes = result.output
         mcp_refusal = None
         if custom is not None and mcp_server is not None and not result.timed_out:
@@ -462,6 +677,7 @@ class ShellTool:
             observation = record.observation
         else:
             tape.complete(call_id=call_id, observation=observation, **completion)
+        self._remember_post_manifest(effects, cap)
         return ShellReply(observation, tuple(effects.applied), after_identity != identity,
                           after_identity, exit_code=result.exit_code,
                           memory_limit_mechanism=getattr(
@@ -473,6 +689,12 @@ class ShellTool:
 
 
 _active: ShellTool | None = None
+
+
+def invalidate_active_environment_identity() -> None:
+    """Discard any cached environment identity restored from a checkpoint."""
+    if _active is not None:
+        _active.invalidate_environment_identity()
 
 
 def configure(run_dir: Path, settings: ToolSettings, spec: dict, session: ExecSession) -> None:

@@ -460,16 +460,14 @@ def _write_immutable_snapshot(path: Path, encoded: bytes) -> None:
 
 
 def store_candidate(destination: str | Path, task_id: object,
-                    sources: Mapping[str, str | bytes | None]) -> dict[str, object]:
+                    sources: Mapping[str, str | bytes | None], *,
+                    parent_sources: Mapping[str, str | bytes | None] | None = None) -> dict[str, object]:
     """Persist one immutable source snapshot, keyed by content digest."""
     try:
         normalized_sources = _normalized_sources(sources)
         if not normalized_sources:
             raise DoneCaptureError("candidate snapshot contains no product effect")
         digest = artifact_digest(normalized_sources)
-        artifact = {**_artifact_payload(normalized_sources), "artifact_digest": digest}
-        encoded = (json.dumps(artifact, ensure_ascii=False, sort_keys=True,
-                              separators=(",", ":")) + "\n").encode("utf-8")
         slug = re.sub(
             r"[^A-Za-z0-9_.-]+", "_", str(task_id or "candidate")
         )[:120].strip("._") or "candidate"
@@ -479,7 +477,15 @@ def store_candidate(destination: str | Path, task_id: object,
         if folder.is_symlink() or folder.resolve().parent != destination_root:
             raise DoneCaptureError("candidate snapshot directory escaped its destination")
         path = folder / f"{digest.removeprefix('sha256:')}.json"
-        _write_immutable_snapshot(path, encoded)
+        if os.environ.get("STATEFRAME_WORKSPACE_OBJECTS") == "on":
+            from kernel_workspace_candidate import save_seal
+
+            save_seal(path, digest, normalized_sources, dict(parent_sources or {}))
+        else:
+            artifact = {**_artifact_payload(normalized_sources), "artifact_digest": digest}
+            encoded = (json.dumps(artifact, ensure_ascii=False, sort_keys=True,
+                                  separators=(",", ":")) + "\n").encode("utf-8")
+            _write_immutable_snapshot(path, encoded)
         return {"stored": True, "artifact_digest": digest}
     except DoneCaptureError:
         raise
@@ -572,7 +578,10 @@ def capture_and_seal(runtime: object, *, destination: str | Path, task_id: objec
         if gate is None or gate["decision"] != "continue" or gate["digest"] != candidate:
             raise DoneCaptureError("hook stop gate record does not match this submission")
         hook_wiring.state["gate"] = None
-    stored = store_candidate(destination, task_id, sources)
+    if os.environ.get("STATEFRAME_WORKSPACE_OBJECTS") == "on":
+        stored = store_candidate(destination, task_id, sources, parent_sources=parent_sources)
+    else:
+        stored = store_candidate(destination, task_id, sources)
     label = label_for_candidate(
         str(stored["artifact_digest"]), artifact_digest(parent_sources),
         out_of_scope=out_of_scope,
@@ -804,6 +813,9 @@ def completion_labels(runtime: object, *, certification: object = None) -> dict[
 
 
 def _required_candidate_tools(runtime: object, tools: object) -> tuple[str, ...]:
+    minimal_launch_pending = getattr(runtime, "minimal_launch_pending", None)
+    if callable(minimal_launch_pending) and minimal_launch_pending():
+        return ()
     if not enabled(runtime) or not candidate_exists(runtime):
         return ()
     unit_policy = getattr(runtime, "_unit_policy", None)

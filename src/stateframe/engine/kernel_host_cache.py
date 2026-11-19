@@ -9,6 +9,8 @@ from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from typing import TypeVar
 
+from kernel_history_receipts import ReceiptList, _ReceiptState
+
 
 CACHE_FORMAT = 1
 _T = TypeVar("_T")
@@ -20,6 +22,86 @@ _PER_CACHE_SWITCHES = {
     "TURN_FACTS": "STATEFRAME_HOST_CACHE_TURN_FACTS",
 }
 _TURN_FACTS_V2_SWITCH = "STATEFRAME_HOST_CACHE_TURN_FACTS_V2"
+
+
+class _CompletionReceiptState(_ReceiptState):
+    def __init__(self, values):
+        super().__init__(None, -1, copy.deepcopy(values))
+        self.generation = 0
+        self.fact = None
+
+    def changed(self):
+        self.generation += 1
+        self.fact = None
+
+
+class _CompletionReceipts(ReceiptList):
+    def __reduce_ex__(self, protocol):
+        # Checkpoints restore receipt values without their process-local facts.
+        return completion_receipts, (self._node,)
+
+
+def completion_receipts(values=()):
+    """Create a list whose nested receipt amendments invalidate derived facts."""
+    state = _CompletionReceiptState(list(values))
+    rows = _CompletionReceipts.__new__(_CompletionReceipts)
+    rows._state, rows._node = state, state.value
+    state.views[id(state.value)] = rows
+    rows._sync()
+    return rows
+
+
+def completion_receipt_state(rows):
+    return rows._state if type(rows) is _CompletionReceipts else None
+
+
+def _tracked_receipt_value(value):
+    """Only cache shapes whose mutable descendants use write-through views."""
+    if type(value) in (type(None), bool, int, float, str, bytes):
+        return True
+    if type(value) in (list, tuple):
+        return all(_tracked_receipt_value(item) for item in value)
+    if type(value) is dict:
+        return all(type(key) is str and _tracked_receipt_value(item)
+                   for key, item in value.items())
+    return False
+
+
+@dataclass
+class CompletionEvidence:
+    key: tuple
+    generation: int
+    authority: object
+    mismatch_fields: tuple[str, ...]
+    encoded: tuple[object, bytes, str] | None = None
+
+    def completion_digest(self, required, verdict, trusted, records):
+        from kernel_verdict import _canonical
+
+        key = (tuple(required), verdict, tuple(trusted))
+        if self.encoded is None or self.encoded[0] != key:
+            payload = _canonical({
+                "required_selectors": required, "verdict": verdict,
+                "trusted_receipts": trusted, "test_receipts": records,
+            })
+            self.encoded = (key, payload, "sha256:" + hashlib.sha256(payload).hexdigest())
+        return self.encoded[2]
+
+
+def memo_completion_evidence(state, key, compute):
+    """Reuse a detached verdict for one verified input and receipt version."""
+    generation = state.generation
+    entry = state.fact
+    if entry is not None and entry.generation == generation and entry.key == key:
+        return entry.authority, entry.mismatch_fields, None, entry
+    authority, mismatches, bypass = compute()
+    if bypass is not None or not _tracked_receipt_value(state.value):
+        return authority, mismatches, bypass, None
+    entry = CompletionEvidence(copy.deepcopy(key), generation, copy.deepcopy(authority), mismatches)
+    if state.generation != generation:
+        return authority, mismatches, bypass, None
+    state.fact = entry
+    return entry.authority, mismatches, None, entry
 
 
 @dataclass(frozen=True)

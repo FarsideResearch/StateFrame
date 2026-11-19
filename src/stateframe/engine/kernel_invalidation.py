@@ -1025,15 +1025,21 @@ class LedgerIndex:
             self._call_graph = graph_or_root
             self._test_dependency_cache.clear()
             return graph_or_root
-        root = str(Path(graph_or_root).resolve())
-        if self._call_graph is not None and self._call_graph_root == root:
+        from mc_repo_intel_vendor.background import enabled as background_enabled
+
+        background = background_enabled()
+        root = str(graph_or_root) if background else str(Path(graph_or_root).resolve())
+        if not background and self._call_graph is not None and self._call_graph_root == root:
             return self._call_graph
         try:
             from mc_repo_intel_vendor.call_graph import build_graph
-            self._call_graph = build_graph(root, use_cache=False, use_memo=True)
-            self._call_graph_root = root
-            self._graph_builds += 1
-            self._test_dependency_cache.clear()
+            graph = build_graph(root, use_cache=False, use_memo=True)
+            if graph is not self._call_graph:
+                self._call_graph = graph
+                self._call_graph_root = root
+                if getattr(graph, "index_status", "ready") != "pending":
+                    self._graph_builds += 1
+                self._test_dependency_cache.clear()
         except (ImportError, OSError, RuntimeError, TypeError, ValueError):
             # A missing optional graph must not erase direct-path invalidation.
             self._call_graph = None
@@ -1043,17 +1049,26 @@ class LedgerIndex:
     def dependencies_for(self, path: str) -> tuple[str, ...]:
         """Return transitive source files called by a test file."""
         normalized = _path(path)
-        if not normalized or not _is_test_path(normalized) or self._call_graph is None:
+        if not normalized or not _is_test_path(normalized):
+            return ()
+        deferred_root = getattr(self, "_deferred_call_graph_root", None)
+        if self._call_graph is None and deferred_root is not None:
+            self.configure_call_graph(deferred_root)
+        if self._call_graph is None:
             return ()
         cached = self._test_dependency_cache.get(normalized)
         if cached is not None:
             return cached
         graph = self._call_graph
         dependencies: set[str] = set()
-        defs = getattr(graph, "defs", {})
-        for symbol, definition in defs.items():
-            if _path(getattr(definition, "file", "")) != normalized:
-                continue
+        scoped = getattr(graph, "symbols_in_file", None)
+        symbols = scoped(normalized) if callable(scoped) else None
+        if symbols is None:
+            symbols = (
+                symbol for symbol, definition in getattr(graph, "defs", {}).items()
+                if _path(getattr(definition, "file", "")) == normalized
+            )
+        for symbol in symbols:
             for ref in graph.find_callees(symbol, transitive=True):
                 file_name = _path(getattr(ref, "file", ""))
                 if file_name and file_name != normalized:
@@ -1116,6 +1131,15 @@ class LedgerIndex:
             derived = self.dependencies_for(node.path)
             if derived:
                 node = replace(node, dependencies=derived)
+        if _is_test_path(node.path) and node.source_kind == "check":
+            checks = getattr(self, "_pending_graph_checks", None)
+            pending = getattr(self._call_graph, "index_status", "ready") != "ready"
+            if pending and not dependencies:
+                if checks is None:
+                    checks = self._pending_graph_checks = {}
+                checks[node.path] = node.node_id
+            elif checks is not None:
+                checks.pop(node.path, None)
         existing = self._observations.get(node.node_id)
         if existing is not None:
             refs = tuple(dict.fromkeys((*existing.evidence_refs, *node.evidence_refs)))
@@ -1496,7 +1520,9 @@ class LedgerIndex:
                 if _same_path(candidate_path, normalized_path)
                 for node_id in node_ids
             )
-        candidate_ids = direct_ids | dependency_ids
+        pending_checks = getattr(self, "_pending_graph_checks", {})
+        pending_ids = set(pending_checks.values()) if cause == "edit_receipt" else set()
+        candidate_ids = direct_ids | dependency_ids | pending_ids
         eligible_observations = [
             self._observations[node_id]
             for node_id in candidate_ids
@@ -1520,6 +1546,8 @@ class LedgerIndex:
                 REASON_SOURCE_EDIT
                 if observation.node_id in direct_ids
                 else REASON_CALL_GRAPH_DEPENDENCY
+                if observation.node_id in dependency_ids
+                else "call_graph_pending_at_check"
             )
             dirty, notice = self._mark_dirty(
                 observation.node_id,
@@ -1530,6 +1558,8 @@ class LedgerIndex:
             )
             if dirty is not None:
                 decisions.append(dirty)
+                if pending_checks.get(observation.path) == observation.node_id:
+                    pending_checks.pop(observation.path, None)
             decisions.append(notice)
         dirty_refs = {
             ref
@@ -1970,8 +2000,16 @@ def runtime_invalidation_index(runtime: object) -> LedgerIndex:
     setattr(runtime, "invalidation_index", index)
     setattr(runtime, "_invalidation_index", index)
     root = getattr(owner, "root", None)
-    if root and getattr(index, "_call_graph", None) is None:
-        index.configure_call_graph(root)
+    if root:
+        # Receipt and recall synchronization can run before any test dependencies
+        # are needed. Keep the root available for the first dependency query.
+        index._deferred_call_graph_root = root
+        if index._call_graph is not None:
+            from mc_repo_intel_vendor.background import enabled as background_enabled
+
+            if background_enabled():
+                # Refresh a graph after a dependency query has requested it.
+                index.configure_call_graph(root)
     if getattr(runtime, "decision_graph", None) is None:
         try:
             from kernel_decision_graph import DecisionGraph
@@ -2057,6 +2095,11 @@ def _refresh_runtime_consumers(runtime: object, index: LedgerIndex) -> None:
 def sync_runtime_invalidation(runtime: object) -> LedgerIndex:
     """Fold all new live receipts into the sole dependency graph."""
     index = runtime_invalidation_index(runtime)
+    minimal_launch_pending = getattr(runtime, "minimal_launch_pending", None)
+    if callable(minimal_launch_pending) and minimal_launch_pending():
+        # Folding preflight test receipts can require the full dependency graph.
+        # Leave them for the first request that can use them to authorize work.
+        return index
     seen: set[str] = set(getattr(runtime, "_invalidation_seen_receipts", set()))
     for record in _runtime_receipts(runtime):
         ident = _receipt_id(record)

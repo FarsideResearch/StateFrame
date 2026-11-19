@@ -299,7 +299,7 @@ def relocation_roots(interpreter: Path, root: Path,
 
 def create_run_env(run_dir: Path, test_python: Path, *, source_repo: Path | None = None,
                    authorized_read_roots: tuple[Path, ...] = (),
-                   allow_source_tree: bool = False) -> RunEnv:
+                   allow_source_tree: bool = False, allow_seed_hardlinks: bool = True) -> RunEnv:
     root = Path(run_dir).absolute() / "env"
     interpreter = Path(test_python).absolute()
     source = interpreter.parent.parent if interpreter.parent.name == "bin" else None
@@ -327,6 +327,7 @@ def create_run_env(run_dir: Path, test_python: Path, *, source_repo: Path | None
 
                 try:
                     seed = clone_seed(source, root, interpreter, source_repo, authorized_read_roots,
+                                      allow_hardlinks=allow_seed_hardlinks,
                                       event=seed_events.append)
                 except OSError as error:
                     if root.exists() or root.is_symlink():

@@ -14,6 +14,8 @@ import os
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from heapq import merge
+from itertools import chain
 from keyword import iskeyword
 from pathlib import PurePosixPath
 from typing import Literal
@@ -37,6 +39,9 @@ _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _PATH = re.compile(r"(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.py")
 _BACKTICK = re.compile(r"`([^`]+)`")
 _WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_SOURCE_WORD = re.compile(r"\w+")
+_BOUNDARY_RUN = re.compile(r"\w+|\W+")
+_NAME_WORD = re.compile(r"[a-z0-9]+")
 _LEGACY_TASK_METADATA_LABEL = re.compile(
     r"(?<![A-Za-z0-9_])(?:#{1,6}\s*)?(Title|Symptom|Focus)\s*:", re.IGNORECASE
 )
@@ -324,6 +329,8 @@ def _manifest_files(manifest: object) -> list[tuple[str, str]]:
 def public_manifest(manifest: object) -> dict[str, object]:
     """Copy only public manifest fields used by the extractor."""
     files = _manifest_files(manifest)
+    if isinstance(manifest, _DeclaredManifest) and manifest.vocabulary.entries == tuple(files):
+        return _DeclaredManifest(manifest.vocabulary)
     return {"files": [{"path": path, "source": source} for path, source in files]}
 
 
@@ -332,7 +339,12 @@ def public_manifest_for_owner(owner: object) -> dict[str, object]:
     row = getattr(owner, "task_row", {})
     if not isinstance(row, Mapping):
         return {"files": []}
-    return public_manifest({"files": row.get("files", ())})
+    vocabulary = DeclaredVocabulary(_manifest_files(row))
+    try:
+        owner._declared_intake_vocabulary = vocabulary
+    except AttributeError:
+        pass  # Standalone callers may have a slotted or immutable owner.
+    return _DeclaredManifest(vocabulary)
 
 
 def _normalized_brief(text: str) -> str:
@@ -519,67 +531,176 @@ def _clause_occurrences(text: str, clauses: Sequence[str]) -> list[tuple[str, in
     return result
 
 
-def _source_symbols(files: Sequence[tuple[str, str]]) -> dict[str, list[str]]:
-    result: dict[str, list[str]] = {}
-    for _path, source in files:
-        for token in _WORD.findall(source):
-            if iskeyword(token) or len(token) < 2:
-                continue
-            result.setdefault(token.lower(), [])
-            if token not in result[token.lower()]:
-                result[token.lower()].append(token)
-    return result
+def name_words(text: str) -> list[str]:
+    """The front door's word projection for names and referents."""
+    return _NAME_WORD.findall(text.lower())
 
 
-def _clause_symbols(clause: str, files: Sequence[tuple[str, str]]) -> tuple[str, ...]:
-    known = _source_symbols(files)
-    found: list[str] = []
-    for raw in _BACKTICK.findall(clause):
-        for token in _WORD.findall(raw):
-            if token not in found:
-                found.append(token)
-    for token in _WORD.findall(clause):
-        lowered = token.lower()
-        if lowered in _COMMON_WORDS or iskeyword(token):
-            continue
-        if lowered in known:
-            for symbol in known[lowered]:
-                if symbol not in found:
-                    found.append(symbol)
-    return _bounded_list(found)
+class DeclaredVocabulary:
+    """The immutable declaration basis shared by the two intake consumers."""
+
+    def __init__(self, entries: Sequence[tuple[str, str]]) -> None:
+        self.entries = tuple(entries)
+        self._names: dict[str, tuple[str, str]] = {}
+
+    def name(self, path: str) -> tuple[str, str]:
+        """Return the declared basename and stem, preserving their case."""
+        if path not in self._names:
+            parsed = PurePosixPath(path)
+            self._names[path] = parsed.name, parsed.stem
+        return self._names[path]
 
 
-def _clause_files(clause: str, files: Sequence[tuple[str, str]],
-                  symbols: Sequence[str]) -> tuple[str, ...]:
-    lower = clause.lower()
-    selected: list[str] = []
-    explicit = {path.lower() for path in _PATH.findall(clause)}
-    for path, source in files:
-        path_lower = path.lower()
-        stem = PurePosixPath(path_lower).stem
-        aliases = {stem, PurePosixPath(path_lower).name}
-        aliases.update(alias for alias, target in _FILE_ALIASES.items()
-                       if PurePosixPath(path_lower).name == target)
-        if (path_lower in explicit or any(re.search(r"\b" + re.escape(alias) + r"\b", lower)
-                                          for alias in aliases)):
-            selected.append(path)
-            continue
-        if any(re.search(r"\b" + re.escape(symbol.lower()) + r"\b", source.lower())
-               for symbol in symbols):
-            selected.append(path)
-    for alias, target in _FILE_ALIASES.items():
-        if re.search(r"\b" + re.escape(alias) + r"\b", lower):
-            for path, _source in files:
-                if PurePosixPath(path.lower()).name == target and path not in selected:
-                    selected.append(path)
-    for term, targets in _SEMANTIC_FILES.items():
-        if re.search(r"\b" + re.escape(term) + r"\b", lower):
-            for path, _source in files:
-                if PurePosixPath(path.lower()).name in targets and path not in selected:
-                    selected.append(path)
-    if "end-to-end" in lower:
-        selected.extend(path for path, _source in files if path not in selected)
-    return _bounded_list(selected)
+class _DeclaredManifest(dict):
+    def __init__(self, vocabulary: DeclaredVocabulary) -> None:
+        super().__init__(files=[{"path": path, "source": source}
+                                for path, source in vocabulary.entries])
+        self.vocabulary = vocabulary
+
+
+def _manifest_vocabulary(manifest: object) -> DeclaredVocabulary:
+    files = _manifest_files(manifest)
+    if isinstance(manifest, _DeclaredManifest) and manifest.vocabulary.entries == tuple(files):
+        return manifest.vocabulary
+    return DeclaredVocabulary(files)
+
+
+@dataclass(frozen=True, slots=True)
+class _Clause:
+    text: str
+    label: str | None
+    quoted: tuple[str, ...]
+    words: tuple[str, ...]
+
+    @classmethod
+    def read(cls, text: str, label: str | None) -> _Clause:
+        quoted = tuple(chain.from_iterable(_WORD.findall(raw) for raw in _BACKTICK.findall(text)))
+        words = tuple(token.lower() for token in _WORD.findall(text)
+                      if token.lower() not in _COMMON_WORDS and not iskeyword(token))
+        return cls(text, label, quoted, words)
+
+
+# Postings retain the first MAX_MENTIONED distinct display paths. Any later
+# path would already be preceded by a full result from that posting alone.
+_Posting = dict[str, int]
+
+
+def _post(posting: _Posting, path: str, position: int) -> None:
+    if len(posting) < MAX_MENTIONED:
+        posting.setdefault(path, position)
+
+
+class _AliasIndex:
+    """Index aliases by word/nonword runs, including punctuated file names."""
+
+    def __init__(self) -> None:
+        self.children: dict[str, _AliasIndex] = {}
+        self.posting: _Posting = {}
+
+    def add(self, alias: str, path: str, position: int) -> None:
+        node = self
+        for run in _BOUNDARY_RUN.findall(alias):
+            child = node.children.get(run)
+            if child is None:
+                child = node.children[run] = _AliasIndex()
+            node = child
+        _post(node.posting, path, position)
+
+    def matches(self, runs: Sequence[str]) -> list[_Posting]:
+        result = []
+        for start, run in enumerate(runs):
+            if start == 0 and not (run[0].isalnum() or run[0] == "_"):
+                continue  # No leading word boundary.
+            node = self
+            for end in range(start, len(runs)):
+                part = runs[end]
+                node = node.children.get(part)
+                if node is None:
+                    break
+                if node.posting and (end < len(runs) - 1 or part[-1].isalnum() or part[-1] == "_"):
+                    result.append(node.posting)
+        if self.posting and any(run[0].isalnum() or run[0] == "_" for run in runs):
+            result.append(self.posting)  # An empty pathlib stem matches \b\b.
+        return result
+
+
+class _ObligationVocabulary:
+    def __init__(self, files: DeclaredVocabulary, clauses: Sequence[_Clause]) -> None:
+        self.paths: list[str] = []
+        self.aliases = _AliasIndex()
+        self.explicit: dict[str, _Posting] = {}
+        self.basenames: dict[str, _Posting] = {}
+        self.members: dict[str, _Posting] = {}
+        self.variants: dict[str, dict[str, None]] = {}
+        terms = {token for clause in clauses for token in clause.words}
+        membership = terms | {token.lower() for clause in clauses for token in clause.quoted}
+        special: dict[str, set[str]] = {}
+        for alias, name in _FILE_ALIASES.items():
+            special.setdefault(name, set()).add(alias)
+        for position, (path, source) in enumerate(files.entries):
+            basename, stem = files.name(path)
+            has_suffix = stem != basename
+            basename = basename.lower()
+            # Lowercase before removing the suffix, as pathlib did when given
+            # the lowercased path. A Greek sigma can depend on the extension.
+            stem = basename.rpartition(".")[0] if has_suffix else basename
+            display = path.strip()
+            self.paths.append(display)
+            for alias in {stem, basename} | special.get(basename, set()):
+                self.aliases.add(alias, display, position)
+            _post(self.explicit.setdefault(path.lower(), {}), display, position)
+            _post(self.basenames.setdefault(basename, {}), display, position)
+            self._index_source(source, terms, membership, display, position)
+
+    def _index_source(self, source: str, terms: set[str], membership: set[str],
+                      path: str, position: int) -> None:
+        for word in _SOURCE_WORD.findall(source):
+            lowered = word.lower()
+            if word.isascii():
+                tokens = (word.lstrip("0123456789"),)
+                members = (lowered,)
+            else:
+                # Legacy symbol discovery used ASCII identifiers, while file
+                # matching used Unicode word boundaries on the lowercased text.
+                tokens = _WORD.findall(word)
+                members = _SOURCE_WORD.findall(lowered)
+            for token in tokens:
+                if len(token) >= 2 and not iskeyword(token) and token.lower() in terms:
+                    variants = self.variants.setdefault(token.lower(), {})
+                    if len(variants) < MAX_MENTIONED:
+                        variants[token] = None
+            for member in members:
+                if member in membership:
+                    _post(self.members.setdefault(member, {}), path, position)
+
+    def symbols(self, clause: _Clause) -> tuple[str, ...]:
+        found: dict[str, None] = {}
+        variants = chain.from_iterable(self.variants.get(word, ()) for word in clause.words)
+        for symbol in chain(clause.quoted, variants):
+            found[symbol] = None
+            if len(found) >= MAX_MENTIONED:
+                break
+        return tuple(found)
+
+    def files(self, clause: _Clause, symbols: Sequence[str]) -> tuple[str, ...]:
+        lower = clause.text.lower()
+        runs = _BOUNDARY_RUN.findall(lower)
+        hits = self.aliases.matches(runs)
+        hits.extend(self.explicit.get(path.lower(), {}) for path in _PATH.findall(clause.text))
+        hits.extend(self.members.get(symbol.lower(), {}) for symbol in symbols)
+        primary = merge(*(posting.values() for posting in hits))
+        clause_terms = set(runs)
+        semantic = (
+            merge(*(self.basenames.get(target, {}).values() for target in targets))
+            for term, targets in _SEMANTIC_FILES.items() if term in clause_terms
+        )
+        tail = range(len(self.paths)) if "end-to-end" in lower else ()
+        selected: dict[str, None] = {}
+        for position in chain(primary, *semantic, tail):
+            selected[self.paths[position]] = None
+            if len(selected) >= MAX_MENTIONED:
+                break
+        return tuple(selected)
 
 
 def _kind(clause: str) -> ObligationKind:
@@ -608,7 +729,6 @@ def extract_obligations(brief: str, manifest: object = None, *,
         raise TypeError("brief must be a string")
     if not lossless_enabled():
         return _extract_legacy_obligations(brief, manifest)
-    files = _manifest_files(manifest)
     result: list[Obligation] = []
     # TASK.md labels describe the task, but cannot be mapped to a concrete
     # observable by themselves. Preserve them as advisory work IDs so terminal
@@ -648,9 +768,11 @@ def extract_obligations(brief: str, manifest: object = None, *,
         if overflow_found:
             break
         prefix_state.advance(text)
-    for clause, source_label, origin in tagged_candidates:
-        symbols = _clause_symbols(clause, files)
-        mentioned_files = _clause_files(clause, files, symbols)
+    clauses = [_Clause.read(text, label) for text, label, _ in tagged_candidates]
+    vocabulary = _ObligationVocabulary(_manifest_vocabulary(manifest), clauses)
+    for parsed, (clause, source_label, origin) in zip(clauses, tagged_candidates):
+        symbols = vocabulary.symbols(parsed)
+        mentioned_files = vocabulary.files(parsed, symbols)
         result.append(Obligation(
             id=f"obl-{len(result):03d}", text=clause, kind=_kind(clause),
             mentioned_symbols=symbols, mentioned_files=mentioned_files,
@@ -665,7 +787,6 @@ def extract_obligations(brief: str, manifest: object = None, *,
 
 def _extract_legacy_obligations(brief: str, manifest: object = None) -> tuple[Obligation, ...]:
     """Preserve the shipped seed's exact clauses until lossless mode is enabled."""
-    files = _manifest_files(manifest)
     result: list[Obligation] = []
     seen: set[str] = set()
     tagged_candidates: list[tuple[str, str | None]] = []
@@ -678,17 +799,22 @@ def _extract_legacy_obligations(brief: str, manifest: object = None) -> tuple[Ob
                 tagged_candidates.append((clause, label.group(1).lower()))
             continue
         tagged_candidates.extend((clause, None) for clause in extract(line))
+    clauses = []
     for clause, source_label in tagged_candidates:
         if not clause or clause in seen:
             continue
         seen.add(clause)
-        symbols = _clause_symbols(clause, files)
-        mentioned_files = _clause_files(clause, files, symbols)
+        clauses.append(_Clause.read(clause, source_label))
+    if not clauses:
+        return ()
+    vocabulary = _ObligationVocabulary(_manifest_vocabulary(manifest), clauses)
+    for clause in clauses:
+        symbols = vocabulary.symbols(clause)
         result.append(Obligation(
-            id=f"obl-{len(result):03d}", text=clause, kind=_kind(clause),
-            mentioned_symbols=symbols, mentioned_files=mentioned_files,
-            unmappable=source_label is not None,
-            source_label=source_label or "",
+            id=f"obl-{len(result):03d}", text=clause.text, kind=_kind(clause.text),
+            mentioned_symbols=symbols, mentioned_files=vocabulary.files(clause, symbols),
+            unmappable=clause.label is not None,
+            source_label=clause.label or "",
         ))
     return tuple(result)
 

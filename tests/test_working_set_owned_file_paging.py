@@ -17,6 +17,7 @@ from dataclasses import replace
 import pytest
 
 from kernel_working_set_allocator import DEFERRED, FULL
+from kernel_working_set_live import read_admission_floor
 from kernel_working_set_prepare import Blocked, PreparedCandidate, prepare_candidate
 from kernel_working_set_render import _slot_modes, propose_slots
 from kernel_working_set_snapshot import PreparationSnapshot
@@ -128,6 +129,20 @@ def test_oversized_owned_file_ordinal_two_is_feasible_under_cap(unit_active) -> 
     assert isinstance(result, PreparedCandidate), getattr(result, "reason", result)
     assert len(result.wire) <= CAP
     assert b"VALUE_1001" in result.wire  # the currently owed window is delivered
+
+
+def test_read_admission_can_page_overlapping_owned_window(unit_active) -> None:
+    # Before the first read there is no pending edit to protect the owned path.
+    # The fresh read needs a FULL carrier, while the wider closure window can page.
+    standing = _span(1, 400, key="standing")
+    fresh = source("fresh", "".join(LINES[:200]), state="DUE", ordinal=3)
+    snap = replace(_snapshot(standing, cap=30_000), protected_paths=())
+
+    floor = read_admission_floor(snap, [(fresh, None)], require_feasible=True)
+
+    assert floor is not None
+    assert dict(floor.certificate.assignment) == {"standing": "DEFERRED", "fresh": "FULL"}
+    assert fresh.page in [message.get("content") for message in json.loads(floor.wire)["messages"]]
 
 
 def test_whole_file_plan_outside_subframe_still_blocks_as_before() -> None:

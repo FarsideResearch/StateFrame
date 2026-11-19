@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass, field, replace
 import sys
 import time
+from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING
 
-from kernel_job_output import JobOutputCollector
 from kernel_shell_tool import ShellCleanupFailed
+
+if TYPE_CHECKING:
+    from kernel_job_output import JobOutputCollector
 
 
 @dataclass
@@ -63,6 +66,8 @@ class AgentJobs:
         if sum(job.state == "running" for job in self.jobs.values()) >= 4:
             return "REFUSED JOB_LIMIT: at most four running jobs"
         ident = f"j{len(self.jobs) + 1}"
+        from kernel_job_output import JobOutputCollector
+
         cap = self.capability(ident, timeout)
         handle = self.shell.session.spawn(["/bin/sh", "-c", args["command"]], cap, cwd=self.shell.root)
         spool = self.shell.run_dir / "job-output"

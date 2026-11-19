@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import ast
 import json
+import os
+import subprocess
 import sys
 from collections import Counter
 from pathlib import Path
@@ -22,7 +24,8 @@ import kernel_release_switch_registry as registry  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
-def _fresh_cache():
+def _fresh_cache(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
     registry._release_registry.cache_clear()
     yield
     registry._release_registry.cache_clear()
@@ -60,6 +63,73 @@ def test_matching_shipped_registry_is_used_without_parsing(tmp_path, monkeypatch
     _forbid_scan(monkeypatch)
     switches, digest = registry.release_stateframe_switches(root)
     assert switches == frozenset({"STATEFRAME_ALPHA", "STATEFRAME_BETA"}) and digest == scanned["digest"]
+
+
+def _launch_registry(root: Path) -> tuple[int, dict]:
+    probe = """
+import json
+from pathlib import Path
+import sys
+
+sys.path.insert(0, sys.argv[1])
+import kernel_release_switch_registry as registry
+
+scans = 0
+scan = registry._scan
+
+def counted_scan(files):
+    global scans
+    scans += 1
+    return scan(files)
+
+registry._scan = counted_scan
+root = Path(sys.argv[2])
+registry.release_stateframe_switches(root)
+detail = registry.unconsumed_stateframe_switches(
+    {"STATEFRAME_ALPHA": "on", "STATEFRAME_BETA": "on", "STATEFRAME_ZETA": "on"},
+    root=root,
+)
+print(json.dumps([scans, detail]))
+"""
+    scans, detail = json.loads(subprocess.check_output(
+        [sys.executable, "-I", "-c", probe, str(ENGINE), str(root)]))
+    return scans, detail
+
+
+def test_launches_reuse_scan_until_source_bytes_change(tmp_path):
+    root = _toy_root(tmp_path)
+    registry.write_registry(root)
+    with (root / "a.py").open("a") as source:
+        source.write("# Source edit after registry generation\n")
+    first_scan_count, first = _launch_registry(root)
+    assert first_scan_count == 1
+    assert first["unknown_switches"] == ["STATEFRAME_ZETA"]
+    assert first["registry_digest"] == registry.build_registry_document(root)["digest"]
+    assert _launch_registry(root) == (0, first)
+
+    source = root / "b.py"
+    before = source.stat()
+    source.write_text(source.read_text().replace("STATEFRAME_BETA", "STATEFRAME_ZETA"))
+    os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert source.stat().st_size == before.st_size
+
+    changed_scan_count, changed = _launch_registry(root)
+    assert changed_scan_count == 1
+    assert changed["unknown_switches"] == ["STATEFRAME_BETA"]
+    assert changed["registry_digest"] == registry.build_registry_document(root)["digest"]
+    assert _launch_registry(root) == (0, changed)
+
+
+def test_preflight_recovers_from_a_damaged_disk_cache(tmp_path):
+    root = _toy_root(tmp_path)
+    scans, expected = _launch_registry(root)
+    assert scans == 1
+    cache = registry._registry_cache_path(root)
+    document = json.loads(cache.read_text())
+    document["switches"].append("STATEFRAME_ZETA")
+    cache.write_text(json.dumps(document))
+    assert _launch_registry(root) == (1, expected)
+    assert _launch_registry(root) == (0, expected)
 
 
 def test_shipped_registry_fingerprint_matches_the_real_engine_sources():

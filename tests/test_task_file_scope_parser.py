@@ -41,6 +41,21 @@ def test_review_regressions(task, expected):
         assert parse_task_file_scope(task) == expected
 
 
+@pytest.mark.parametrize("task", [
+    "Answer only by creating the file ANSWER.json at the repository root. "
+    "Do not change any other file.",
+    "Answer only by creating the file ANSWER.json. Do not change any other file.",
+    "Create ANSWER.json at the repository root. Do not change any other file.",
+    "Create ANSWER.json. Do not change any other file.",
+    "Write the file ANSWER.json at the repository root. Do not change any other file.",
+    "Write the file ANSWER.json. Do not change any other file.",
+    "Add the file ANSWER.json at the repository root. Do not change any other file.",
+    "Add the file ANSWER.json. Do not change any other file.",
+])
+def test_answer_output_file_wording_parses_in_strict_mode(task):
+    assert parse_task_file_scope(task, strict=True) == ("ANSWER.json",)
+
+
 @pytest.mark.parametrize("verb", ["edit", "change", "modify", "write"])
 def test_only_rule_consumes_affirmative_target_list(verb):
     assert parse_task_file_scope(
@@ -127,10 +142,20 @@ def test_unsupported_target_never_becomes_a_basename(path):
     "src/a.py and src/b.py need repairs. Only edit the file above.",
     "src/a.py needs repairs. No file is named here. Only edit the file above.",
     "Only edit v1.alpha.",
+    "Fix a.py. If needed, only edit b.py.",
 ])
-def test_ambiguous_scope_is_rejected(task):
-    with pytest.raises(TaskFileScopeError):
-        parse_task_file_scope(task)
+def test_ambiguous_scope_degrades_for_row_callers(task, caplog):
+    import logging
+
+    from stateframe.task_row import resolve_edit_scope
+
+    caplog.set_level(logging.WARNING, logger="stateframe.task_row")
+    product = {"a.py": "A = 1\n", "src/a.py": "A = 1\n", "src/b.py": "B = 2\n"}
+    assert resolve_edit_scope(task, product, target=None, edits=[], steering={}) == (
+        product, False, "whole_repo")
+    events = [record for record in caplog.records
+              if getattr(record, "event_type", None) == "task_file_scope_degraded"]
+    assert len(events) == 1
 
 
 @pytest.mark.parametrize("task", [

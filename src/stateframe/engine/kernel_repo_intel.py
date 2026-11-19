@@ -16,6 +16,7 @@ from pathlib import Path
 
 from kernel_repo_catalog import StructuralIndexError, build_structural_index
 from mc_repo_intel_vendor import MC_COMMIT, SOURCE_PATH, VENDOR_SCHEMA
+from mc_repo_intel_vendor import background
 from mc_repo_intel_vendor import repo_map as _repo_map_module
 from mc_repo_intel_vendor.call_graph import build_graph
 from mc_repo_intel_vendor.repo_map import (
@@ -150,6 +151,11 @@ def _graph(runtime: object):
     return root, graph
 
 
+def _pending_query(action: str, symbol: str) -> dict[str, object]:
+    return {"schema": SCHEMA, "status": "PARTIAL", "action": action, "symbol": symbol,
+            "results": [], "pending": ["call_graph"]}
+
+
 def _not_found(action: str, symbol: str, graph: object) -> dict[str, object]:
     suggestions = []
     search_names = getattr(graph, "search_names", None)
@@ -235,7 +241,10 @@ def operation(runtime: object, name: str, arguments: Mapping[str, object] | None
             return json.dumps(result, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         symbol = _bounded_symbol(args.get("symbol"))
         root, graph = _graph(runtime)
-        if name == "where_defined":
+        index_status = getattr(graph, "index_status", "ready")
+        if index_status == "pending":
+            result = _pending_query(name, symbol)
+        elif name == "where_defined":
             candidates = _definition_candidates(graph, symbol)
             result = (_not_found(name, symbol, graph) if not candidates else
                       _ambiguous(name, symbol, candidates, graph) if len(candidates) > 1 else {
@@ -303,6 +312,12 @@ def operation(runtime: object, name: str, arguments: Mapping[str, object] | None
                     "counts": {"callers": len(callers), "callees": len(callees)},
                     "coverage": graph.coverage_summary(),
                 }
+        if index_status == "partial" and name != "where_defined":
+            result["pending"] = ["type_resolution"]
+            if "total_relation" in result:
+                result["total_relation"] = "lower_bound"
+            if result["status"] in {"FOUND", "EMPTY"}:
+                result["status"] = "PARTIAL"
         result["workspace"] = root.name
         result["vendor"] = {"schema": VENDOR_SCHEMA, "mc_commit": MC_COMMIT}
         _emit(runtime, "repo_intel_query", action=name, symbol=symbol,
@@ -342,6 +357,8 @@ def host_where_defined(root: Path, symbol: str) -> dict[str, object]:
         resolved = _public_graph_root(Path(root).resolve())
         name = _bounded_symbol(symbol)
         graph = build_graph(str(resolved), use_cache=True, use_memo=True)
+        if getattr(graph, "index_status", "ready") == "pending":
+            return _pending_query("where_defined", name)
         found = graph.find_definition(name)
     except (OSError, TypeError, ValueError, RuntimeError, RecursionError) as error:
         return {"schema": SCHEMA, "status": "UNAVAILABLE", "action": "where_defined",
@@ -624,6 +641,18 @@ def intake_orientation(root: Path, *, target_path: str = "", symbol: str = "",
     if unit_module is not None and unit_module.active() is not None:
         from kernel_nav_basics import render_intake_orientation
         return render_intake_orientation(root, selectors)
+    if background.enabled():
+        from kernel_nav_basics import render_intake_orientation
+        # Intake starts both indexes. Its first request has a fixed optional
+        # panel even if a warm background result finishes before the first send.
+        map_result = _repo_map_module.background_map(root)
+        build_graph(str(root), use_cache=True, use_memo=True)
+        if map_result is None or journal is not None:
+            return render_intake_orientation(root, selectors, repo_map="[Repository signatures pending.]")
+        repo_map, stats = map_result
+        bounded = bound_repo_map(repo_map, target_path=target_path, symbol=symbol)
+        _journal_repo_map_receipt(stats, map_chars=len(bounded))
+        return render_intake_orientation(root, selectors, repo_map=bounded)
     commit = (get_current_commit_sha(str(root), journal=journal) if journal is not None
               else get_current_commit_sha(str(root)))
     # Intake sees mutable run workspaces and should stay content-deterministic without a cache scan.

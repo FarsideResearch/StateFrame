@@ -28,8 +28,10 @@ from pathlib import Path
 
 try:
     from .engine.kernel_stable_wire_record import validate_reserves_record
+    from .state_dirs import wire_stem
 except ImportError:  # engine child imports this module by path
     from engine.kernel_stable_wire_record import validate_reserves_record
+    from state_dirs import wire_stem
 
 SCHEMA = "stateframe-resume/1"
 _MODEL_FIELD = b'{"model": '
@@ -51,13 +53,6 @@ def _stable_wire_record(stem: Path, send_record: dict | None = None) -> dict[str
         raise TapeError("invalid stable wire reserves tape record") from error
     record = durable if durable is not None else completed
     return {"stable_wire_reserves": record} if record is not None else {}
-
-
-def wire_stem(wire_dir: Path, send: int) -> Path:
-    """The recorder's canonical stem, with four digits as a minimum width."""
-    if type(send) is not int or send < 1:
-        raise ValueError("wire send number must be a positive integer")
-    return wire_dir / f"{send:04d}"
 
 
 def numbered_wire_files(wire_dir: Path, suffix: str) -> list[tuple[int, Path]]:

@@ -37,9 +37,12 @@ def fixture_repo(tmp_path, *, failing=False):
     return repo
 
 
-def environment():
-    return {**os.environ, "PYTHONPATH": os.pathsep.join(
+def environment(*, identity_epoch=None):
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(
         (str(ROOT / "src"), str(ROOT / "src/stateframe/engine")))}
+    if identity_epoch is not None:
+        env["STATEFRAME_SHELL_ENV_IDENTITY_EPOCH"] = identity_epoch
+    return env
 
 
 def command(repo, run, url, flags=()):
@@ -49,17 +52,19 @@ def command(repo, run, url, flags=()):
             "--test-python", sys.executable, "--max-turns", "16", "--quiet", *flags]
 
 
-def run_script(tmp_path, steps, *, failing=False, flags=(), prepare=None):
-    repo = fixture_repo(tmp_path, failing=failing)
+def run_script(tmp_path, steps, *, failing=False, flags=(), prepare=None,
+               repo=None, run_name="run", identity_epoch=None):
+    repo = repo or fixture_repo(tmp_path, failing=failing)
     if prepare:
         prepare(repo)
     script = Script({"model": "scripted", "steps": steps, "tokenize": {"mode": "ok"}})
     server = serve(script)
-    run = tmp_path / "run"
+    run = tmp_path / run_name
     try:
         result = run_monitored(
             command(repo, run, f"http://127.0.0.1:{server.server_port}/v1", flags),
-            env=environment(), capture_output=True, text=True, expected_seconds=scaled(240),
+            env=environment(identity_epoch=identity_epoch), capture_output=True, text=True,
+            expected_seconds=scaled(240),
             run_dir=run,
         )
         summary_path = run / "summary.json"
@@ -93,9 +98,30 @@ def test_readonly_touch_refusal(tmp_path):
     assert not (run / "workspace/x").exists()
 
 
-def test_protected_test_restored(tmp_path):
+def test_first_send_defers_shell_baseline_then_restores_protected_test(tmp_path, monkeypatch):
+    from kernel_workspace_refs import RootKey, open_run_store, read_root, workspace_run_id
+
+    run = tmp_path / "run"
+    first_send_retained = []
+    next_call = Script.next_call
+
+    def baseline_retained():
+        if (run / ".workspace-objects.json").is_file():
+            key = RootKey(workspace_run_id(run), "shell-baseline", "parent")
+            with open_run_store(run).lease() as lease:
+                return read_root(lease, key) is not None
+        return any((run / "shell-baseline").glob("*/objects.pack"))
+
+    def inspect_first_send(script, offered):
+        if script.position == 0:
+            first_send_retained.append(baseline_retained())
+        return next_call(script, offered)
+
+    monkeypatch.setattr(Script, "next_call", inspect_first_send)
     _, requests = run_script(tmp_path, [step("shell", command="printf 'assert False\\n' > tests/test_value.py"),
                                       *finish()], flags=("--protect-tests", "all"))
+    assert first_send_retained == [False]
+    assert baseline_retained()
     assert "restored (not allowed): tests/test_value.py" in requests
 
 
@@ -298,3 +324,59 @@ def test_kill_resume_preserves_repeated_read_request_bytes(tmp_path):
             process.wait(timeout=scaled(20))
         server.shutdown()
         server.server_close()
+
+
+_JOURNAL_VOLATILE_FIELDS = {
+    "event_id", "previous_hash", "record_hash", "run_id", "task_id", "sequence",
+    "timestamp_ns", "tokenize_latency_ms", "tokenize_route", "tokenizer_identity",
+    "result_sha256",
+}
+
+
+def _without_timing(value):
+    if isinstance(value, dict):
+        normalized = {}
+        for key, item in value.items():
+            name = str(key).lower()
+            if (key in _JOURNAL_VOLATILE_FIELDS
+                    or any(part in name for part in ("latency", "duration", "elapsed", "wall_time"))
+                    or name.endswith(("_ns", "_ms", "_seconds"))):
+                continue
+            normalized[key] = _without_timing(item)
+        return normalized
+    if isinstance(value, list):
+        return [_without_timing(item) for item in value]
+    if isinstance(value, str):
+        normalized = re.sub(r"(?<=\| )\d+(?:\.\d+)?s(?= \|)", "<timing>s", value)
+        # Action-ledger hashes cover shell observations, including measured duration text.
+        return re.sub(r'("result_sha256"\s*:\s*")[0-9a-f]{64}(")',
+                      r"\1<timing-derived>\2", normalized)
+    return value
+
+
+def _normalized_requests(run):
+    requests = [read_request_record(run, name) for name in list_request_records(run)]
+    return tuple(json.dumps(_without_timing(json.loads(raw)), sort_keys=True,
+                            separators=(",", ":")).encode() for raw in requests)
+
+
+def _normalized_tool_tape(run):
+    path = run / "tool-tape.jsonl"
+    if not path.is_file():
+        return ()
+    return tuple(json.dumps(_without_timing(json.loads(line)), sort_keys=True,
+                            separators=(",", ":"))
+                 for line in path.read_text().splitlines() if line.strip())
+
+
+def test_environment_identity_epoch_keeps_request_and_journal_bytes(tmp_path):
+    repo = fixture_repo(tmp_path)
+    steps = [step("shell", command="echo hi"), *finish()]
+    enabled, _ = run_script(tmp_path, steps, repo=repo, run_name="epoch-on",
+                            identity_epoch="on")
+    disabled, _ = run_script(tmp_path, steps, repo=repo, run_name="epoch-off",
+                             identity_epoch="off")
+
+    assert _normalized_requests(enabled) == _normalized_requests(disabled)
+    # The tool tape is the durable shell command journal; its outcome must be unchanged too.
+    assert _normalized_tool_tape(enabled) == _normalized_tool_tape(disabled)

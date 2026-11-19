@@ -829,7 +829,8 @@ def _register_checkpoint_signing_key(kernel_checkpoint) -> None:
         kernel_checkpoint.register_signing_key(key)
 
 
-def select_checkpoint(run: Path, tape: list[dict[str, object]], wire_dir: Path) -> dict[str, object] | None:
+def select_checkpoint(run: Path, tape: list[dict[str, object]], wire_dir: Path, *,
+                      atomic_publication: bool = False) -> dict[str, object] | None:
     """The newest intact engine checkpoint whose next request was recorded (so it can be verified).
 
     A checkpoint (``checkpoints/<step>/``, written by the engine at every step boundary by default:
@@ -846,7 +847,20 @@ def select_checkpoint(run: Path, tape: list[dict[str, object]], wire_dir: Path) 
     try:
         if not root.is_dir():
             return None
-        folders = [folder for folder in root.iterdir() if folder.is_dir() and not folder.name.startswith(".")]
+        if atomic_publication:
+            from .engine import kernel_checkpoint
+
+            try:
+                indexed = kernel_checkpoint.publication_candidates(root)
+                if indexed:
+                    kernel_checkpoint.recover_publication_latest(root)
+            except kernel_checkpoint.CheckpointError:
+                return None
+        else:
+            indexed = None
+        folders = indexed if indexed is not None else [
+            folder for folder in root.iterdir() if folder.is_dir() and not folder.name.startswith(".")
+        ]
     except OSError:
         return None
     pending = replay_tape.pending_request(wire_dir)
@@ -869,22 +883,31 @@ def select_checkpoint(run: Path, tape: list[dict[str, object]], wire_dir: Path) 
             candidates.append((seq, meta.get("created") or 0, folder.name, folder, meta))
     for *_, folder, meta in sorted(candidates, key=lambda row: row[:3], reverse=True):  # newest first
         try:
-            if meta.get("schema") != CHECKPOINT_SCHEMA or type(meta.get("sends")) is not int:
+            if type(meta.get("sends")) is not int:
                 continue
-            # Cheap integrity check first so a truncated or altered state reports its checksum
-            # mismatch rather than a later authentication error.
-            state = folder / "state.pkl"
-            kernel_checkpoint.decode_state(state.read_bytes(), meta)
-            # Report an unusable pooled file before authentication so damaged old-layout
-            # checkpoints keep their actionable blob diagnostic. This inspection is read-only.
-            blob_problem = _blob_integrity_problem(folder, meta)
-            if blob_problem:
-                _record_checkpoint_refusal(root, folder, blob_problem)
+            if meta.get("schema") == kernel_checkpoint._OBJECT_CHECKPOINT_SCHEMA:
+                from .runner import _workspace_engine_imports
+
+                _register_checkpoint_signing_key(kernel_checkpoint)
+                with _workspace_engine_imports():
+                    kernel_checkpoint.validate(folder)
+            elif meta.get("schema") != CHECKPOINT_SCHEMA:
                 continue
-            _register_checkpoint_signing_key(kernel_checkpoint)
-            # Signed state metadata and every referenced journal-cache chunk must verify
-            # before this checkpoint is offered to the restore path.
-            kernel_checkpoint.validate(folder)
+            else:
+                # Cheap integrity check first so a truncated or altered state reports its checksum
+                # mismatch rather than a later authentication error.
+                state = folder / "state.pkl"
+                kernel_checkpoint.decode_state(state.read_bytes(), meta)
+                # Report an unusable pooled file before authentication so damaged old-layout
+                # checkpoints keep their actionable blob diagnostic. This inspection is read-only.
+                blob_problem = _blob_integrity_problem(folder, meta)
+                if blob_problem:
+                    _record_checkpoint_refusal(root, folder, blob_problem)
+                    continue
+                _register_checkpoint_signing_key(kernel_checkpoint)
+                # Signed state metadata and every referenced journal-cache chunk must verify
+                # before this checkpoint is offered to the restore path.
+                kernel_checkpoint.validate(folder)
         except kernel_checkpoint.CheckpointError as error:
             _record_checkpoint_refusal(root, folder, str(error))
             continue
@@ -973,7 +996,29 @@ def archive_attempt(state: dict[str, object], engine_dir: Path, *, use_checkpoin
     """Move the stopped attempt's files to attempts/<n>/ and point the spec at its tape."""
     run: Path = state["run"]  # type: ignore[assignment]
     spec: dict = state["spec"]  # type: ignore[assignment]
+    if (run / "checkpoints" / ".workspace-activation.json").exists():
+        from .engine import kernel_checkpoint
+        from .runner import _workspace_engine_imports
+
+        try:
+            _register_checkpoint_signing_key(kernel_checkpoint)
+            with _workspace_engine_imports():
+                kernel_checkpoint._workspace_checkpoint_codec().recover_activation(run)
+        except (OSError, ValueError, kernel_checkpoint.CheckpointError) as error:
+            raise ResumeRefused("interrupted workspace checkpoint restore could not be recovered") from error
     restart_live = int(state["max_turns"]) != int(spec["max_turns"])
+    atomic_publication = (
+        spec.get("environment", {}).get("STATEFRAME_TURN_ATOMIC_PUBLICATION", "").strip().lower() == "on"
+    )
+    publication_intents = list((run / "worker" / "measurement-runs").glob("*/.journal-publication"))
+    if publication_intents:
+        from .engine.kernel_continuation_journal import JournalError, recover_publication_mirror
+
+        try:
+            for intent in publication_intents:
+                recover_publication_mirror(intent.parent / "events.jsonl")
+        except (JournalError, OSError) as error:
+            raise ResumeRefused("journal publication could not be recovered") from error
     external = _tool_safety(run, spec, replay_external=replay_external) if restart_live else []
     interrupted_archive_tape = _interrupted_archive_tape(run, spec) if not restart_live else None
     number = int(state["attempt"])
@@ -1015,8 +1060,11 @@ def archive_attempt(state: dict[str, object], engine_dir: Path, *, use_checkpoin
         prior_route_changes, skipped_reason = [], None
     # Checkpoint restore is not supported for routed runs: checkpoint selection reads the in-flight
     # request from the archived wire, not from the carried, route-verified check. Routed runs replay.
-    checkpoint = (select_checkpoint(run, tape, source / "wire")
-                  if use_checkpoint and not restart_live and not spec.get("routes") else None)
+    if use_checkpoint and not restart_live and not spec.get("routes"):
+        checkpoint = (select_checkpoint(run, tape, source / "wire", atomic_publication=True)
+                      if atomic_publication else select_checkpoint(run, tape, source / "wire"))
+    else:
+        checkpoint = None
     spec["max_turns"] = int(state["max_turns"])
     spec["environment"]["REACT_STEPS"] = str(spec["max_turns"])
     spec["engine_dir"] = str(engine_dir)  # same release (checked in assess), current install path

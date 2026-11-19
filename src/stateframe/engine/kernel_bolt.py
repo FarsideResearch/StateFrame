@@ -14,6 +14,7 @@ import re
 import sys
 import traceback
 from collections.abc import Callable, Mapping
+from threading import Lock
 
 import kernel_effect_boundary as keb
 import kernel_workspace_truth as _workspace_truth
@@ -32,10 +33,87 @@ POC = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(POC))
 
 
+def indexed_grep_symbols_enabled() -> bool:
+    return (os.environ.get("STATEFRAME_TURN_REPO_INTEL") == "on"
+            and os.environ.get("STATEFRAME_TURN_INDEXED_READS") == "on")
+
+
+class _GrepSymbolView:
+    """Python definition postings owned by one repository-index generation."""
+
+    def __init__(self, definitions: Mapping[str, tuple[Mapping[str, object], ...]],
+                 revision: str | None, current: Callable[[], bool]) -> None:
+        self.definitions = definitions
+        self.revision = revision
+        self.current = current
+        self._answers: dict[str, str] = {}
+        self._lock = Lock()
+
+    def __getstate__(self) -> dict[str, object]:
+        # The worker and its generation do not survive a physical checkpoint.
+        return {}
+
+    def lookup(self, symbol: str) -> str:
+        rows = self.definitions.get(symbol, ())
+        if not rows:
+            return ""
+        if self.revision:
+            return _workspace_truth.render_fact(_workspace_truth.Fact(
+                "index", "indexed", symbol, self.revision, exists=True, definitions=rows,
+            ))
+        return _workspace_truth.render_legacy_symbol_answer(symbol, rows, (), 0, 0, 0)
+
+    def answer(self, symbol: str) -> str:
+        with self._lock:
+            if symbol not in self._answers:
+                self._answers[symbol] = self.lookup(symbol)
+            return self._answers[symbol]
+
+
+def _build_grep_symbol_view(
+        root: pathlib.Path, oracle: bool, publish: Callable[[_GrepSymbolView], None],
+        current: Callable[[], bool],
+) -> None:
+    if oracle:
+        # The live-oracle arm retains its existing ordering and revision format.
+        definitions, _, revision = _workspace_truth._symbol_index(root)
+        if current():
+            publish(_GrepSymbolView(definitions, revision, current))
+        return
+
+    from kernel_turn_contracts import Unavailable
+    from kernel_turn_facts import _SKIPPED, _symbols
+
+    definitions: dict[str, list[Mapping[str, object]]] = {}
+    for directory, subdirs, names in os.walk(root):
+        if not current():
+            return
+        subdirs[:] = [name for name in subdirs if name.casefold() not in _SKIPPED]
+        for name in names:
+            if not current():
+                return
+            if not name.endswith(".py"):
+                continue
+            path = pathlib.Path(directory) / name
+            if path.is_symlink() or not path.is_file():
+                continue
+            relative = path.relative_to(root).as_posix()
+            try:
+                rows = _symbols(os.fsencode(relative), path.read_bytes())
+            except (OSError, Unavailable):
+                continue
+            for symbol, hits in rows.items():
+                definitions.setdefault(symbol, []).extend(hits)
+    if current():
+        publish(_GrepSymbolView(
+            {name: tuple(rows) for name, rows in definitions.items()}, None, current,
+        ))
+
+
 class KernelBolt:
     """All cylinders, per-task. Every method is best-effort and self-reporting."""
 
-    def __init__(self, root: pathlib.Path, fn: str, task_id: str) -> None:
+    def __init__(self, root: pathlib.Path, fn: str, task_id: str, *, defer_symbols: bool = False) -> None:
         self.root = root
         self.fn = str(fn or "")
         self.target_path: str | None = None
@@ -58,12 +136,12 @@ class KernelBolt:
         self._last_relevant_match = True
         self.oracle_preflight: Mapping[str, object] = {}
         self._reg = None
+        if defer_symbols or not indexed_grep_symbols_enabled():
+            self._defer_symbols = True
         self._graph = None
         self._boot()
 
-    # ------------------------------------------------------------------ boot
-    def _boot(self) -> None:
-        """Start every cylinder. A failure to start is RECORDED, never swallowed."""
+    def _build_symbols(self) -> None:
         try:
             from symbol_registry import SymbolRegistry
             self._reg = SymbolRegistry().build(self.root)
@@ -72,6 +150,9 @@ class KernelBolt:
         except Exception as e:                                       # noqa: BLE001
             self.status["symbol"] = f"error: {type(e).__name__}: {e}"
 
+    # ------------------------------------------------------------------ boot
+    def _boot(self) -> None:
+        """Start the components needed at launch and record startup failures."""
         # work_ledger's real API is manifest/plan-hash oriented (canonical_json, plan_hash,
         # sha256_ref) and expects a plan object we do not have in a free-form agent loop. We
         # take its BEHAVIOUR — remember what was done, never redo it blind — with its own
@@ -128,7 +209,42 @@ class KernelBolt:
         return str(getattr(self, "target_path", "") or "<unlocalized>")
 
     # ------------------------------------------------------- cylinder 1+2
-    def observe(self, cmd: str, obs: str, *, step: int | None = None) -> str:
+    def grep_symbol_advisory(self, pattern: str, *, page: bool = False) -> str:
+        """Return supplementary exact-name advice from the shared index, if ready."""
+        token = re.sub(r"^(def|class|async def)\s+", "", pattern).strip()
+        token = re.split(r"[^\w]", token, maxsplit=1)[0]
+        if not token:
+            return ""
+        from mc_repo_intel_vendor import background
+
+        oracle = _workspace_truth.enabled()
+        root = self.root.resolve()
+        # An old background job restored from a checkpoint cannot answer this process.
+        kind = f"grep-definitions-{os.getpid()}-{int(oracle)}"
+
+        def build(publish, current):
+            _build_grep_symbol_view(root, oracle, publish, current)
+
+        view = background.request(root, kind, build)
+        answer = view.answer(token) if isinstance(view, _GrepSymbolView) and view.current() else None
+        if answer is None or not view.current():
+            self._rec("symbol", "pending_dead_grep", token[:160])
+            return "\n[repository symbol lookup] Python definition index pending."
+        answer = view.answer(token)
+        if not answer:
+            return ""
+        self._rec("symbol", "answered_dead_grep", token[:160])
+        if not page:
+            return "\n[kernel] " + answer
+        from kernel_owner_first import coordinates_enabled
+
+        if coordinates_enabled() or oracle:
+            return (f"\n[repository symbol lookup | source=symbol_registry "
+                    f"query_mode=identifier status=EXISTS symbol=`{token}`]\n{answer}")
+        return "\n(no grep matches)\n" + answer
+
+    def observe(self, cmd: str, obs: str, *, step: int | None = None,
+                grep_page: bool = False) -> str:
         """Every command passes through here. Returns a possibly-augmented observation."""
         from kernel_intervention_policy import interventions_enabled
         if not interventions_enabled():
@@ -194,6 +310,13 @@ class KernelBolt:
             # Ablation switch: fresh observations always pass through unchanged.
             return out
 
+        _dead_grep = (getattr(self, "last_grep_hits", None) == 0
+                      or "(no matches)" in obs or "(no grep matches)" in obs)
+        indexed_grep = cmd.startswith("grep") and indexed_grep_symbols_enabled()
+        if indexed_grep and _dead_grep and not grep_page and "scan_complete=false" not in obs:
+            query = re.sub(r"^grep\s+", "", cmd).strip().strip("\"'`")
+            out = obs = obs + self.grep_symbol_advisory(query)
+
         # CYLINDER 2 — negative work, on QUERIES only. Measured live: an agent re-ran an
         # identical grep it had already run three steps earlier. Handing back the previous
         # answer costs nothing and cannot mislead — it is literally what the repo said before.
@@ -220,14 +343,22 @@ class KernelBolt:
             out = (f"[kernel] (repeat #{n}) You already ran `{key}` and got:\n"
                    f"{self.seen[key][:400]}\n{nudge}")
             self._rec("ledger", "repeat_blocked", f"{key} (#{n})")
+            if indexed_grep:
+                return f"{obs}\n[kernel] (repeat #{n}) {nudge}"
             return out
         self.seen[key] = obs
 
         # CYLINDER 1: a dead search can still benefit from a known definition.
         # Registry misses are not absence evidence for attributes, locals or
         # other languages. Append only a positive fact with source locations.
-        _dead_grep = (getattr(self, "last_grep_hits", None) == 0
-                      or "(no matches)" in obs or "(no grep matches)" in obs)
+        if indexed_grep:
+            return obs
+        if cmd.startswith("grep") and _dead_grep and getattr(self, "_defer_symbols", False):
+            self._defer_symbols = False
+            self._build_symbols()
+            status = self.status["symbol"]
+            self._rec("liveness", "ORGAN_ARMED" if self._reg is not None else "ORGAN_DISARMED",
+                      f"organ=bolt.symbol status={status[:160]}")
         if self._reg is not None and cmd.startswith("grep") and _dead_grep:
             tok = re.sub(r"^grep\s+", "", cmd)
             tok = re.sub(r"^(def|class|async def)\s+", "", tok.strip("\"'`"))
@@ -1591,6 +1722,11 @@ class KernelBolt:
                             "vitals EKG observe failed (fail-open)", type(_e).__name__)
         if kind == "edit" and result_class == "APPLIED":
             self.workspace_revision = getattr(self, "workspace_revision", 0) + 1
+        if (result_class == "APPLIED" and indexed_grep_symbols_enabled()
+                and getattr(runtime, "_workspace_view_store", None) is None):
+            from mc_repo_intel_vendor.background import invalidate
+
+            invalidate(self.root.resolve())
         rp = getattr(self, "receipts_path", None)
         if rp:
             try:

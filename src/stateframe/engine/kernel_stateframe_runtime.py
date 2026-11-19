@@ -25,6 +25,7 @@ import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING, TypeVar
 from kernel_obligation_assess import UnavailableEvidence
 from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 
@@ -56,6 +57,11 @@ from kernel_verdict import (
 )
 from kernel_reason_log import bind_journal, configure, emit_reason, flush_summary
 
+if TYPE_CHECKING:
+    from kernel_named_layer_coverage import CoverageProjection
+
+_CoverageResult = TypeVar("_CoverageResult")
+
 
 def _log_render_overflow(view: RenderOverflow, journal: object | None) -> None:
     """Name the frame group that did not fit. One stderr line per group per run."""
@@ -69,6 +75,12 @@ def _log_render_overflow(view: RenderOverflow, journal: object | None) -> None:
 
 
 PUBLIC_TEST_VERDICT_FACT_ENV = "STATEFRAME_PUBLIC_TEST_VERDICT_FACT"
+
+
+def _pinned_completion_enabled() -> bool:
+    return os.environ.get("STATEFRAME_WORKSPACE_OBJECTS", "off").strip().lower() == "on"
+
+
 # Switch registry anchor: kernel_routing_schema.py is not a manifest-declared module, so the
 # registry scan only sees STATEFRAME_ROUTING_SCHEMA through this declared file. The check keeps
 # the two spellings from drifting.
@@ -5129,8 +5141,7 @@ class StateFrameRuntime:
                 or self.stateframe_coverage_reminders_mode == "on"):
             self._initialize_layer_coverage(resume=resume)
         if getattr(self, "stateframe_false_completion_mode", "off") == "on":
-            from kernel_false_completion import initialise as initialise_false_completion
-            initialise_false_completion(self, resume=resume)
+            self._initialize_false_completion(resume=resume)
         from kernel_source_evidence_store import SourceEvidenceStore, source_store_mode
         self.stateframe_source_store_mode = source_store_mode()
         source_owner = str(getattr(owner, "fn", "") or "")
@@ -5773,6 +5784,9 @@ class StateFrameRuntime:
         self._empirical_previous_outgoing: str | None = None
         self._empirical_stall_counter = 0
         self.test_receipts: list[dict] = []
+        if _pinned_completion_enabled():
+            from kernel_host_cache import completion_receipts
+            self.test_receipts = completion_receipts()
         self._evictfix_environment_notice_pending: str | None = None
         self._evictfix_environment_notice_announced = False
         # IDEALPATH is the sole stage-state owner for live repair frames when
@@ -5895,6 +5909,26 @@ class StateFrameRuntime:
         if getattr(self, "stateframe_starter_conflicts_mode", "off") == "on":
             self._initialize_starter_conflicts(resume=resume)
 
+    def __getstate__(self) -> dict[str, object]:
+        state = self.__dict__.copy()
+        if _pinned_completion_enabled():
+            from kernel_host_cache import completion_receipt_state
+            receipts = completion_receipt_state(state.get("test_receipts"))
+            if receipts is not None:
+                state["test_receipts"] = receipts.value
+        state.pop("_completion_binding_generation", None)
+        # A resumed attempt opens its own publication port and workspace fence.
+        state.pop("_live_decision_panels", None)
+        state.pop("_coverage_workspace_projection", None)
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        receipts = state.get("test_receipts")
+        if _pinned_completion_enabled() and type(receipts) is list:
+            from kernel_host_cache import completion_receipts
+            self.test_receipts = completion_receipts(receipts)
+
     @profiled_function_span("binding_computation")
     def binding(self, *, command: object = (),
                 run_write_set: tuple[str, ...] | list[str] = ()) -> dict:
@@ -6009,7 +6043,8 @@ class StateFrameRuntime:
         self._binding_epoch += 1
         self._binding_cache = None
 
-    def _workspace_snapshot(self, root: Path, revision: object) -> dict[str, str | None]:
+    def _workspace_snapshot(self, root: Path, revision: object, *,
+                            cache: bool = True) -> dict[str, str | None]:
         """Share one snapshot across coverage organs for one revision/input pair."""
         from kernel_named_layer_coverage import snapshot_workspace
 
@@ -6017,7 +6052,7 @@ class StateFrameRuntime:
         revision_key = str(revision or "UNKNOWN")
         inputs_digest = digest({"root": str(root)})
         key = (revision_key, inputs_digest)
-        if not self._host_step_budget2_cache_enabled():
+        if not cache or not self._host_step_budget2_cache_enabled():
             return snapshot_workspace(root)
         cached = self._workspace_snapshot_cache.get(key)
         if cached is not None:
@@ -6027,6 +6062,65 @@ class StateFrameRuntime:
             self._workspace_snapshot_cache.clear()
         self._workspace_snapshot_cache[key] = value
         return value
+
+    def _project_coverage(self, root: Path,
+                          compute: Callable[[CoverageProjection | None, bool], _CoverageResult]
+                          ) -> _CoverageResult:
+        """Share coverage paths within a filesystem observation."""
+        from kernel_named_layer_coverage import CoverageFileCache, use_file_cache
+
+        root = root.resolve()
+
+        def legacy(*, cache: bool) -> _CoverageResult:
+            file_cache = getattr(self, "_coverage_file_cache", None) if cache else None
+            if file_cache is None:
+                file_cache = CoverageFileCache()
+                if cache:
+                    self._coverage_file_cache = file_cache
+            with use_file_cache(root, file_cache):
+                return compute(None, cache)
+
+        if os.environ.get("STATEFRAME_WORKSPACE_OBJECTS") != "on":
+            return legacy(cache=True)
+        from kernel_named_layer_coverage import CoverageProjection, use_projection
+        from kernel_workspace_consumers import consumers_for
+        from kernel_workspace_state import WorkspaceUnavailable
+
+        consumers = consumers_for(root)
+        if consumers is None:
+            return legacy(cache=True)
+        boundary = "coverage"
+        state = consumers.state
+        try:
+            with state.pin(boundary) as observation:
+                projection = getattr(self, "_coverage_workspace_projection", None)
+                if projection is None or projection.state is not state:
+                    projection = CoverageProjection(root, state)
+                    self._coverage_workspace_projection = projection
+                if projection.refresh(observation.tree):
+                    with use_projection(projection):
+                        result = compute(projection, True)
+                else:
+                    # Legacy file aliases may resolve through unobserved paths.
+                    result = legacy(cache=False)
+                if not observation.validate_for_use(boundary):
+                    raise WorkspaceUnavailable("coverage workspace observation changed")
+                return result
+        except WorkspaceUnavailable:
+            self._coverage_workspace_projection = None
+        return legacy(cache=False)
+
+    def _coverage_start_snapshot(self, root: Path) -> dict[str, str | None]:
+        from kernel_named_layer_coverage import snapshot_workspace
+
+        root = root.resolve()
+        captured = getattr(self, "_coverage_initial_capture", None)
+        if captured is None or captured[0] != root:
+            captured = (root, self._project_coverage(
+                root, lambda projection, _: (projection.initial_snapshot()
+                                             if projection is not None else snapshot_workspace(root))))
+            self._coverage_initial_capture = captured
+        return captured[1]
 
     def session_message(self, role: str, content: str, *, turn: int | None = None,
                         message_id: str | None = None, ask_id: str | None = None,
@@ -6710,10 +6804,66 @@ class StateFrameRuntime:
             arguments.get("path"), reason="first_admitted_edit",
             allow_missing=kind in {"file_create", "create_file", "write"})
 
+    @staticmethod
+    def _decision_panels_enabled() -> bool:
+        return os.environ.get("STATEFRAME_TURN_PANELS") == "on"
+
+    def _decision_panel_authority(self) -> tuple[object, ...]:
+        return (
+            str(getattr(self.owner, "sha", "") or self.owner.root),
+            getattr(self.journal, "config_hash", None), getattr(self, "context_scope", None),
+            self.journal.manifest.get("environment_revision"),
+            getattr(self.owner, "workspace_revision", None),
+            getattr(self.owner, "current_step", None),
+        )
+
+    def _decision_panel(self, slot: str, revision: str, project: Callable[[], object],
+                        *, context: Mapping[str, object],
+                        check: Callable[[], bool]) -> object:
+        from contextlib import nullcontext
+        from kernel_turn_contracts import Stale
+        from kernel_turn_host import DecisionPanels
+        from kernel_turn_panel_store import canonical, sha256
+
+        journal = self.journal
+        ownership = getattr(journal, "ownership", nullcontext)
+        cursor = getattr(journal, "receipt_cursor", lambda: None)
+        sources = context.get("source_files")
+        receipts = context.get("receipts")
+        expected = self._decision_frame_authority
+        parent = str(expected[0])
+
+        observing = sources.observing() if sources is not None else nullcontext((None, 0, lambda: True))
+        with observing as (live, epoch, source_current), ownership():
+            admitted = sha256(canonical(expected))
+            before = cursor(), getattr(journal, "head", None)
+            if live is None:
+                live = sha256(canonical(sources.observed if sources is not None else {}))
+
+            def verify():
+                return (self._decision_panel_authority() == expected
+                        and (cursor(), getattr(journal, "head", None)) == before
+                        and source_current()
+                        and (receipts is None or (
+                            receipts.rows is getattr(self.owner, "_receipts", ()) and receipts.verify()))
+                        and check())
+
+            if not verify():
+                raise Stale("decision panel authority changed")
+            panel = getattr(self, "_live_decision_panels", None)
+            if panel is None:
+                private = Path(journal.path).parent
+                panel = self._live_decision_panels = DecisionPanels(
+                    private, task=str(self.owner.task_id), parent=parent)
+            return panel.render(slot, revision, live=live, epoch=epoch,
+                                step=int(getattr(self.owner, "current_step", 0) or 0),
+                                authority=admitted, verify=verify, project=project)
+
     def _decision_cache_context(self, source: str | None = None,
                                 path: str | None = None) -> dict[str, object]:
         """Build host-only dependency input; sidecars never supply this context."""
-        if source is None:
+        panels = StateFrameRuntime._decision_panels_enabled()
+        if source is None and not panels:
             source = self._target_source()
         if path is None:
             path = self._target_relative()
@@ -6725,34 +6875,44 @@ class StateFrameRuntime:
             brief = next((row.get(key) for key in (
                 "_bridge_ordinary_brief", "msg", "brief", "symptom")
                 if isinstance(row.get(key), str) and row.get(key).strip()), "")
-        sources: dict[str, str] = {}
-        if path:
-            sources[path] = source
-        root = Path(self.owner.root).resolve()
-        declared = []
-        for key in ("target_files", "files"):
-            value = row.get(key)
-            if isinstance(value, Mapping):
-                declared.extend(value.keys())
-            elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
-                declared.extend(value)
-        for raw_path in declared:
-            candidate = Path(str(raw_path))
-            if not candidate.is_absolute():
-                candidate = root / candidate
-            try:
-                candidate = candidate.resolve()
-                relative = candidate.relative_to(root).as_posix()
-                if candidate.is_file() and relative not in sources:
-                    sources[relative] = candidate.read_text(encoding="utf-8")
-            except (OSError, UnicodeError, ValueError):
-                continue
+        if panels:
+            from kernel_decision_cache import DecisionInputs, DecisionReceipts, DecisionSources
+            inputs = getattr(self, "_decision_inputs", None)
+            if inputs is None:
+                inputs = self._decision_inputs = DecisionInputs()
+            sources = DecisionSources(inputs, Path(self.owner.root).resolve(), row, path or "", source)
+            history = getattr(self.owner, "_receipts", ())
+            receipts = DecisionReceipts(inputs, () if history is None else history)
+        else:
+            sources: dict[str, str] = {}
+            if path:
+                sources[path] = source
+            root = Path(self.owner.root).resolve()
+            declared = []
+            for key in ("target_files", "files"):
+                value = row.get(key)
+                if isinstance(value, Mapping):
+                    declared.extend(value.keys())
+                elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+                    declared.extend(value)
+            for raw_path in declared:
+                candidate = Path(str(raw_path))
+                if not candidate.is_absolute():
+                    candidate = root / candidate
+                try:
+                    candidate = candidate.resolve()
+                    relative = candidate.relative_to(root).as_posix()
+                    if candidate.is_file() and relative not in sources:
+                        sources[relative] = candidate.read_text(encoding="utf-8")
+                except (OSError, UnicodeError, ValueError):
+                    continue
+            receipts = copy.deepcopy(list(getattr(self.owner, "_receipts", ()) or ()))
         context = {
             "brief": str(brief or ""),
             "target_path": path or "",
             "symbol": str(getattr(self.owner, "fn", "") or ""),
             "source_files": sources,
-            "receipts": copy.deepcopy(list(getattr(self.owner, "_receipts", ()) or ())),
+            "receipts": receipts,
         }
         if getattr(self, "conclusion_cache_mode", "off") == "on":
             from kernel_conclusion_cache import premise_context
@@ -7242,12 +7402,24 @@ class StateFrameRuntime:
         if getattr(self, "conclusion_cache_mode", "off") == "on":
             from kernel_conclusion_cache import runtime_receipt_view
             receipt_view = runtime_receipt_view(self)
-        content = decision_cache.render(
-            work_frontier=frontier,
-            active_symbols=(self._target_relative(), getattr(self.owner, "fn", "")),
-            emit=self._decision_cache_emit,
-            **receipt_view,
-        )
+        active_symbols = (self._target_relative(), getattr(self.owner, "fn", ""))
+        if (StateFrameRuntime._decision_panels_enabled()
+                and getattr(self, "_decision_frame_authority", None) is not None):
+            def revision():
+                return decision_cache.panel_revision(work_frontier=frontier,
+                                                     active_symbols=active_symbols,
+                                                     receipt_view=receipt_view)
+
+            key = revision()
+            panel = self._decision_panel(
+                "settled", key, lambda: decision_cache.project_panel(
+                    work_frontier=frontier, active_symbols=active_symbols, **receipt_view),
+                context=self._decision_cache_input_context,
+                check=lambda: revision() == key)
+            content = decision_cache.consume_panel(panel, self._decision_cache_emit)
+        else:
+            content = decision_cache.render(work_frontier=frontier, active_symbols=active_symbols,
+                                            emit=self._decision_cache_emit, **receipt_view)
         if not content:
             return None
         if frame_clarity and frame.get("recent_changes") and "DELTA changes=[]" in content:
@@ -9793,8 +9965,15 @@ class StateFrameRuntime:
     def _completion_basis(self, *, evidence: object = None) -> CompletionBasis:
         current = self.binding()
         verdict = None
+        fact = None
         try:
-            verdict = self.public_test_verdict()
+            read_verdict = self.public_test_verdict
+            if (evidence is None and _pinned_completion_enabled()
+                    and getattr(read_verdict, "__func__", None) is StateFrameRuntime.public_test_verdict):
+                verdict, fact = self._public_test_verdict_fact()
+                current = self.binding()
+            else:
+                verdict = read_verdict()
         except Exception as error:
             from kernel_harden8 import record_failure
             record_failure(
@@ -9806,13 +9985,20 @@ class StateFrameRuntime:
                 denied_actions=("green", "done", "submit"),
             )
         if evidence is None:
-            evidence = {
-                "required_selectors": self.required_public_selectors(),
-                "verdict": verdict.as_dict() if isinstance(verdict, Verdict) else None,
-                "trusted_receipts": [receipt.receipt_id for receipt in getattr(
-                    verdict, "trusted_receipts", ())],
-                "test_receipts": copy.deepcopy(self.test_receipts),
-            }
+            required = self.required_public_selectors()
+            public_verdict = verdict.as_dict() if isinstance(verdict, Verdict) else None
+            trusted = [receipt.receipt_id for receipt in getattr(verdict, "trusted_receipts", ())]
+            if fact is not None:
+                from kernel_host_cache import completion_receipt_state
+                state = completion_receipt_state(self.test_receipts)
+                if state is not None and state.fact is fact and state.generation == fact.generation:
+                    evidence = fact.completion_digest(required, public_verdict, trusted, state.value)
+            if evidence is None:
+                evidence = {
+                    "required_selectors": required, "verdict": public_verdict,
+                    "trusted_receipts": trusted,
+                    "test_receipts": copy.deepcopy(self.test_receipts),
+                }
         return CompletionBasis.capture(
             self.snapshot_id, current,
             contract_version=getattr(self, "completion_contract_version",
@@ -10821,6 +11007,7 @@ class StateFrameRuntime:
             required_public_tests=self.required_public_selectors(),
             unresolved_gating_items=unresolved_gating_items,
             claims=claims if claims is not None else self._host_done_facts_claims,
+            pinned_baseline=_pinned_completion_enabled(),
         )
         self._host_done_facts = facts
         self._host_done_facts_claims = copy.deepcopy(dict(facts.claims))
@@ -12326,6 +12513,9 @@ class StateFrameRuntime:
         return selected
 
     def _base_tool_menu(self, tools: list[dict], messages: Sequence[dict]) -> list[dict]:
+        if StateFrameRuntime.minimal_launch_pending(self):
+            from kernel_turn_launch import navigation_tools
+            return navigation_tools(tools)
         if self._unit_policy is not None:
             selected = [tool for tool in tools
                         if tool.get("function", {}).get("name") in self._unit_policy.allowed_tools]
@@ -12462,6 +12652,10 @@ class StateFrameRuntime:
         from kernel_qgates import project_menu as project_qgate_menu
         selected = project_qgate_menu(selected, tools, self)
         return self._pass_gates_menu(self._idealpath_project_menu(selected))
+
+    def minimal_launch_pending(self) -> bool:
+        return (getattr(self, "_minimal_launch", False)
+                and getattr(self.owner, "current_step", 0) == 0)
 
     def targetless_tool_surface(self, tools: Sequence[Mapping[str, object]]) -> list[dict]:
         """Expose navigation plus explicit localization for arbitrary-row sessions."""
@@ -13833,10 +14027,15 @@ class StateFrameRuntime:
         provider = getattr(self, "verdict_identity_provider", None)
         if provider is None:
             return list(records) if isinstance(records, Sequence) else []
-        from kernel_verdict_identity import IdentityError, assert_current, enabled as identity_enabled
+        from kernel_verdict_identity import enabled as identity_enabled
         if not identity_enabled():
             return list(records) if isinstance(records, Sequence) else []
-        current = provider.current()
+        return StateFrameRuntime._records_for_test_identity(records, provider.current())
+
+    @staticmethod
+    def _records_for_test_identity(records: object, current: object) -> list[object]:
+        from kernel_verdict_identity import IdentityError, assert_current
+
         values = records if isinstance(records, Sequence) else ()
         result: list[object] = []
         for record in values:
@@ -13852,38 +14051,122 @@ class StateFrameRuntime:
         # Audits belong to calls, not cache misses. Only the pure body is memoized.
         return self._public_test_verdict_uncached()
 
-    def _public_test_verdict_body(self, mode, required, records, current_binding):
+    def _public_test_verdict_body(self, mode, required, records, current_binding, *, identity=None):
         """Normalize/evaluate only; no integrity checks or journal effects."""
         from kernel_test_artifact_policy import normalize_public_test_bindings_for_mode
         current_binding, records, mismatch_fields, fallback_reason = (
             normalize_public_test_bindings_for_mode(current_binding, records, mode))
         authority = evaluate_required_tests(
             current_binding, required, records,
-            identity=getattr(self, "verdict_identity_provider", None),
+            identity=identity if identity is not None else getattr(self, "verdict_identity_provider", None),
         )
         return authority, mismatch_fields, fallback_reason
 
     def _public_test_verdict_uncached(self):
+        verdict, fact = self._public_test_verdict_fact()
+        return copy.deepcopy(verdict) if fact is not None else verdict
+
+    def _completion_test_identity(self, provider, root: Path):
+        """Acquire fresh authority and a reuse key when the provider can prove one."""
+        from kernel_verdict_identity import RunIdentity, RunIdentityProvider
+
+        if type(provider) is RunIdentityProvider:
+            from kernel_host_done_facts import pinned_run_identity
+            try:
+                pinned = pinned_run_identity(provider)
+            except (OSError, ValueError):
+                pinned = None
+            if pinned is not None:
+                tree, current = pinned
+                return current, (id(provider), tree, current), tree if provider.root == root else None
+
+        def generation():
+            try:
+                token = getattr(provider, "generation", None)
+                token = token() if callable(token) else token
+            except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+                return None
+            return token if type(token) in (int, str, bytes) else None
+
+        before = generation()
+        current = provider.current()
+        if isinstance(current, Mapping):
+            current = RunIdentity.from_mapping(current)
+        if not isinstance(current, RunIdentity):
+            return None, None, None
+        after = generation()
+        if before is not None and before != after:
+            # The provider changed during observation. Use the live path.
+            return None, None, None
+        return current, (id(provider), before, current) if before is not None else None, None
+
+    def _public_test_verdict_fact(self):
         mode = public_test_verdict_fact_mode()
         required = self.required_public_selectors()
-        records = StateFrameRuntime._current_identity_records(self, self.test_receipts)
-        current_binding = self.binding()
+        provider = getattr(self, "verdict_identity_provider", None)
+        state = None
+        identity = authority_key = generation = None
+        if _pinned_completion_enabled():
+            from kernel_host_cache import completion_receipt_state
+            from kernel_host_done_facts import completion_workspace_generation
+            from kernel_verdict_identity import enabled as identity_enabled
 
-        def compute():
-            return self._public_test_verdict_body(mode, required, records, current_binding)
+            state = completion_receipt_state(self.test_receipts)
+            root = getattr(getattr(self, "owner", None), "root", None)
+            if root is not None:
+                root = Path(root)
+                if provider is not None and identity_enabled():
+                    identity, authority_key, generation = self._completion_test_identity(provider, root)
+                if generation is None and state is not None:
+                    try:
+                        generation = completion_workspace_generation(root)
+                    except (OSError, ValueError):
+                        pass
+                if generation is not None:
+                    previous = getattr(self, "_completion_binding_generation", None)
+                    if previous is not None and previous != generation:
+                        self._invalidate_binding_cache()
+                        store = getattr(self, "_workspace_view_store", None)
+                        if store is not None:
+                            store.note_mutation((), "completion_workspace_changed")
+                    self._completion_binding_generation = generation
 
-        # A live identity provider reads the workspace inside the evaluator.
-        # Preserve those reads until it exposes an immutable generation token.
-        if getattr(self, "verdict_identity_provider", None) is not None:
-            authority, mismatch_fields, fallback_reason = compute()
+        fact = None
+        if state is not None and generation is not None and (provider is None or authority_key is not None):
+            from kernel_host_cache import memo_completion_evidence
+
+            current_binding = self.binding()
+
+            def compute():
+                records = (StateFrameRuntime._records_for_test_identity(self.test_receipts, identity)
+                           if identity is not None else list(self.test_receipts))
+                return self._public_test_verdict_body(
+                    mode, required, records, current_binding, identity=identity)
+
+            key = (os.getpid(), id(self), mode, tuple(required), current_binding,
+                   generation, authority_key, evictfix_enabled())
+            authority, mismatch_fields, fallback_reason, fact = memo_completion_evidence(
+                state, key, compute)
         else:
-            from kernel_host_cache import memo_runtime_body
-            authority, mismatch_fields, fallback_reason = memo_runtime_body(
-                self, "public_test_verdict_body", compute,
-                inputs=lambda: (mode, required, records, current_binding),
-                cacheable=lambda value: value[2] is None,
-                binding=current_binding,
-            )
+            records = (StateFrameRuntime._records_for_test_identity(self.test_receipts, identity)
+                       if identity is not None else
+                       StateFrameRuntime._current_identity_records(self, self.test_receipts))
+            current_binding = self.binding()
+
+            def compute():
+                return self._public_test_verdict_body(
+                    mode, required, records, current_binding, identity=identity)
+
+            if provider is not None:
+                authority, mismatch_fields, fallback_reason = compute()
+            else:
+                from kernel_host_cache import memo_runtime_body
+                authority, mismatch_fields, fallback_reason = memo_runtime_body(
+                    self, "public_test_verdict_body", compute,
+                    inputs=lambda: (mode, required, records, current_binding),
+                    cacheable=lambda value: value[2] is None,
+                    binding=current_binding,
+                )
         integrity_report = self._audit_test_integrity()
         integrity = getattr(self, "test_integrity", None)
         integrity_reasons = []
@@ -13925,7 +14208,7 @@ class StateFrameRuntime:
         if fallback_reason is not None:
             _emit_public_test_verdict_fact_event(
                 self, "public_test_verdict_fact_bypass", reason=fallback_reason)
-        return verdict
+        return verdict, fact
 
     def _audit_test_integrity(self):
         integrity = getattr(self, "test_integrity", None)
@@ -15368,6 +15651,8 @@ class StateFrameRuntime:
         """Publish post-dispatch evidence without replaying action effects."""
         StateFrameRuntime._bind_other_end_contract_receipt(self, receipt)
         self.journal.emit('action_receipt_amended', receipt=receipt)
+        if StateFrameRuntime._decision_panels_enabled():
+            self._conclusion_receipt_view_cache = None
         if self.last_completed_receipt and self.last_completed_receipt.get('receipt_id') == receipt.get('receipt_id'):
             self.last_completed_receipt = copy.deepcopy(receipt)
         if self.step_ledger is not None and self.step_ledger.pending is not None:
@@ -17032,7 +17317,7 @@ class StateFrameRuntime:
 
     def _initialize_layer_coverage(self, *, resume=None) -> None:
         """Capture (or restore) the product start snapshot for named-layer coverage."""
-        from kernel_named_layer_coverage import normalise_snapshot, snapshot_workspace
+        from kernel_named_layer_coverage import normalise_snapshot
 
         restored = None
         records = getattr(self.journal, "records", None)
@@ -17046,7 +17331,7 @@ class StateFrameRuntime:
             self._layer_coverage_start_snapshot = restored
             self._layer_coverage_start_snapshot_digest = digest(restored)
             return
-        self._layer_coverage_start_snapshot = snapshot_workspace(Path(self.owner.root))
+        self._layer_coverage_start_snapshot = self._coverage_start_snapshot(Path(self.owner.root))
         self._layer_coverage_start_snapshot_digest = digest(self._layer_coverage_start_snapshot)
         self.journal.emit(
             "named_layer_coverage_started", producer="kernel_named_layer_coverage",
@@ -17059,21 +17344,30 @@ class StateFrameRuntime:
         if getattr(self, "stateframe_false_completion_mode", "off") != "on":
             return
         from kernel_false_completion import initialise
-        initialise(self, resume=resume)
-        self._false_completion_start_snapshot_digest = digest(
-            getattr(self, "_false_completion_start_snapshot", {}))
+        initialise(self, resume=resume, snapshot=self._coverage_start_snapshot)
+        start = self._false_completion_start_snapshot
+        if start is getattr(self, "_layer_coverage_start_snapshot", None):
+            self._false_completion_start_snapshot_digest = self._layer_coverage_start_snapshot_digest
+        else:
+            self._false_completion_start_snapshot_digest = digest(start)
 
     def false_completion_report(self) -> dict[str, object] | None:
         """Return the current R-007 report using only public task material."""
         if getattr(self, "stateframe_false_completion_mode", "off") != "on":
             return None
+        root = Path(getattr(getattr(self, "owner", None), "root", "."))
+        return self._project_coverage(
+            root, lambda projection, cache: self._build_false_completion_report(
+                root, projection, cache=cache))
+
+    def _build_false_completion_report(self, root: Path, projection: CoverageProjection | None,
+                                       *, cache: bool) -> dict[str, object]:
         from kernel_false_completion import coverage_report
         from kernel_named_layer_coverage import row_public_tests, row_ticket
 
         owner = getattr(self, "owner", None)
         row = getattr(owner, "task_row", {})
         row = row if isinstance(row, Mapping) else {}
-        root = Path(getattr(owner, "root", "."))
         ticket = row_ticket(row, root=root)
         public_tests = row_public_tests(row)
         current_binding = self.binding()
@@ -17090,9 +17384,11 @@ class StateFrameRuntime:
             "start_snapshot": start_snapshot_digest,
             "behavior_witnesses": getattr(self, "behavior_witness_records", ()),
         })
-        cache_key = (str(current_revision or "UNKNOWN"), inputs_digest)
+        cache_key = ((projection.revision if projection is not None
+                      else str(current_revision or "UNKNOWN")), inputs_digest)
         cached = getattr(self, "_false_completion_report_cache", None)
-        if (self._host_step_budget2_cache_enabled()
+        cache = cache and self._host_step_budget2_cache_enabled()
+        if (cache
                 and isinstance(cached, Mapping) and cached.get("key") == cache_key):
             report = cached.get("report")
             if isinstance(report, Mapping):
@@ -17101,10 +17397,11 @@ class StateFrameRuntime:
         report = coverage_report(
             ticket, root,
             start_snapshot=start_snapshot,
-            current_snapshot=self._workspace_snapshot(root, current_revision),
+            current_snapshot=(projection.hashes if projection is not None else
+                              self._workspace_snapshot(root, current_revision, cache=cache)),
             public_tests=public_tests,
             behavior_witnesses=getattr(self, "behavior_witness_records", ()))
-        if self._host_step_budget2_cache_enabled():
+        if cache:
             self._false_completion_report_cache = {
                 "key": cache_key,
                 "report": copy.deepcopy(report),
@@ -17155,12 +17452,18 @@ class StateFrameRuntime:
         reminders_on = getattr(self, "stateframe_coverage_reminders_mode", "off") == "on"
         if not (layer_on or reminders_on):
             return None
+        root = Path(getattr(getattr(self, "owner", None), "root", "."))
+        return self._project_coverage(
+            root, lambda projection, cache: self._build_layer_coverage_report(
+                root, projection, reminders_on=reminders_on, cache=cache))
+
+    def _build_layer_coverage_report(self, root: Path, projection: CoverageProjection | None,
+                                     *, reminders_on: bool, cache: bool) -> dict[str, object]:
         from kernel_named_layer_coverage import build_report, row_public_tests, row_ticket
 
         owner = getattr(self, "owner", None)
         row = getattr(owner, "task_row", {})
         row = row if isinstance(row, Mapping) else {}
-        root = Path(getattr(owner, "root", "."))
         ticket = row_ticket(row, root=root)
         start_snapshot = getattr(self, "_layer_coverage_start_snapshot", {})
         current_binding = self.binding()
@@ -17174,26 +17477,31 @@ class StateFrameRuntime:
         if start_snapshot_digest is None:
             start_snapshot_digest = digest(start_snapshot)
             self._layer_coverage_start_snapshot_digest = start_snapshot_digest
-        inputs_digest = digest({
+        inputs = {
             "ticket": ticket,
             "public_tests": public_tests,
             "start_snapshot": start_snapshot_digest,
             "public_checks": public_checks,
             "public_check_registry": public_registry,
-        })
-        cache_key = (str(current_revision or "UNKNOWN"), inputs_digest)
+        }
+        if projection is not None and reminders_on:
+            inputs["current_binding"] = current_binding
+        cache_key = ((projection.revision if projection is not None
+                      else str(current_revision or "UNKNOWN")), digest(inputs))
         cached = getattr(self, "_layer_coverage_report_cache", None)
-        if (self._host_step_budget2_cache_enabled()
+        cache = cache and self._host_step_budget2_cache_enabled()
+        if (cache
                 and isinstance(cached, Mapping) and cached.get("key") == cache_key):
             report = cached.get("report")
             if isinstance(report, Mapping):
                 self._layer_coverage_report = copy.deepcopy(dict(report))
                 return copy.deepcopy(dict(report))
-        current_snapshot = self._workspace_snapshot(root, current_revision)
+        current_snapshot = (projection.hashes if projection is not None else
+                            self._workspace_snapshot(root, current_revision, cache=cache))
+        report = build_report(
+            ticket, root, start_snapshot=start_snapshot,
+            current_snapshot=current_snapshot, public_tests=public_tests)
         if reminders_on:
-            report = build_report(
-                ticket, root, start_snapshot=start_snapshot,
-                current_snapshot=current_snapshot, public_tests=public_tests)
             from kernel_coverage_reminders import augment_report
             report = augment_report(
                 report, ticket, root, start_snapshot=start_snapshot,
@@ -17201,11 +17509,7 @@ class StateFrameRuntime:
                 public_checks=public_checks,
                 public_check_registry=public_registry,
                 current_binding=current_binding)
-        else:
-            report = build_report(
-                ticket, root, start_snapshot=start_snapshot,
-                current_snapshot=current_snapshot, public_tests=public_tests)
-        if self._host_step_budget2_cache_enabled():
+        if cache:
             self._layer_coverage_report_cache = {
                 "key": cache_key,
                 "report": copy.deepcopy(report),
@@ -18476,7 +18780,23 @@ class StateFrameRuntime:
             self.decision_cache.begin_frame(frame, context=cache_context)
             self._decision_cache_input_context = copy.deepcopy(cache_context)
             self._decision_cache_input_receipt_refs = collect_receipt_refs(frame)
-            frame["decision_cache"] = self.decision_cache.snapshot()
+            if StateFrameRuntime._decision_panels_enabled():
+                cache_context["source_files"].freeze()
+                cache_context["receipts"].freeze()
+                self._decision_frame_authority = self._decision_panel_authority()
+                cache = self.decision_cache
+                decision_revision = cache.frame_revision
+                from kernel_turn_panels import PanelCapacity
+                try:
+                    records = self._decision_panel(
+                        "frame", decision_revision, cache.all_records, context=cache_context,
+                        check=lambda: cache.frame_revision == decision_revision)
+                except PanelCapacity:
+                    frame["decision_cache"] = cache.snapshot()
+                else:
+                    frame["decision_cache"] = cache.snapshot(records=records)
+            else:
+                frame["decision_cache"] = self.decision_cache.snapshot()
         if getattr(self, "stateframe_decision_continuity_mode", "off") != "off":
             self._refresh_decision_continuity_from_organs(frame)
         if getattr(self, "stateframe_host_facts_mode", "off") == "on":
@@ -21447,6 +21767,10 @@ class StateFrameRuntime:
     def _rulebook_entrypoints(self) -> tuple[str, ...]:
         """N14 scope: every touched module plus every declared Python entrypoint."""
         root = Path(getattr(self.owner, "root", Path.cwd())).resolve()
+        from kernel_ship_tree_smoke import python_paths
+        return python_paths(root, self._rulebook_entrypoint_values(root))
+
+    def _rulebook_entrypoint_values(self, root: Path) -> list[object]:
         values: list[object] = list(getattr(self, "_ship_tree_touched", ()))
         target = getattr(self, "target", None)
         if isinstance(target, Path):
@@ -21464,16 +21788,13 @@ class StateFrameRuntime:
                     values.extend(value)
                 elif isinstance(value, str) and value.strip():
                     values.append(value)
-        from kernel_ship_tree_smoke import python_paths
-        return python_paths(root, values)
+        return values
 
-    def ship_tree_smoke(self):
+    def ship_tree_smoke(self, *, allow_pending: bool = False):
         """N14: run or reuse smoke only for the same parent/dependency context."""
-        from kernel_ship_tree_smoke import (TREE_DIGEST_FORMAT, python_paths, run_smoke,
-                                            source_roots, tree_digest)
+        from kernel_ship_tree_smoke import (TREE_DIGEST_FORMAT, projection_enabled, python_paths,
+                                            run_smoke, source_roots, tree_digest)
         root = Path(getattr(self.owner, "root", Path.cwd())).resolve()
-        paths = self._rulebook_entrypoints()
-        checked = python_paths(root, paths)
         row = getattr(self.owner, "task_row", {})
         row = row if isinstance(row, Mapping) else {}
         parent_identity = next(
@@ -21489,6 +21810,36 @@ class StateFrameRuntime:
             dependencies = tuple(str(item) for item in dependencies)
         else:
             dependencies = (str(dependencies),) if dependencies not in (None, "") else ()
+
+        if projection_enabled():
+            from kernel_workspace_consumers import consumers_for
+
+            consumers = consumers_for(root)
+            if consumers is not None:
+                from kernel_ship_tree_smoke import ShipTreeSmokeResult, SmokeScope
+
+                projection = consumers.ship_tree()
+                scope = SmokeScope(
+                    tuple(str(value or "").strip() for value in self._rulebook_entrypoint_values(root)),
+                    dependencies, json.dumps(parent_identity, sort_keys=True, default=str),
+                    not getattr(self, "_ship_tree_touched", None),
+                )
+                if (allow_pending and StateFrameRuntime.minimal_launch_pending(self)
+                        and os.environ.get("STATEFRAME_TURN_GENERATION_OVERLAP") == "on"):
+                    self._ship_tree_smoke_result = None
+                    self._projected_ship_tree_basis = None
+                    projection.offer(scope)
+                    return ShipTreeSmokeResult("PENDING", (), ())
+                # Any stale result must lose authority before the projection
+                # tries to qualify work for the current scope.
+                result = projection.take(scope, self._publish_projected_ship_tree_smoke)
+                if result.status == "ENGINE_ERROR" and not result.digest_format:
+                    self._ship_tree_smoke_result = None
+                    self._projected_ship_tree_basis = None
+                return result
+
+        paths = self._rulebook_entrypoints()
+        checked = python_paths(root, paths)
         dependency_identity = {
             "parent": parent_identity,
             "checked_dependencies": dependencies,
@@ -21556,6 +21907,39 @@ class StateFrameRuntime:
                 environment_identity=environment_identity,
                 resolver_identity=resolver_identity,
             )
+        return self._publish_ship_tree_smoke(result)
+
+    def _publish_projected_ship_tree_smoke(self, basis, raw, reused: bool, may_record_parent: bool):
+        from kernel_ship_tree_smoke import apply_baseline
+
+        cached = getattr(self, "_ship_tree_smoke_result", None)
+        if reused and cached is not None and getattr(self, "_projected_ship_tree_basis", None) == basis:
+            return cached
+        parent = getattr(self, "_ship_tree_parent_tree", None)
+        if parent is None and basis.scope.untouched and may_record_parent:
+            parent = self._ship_tree_parent_tree = basis.tree
+        baseline = getattr(self, "_ship_tree_baseline", None)
+        if baseline is not None and (
+                getattr(self, "_ship_tree_baseline_context", None) != basis.baseline_context
+                or baseline.dependency_identity != raw.dependency_identity
+                or baseline.environment_identity != raw.environment_identity
+                or baseline.resolver_identity != raw.resolver_identity):
+            self.journal.emit(
+                "import_smoke_baseline_stale", producer="kernel_ship_tree_smoke",
+                mechanism_id="N14", reason="parent_or_dependency_environment_changed",
+                dispatch=False,
+            )
+            baseline = None
+        if (baseline is None and basis.scope.untouched and parent == basis.tree
+                and raw.probe_complete):
+            baseline = self._ship_tree_baseline = raw
+            self._ship_tree_baseline_context = basis.baseline_context
+            self.journal.emit("import_smoke_baseline", producer="kernel_ship_tree_smoke",
+                              mechanism_id="N14", result=baseline.as_dict(), dispatch=False)
+        self._projected_ship_tree_basis = basis
+        return self._publish_ship_tree_smoke(apply_baseline(raw, baseline))
+
+    def _publish_ship_tree_smoke(self, result):
         self._ship_tree_smoke_result = result
         self.journal.emit("import_smoke", producer="kernel_ship_tree_smoke",
                           mechanism_id="N14", result=result.as_dict(),
@@ -21676,7 +22060,8 @@ class StateFrameRuntime:
                               mechanism_id="N5", certificate=view.as_dict(), dispatch=False)
         if provider_request and getattr(self, "stateframe_ship_tree_smoke_mode", "off") == "on":
             from kernel_ship_tree_smoke import render_smoke
-            sidecars.append({"role": "user", "content": render_smoke(self.ship_tree_smoke())})
+            sidecars.append({"role": "user", "content": render_smoke(
+                self.ship_tree_smoke(allow_pending=True))})
         if provider_request and (
                 getattr(self, "stateframe_site_facts_mode", "off") == "on"
                 or getattr(self, "stateframe_owner_coords_mode", "off") == "on"):
@@ -21684,8 +22069,10 @@ class StateFrameRuntime:
             # Q2/Q4 expert-gap sidecars (state owners, lifecycle table) + Q3 row-role facts.
             if getattr(self, "stateframe_site_facts_mode", "off") == "on":
                 from kernel_expert_gap_sidecars import blocks as _expert_gap_blocks
+                first_request = getattr(self, "_frame_budget_request_count", 0) == 0
                 sidecars.extend({"role": "user", "content": block}
-                                for block in _expert_gap_blocks(self))
+                                for block in _expert_gap_blocks(
+                                    self, first_request=first_request))
         if provider_request:
             from kernel_unknowns_ledger import mode as _unknowns_ledger_mode
             if _unknowns_ledger_mode() == "on":
@@ -23005,9 +23392,9 @@ class StateFrameRuntime:
                               view=dataclasses.asdict(candidate),
                               applied=(True if f4_on else AXES[self.modes["render_selection"]][2]))
             if isinstance(view, RenderOverflow):
-                _log_render_overflow(view, getattr(self, "journal", None))
                 overflow = {"kind": "RENDER_OVERFLOW", **dataclasses.asdict(view)}
                 from kernel_request_budget import _runtime_enabled as request_budget_enabled
+                from kernel_read_receipts import enabled as working_set_allocator_enabled
                 if (framefit5_on and view.reason == "stateframe_f4_ceiling"
                         and request_budget_enabled(self)):
                     # F4 returns its intact candidate on a capacity-only miss.
@@ -23019,6 +23406,10 @@ class StateFrameRuntime:
                         framefit5_state=_prepared_framefit5_state(self),
                     )
                     frame_composed = True
+                    if not working_set_allocator_enabled():
+                        _log_render_overflow(view, getattr(self, "journal", None))
+                else:
+                    _log_render_overflow(view, getattr(self, "journal", None))
             elif view.applied:
                 prepared = [candidates[item.item_id] for item in view.selected]
                 frame_composed = True

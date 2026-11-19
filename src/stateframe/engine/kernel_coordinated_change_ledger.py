@@ -23,6 +23,7 @@ import re
 import sys
 import tempfile
 import threading
+import unicodedata
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from collections import OrderedDict
 from contextlib import contextmanager
@@ -553,7 +554,8 @@ def _copy_scan_result(result: ScanResult) -> ScanResult:
 
 
 def _scan_repository(root: str | Path, *, overlays: Mapping[str, str] | None = None,
-                     files: tuple[str, ...] | None = None) -> ScanResult:
+                     files: tuple[str, ...] | None = None,
+                     references: re.Pattern[str] | None = None) -> ScanResult:
     root_path = Path(root).resolve()
     if not root_path.is_dir():
         raise CoordinatedChangeError(f"scan root is not a directory: {root}")
@@ -568,14 +570,23 @@ def _scan_repository(root: str | Path, *, overlays: Mapping[str, str] | None = N
     # ``_dedupe_sites`` result, and dict insertion order is unchanged.
     usage_parts: dict[str, list[tuple[UsageSite, ...]]] = {}
     importer_parts: dict[str, list[tuple[UsageSite, ...]]] = {}
+    scanned_files: list[str] = []
     with python_index.open_index(root_path) as index:
         for relative in files:
             source = _source_for(root_path, relative, overlays)
             if source is None:
                 continue
+            is_python = relative.endswith(".py")
+            if references is not None:
+                if not references.search(source):
+                    # Python normalizes identifiers before emitting AST names.
+                    if (not is_python or source.isascii()
+                            or not references.search(unicodedata.normalize("NFKC", source))):
+                        continue
+                scanned_files.append(relative)
             module = _module_for_path(relative)
             try:
-                if relative.endswith(".py"):
+                if is_python:
                     scanned = _parse_cache.derived_source(
                         ("ccl.scan_py", relative, module), source, relative,
                         lambda text, relative=relative, module=module:
@@ -597,8 +608,19 @@ def _scan_repository(root: str | Path, *, overlays: Mapping[str, str] | None = N
         tuple(sorted(definitions, key=lambda item: (item.path, item.line, item.symbol))),
         {key: _concat_sites(parts) for key, parts in importer_parts.items()},
         {key: _concat_sites(parts) for key, parts in usage_parts.items()},
-        files,
+        files if references is None else tuple(scanned_files),
     )
+
+
+def _scan_for_symbols(root: Path, symbols: set[str]) -> ScanResult:
+    if not symbols:
+        return ScanResult((), {}, {}, ())
+    # A direct dependency can be a text reference as well as a Python import.
+    # Locate those references before building any file's detailed facts.
+    alternatives = "|".join(re.escape(symbol) for symbol in sorted(symbols))
+    references = re.compile(rf"(?<!\w)(?:{alternatives})(?!\w)")
+    with _parse_cache.gc_paused():
+        return _scan_repository(root, references=references)
 
 
 _SYMBOL_TOKEN = python_index.IDENTIFIER
@@ -780,14 +802,13 @@ def _plan_pairs(plan: object) -> list[tuple[str, str, str]]:
 
 
 def _rename_pairs(ticket: str, plan: object = None, *,
-                  grounded_symbols: Iterable[str] = ()) -> list[tuple[str, str, str]]:
-    """Return planned pairs and explicit, workspace-grounded ticket renames."""
+                  grounded_symbols: set[str] | None) -> list[tuple[str, str, str]]:
+    """Return planned and explicit ticket renames, with optional definition grounding."""
     rows: list[tuple[str, str, str]] = []
     rows.extend(_plan_pairs(plan))
 
-    # Public prose is not rename authority. Ticket text must quote both symbols
-    # and each symbol must be an actual code definition in this workspace.
-    grounded = {str(symbol) for symbol in grounded_symbols}
+    # Ticket text must quote both symbols. The optional grounding pass checks
+    # that the old name has a definition in the workspace.
     quoted_symbol = rf'''(?:`({_SYMBOL})`|'({_SYMBOL})'|"({_SYMBOL})")'''
     patterns = (
         re.compile(
@@ -805,7 +826,7 @@ def _rename_pairs(ticket: str, plan: object = None, *,
             old = next(value for value in groups[:3] if value is not None)
             new = next(value for value in groups[3:6] if value is not None)
             # Ground the OLD name only: a genuine rename's new name usually does not exist yet.
-            if old in grounded and new != old:
+            if new != old and (grounded_symbols is None or old in grounded_symbols):
                 rows.append((old, new, "ticket_text"))
     # Explicit grouped form ("new names are a, b (old: x, y)") stays supported, under the same grounding.
     grouped = re.search(
@@ -816,7 +837,7 @@ def _rename_pairs(ticket: str, plan: object = None, *,
         old_names = _symbol_list(grouped.group("old"))
         if len(new_names) == len(old_names):
             rows.extend((old, new, "ticket_name_pair") for old, new in zip(old_names, new_names)
-                        if old in grounded and new != old)
+                        if old != new and (grounded_symbols is None or old in grounded_symbols))
 
     result: list[tuple[str, str, str]] = []
     seen: set[tuple[str, str]] = set()
@@ -1060,7 +1081,7 @@ class ChangeItem:
 class CoordinatedChangeLedger:
     """One typed coordination view bridged to v21 host-owned ledgers."""
 
-    def __init__(self, *, root: str | Path, ticket: str, scan: ScanResult,
+    def __init__(self, *, root: str | Path, ticket: str, scan: ScanResult | None,
                  items: Sequence[ChangeItem], revision: str = "",
                  requirements_ledger: Mapping[str, object] | None = None,
                  planned_artifacts: object = None, obligation_ledger: object = None,
@@ -1069,7 +1090,7 @@ class CoordinatedChangeLedger:
         self.task_id = task_id if isinstance(task_id, str) else ""
         self.ticket = ticket
         self.ticket_digest = _sha_text(ticket)
-        self.scan = scan
+        self._scan = scan
         self.items: list[ChangeItem] = list(items)
         self.revision = revision or tree_revision(self.root)
         # Keep the host mapping itself as storage authority.  Deep copies are
@@ -1109,7 +1130,16 @@ class CoordinatedChangeLedger:
                     revision: str = "", task_id: str = "") -> "CoordinatedChangeLedger":
         if not isinstance(ticket, str) or not ticket.strip():
             raise CoordinatedChangeError("ticket text is required")
-        scan = scan_repository(root, task_id=task_id, journal=journal)
+        root_path = Path(root).resolve()
+        if not root_path.is_dir():
+            raise CoordinatedChangeError(f"scan root is not a directory: {root}")
+        candidates = _rename_pairs(ticket, plan, grounded_symbols=None)
+        input_candidates = _input_pairs(ticket, (), compatibility_fixtures)
+        symbols = {symbol for old, new, _ in (*candidates, *input_candidates)
+                   for symbol in (old, new)}
+        if symbols and compatibility_fixtures:
+            symbols.update(filter(None, map(_fixture_symbol, compatibility_fixtures.values())))
+        scan = _scan_for_symbols(root_path, symbols)
         grounded_symbols = {definition.symbol for definition in scan.definitions}
         pairs = _rename_pairs(ticket, plan, grounded_symbols=grounded_symbols)
         input_pairs = _input_pairs(ticket, pairs, compatibility_fixtures)
@@ -1149,14 +1179,21 @@ class CoordinatedChangeLedger:
                     tuple(row for row in sites if row.kind == "import"), sites,
                     related_req, planned_ids, compatibility=check, checkable=bool(alias_path),
                     status_reason="ticket requires old callers/imports to keep working"))
+        input_targets = []
         for old, new, provenance in input_pairs:
             fixture = _fixture_for(compatibility_fixtures,
                                    item_id=f"input:{old}->{new}", old=old, new=new,
                                    kind="input")
             target_symbol = _input_target(scan, pairs, new, fixture, old)
+            input_targets.append((old, new, provenance, fixture, target_symbol))
+        # An inferred target can have a same-name definition in another file
+        # that does not mention either input field. Keep the same path ordering.
+        inferred = {target for _, _, _, _, target in input_targets} - symbols - {""}
+        target_scan = _scan_for_symbols(root_path, inferred)
+        for old, new, provenance, fixture, target_symbol in input_targets:
             baseline_symbol = next((pair_old for pair_old, pair_new, _ in pairs
                                     if pair_new == target_symbol), "")
-            path = _path_for_symbol(scan, target_symbol)
+            path = _path_for_symbol(target_scan if target_symbol in inferred else scan, target_symbol)
             sites = scan.sites_for((old, new))
             related_req = tuple(item for item in req_ids
                                 if _requirement_mentions(requirements_ledger, item, old, new))
@@ -1173,7 +1210,7 @@ class CoordinatedChangeLedger:
                 tuple(row for row in sites if row.kind == "import"), sites,
                 related_req, planned_ids, compatibility=check, checkable=bool(path),
                 status_reason=f"{provenance} requires the legacy input to remain equivalent"))
-        return cls(root=root, ticket=ticket, scan=scan, items=items, revision=revision,
+        return cls(root=root_path, ticket=ticket, scan=None, items=items, revision=revision,
                    requirements_ledger=requirements_ledger,
                    planned_artifacts=planned_artifacts, obligation_ledger=obligation_ledger,
                    journal=journal, task_id=task_id)
@@ -1190,6 +1227,13 @@ class CoordinatedChangeLedger:
     def remaining(self) -> tuple[ChangeItem, ...]:
         return tuple(item for item in self.items if item.status != STATUS_VERIFIED)
 
+    @property
+    def scan(self) -> ScanResult:
+        """Return the complete index when a caller explicitly requests it."""
+        if self._scan is None:
+            self._scan = scan_repository(self.root, task_id=self.task_id, journal=self.journal)
+        return self._scan
+
     def refresh_scan(self, *, revision: str = "") -> None:
         # The in-repository caller passes its just-assigned result.revision here.
         current = revision or tree_revision(self.root)
@@ -1204,8 +1248,7 @@ class CoordinatedChangeLedger:
                     item.edit_progress = EDIT_PENDING
                     item.verification = VERIFY_STALE
             self.revision = current
-        self.scan = scan_repository(
-            self.root, task_id=self.task_id, journal=self.journal)
+        self._scan = None
 
     def record_batch(self, result: "BatchResult") -> None:
         if result.status != "APPLIED":
@@ -2710,6 +2753,9 @@ def _render_scope_projection(ledger: CoordinatedChangeLedger,
 @profiled_function_span("tokenlab_v22_unified_ledger")
 def render_runtime_ledger(runtime: object) -> str | None:
     """Build and render one compact runtime view at the existing sidecar seam."""
+    minimal_launch_pending = getattr(runtime, "minimal_launch_pending", None)
+    if callable(minimal_launch_pending) and minimal_launch_pending():
+        return None
     try:
         from kernel_host_cache import memo_runtime_sidecar_text, sidecar_cache_enabled
     except Exception:

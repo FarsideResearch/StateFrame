@@ -11,9 +11,15 @@ import hashlib
 import json
 import os
 import re
-from collections.abc import Mapping, Sequence
+from collections import OrderedDict
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING, Generic, TypeVar
+
+if TYPE_CHECKING:
+    from kernel_workspace_consumers import WorkspaceConsumers
+    from kernel_workspace_tree import Entry, File
 
 import kernel_workspace_truth as _workspace_truth
 
@@ -25,6 +31,12 @@ DEFAULT_PAGE_SIZE = 12
 DEFAULT_DIRECTORY_PAGE_SIZE = 60
 DEFAULT_LAYOUT_PAGE_SIZE = 80
 MAX_PAGE_SIZE = 500
+_SEARCH_MAX_ENTRIES = 20_000
+_SEARCH_MAX_FILE_BYTES = 16 << 20
+_SEARCH_MAX_BYTES = 256 << 20
+_SEARCH_CACHE_BYTES = 8 << 20
+_SEARCH_RESULT_BYTES = 512 << 10
+_SEARCH_FILE_RESULT_BYTES = 64 << 10
 
 
 @dataclass(frozen=True)
@@ -143,20 +155,23 @@ def _page_rows(rows: Sequence[Mapping[str, object]], *, cursor: object,
     digest = _fingerprint(rows)
     start = _offset(cursor, digest)
     shown = list(rows[start:start + size])
-    next_offset = start + len(shown)
-    remaining = max(0, len(rows) - next_offset)
+    return shown, _page_metadata(digest, start, len(shown), len(rows))
+
+
+def _page_metadata(digest: str, start: int, shown: int, total: int) -> dict[str, object]:
+    next_offset = start + shown
+    remaining = max(0, total - next_offset)
     next_cursor = _cursor(digest, next_offset) if remaining else None
-    metadata = {
+    return {
         "schema": "navigation-page/1",
         "result_set_digest": digest,
-        "shown": len(shown),
-        "total": len(rows),
+        "shown": shown,
+        "total": total,
         "offset": start,
         "remaining": remaining,
         "complete": next_cursor is None,
         "continuation": next_cursor,
     }
-    return shown, metadata
 
 
 def _page_text(kind: str, metadata: Mapping[str, object], rows: Sequence[str],
@@ -179,8 +194,9 @@ def _page_text(kind: str, metadata: Mapping[str, object], rows: Sequence[str],
     else:
         next_line = "0 more; complete=true"
     if metadata.get("scan_complete") is False:
-        next_line += (f"; scan incomplete ({metadata.get('unreadable_files', 0)} unreadable files); "
-                      "do not treat this page as repository-wide absence")
+        coverage = ", coverage limit reached" if metadata.get("coverage_limited") else ""
+        next_line += (f"; scan incomplete ({metadata.get('unreadable_files', 0)} unreadable files"
+                      f"{coverage}); do not treat this page as repository-wide absence")
     lines = [header, next_line]
     if continuation:
         lines.append(continuation)
@@ -188,12 +204,268 @@ def _page_text(kind: str, metadata: Mapping[str, object], rows: Sequence[str],
     return "\n".join(lines) + advice
 
 
+_Key = TypeVar("_Key")
+_Value = TypeVar("_Value")
+
+
+class _SearchLRU(Generic[_Key, _Value]):
+    def __init__(self, limit: int):
+        self.limit = limit
+        self.size = 0
+        self.entries: OrderedDict[_Key, tuple[_Value, int]] = OrderedDict()
+
+    def get(self, key: _Key) -> _Value | None:
+        item = self.entries.get(key)
+        if item is None:
+            return None
+        self.entries.move_to_end(key)
+        return item[0]
+
+    def put(self, key: _Key, value: _Value, weight: int) -> None:
+        if weight > _SEARCH_CACHE_BYTES:
+            return
+        previous = self.entries.pop(key, None)
+        self.size += weight - (previous[1] if previous else 0)
+        self.entries[key] = value, weight
+        while self.size > _SEARCH_CACHE_BYTES or len(self.entries) > self.limit:
+            _, (_, removed) = self.entries.popitem(last=False)
+            self.size -= removed
+
+
+@dataclass(frozen=True, slots=True)
+class _SearchResult:
+    digest: str
+    total: int
+    unreadable: int
+    non_text: int
+    limited: bool
+    rows: tuple[bytes, ...]
+    all_rows: bool
+
+    def page(self, start: int, size: int) -> tuple[list[Mapping[str, object]], dict[str, object]]:
+        selected = self.rows[start:start + size] if self.all_rows else self.rows
+        shown = [json.loads(row) for row in selected]
+        return shown, _page_metadata(self.digest, start, len(shown), self.total)
+
+
+_SearchParameters = tuple[str, str, str | None]
+_FileKey = tuple[str, str, str, bytes]
+_ResultKey = tuple[Path, bytes, _SearchParameters, tuple[int, int] | None]
+
+
+class _SearchCache:
+    def __init__(self):
+        self.files = _SearchLRU[_FileKey, tuple[str, tuple[bytes, ...]]](_SEARCH_MAX_ENTRIES)
+        self.results = _SearchLRU[_ResultKey, _SearchResult](24)
+
+    def __reduce__(self):
+        # A restored owner must derive search evidence under its own live pin.
+        return type(self), ()
+
+
+def _row(path: str, line: int | None = None, text: str = "") -> bytes:
+    row: dict[str, object] = {"path": path}
+    if line is not None:
+        row.update(line=line, text=text)
+    return json.dumps(row, sort_keys=True, ensure_ascii=False,
+                      separators=(",", ":")).encode("utf-8")
+
+
+def _match_rows(path: str, text: str, matcher: re.Pattern[str]) -> Iterator[bytes]:
+    for line_number, line in enumerate(text.splitlines(), 1):
+        if matcher.search(line):
+            yield _row(path, line_number, line)
+
+
+def _matches_file_glob(relative: str, file_glob: str | None) -> bool:
+    return not file_glob or (fnmatch.fnmatch(relative, file_glob)
+                             or fnmatch.fnmatch(relative.rsplit("/", 1)[-1], file_glob))
+
+
+def _matcher(mode: str, query: str) -> re.Pattern[str] | None:
+    if mode == "path":
+        return None
+    try:
+        return re.compile(re.escape(query) if mode == "literal" else query)
+    except re.error as error:
+        raise ValueError(f"invalid regex: {error}") from error
+
+
+class _SearchCoverageLimit(Exception):
+    pass
+
+
+def _pinned_files(prefix: str, entry: Entry) -> Iterator[tuple[str, File]]:
+    from kernel_workspace_tree import Directory, File, children
+
+    if isinstance(entry, File):
+        yield prefix, entry
+        return
+    if not isinstance(entry, Directory):
+        return
+    pending = [(prefix, entry)]
+    remaining = _SEARCH_MAX_ENTRIES
+    while pending:
+        parent, directory = pending.pop()
+        files: list[tuple[str, File]] = []
+        directories: list[tuple[str, Directory]] = []
+        limited = False
+        for name, child in children(directory):
+            if remaining == 0:
+                limited = True
+                break
+            remaining -= 1
+            leaf = os.fsdecode(name)
+            relative = f"{parent}/{leaf}" if parent else leaf
+            if isinstance(child, File):
+                files.append((relative, child))
+            elif isinstance(child, Directory) and leaf not in _SKIP_DIRS:
+                directories.append((relative, child))
+        # Legacy walk uses decoded filename order and files before subdirectories.
+        yield from sorted(files, key=lambda item: item[0])
+        if limited:
+            raise _SearchCoverageLimit
+        pending.extend(sorted(directories, key=lambda item: item[0], reverse=True))
+
+
+def _requested_offset(cursor: object) -> int:
+    if cursor in (None, ""):
+        return 0
+    try:
+        return _offset(cursor, str(cursor).split(":")[1])
+    except (IndexError, ValueError):
+        # Validate against the completed canonical digest before rendering.
+        return 0
+
+
+def _scan_pinned_search(
+    root: Path, scope: str, entry: Entry, parameters: _SearchParameters,
+    matcher: re.Pattern[str] | None, cache: _SearchCache, start: int, size: int,
+) -> _SearchResult:
+    mode, query, file_glob = parameters
+    digest = hashlib.sha256(b"[")
+    total = unreadable = non_text = scanned_bytes = 0
+    limited = False
+    page_rows: list[bytes] = []
+    all_rows: list[bytes] | None = []
+    all_weight = 0
+
+    def append(row: bytes) -> None:
+        nonlocal total, all_rows, all_weight
+        if total:
+            digest.update(b",")
+        digest.update(row)
+        if start <= total < start + size:
+            page_rows.append(row)
+        total += 1
+        if all_rows is not None:
+            all_weight += len(row) + 64
+            if all_weight <= _SEARCH_RESULT_BYTES:
+                all_rows.append(row)
+            else:
+                all_rows = None
+
+    try:
+        for relative, file in _pinned_files(scope, entry):
+            if not _matches_file_glob(relative, file_glob):
+                continue
+            if matcher is None:
+                if query in relative:
+                    append(_row(relative))
+                continue
+            if file.size > _SEARCH_MAX_FILE_BYTES:
+                limited = True
+                continue
+            scanned_bytes += file.size
+            if scanned_bytes > _SEARCH_MAX_BYTES:
+                limited = True
+                break
+            key = (mode, query, relative, file.digest)
+            known = cache.files.get(key)
+            if known is not None:
+                status, hits = known
+                for hit in hits:
+                    append(hit)
+                non_text += status == "non_text"
+                continue
+            text, status = _read_text(root / relative)
+            if text is None:
+                unreadable += status == "unreadable"
+                non_text += status == "non_text"
+                if status == "non_text":
+                    cache.files.put(key, (status, ()), len(relative) * 4 + len(query) * 4 + 512)
+                continue
+            weight = len(relative) * 4 + len(query) * 4 + 512
+            file_rows: list[bytes] = []
+            for hit in _match_rows(relative, text, matcher):
+                append(hit)
+                weight += len(hit) + 64
+                if weight <= _SEARCH_FILE_RESULT_BYTES:
+                    file_rows.append(hit)
+            if weight <= _SEARCH_FILE_RESULT_BYTES:
+                cache.files.put(key, (status, tuple(file_rows)), weight)
+    except _SearchCoverageLimit:
+        limited = True
+    digest.update(b"]")
+    return _SearchResult(
+        digest.hexdigest()[:24], total, unreadable, non_text, limited,
+        tuple(all_rows if all_rows is not None else page_rows), all_rows is not None,
+    )
+
+
+def _pinned_search(
+    consumers: WorkspaceConsumers, root: Path, scope: object,
+    parameters: _SearchParameters, cursor: object, size: int, journal: object,
+) -> _SearchResult | None:
+    from kernel_request_auth_identity import _installation_home
+    from kernel_workspace_state import WorkspaceUnavailable
+    from kernel_workspace_tree import Directory, File, lookup
+
+    boundary = "navigation-search"
+    # Refuse bad scopes before opening a workspace observation.
+    _rooted(root, scope, journal=journal)
+    matcher = _matcher(parameters[0], parameters[1])
+    try:
+        with consumers.state.pin(boundary) as observation:
+            start = _rooted(root, scope, journal=journal)
+            home = _installation_home().resolve()
+            if home.is_relative_to(root) and (home.is_relative_to(start) or start.is_relative_to(home)):
+                # This workspace observation intentionally excludes the installation home.
+                return None
+            parts = start.relative_to(root).parts
+            entry = lookup(observation.tree, tuple(map(os.fsencode, parts)))
+            if not isinstance(entry, (Directory, File)):
+                return None
+
+            # The host binding owns this derived data, outside navigation's checkpoint globals.
+            cache = vars(consumers).get("_navigation_search_cache")
+            if not isinstance(cache, _SearchCache):
+                cache = vars(consumers)["_navigation_search_cache"] = _SearchCache()
+            key = (start, entry.digest, parameters, None)
+            offset = _requested_offset(cursor)
+            page_key = (*key[:3], (offset, size))
+            cached = cache.results.get(key) or cache.results.get(page_key)
+            result = cached
+            if result is None:
+                result = _scan_pinned_search(root, "/".join(parts), entry, parameters,
+                                             matcher, cache, offset, size)
+            if not observation.validate_for_use(boundary):
+                vars(consumers).pop("_navigation_search_cache", None)
+                raise WorkspaceUnavailable("search workspace observation changed")
+            if cached is None and not result.unreadable:
+                weight = sum(len(row) + 64 for row in result.rows) + len(parameters[1]) * 4 + 512
+                cache.results.put(key if result.all_rows else page_key, result, weight)
+            return result
+    except WorkspaceUnavailable:
+        return None
+
+
 def search_repository(root: Path, pattern: str, scope: object = None, *,
                       mode: str | None = None, file_glob: str | None = None,
                       cursor: object = None, requested_page_size: object = None,
                       policy: object | None = None,
                       journal: object = None) -> NavigationPage:
-    """Search all authorized UTF-8 text files or their paths, with a truthful page."""
+    """Search authorized UTF-8 text files or paths with revision-bound pages."""
     normalized_mode = str(mode or "regex").strip().casefold()
     if normalized_mode in {"literal", "text"}:
         normalized_mode = "literal"
@@ -203,28 +475,32 @@ def search_repository(root: Path, pattern: str, scope: object = None, *,
         raise ValueError("grep mode must be regex, literal, or path")
     page = _bounded_int(requested_page_size, DEFAULT_PAGE_SIZE)
     root = root.resolve()
-    files = _walk_files(root, scope, journal=journal)
     query = str(pattern)
-    rows: list[dict[str, object]] = []
-    if normalized_mode == "path":
-        for relative, _path in files:
-            if file_glob and not (fnmatch.fnmatch(relative, file_glob)
-                                  or fnmatch.fnmatch(Path(relative).name, file_glob)):
-                continue
-            if query and query not in relative:
-                continue
-            rows.append({"path": relative})
+    pinned = None
+    if os.environ.get("STATEFRAME_WORKSPACE_OBJECTS") == "on":
+        from kernel_workspace_consumers import consumers_for
+
+        consumers = consumers_for(root)
+        if consumers is not None:
+            pinned = _pinned_search(consumers, root, scope, (normalized_mode, query, file_glob),
+                                    cursor, page, journal)
+
+    if pinned is not None:
+        shown, metadata = pinned.page(_offset(cursor, pinned.digest), page)
+        unreadable_files, non_text_files = pinned.unreadable, pinned.non_text
+        limited = pinned.limited
     else:
-        expression = re.escape(query) if normalized_mode == "literal" else query
-        try:
-            matcher = re.compile(expression)
-        except re.error as error:
-            raise ValueError(f"invalid regex: {error}") from error
-        unreadable_files = 0
-        non_text_files = 0
+        files = _walk_files(root, scope, journal=journal)
+        matcher = _matcher(normalized_mode, query)
+        rows: list[dict[str, object]] = []
+        unreadable_files = non_text_files = 0
+        limited = False
         for relative, path in files:
-            if file_glob and not (fnmatch.fnmatch(relative, file_glob)
-                                  or fnmatch.fnmatch(path.name, file_glob)):
+            if not _matches_file_glob(relative, file_glob):
+                continue
+            if matcher is None:
+                if query in relative:
+                    rows.append({"path": relative})
                 continue
             text, status = _read_text(path)
             if text is None:
@@ -234,8 +510,8 @@ def search_repository(root: Path, pattern: str, scope: object = None, *,
             for line_number, line in enumerate(text.splitlines(), 1):
                 if matcher.search(line):
                     rows.append({"path": relative, "line": line_number, "text": line})
-    shown, metadata = _page_rows(rows, cursor=cursor, size=page)
-    rendered = []
+        shown, metadata = _page_rows(rows, cursor=cursor, size=page)
+
     if normalized_mode == "path":
         rendered = [str(row["path"]) for row in shown]
     else:
@@ -243,11 +519,13 @@ def search_repository(root: Path, pattern: str, scope: object = None, *,
     metadata = {**metadata, "mode": normalized_mode, "pattern": query,
                 "scope": str(scope or "."), "file_glob": file_glob,
                 "page_size": page}
-    if normalized_mode != "path":
-        metadata.update({"scan_complete": unreadable_files == 0,
+    if normalized_mode != "path" or limited:
+        metadata.update({"scan_complete": unreadable_files == 0 and not limited,
                          "unreadable_files": unreadable_files,
                          "non_text_files": non_text_files})
-    if not rows:
+    if limited:
+        metadata["coverage_limited"] = True
+    if not metadata["total"]:
         # Search evidence is limited to this query and scope. In particular,
         # literal alternation-looking text says nothing about either symbol.
         summary = (f"No hits for {normalized_mode} search: pattern={query!r} "

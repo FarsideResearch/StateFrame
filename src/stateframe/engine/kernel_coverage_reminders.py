@@ -77,18 +77,14 @@ def _layers(clause: str) -> tuple[str, ...]:
     return extract_named_layers(clause)
 
 
-def _target_rows(clause: str, root: Path, start: Mapping[str, object],
+def _target_rows(clause: str, layers: Sequence[str], root: Path, lookup: Mapping[str, Path],
+                 start: Mapping[str, object],
                  current: Mapping[str, object]) -> tuple[dict[str, object], ...]:
     """Resolve reminder targets without changing the affirmative row set."""
-    from kernel_named_layer_coverage import (
-        _path_lookup,
-        _rows_for_layer,
-        product_files,
-    )
+    from kernel_named_layer_coverage import _rows_for_layer
 
-    lookup = _path_lookup(root, product_files(root))
     rows: list[dict[str, object]] = []
-    for layer in _layers(clause):
+    for layer in layers:
         rows.extend(
             row.to_dict()
             for row in _rows_for_layer(layer, clause, root, lookup, start, current)
@@ -344,12 +340,12 @@ def _open_rows(report: Mapping[str, object], ticket: object) -> list[dict[str, o
     return result
 
 
-def _reminder(clause: str, root: Path, start: Mapping[str, object],
+def _reminder(clause: str, root: Path, lookup: Mapping[str, Path], start: Mapping[str, object],
               current: Mapping[str, object], public_checks: object = None,
               *, public_check_registry: object = None,
               current_binding: object = None) -> dict[str, object]:
-    target_rows = _target_rows(clause, root, start, current)
     layers = _layers(clause)
+    target_rows = _target_rows(clause, layers, root, lookup, start, current)
     target_files = _files(target_rows)
     # A file edit establishes only a candidate target.  Filtered behavioral
     # clauses stay REVIEW until that exact public clause has a passing check;
@@ -388,10 +384,14 @@ def augment_report(report: Mapping[str, object], ticket: object, root: Path, *,
                    public_check_registry: object = None,
                    current_binding: object = None) -> dict[str, object]:
     """Add reminder metadata while leaving the named-layer evidence rows intact."""
+    from kernel_named_layer_coverage import _file_lookup
+
     result = copy.deepcopy(dict(report))
     open_rows = _open_rows(result, ticket)
     rejected = [clause for clause in _clauses(ticket) if not _affirmative(clause)]
-    reminders = [_reminder(clause, Path(root).resolve(), start_snapshot, current_snapshot,
+    root = Path(root).resolve()
+    lookup = _file_lookup(root) if rejected else {}
+    reminders = [_reminder(clause, root, lookup, start_snapshot, current_snapshot,
                            public_checks,
                            public_check_registry=public_check_registry,
                            current_binding=current_binding)

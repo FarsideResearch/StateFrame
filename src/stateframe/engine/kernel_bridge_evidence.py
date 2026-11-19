@@ -5,6 +5,7 @@ import difflib
 import base64
 import hashlib
 import json
+import os
 from pathlib import Path
 
 from kernel_information_policy import text_hash
@@ -14,6 +15,12 @@ def capture_candidate(destination: str, root: Path, row: dict, proposals: int) -
     if not destination:
         return
     folder = Path(destination).resolve()
+    if os.environ.get("STATEFRAME_WORKSPACE_OBJECTS") == "on":
+        from kernel_workspace_candidate import ProposalCapture
+
+        run = folder.parent.parent
+        ProposalCapture(run, run / "parent", compact=False)(destination, root, row, proposals)
+        return
     poc = Path(__file__).parent.resolve()
     if folder.is_relative_to(root.resolve()) or any(
             folder.is_relative_to((poc / name).resolve())

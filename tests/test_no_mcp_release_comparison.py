@@ -104,13 +104,15 @@ def test_no_mcp_requests_match_immediate_base(tmp_path, baseline_checkout, must_
     run_dir = tmp_path / "run"
     script = ROOT / "examples/discount_bug.script.json"
     baseline_python = tree_python(baseline / "src", tmp_path / "baseline-python")
-    assert_tree_imports(baseline_python, baseline / "src", tmp_path)
+    # The scratch directory can be inside the source checkout.
+    import_probe_dir = Path(ROOT.anchor)
+    assert_tree_imports(baseline_python, baseline / "src", import_probe_dir)
     previous = _capture_checked(baseline, baseline_python, baseline_launcher, script, repo, run_dir,
                                 stable_tool_head=None, final_cache_layout=None,
                                 source_on_pythonpath=False, test_python=sys.executable)
     run_dir.rename(tmp_path / "baseline-run")
     current_python = tree_python(ROOT / "src", tmp_path / "current-python")
-    assert_tree_imports(current_python, ROOT / "src", tmp_path)
+    assert_tree_imports(current_python, ROOT / "src", import_probe_dir)
     current = _capture_checked(ROOT, current_python, current_launcher, script, repo, run_dir,
                                stable_tool_head=None, final_cache_layout=None,
                                source_on_pythonpath=False, test_python=sys.executable)

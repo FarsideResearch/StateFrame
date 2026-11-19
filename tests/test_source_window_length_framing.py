@@ -51,6 +51,27 @@ def _with_header(window: str) -> str:
     return f"[Current source: {PATH}]\n" + window
 
 
+def test_literal_site_roles_reuse_inventory_lines(tmp_path, monkeypatch):
+    split_calls = []
+
+    class CountedSource(str):
+        def splitlines(self, *args, **kwargs):
+            split_calls.append(None)
+            return super().splitlines(*args, **kwargs)
+
+    literal = "LEGACY_LIMIT_V1"
+    source = CountedSource(
+        f'"""{literal}"""\n# {literal}\n' + "unused = 0\n" * 2000
+        + f'value = "{literal}"\n')
+    monkeypatch.setattr(source_window, "_read_product_file", lambda *args, **kwargs: source)
+    sites = source_window.literal_site_inventory(tmp_path, (PATH,), (literal,))
+
+    assert [(site.line, site.role) for site in sites] == [
+        (1, "docstring"), (2, "comment"), (2003, "executable"),
+    ]
+    assert len(split_calls) <= 1 + len(sites)
+
+
 def test_raw_window_round_trips_marker_lines_in_file_text():
     window = _with_header(_raw(HOSTILE))
     metadata = parse_window(window)

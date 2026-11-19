@@ -5,20 +5,28 @@ import copy
 import hashlib
 import json
 import os
-from pathlib import Path
 import tempfile
 import time
 from dataclasses import replace
+from pathlib import Path
 
-from kernel_exec_session import ExecSessionError
-from kernel_agent_jobs import AgentJobs
-from kernel_agent_schemas import BUILTIN_SCHEMAS, JOB_NAMES, OBSERVATION_NAMES
-from kernel_git_view import GitView, excluded_path, handle_git_call
-from kernel_shell_tool import ShellReply, ShellCleanupFailed, workspace_identity
-from kernel_tool_tape import (replay_mode_active, tape_for_run, replay_decision,
-                              verify_intent, ToolReplayRefused)
-from kernel_web_fetch import WebPolicy, fetch
 import kernel_git_commit
+from kernel_agent_jobs import AgentJobs
+from kernel_agent_schemas import (
+    BUILTIN_SCHEMAS,
+    JOB_NAMES,
+    OBSERVATION_NAMES,
+    prepare_schema_measurement,
+)
+from kernel_exec_session import ExecSessionError
+from kernel_shell_tool import ShellCleanupFailed, ShellReply, workspace_identity
+from kernel_tool_tape import (
+    ToolReplayRefused,
+    replay_decision,
+    replay_mode_active,
+    tape_for_run,
+    verify_intent,
+)
 
 
 def _tokenizer_auth(spec):
@@ -29,14 +37,17 @@ def _tokenizer_auth(spec):
 
 
 class AgentTools:
-    def __init__(self, shell, custom, mcp_servers=(), *, resume_active=False):
-        from kernel_completion_owner import TOOL_SPECS
-        from kernel_lean import _KNOWN_TOOL_NAMES
-        from kernel_custom_tools import CustomToolError
-        reserved = set(TOOL_SPECS) | set(_KNOWN_TOOL_NAMES)
-        collisions = sorted(tool.name for tool in custom.tools if tool.name in reserved)
-        if collisions:
-            raise CustomToolError("custom tools duplicate built-in capabilities: " + ", ".join(collisions))
+    def __init__(self, shell, custom, mcp_servers=(), *, resume_active=False,
+                 defer_schema_budget=False):
+        if custom.tools:
+            from kernel_completion_owner import TOOL_SPECS
+            from kernel_custom_tools import CustomToolError
+            from kernel_lean import _KNOWN_TOOL_NAMES
+
+            collisions = sorted(tool.name for tool in custom.tools
+                                if tool.name in TOOL_SPECS or tool.name in _KNOWN_TOOL_NAMES)
+            if collisions:
+                raise CustomToolError("custom tools duplicate built-in capabilities: " + ", ".join(collisions))
         self.shell = shell
         self.custom = {tool.name: tool for tool in custom.tools}
         self.mcp_servers = tuple(mcp_servers)
@@ -50,6 +61,8 @@ class AgentTools:
         self.git = None
         source = shell.spec.get("repo")
         if shell.settings.git_tool and source:
+            from kernel_git_view import GitView, excluded_path
+
             metadata = shell.run_dir / "git-view-metadata.json"
             if metadata.exists():
                 pinned = json.loads(metadata.read_text())
@@ -71,18 +84,46 @@ class AgentTools:
         # STATEFRAME_GIT_COMMIT: commit and branch tools, absent from every request when off.
         self.commit_names = frozenset(kernel_git_commit.TOOL_NAMES) if kernel_git_commit.enabled() else frozenset()
         self.names = OBSERVATION_NAMES | self.commit_names | self.custom.keys()
-        from kernel_agent_schemas import measure_schemas
-        auth_key, generation_endpoint = _tokenizer_auth(shell.spec)
-        self.schema_budget = measure_schemas(
-            self.custom_schemas, endpoint=shell.spec.get("chat_url"),
-            auth_key=auth_key, generation_endpoint=generation_endpoint,
-        )
+        measure_schema_budget = self._prepare_schema_budget()
+        self._pending_schema_budget = None
+        if defer_schema_budget and shell.spec.get("chat_url"):
+            from concurrent.futures import Future
+            from threading import Thread
+
+            pending = Future()
+            self._pending_schema_budget = pending
+
+            def measure():
+                try:
+                    pending.set_result(measure_schema_budget())
+                except BaseException as error:  # noqa: BLE001 - forward worker failures to the caller
+                    pending.set_exception(error)
+
+            # Workspace preparation can proceed while the tokenizer checks the schemas.
+            Thread(target=measure, name="tool-schema-budget", daemon=True).start()
+        else:
+            self._write_schema_budget(measure_schema_budget())
+
+    def _prepare_schema_budget(self):
+        auth_key, endpoint = _tokenizer_auth(self.shell.spec)
+        return prepare_schema_measurement(self.custom_schemas, endpoint=endpoint,
+                                          auth_key=auth_key, generation_endpoint=endpoint)
+
+    def _write_schema_budget(self, budget):
+        self.schema_budget = budget
         with tempfile.NamedTemporaryFile(mode="w", prefix="tool-schema-budget-", suffix=".json",
-                                         dir=shell.run_dir, delete=False) as report:
+                                         dir=self.shell.run_dir, delete=False) as report:
             json.dump(self.schema_budget, report, sort_keys=True)
             self.schema_budget_path = Path(report.name)
 
+    def _finish_schema_budget(self):
+        pending = getattr(self, "_pending_schema_budget", None)
+        if pending is not None:
+            self._write_schema_budget(pending.result())
+            self._pending_schema_budget = None
+
     def bind(self):
+        self._finish_schema_budget()
         if self.mcp_servers:
             from kernel_mcp_tools import discover
             from kernel_custom_tools import CustomToolError
@@ -104,12 +145,8 @@ class AgentTools:
             self.custom.update({tool.name: tool for tool in found.tools})
             self.custom_schemas.extend(copy.deepcopy(found.schemas()))
             self.names = OBSERVATION_NAMES | self.commit_names | self.custom.keys()
-            from kernel_agent_schemas import measure_schemas
-            auth_key, generation_endpoint = _tokenizer_auth(self.shell.spec)
-            self.schema_budget = measure_schemas(
-                self.custom_schemas, endpoint=self.shell.spec.get("chat_url"),
-                auth_key=auth_key, generation_endpoint=generation_endpoint,
-            )
+            measure_schema_budget = self._prepare_schema_budget()
+            self.schema_budget = measure_schema_budget()
             self.schema_budget_path.write_text(json.dumps(self.schema_budget, sort_keys=True))
         if self.git is not None:
             self.git.workspace = self.shell.root
@@ -130,6 +167,7 @@ class AgentTools:
         return name in self.custom
 
     def schemas(self):
+        self._finish_schema_budget()
         commit_schemas = kernel_git_commit.SCHEMAS if self.commit_names else ()
         return [copy.deepcopy(s) for s in (*BUILTIN_SCHEMAS, *commit_schemas, *self.custom_schemas)
                 if self.offered(s["function"]["name"])]
@@ -138,8 +176,14 @@ class AgentTools:
         log = kernel_git_commit.CommitLog(self.shell.run_dir)
         if name == "git_branch":
             return kernel_git_commit.branch(log, call_id, args.get("name"))
+        from kernel_git_view import excluded_path
+
         manifest = self.shell._scan()
-        return kernel_git_commit.commit(log, self.shell.store, manifest, self.shell.root, call_id,
+        store = getattr(self.shell, "store", None)
+        if store is None:
+            from kernel_effects import ContentStore
+            store = ContentStore(self.shell.run_dir)
+        return kernel_git_commit.commit(log, store, manifest, self.shell.root, call_id,
                                         args.get("message"), excluded_path)
 
     def observation(self, name, args, call_id, operation, *, definition=None, capability=None):
@@ -289,6 +333,8 @@ class AgentTools:
                        env={**self.shell.capability.env, **self.git.env()})
 
     def _git(self, args):
+        from kernel_git_view import handle_git_call
+
         params = {k: v for k, v in args.items() if k != "why"}
         action = params.get("action")
         if action == "show" and isinstance(params.get("rev"), str) and ":" in params["rev"]:
@@ -322,6 +368,8 @@ class AgentTools:
         size = args.get("max_chars", 12000)
         if not isinstance(args.get("url"), str) or type(size) is not int or not 1 <= size <= 12000:
             return "REFUSED WEB_HTTP_ERROR: url must be text and max_chars an integer from 1 to 12000"
+        from kernel_web_fetch import WebPolicy, fetch
+
         policy = WebPolicy(tuple(self.shell.settings.web_allow), max_chars=size,
                            deadline=max(0.001, min(20, self.deadline-time.monotonic())))
         result = fetch(args["url"], policy)
@@ -351,9 +399,11 @@ class AgentTools:
 _active: AgentTools | None = None
 
 
-def configure(shell, custom, mcp_servers=(), *, resume_active=False):
+def configure(shell, custom, mcp_servers=(), *, resume_active=False,
+              defer_schema_budget=False):
     global _active
-    candidate = AgentTools(shell, custom, mcp_servers, resume_active=resume_active)
+    candidate = AgentTools(shell, custom, mcp_servers, resume_active=resume_active,
+                           defer_schema_budget=defer_schema_budget)
     # Publish only after all definitions and the source view validate. Dynamic
     # dispatch and schema consumers resolve this same per-run object.
     _active = candidate

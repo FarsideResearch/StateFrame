@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import time
 from collections.abc import Mapping
 
@@ -113,13 +114,28 @@ def _recover_post_fit_growth(candidate, context, body, fitted_body, fitted_count
                 replay_mismatch(candidate, body, reason="qualification_layout_mismatch")
                 replay_mismatched = True
 
-    def fits(value):
-        tokens, _method = final_request_tokens(value, meter, candidate)
-        inputs = candidate._frame_candidate_inputs
-        return (tokens <= inputs["token_ceiling"]
-                and len(json.dumps(value).encode()) <= inputs["byte_ceiling"])
+    bounded = os.environ.get("STATEFRAME_TURN_BOUNDED_QUALIFICATION") == "on"
 
-    if not replay_mismatched and fits(body):
+    def measure_fit(value):
+        if bounded:
+            size = len(json.dumps(value).encode())
+            tokens, method = final_request_tokens(value, meter, candidate, wire_bytes=size)
+        else:
+            tokens, method = final_request_tokens(value, meter, candidate)
+            size = None
+        inputs = candidate._frame_candidate_inputs
+        if size is None and tokens <= inputs["token_ceiling"]:
+            size = len(json.dumps(value).encode())
+        return (size is not None and tokens <= inputs["token_ceiling"]
+                and size <= inputs["byte_ceiling"]), tokens, method, size
+
+    def is_exact(result):
+        # A frozen counter can report its original method during an outage.
+        # Keep the legacy reprobe behavior if the live meter lacks an exact count.
+        return (bounded and result[2] == "tokenize"
+                and getattr(meter, "measure_method", None) == "tokenize")
+
+    if not replay_mismatched and measure_fit(body)[0]:
         return body, False
 
     # A projection is optional. Restore the fully fitted canonical candidate
@@ -136,17 +152,24 @@ def _recover_post_fit_growth(candidate, context, body, fitted_body, fitted_count
     recovered = copy.deepcopy(fitted_body)
     enforce_context_capacity(candidate, recovered, endpoint=endpoint, key=key)
     recovered = _prepare_qualified_hook_body(context, recovered, candidate.request_id)
-    if not fits(recovered):
+    result = measure_fit(recovered)
+    if not result[0]:
         # A later body rewrite may itself consume capacity. Refit its changed
         # bytes instead of handing an over-budget candidate to the final proof.
         recovered = finalize_frame_candidate(
             context, candidate, recovered, frame_counter=token_estimate)
         enforce_context_capacity(candidate, recovered, endpoint=endpoint, key=key)
         recovered = _prepare_qualified_hook_body(context, recovered, candidate.request_id)
-    if not fits(recovered):
-        tokens, method = final_request_tokens(recovered, meter, candidate)
+        result = measure_fit(recovered)
+    elif not is_exact(result):
+        result = measure_fit(recovered)
+    fits, tokens, method, size = result
+    if not fits:
+        if not is_exact(result):
+            tokens, method = final_request_tokens(recovered, meter, candidate)
+            size = len(json.dumps(recovered).encode())
         raise FrameFit5ImpossibleMinimum({
-            "request_bytes": len(json.dumps(recovered).encode()),
+            "request_bytes": size,
             "prompt_tokens": tokens, "measure_method": method,
             "max_request_bytes": candidate._frame_candidate_inputs["byte_ceiling"],
             "max_prompt_tokens": candidate._frame_candidate_inputs["token_ceiling"],

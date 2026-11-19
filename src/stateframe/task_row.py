@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import logging
 import posixpath
 import re
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from .task_file_scope import TaskFileScopeError, parse_task_file_scope
@@ -23,7 +25,7 @@ TEXT_SUFFIXES = {
     ".csv", ".sql", ".html", ".css", ".js", ".ts", ".sh", ".in",
 }
 TASK_PATH = re.compile(r"(?<![\w./-])(?:(?:[\w.-]+/)+[\w.-]*|[\w.-]+\.[\w-]+)")
-TASK_ACTION = re.compile(r"\b(build|create|write|produce|save|generate|add|read|load|use)\b",
+TASK_ACTION = re.compile(r"\b(build|creat(?:e|ing)|write|produce|save|generate|add|read|load|use)\b",
                          re.IGNORECASE)
 NONPUBLIC_PARTS = frozenset({
     "test", "tests", "testdata", "fixtures", "fixture", "private", "hidden",
@@ -35,11 +37,25 @@ class TaskRowError(ValueError):
     pass
 
 
-def _parse_task_scope(task: str) -> tuple[str, ...] | None:
+_LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _ParsedTaskScope:
+    paths: tuple[str, ...] | None
+    degraded: bool = False
+
+
+def _parse_task_scope(task: str) -> _ParsedTaskScope:
     try:
-        return parse_task_file_scope(task, strict=True)
+        return _ParsedTaskScope(parse_task_file_scope(task, strict=True))
     except TaskFileScopeError as exc:
-        raise TaskRowError(str(exc)) from exc
+        _LOGGER.warning(
+            "task_file_scope_degraded: %s; running without a task file scope limit",
+            exc,
+            extra={"event_type": "task_file_scope_degraded"},
+        )
+        return _ParsedTaskScope(None, degraded=True)
 
 
 def discover_checks(files: dict[str, str], *, repo: Path | None = None) -> list[str]:
@@ -203,7 +219,7 @@ DECLARE_ALL_LIMIT = 200
 # Where a row's editable scope came from, recorded as row["scope_source"] so a run shows it.
 SCOPE_EXPLICIT = "explicit"          # --target and/or --edit given
 SCOPE_INFERRED = "inferred"          # over the limit: auto_scope found files from the task/checks
-SCOPE_WHOLE_REPO = "whole_repo"      # at or below the limit with no flags: unscoped, as before
+SCOPE_WHOLE_REPO = "whole_repo"      # no file-level limit, including an unparseable task rule
 SCOPE_TASK_TEXT = "task_text"        # the task states a file-scope rule ("Change no other file")
 
 
@@ -215,11 +231,19 @@ def resolve_edit_scope(task: str, product: dict[str, str], *, target: str | None
     ``--target`` alone scopes only over the limit (small repos keep it as a hint, as before). A
     task's explicit file-scope rule ("Change no other file", "Only edit X") scopes to its named
     files at any size and wins over the size-based fallbacks below. A repo at or below
-    DECLARE_ALL_LIMIT with no flags and no task rule stays unscoped. Over the limit with no flags,
-    auto_scope chooses the files; if it finds none, refuse before the run so every product file
-    cannot accidentally become editable.
+    DECLARE_ALL_LIMIT with no flags and no task rule stays unscoped. An unparseable restriction
+    warns and leaves the task unscoped. Otherwise, over the limit with no flags, auto_scope
+    chooses files; if it finds none, refuse before the run so every product file cannot
+    accidentally become editable.
     """
-    named = _parse_task_scope(task)
+    return _resolve_edit_scope(task, product, target=target, edits=edits, steering=steering,
+                               parsed_scope=_parse_task_scope(task))
+
+
+def _resolve_edit_scope(task: str, product: dict[str, str], *, target: str | None,
+                        edits: list[str], steering: dict[str, str],
+                        parsed_scope: _ParsedTaskScope) -> tuple[dict[str, str], bool, str]:
+    named = parsed_scope.paths
     large = len(product) > DECLARE_ALL_LIMIT
     if edits or (large and target):
         paths = list(dict.fromkeys(([target] if target else []) + edits))
@@ -228,6 +252,8 @@ def resolve_edit_scope(task: str, product: dict[str, str], *, target: str | None
                 f"explicit --edit/--target paths {paths!r} conflict with task file scope "
                 f"{list(named)!r}; remove paths outside the task scope or update --task")
         return {path: product[path] for path in paths}, True, SCOPE_EXPLICIT
+    if parsed_scope.degraded:
+        return product, False, SCOPE_WHOLE_REPO
     if named:
         return {path: product[path] for path in named if path in product}, True, SCOPE_TASK_TEXT
     if not large:
@@ -345,9 +371,11 @@ def build_row(work: WorkCopy, *, task: str, checks: list[str] | None = None,
         steering = {path: texts[path] for path in sorted(steered) if path in texts}
     # Scoped rows declare only the scope's files editable; the whole repository is still in the
     # sandbox as context. Other tests stay in the repository copy, not the row.
-    product, scoped, scope_source = resolve_edit_scope(
-        task, all_product, target=target, edits=edits, steering=steering)
-    named = _parse_task_scope(task)
+    parsed_scope = _parse_task_scope(task)
+    product, scoped, scope_source = _resolve_edit_scope(
+        task, all_product, target=target, edits=edits, steering=steering,
+        parsed_scope=parsed_scope)
+    named = parsed_scope.paths
     if not scoped:
         # Other tests under tests/ (fixtures, conftest, helpers) stay visible as public test files.
         extra = [path for path in texts if path.startswith("tests/") and path not in public_tests]
@@ -456,9 +484,11 @@ def _build_generic_row(work: WorkCopy, *, task: str, checks: list[str] | None,
     if not edits and not selected_target and len(product) > DECLARE_ALL_LIMIT:
         steered = set(declared) | set(judging_test_paths(tuple(test_files), test_command, ()))
         steering = {path: texts[path] for path in sorted(steered) if path in texts}
-    product, scoped, scope_source = resolve_edit_scope(
-        task, product, target=selected_target, edits=edits, steering=steering)
-    named = _parse_task_scope(task)
+    parsed_scope = _parse_task_scope(task)
+    product, scoped, scope_source = _resolve_edit_scope(
+        task, product, target=selected_target, edits=edits, steering=steering,
+        parsed_scope=parsed_scope)
+    named = parsed_scope.paths
     source_files = {path: text for path, text in product.items() if path not in test_files}
     candidates = source_files or product
     entry = selected_target or next(

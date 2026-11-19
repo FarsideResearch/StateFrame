@@ -88,6 +88,9 @@ class SourceEvidenceStore:
         self._selection_key: tuple[object, ...] | None = None
         self._selection_cache: tuple[list[dict[str, object]], dict[str, object]] | None = None
         self.blobs: dict[str, bytes] = {}
+        # Reserved for optional retained pages; the speed branch does not populate it.
+        self.archive: dict[tuple[str, str, int, int], dict[str, object]] = {}
+        self._archive_bytes = 0
 
     def _invalidate_selection(self) -> None:
         self._selection_key = None
@@ -380,7 +383,65 @@ class SourceEvidenceStore:
         for key, row in list(self.evidence.items()):
             if current.get(str(row['path'])) != row['revision']:
                 self.evidence.pop(key, None)
+        # Some callers may attach retained archive state; this store does not require it.
+        archive = getattr(self, 'archive', None)
+        if isinstance(archive, dict):
+            archive_bytes = getattr(self, '_archive_bytes', None)
+            for key in list(archive):
+                if not isinstance(key, tuple) or len(key) < 2:
+                    continue
+                if current.get(str(key[0])) == str(key[1]):
+                    continue
+                entry = archive.pop(key)
+                if isinstance(archive_bytes, int):
+                    content = entry.get('content', '') if isinstance(entry, Mapping) else ''
+                    archive_bytes -= len(str(content).encode('utf-8'))
+            if isinstance(archive_bytes, int):
+                self._archive_bytes = max(0, archive_bytes)
         self._invalidate_selection()
+
+    def _invalidation_would_drop(self, current: Mapping[str, str]) -> bool:
+        """Check whether invalidation would remove a row before trusting a cached selection."""
+        if any(current.get(str(row['path'])) != row['revision']
+               for row in self.pages.values()):
+            return True
+        if any(current.get(str(row['path'])) != row['revision']
+               for row in self.evidence.values()):
+            return True
+        archive = getattr(self, 'archive', {})
+        if isinstance(archive, Mapping) and any(
+                isinstance(key, tuple) and len(key) >= 2
+                and current.get(str(key[0])) != str(key[1]) for key in archive):
+            return True
+        spans = getattr(self.working_set, 'spans', {})
+        return isinstance(spans, Mapping) and any(
+            current.get(str(span['path'])) != span['revision'] for span in spans.values())
+
+    def _selection_cache_key(
+            self, current: Mapping[str, str], working_path: str,
+            working_content: str | None, owner_symbol: str,
+            required_caller_path: str, required_caller_symbol: str,
+            mandatory_paths: tuple[str, ...]) -> tuple[object, ...]:
+        key: tuple[object, ...] = (
+            tuple(sorted(current.items())), working_path, digest(working_content or ''),
+            owner_symbol, required_caller_path, required_caller_symbol,
+            tuple(sorted(self.pages)),
+        )
+        return key + (mandatory_paths,) if mandatory_paths else key
+
+    def _mark_mandatory_paths(self, mandatory_paths: tuple[str, ...]) -> None:
+        if not mandatory_paths:
+            return
+        mandatory_set = set(mandatory_paths)
+        for row in self.pages.values():
+            if str(row.get('path', '')) not in mandatory_set:
+                continue
+            row['owner_role'] = 'required_caller'
+            row['owner_roles'] = ('required_caller',)
+            row['evidence_kind'] = 'required_caller'
+            row['evidence_kinds'] = ('required_caller',)
+            self.working_set.set_owner(str(row.get('reference', '')),
+                                       'required_caller', 'required_caller')
 
     def _set_focus(self, path: str, owner_symbol: str, caller_path: str,
                    caller_symbol: str) -> None:
@@ -429,13 +490,24 @@ class SourceEvidenceStore:
     def select(self, current: Mapping[str, str], working_path: str,
                working_content: str | None, *, owner_symbol: str = '',
                required_caller_path: str = '', required_caller_symbol: str = '') -> tuple[list[dict[str, object]], dict[str, object]]:
+        mandatory_paths = tuple(sorted({
+            _normalized_path(path) for path in getattr(self, 'required_source_paths', ())
+            if _normalized_path(path)
+        }))
+        key = self._selection_cache_key(
+            current, working_path, working_content, owner_symbol,
+            required_caller_path, required_caller_symbol, mandatory_paths)
+        if (key == self._selection_key and self._selection_cache is not None
+                and not self._invalidation_would_drop(current)):
+            self._mark_mandatory_paths(mandatory_paths)
+            return copy.deepcopy(self._selection_cache)
+
         self.invalidate(current)
         self._set_focus(working_path, owner_symbol, required_caller_path, required_caller_symbol)
-        key = (tuple(sorted(current.items())), working_path, digest(working_content or ''),
-               owner_symbol, required_caller_path, required_caller_symbol,
-               tuple(sorted(self.pages)))
-        if key == self._selection_key and self._selection_cache is not None:
-            return copy.deepcopy(self._selection_cache)
+        self._mark_mandatory_paths(mandatory_paths)
+        key = self._selection_cache_key(
+            current, working_path, working_content, owner_symbol,
+            required_caller_path, required_caller_symbol, mandatory_paths)
         selected, state = self.working_set.select(self, dict(current), working_path, working_content)
         self._selection_key = key
         self._selection_cache = (copy.deepcopy(selected), copy.deepcopy(state))

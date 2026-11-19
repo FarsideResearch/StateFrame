@@ -14,6 +14,8 @@ from subprocess import CompletedProcess
 
 import pytest
 
+from tools.sandbox_temp import sandbox_visible_temp_dir, shadowed_by_bwrap_dev
+
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLES = {
@@ -38,8 +40,29 @@ REQUEST_PATH_MODULES = (
 RANDOM_CALL_ALLOWLIST = {
     "src/stateframe/runner.py": {
         "secrets.token_hex": (
-            1, "Creates the persisted run seed; same-seed runs and resume reuse it."
+            3, "The persisted wire seed is replayed. The workspace namespace and run ID only bind local storage."
         ),
+    },
+    "src/stateframe/engine/kernel_turn_host.py": {
+        "os.urandom": (1, "Isolates turn service attempts within host storage."),
+    },
+    "src/stateframe/engine/kernel_workspace_consumers.py": {
+        "secrets.token_hex": (1, "Separates private shell snapshot roots across attempts."),
+    },
+    "src/stateframe/engine/kernel_workspace_index.py": {
+        "secrets.token_hex": (1, "Names the staging file for atomic index replacement."),
+    },
+    "src/stateframe/engine/kernel_workspace_objects.py": {
+        "secrets.token_hex": (2, "Stages object writes and private restorations before publication."),
+    },
+    "src/stateframe/engine/kernel_workspace_refs.py": {
+        "secrets.token_hex": (1, "Names a temporary file for atomic root publication."),
+    },
+    "src/stateframe/engine/kernel_workspace_state.py": {
+        "os.urandom": (3, "Fences host writer epochs and invalidates cached stat coverage."),
+    },
+    "src/stateframe/engine/kernel_workspace_tree_io.py": {
+        "secrets.token_hex": (1, "Names a private checkout staging directory."),
     },
     "src/stateframe/_child.py": {
         "secrets.token_hex": (
@@ -1968,10 +1991,12 @@ def _run_scripted_example(monkeypatch, example: str, task: str, work: Path,
         monkeypatch.delenv(name, raising=False)
     if observer:
         monkeypatch.setenv("STATEFRAME_FL_CAPTURE_EVERY_K", "1")
-    monkeypatch.setattr(
-        runner.secrets, "token_hex",
-        lambda n=16: "0123456789abcdef0123456789abcdef"[: 2 * n],
-    )
+    # Pin the run identity seed. Private storage names still need fresh entropy.
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(runner, "secrets", SimpleNamespace(
+        token_hex=lambda n: "0123456789abcdef" * 2 if n == 16 else secrets.token_hex(n),
+    ))
     arguments = [
         "run", "--repo", str(repo), "--task", task,
         "--endpoint", f"http://127.0.0.1:{server.server_port}/v1",
@@ -2129,7 +2154,12 @@ def test_bundled_example_guard_rejects_sequence_based_receipt_derivation(tmp_pat
     # cannot see the bug class it exists for.
     # The isolated startup probe mounts a private /dev; a planted engine below
     # a /dev/shm-backed pytest basetemp cannot start its supervisor there.
-    with tempfile.TemporaryDirectory(prefix="stateframe-planted-", dir="/tmp") as directory:
+    package_scratch = (
+        sandbox_visible_temp_dir()
+        if shadowed_by_bwrap_dev(tmp_path)
+        else tempfile.TemporaryDirectory(prefix="stateframe-planted-", dir=tmp_path)
+    )
+    with package_scratch as directory:
         planted = _planted_sequence_receipt_package(Path(directory))
         seq_plain, seq_plain_requests, _ = _run_scripted_example(
             monkeypatch, example, task, tmp_path / "pln-a", package_root=planted)

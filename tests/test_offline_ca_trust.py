@@ -1,8 +1,8 @@
 """Offline sandboxed commands must see the public CA trust store.
 
 Debian's bundled pip wheel points certifi at /etc/ssl/certs/ca-certificates.crt and loads it when
-imported, so `ensurepip` inside an offline probe failed and no run env was built (checks then ran a
-bare `python` that does not exist).
+imported, so `ensurepip` inside an offline sandbox probe failed and no run environment was built.
+Sandbox probes then tried a bare `python` that does not exist. Regression for RUNENV-ENSUREPIP.
 """
 import shutil
 import subprocess

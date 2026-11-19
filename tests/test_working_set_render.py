@@ -59,6 +59,40 @@ def test_disjoint_ranges_and_historical_revision_never_share_authority():
         verify_certificate(candidate.wire, forged)
 
 
+def test_read_admission_protects_overlaps_and_keeps_pending_edit_paths():
+    from kernel_source_delivery import deliver_source
+    from kernel_working_set_cache import transaction
+    from kernel_working_set_live import read_admission_floor, read_admission_slot
+    from kernel_working_set_render import domain, snapshot_digest
+
+    raw = b"line\n" * 30
+    args = {"path": "a.py", "start_line": 10, "end_line": 11}
+    proposal = read_admission_slot(deliver_source(raw, "a.py", 0, args=args),
+                                   path="a.py", arguments=args, ordinal=3)
+    revision = proposal.identity.revision
+    overlapping = source("overlap", "line\n" * 3, first=9, state="RESIDENT", revision=revision)
+    disjoint = source("disjoint", "line\n" * 3, first=12, state="RESIDENT", revision=revision, ordinal=2)
+    base = snapshot(overlapping, disjoint)
+
+    @transaction
+    def check():
+        assert DEFERRED in domain(base, overlapping)
+        floor = read_admission_floor(base, [(proposal, None)])
+        admitted = floor.certificate.snapshot
+        assert admitted.protected_paths == ()
+        assert admitted.protected_ranges == (("a.py", 10, 11),)
+        assert domain(admitted, overlapping) == (FULL,)
+        assert DEFERRED in domain(admitted, disjoint)
+        assert snapshot_digest(admitted) != snapshot_digest(replace(admitted, protected_ranges=()))
+        assert admitted.snapshot_digest != replace(admitted, protected_ranges=()).snapshot_digest
+        edit = replace(base, protected_paths=("a.py",))
+        edit_floor = read_admission_floor(edit, [(proposal, None)])
+        assert edit_floor.certificate.snapshot.protected_paths == ("a.py",)
+        assert domain(edit_floor.certificate.snapshot, disjoint) == (FULL,)
+
+    check()
+
+
 def test_shared_capture_carrier_and_newest_exchange():
     a = source()
     b = replace(a, key="b", obligation_ids=("b",), admission_ordinal=2)

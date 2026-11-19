@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Literal
 
 from kernel_repo_catalog import (
+    MAX_CACHED_BODY_BYTES,
     MAX_FILES,
     MAX_OVERLAY_FILES,
     MAX_SCAN_ENTRIES,
@@ -22,6 +23,7 @@ from kernel_repo_catalog import (
     scan_entry_set,
     subset_structural_index,
 )
+from kernel_scope_widen_guard import _parent as _open_source_parent
 
 
 MODE_ENV = "STATEFRAME_CENSUS_INDEX_REUSE"
@@ -118,10 +120,41 @@ def _signature(path: Path) -> _Signature | None:
         current = path.lstat()
     except OSError:
         return None
+    return _stat_signature(current)
+
+
+def _stat_signature(current: os.stat_result) -> _Signature:
     return (
         int(current.st_dev), int(current.st_ino), int(current.st_mode),
         int(current.st_size), int(current.st_mtime_ns), int(current.st_ctime_ns),
     )
+
+
+def admitted_source_digest(root: Path, path: str) -> str:
+    """Query one current source revision without consulting the structural cache.
+
+    Only call for a path admitted by the request's source carrier. An unsafe,
+    oversized, or unstable read cannot establish a negative route decision.
+    """
+    relative = _catalog_relative(root, path)
+    with _open_source_parent(root, relative) as (parent, name):
+        before = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        if not stat.S_ISREG(before.st_mode) or before.st_size > MAX_CACHED_BODY_BYTES:
+            raise OSError("census point read requires a bounded regular file")
+        expected = _stat_signature(before)
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+        with os.fdopen(os.open(name, flags, dir_fd=parent), "rb") as source:
+            if _stat_signature(os.fstat(source.fileno())) != expected:
+                raise OSError("census source changed before point read")
+            body = source.read(before.st_size + 1)
+            if (len(body) != before.st_size
+                    or _stat_signature(os.fstat(source.fileno())) != expected):
+                raise OSError("census source changed during point read")
+    # A parent may have been renamed while its open descriptor stayed valid.
+    with _open_source_parent(root, relative) as (parent, name):
+        if _stat_signature(os.stat(name, dir_fd=parent, follow_symlinks=False)) != expected:
+            raise OSError("census source path changed during point read")
+    return "sha256:" + hashlib.sha256(body).hexdigest()
 
 
 def _dependency_revision(index: StructuralIndex) -> str:
@@ -278,10 +311,7 @@ def _file_digest(path: Path, *, max_bytes: int) -> tuple[_Signature, str] | None
     byte_count = 0
     try:
         opened = os.fstat(descriptor)
-        opened_signature = (
-            int(opened.st_dev), int(opened.st_ino), int(opened.st_mode),
-            int(opened.st_size), int(opened.st_mtime_ns), int(opened.st_ctime_ns),
-        )
+        opened_signature = _stat_signature(opened)
         if opened_signature != before or not stat.S_ISREG(opened.st_mode):
             return None
         while True:
@@ -292,11 +322,7 @@ def _file_digest(path: Path, *, max_bytes: int) -> tuple[_Signature, str] | None
             if byte_count > max_bytes:
                 return None
             digest.update(chunk)
-        after = os.fstat(descriptor)
-        after_signature = (
-            int(after.st_dev), int(after.st_ino), int(after.st_mode),
-            int(after.st_size), int(after.st_mtime_ns), int(after.st_ctime_ns),
-        )
+        after_signature = _stat_signature(os.fstat(descriptor))
         if after_signature != before or _signature(path) != before:
             return None
         if byte_count != before[3]:

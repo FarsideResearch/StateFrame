@@ -30,6 +30,14 @@ class FileOperationEffect:
     destination: str | None = None
 
 
+def _invalidate_shell_manifest_cache() -> None:
+    from kernel_shell_tool import service
+
+    shell = service()
+    if shell is not None:
+        shell.invalidate_manifest_cache()
+
+
 class FileOperationReplay:
     """Bind native mutations to durable intent and verified local replay."""
 
@@ -169,6 +177,7 @@ def file_delete(
     path, relative = admit_file_delete(
         root, raw_path, protected=protected, editable=editable
     )
+    _invalidate_shell_manifest_cache()
     from kernel_scope_widen_guard import unlink as guarded_unlink
     guarded_unlink(path)
     return FileOperationEffect((relative,), relative)
@@ -204,6 +213,7 @@ def file_move(
         editable=editable,
         new_file_allowed=new_file_allowed,
     )
+    _invalidate_shell_manifest_cache()
     destination.parent.mkdir(parents=True, exist_ok=True)
     from kernel_scope_widen_guard import admitted as widened_admitted, move as guarded_move
     if widened_admitted(source):

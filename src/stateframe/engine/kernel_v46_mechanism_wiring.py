@@ -17,8 +17,13 @@ import sys
 import traceback
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from kernel_obligation_seed import DeclaredVocabulary
 
 
 EVENT_SCHEMA = "stateframe-v46-mechanism-wiring/1"
@@ -236,7 +241,7 @@ def _row_files(row: Mapping[str, object], root: Path) -> dict[str, str]:
     files: dict[str, str] = {}
     declared = row.get("files")
     if isinstance(declared, Mapping):
-        for raw_path, value in list(declared.items())[:16]:
+        for raw_path, value in islice(declared.items(), 16):
             if not isinstance(raw_path, str):
                 continue
             if isinstance(value, Mapping):
@@ -270,12 +275,15 @@ def _done_criteria(row: Mapping[str, object]) -> list[str]:
     return list(dict.fromkeys(criteria)) or ["completion owner accepts the delivered work"]
 
 
-def _working_contract(row: Mapping[str, object], root: Path) -> dict[str, object]:
+def _working_contract(row: Mapping[str, object], root: Path,
+                      vocabulary: DeclaredVocabulary | None = None) -> dict[str, object]:
     brief = _brief(row)
     top: dict[str, object] = {}
     question: dict[str, object] | None = None
     from detreason.front_door import interpret
-    result = interpret(brief, extra_context={"files": _row_files(row, root), "activity": []})
+    result = interpret(brief, extra_context={
+        "files": _row_files(row, root), "activity": [], "declared_vocabulary": vocabulary,
+    })
     result_data = result.to_dict()
     verdict = str(result.verdict)
     if result.top is not None:
@@ -345,11 +353,16 @@ def _sufficiency(runtime: object, row: Mapping[str, object], contract: Mapping[s
 def task_start(runtime: object, row: Mapping[str, object], root: Path) -> None:
     """Compile the task contract and sufficiency record at the live task boundary."""
     install_error_journal_details(getattr(runtime, "journal", None))
+    owner = getattr(runtime, "owner", None)
+    vocabulary = getattr(owner, "_declared_intake_vocabulary", None)
+    if vocabulary is not None:
+        del owner._declared_intake_vocabulary
+    contract_args = (row, root) if vocabulary is None else (row, root, vocabulary)
     contract: dict[str, object] = {}
     front_door_failed = False
     if enabled("front_door"):
         try:
-            contract = _working_contract(row, root)
+            contract = _working_contract(*contract_args)
             runtime._v46_working_contract = contract
             question = contract.get("question")
             question_text = (
@@ -381,7 +394,7 @@ def task_start(runtime: object, row: Mapping[str, object], root: Path) -> None:
             if front_door_failed:
                 raise RuntimeError("front_door contract unavailable")
             if not contract:
-                contract = _working_contract(row, root)
+                contract = _working_contract(*contract_args)
                 runtime._v46_working_contract = contract
             sufficiency = _sufficiency(runtime, row, contract)
             contract["sufficiency"] = sufficiency
