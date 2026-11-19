@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Task brief requirements remain actionable when labels appear in mixed instruction text, and coverage retains exact ownership and occurrence origins.
+- Metadata parsing now tracks quote and boundary state in one pass, so large briefs avoid repeated prefix scans.
+- Requirement extraction and work-step generation cap retained occurrences and add an open overflow record when additional occurrences remain.
+- Seed occurrence identity, structural labels, and overflow reporting require the default-off `STATEFRAME_OBLIGATION_SEED_LOSSLESS` switch, preserving shipped-profile request bytes.
 ## 0.7.81 (2026-11-19)
 
 - Fixed: the runner now forwards the documented `STATEFRAME_QGATES=on` shell setting so the engine can enable its typed question gates.
