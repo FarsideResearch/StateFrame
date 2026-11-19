@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.68 (2026-11-18)
+
+- Fixed: completion-token totals now require a valid count for every send and preserve measured zero.
+- Fixed default pytest discovery to use the path manifest and declared Python encodings; selected checks that cannot be read or decoded now stop with a visible error.
+- Fixed runner selection so explicit pytest selectors and configured file patterns keep the pytest runner.
+- Fix: work copy creation, change manifests, candidate digests, and test discovery now raise typed path-specific errors when a directory cannot be scanned. Incomplete trees can no longer appear as deletions, empty digests, or missing checks.
+
 ## 0.7.67 (2026-11-18)
 
 - Changed: Python analyzer trees now share a 24 MiB source-byte LRU with a 16,384-entry backstop; the boot symbol registry and coordinated-change validation reuse read-only cached trees. Oversized sources parse without evicting warm entries.

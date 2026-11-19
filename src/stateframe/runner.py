@@ -3350,6 +3350,13 @@ def summarize(run: Path, started: float) -> dict[str, object]:
     total_prompt = _known_total(metrics, "total")
     cached_prompt = _known_total(metrics, "cached")
     uncached_prompt = _known_total(metrics, "uncached")
+    completion_metrics: list[dict[str, int | None]] = []
+    for send in sends:
+        count = send.get("completion_tokens")
+        completion_metrics.append({
+            "completion": count if type(count) is int and count >= 0 else None,
+        })
+    completion_total = _known_total(completion_metrics, "completion")
     try:
         requests = len(list_request_records(run))
     except (OSError, RequestRecordsError):
@@ -3383,7 +3390,7 @@ def summarize(run: Path, started: float) -> dict[str, object]:
         "max_request_bytes": max((int(s.get("request_bytes") or 0) for s in sends), default=0),
         "prompt_tokens_sent": total_prompt,
         "uncached_prompt_tokens": uncached_prompt,
-        "completion_tokens": sum(int(s.get("completion_tokens") or 0) for s in sends) or None,
+        "completion_tokens": completion_total,
         "cached_tokens": cached_prompt,
         "cached_share": (round(paired_cached / paired_total, 4)
                          if pairs and len(pairs) == len(sends) and paired_total > 0 else None),
@@ -3446,13 +3453,27 @@ def candidate_digest(root: Path) -> str:
     """Bind host checks to the materialized candidate, including unchanged context files."""
     # Tool litter the checks themselves write (.pytest_cache, __pycache__) is not candidate content.
     manifest = {}
-    for p in root.rglob("*"):
-        rel = p.relative_to(root)
-        if (not p.is_file() or p.is_symlink()
-                or any(workcopy._ignored(part, True) for part in rel.parts[:-1])
-                or workcopy._ignored(rel.name, False)):
-            continue
-        manifest[rel.as_posix()] = hashlib.sha256(p.read_bytes()).hexdigest()
+    def scan_error(error: OSError) -> None:
+        path = error.filename or root
+        detail = error.strerror or str(error)
+        raise workcopy.WorkCopyScanError(f"cannot scan candidate directory {path}: {detail}") from error
+
+    for directory, dirnames, filenames in os.walk(root, followlinks=False, onerror=scan_error):
+        here = Path(directory)
+        dirnames[:] = sorted(name for name in dirnames
+                             if not workcopy._ignored(name, True) and not (here / name).is_symlink())
+        for name in sorted(filenames):
+            path = here / name
+            if path.is_symlink() or workcopy._ignored(name, False):
+                continue
+            if not path.is_file():
+                continue
+            rel = path.relative_to(root)
+            try:
+                data = path.read_bytes()
+            except OSError as error:
+                raise workcopy.WorkCopyScanError(f"cannot read candidate file {path}: {error}") from error
+            manifest[rel.as_posix()] = hashlib.sha256(data).hexdigest()
     return hashlib.sha256(json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
@@ -4056,8 +4077,12 @@ def _run(options: RunOptions, started: float, printer=print) -> dict[str, object
             options.check_source = "command"
         elif options.test_cmd:
             options.check_source = DECLARED_TEST_SOURCE
+        elif options.runner_kind == "pytest" or (options.runner_kind == "auto" and options.checks):
+            options.runner_kind = "pytest"
+            options.check_source = DECLARED_TEST_SOURCE
         else:
-            detected, source, has_tests = discover_check(options.repo)
+            discovered_tests: list[str] = []
+            detected, source, has_tests = discover_check(options.repo, pytest_paths=discovered_tests)
             if detected:
                 options.test_cmd = detected
                 options.runner_kind = "generic"
@@ -4067,6 +4092,8 @@ def _run(options: RunOptions, started: float, printer=print) -> dict[str, object
                 options.check_source = "none"
             else:
                 options.check_source = DECLARED_TEST_SOURCE
+                if not options.checks:
+                    options.checks = discovered_tests
         options.runner_kind, command_argv = parse_command(options.test_cmd, options.runner_kind)
         if options.runner_kind == "generic" and not command_argv and options.check_source != "none":
             raise ValueError("a generic runner requires --test-cmd")

@@ -2,18 +2,27 @@
 from __future__ import annotations
 
 import ast
+import configparser
 import fnmatch
 import json
 import os
 import re
 import shlex
+import tomllib
+from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
 
 from .workcopy import IGNORE_DIRS
 
 
+class TestDiscoveryError(ValueError):
+    pass
+
+
 PYTEST_PATTERNS = ("test_*.py", "conftest.py")
-PYTEST_DISCOVERY_PATTERNS = ("test_*.py", "*_test.py")
+DEFAULT_PYTEST_FILE_PATTERNS = ("test_*.py", "*_test.py")
+PYTEST_CONFIG_FILES = ("pytest.ini", ".pytest.ini", "pyproject.toml", "tox.ini", "setup.cfg")
+PYTEST_DISCOVERY_PATTERNS = DEFAULT_PYTEST_FILE_PATTERNS
 DECLARED_TEST_SOURCE = "tests"
 GENERIC_PATTERNS = (
     "test_*.py", "*_test.py", "conftest.py", "*.test.*", "*.spec.*",
@@ -34,8 +43,94 @@ def is_test_file(path: str) -> bool:
 
 def is_pytest_test_file(path: str) -> bool:
     """Whether the basename matches pytest's conventional test-module patterns."""
-    name = PurePosixPath(path).name
-    return any(fnmatch.fnmatchcase(name, pattern) for pattern in PYTEST_DISCOVERY_PATTERNS)
+    return is_runnable_pytest_file(path, PYTEST_DISCOVERY_PATTERNS)
+
+
+def is_runnable_pytest_file(path: str, patterns: tuple[str, ...]) -> bool:
+    """Match Python test modules, leaving broader protected-resource rules separate."""
+    return path.endswith(".py") and any(
+        fnmatch.fnmatchcase(PurePosixPath(path).name, pattern) for pattern in patterns)
+
+
+def _pytest_option_values(value: object, *, option: str, config: Path,
+                          default: tuple[str, ...]) -> tuple[str, ...]:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return tuple(value.split())
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return tuple(value)
+    raise ValueError(f"cannot inspect pytest {option} in {config}: expected text or a list of text")
+
+
+def _pytest_config_options(config: Path) -> dict[str, object] | None:
+    try:
+        if config.name == "pyproject.toml":
+            data = tomllib.loads(config.read_text(encoding="utf-8"))
+            tool = data.get("tool")
+            pytest_config = tool.get("pytest") if isinstance(tool, dict) else None
+            if not isinstance(pytest_config, dict):
+                return None
+            options = pytest_config.get("ini_options")
+            if options is not None:
+                if not isinstance(options, dict):
+                    raise ValueError(
+                        f"cannot inspect pytest settings in {config}: ini_options must be a table")
+                return options
+            return pytest_config or None
+        parser = configparser.ConfigParser(interpolation=None)
+        with config.open(encoding="utf-8") as stream:
+            parser.read_file(stream)
+    except (OSError, UnicodeError, configparser.Error, tomllib.TOMLDecodeError) as error:
+        raise ValueError(f"cannot inspect pytest settings in {config}: {error}") from error
+    section = "tool:pytest" if config.name == "setup.cfg" else "pytest"
+    if not parser.has_section(section):
+        return {} if config.name in {"pytest.ini", ".pytest.ini"} else None
+    return dict(parser.items(section))
+
+
+def _pytest_discovery_settings(repo: Path | None) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    if repo is None:
+        return DEFAULT_PYTEST_FILE_PATTERNS, ()
+    for name in PYTEST_CONFIG_FILES:
+        config = repo / name
+        if not config.is_file():
+            continue
+        options = _pytest_config_options(config)
+        if options is None:
+            continue
+        patterns = _pytest_option_values(
+            options.get("python_files"), option="python_files", config=config,
+            default=DEFAULT_PYTEST_FILE_PATTERNS)
+        testpaths = _pytest_option_values(
+            options.get("testpaths"), option="testpaths", config=config, default=())
+        for testpath in testpaths:
+            normalized = PurePosixPath(testpath.replace("\\", "/"))
+            if normalized.is_absolute() or ".." in normalized.parts:
+                raise ValueError(f"cannot inspect pytest testpaths in {config}: {testpath}")
+        return patterns, testpaths
+    return DEFAULT_PYTEST_FILE_PATTERNS, ()
+
+
+def discover_pytest_paths(paths: Iterable[str], *, repo: Path | None = None) -> tuple[str, ...]:
+    """Find runnable Python test modules using the repository's pytest file settings."""
+    patterns, testpaths = _pytest_discovery_settings(repo)
+    matches = []
+    for path in paths:
+        if not is_runnable_pytest_file(path, patterns):
+            continue
+        if testpaths and not _within_pytest_testpaths(path, testpaths):
+            continue
+        matches.append(path)
+    return tuple(sorted(matches))
+
+
+def _within_pytest_testpaths(path: str, testpaths: tuple[str, ...]) -> bool:
+    for testpath in testpaths:
+        base = PurePosixPath(testpath.replace("\\", "/")).as_posix().rstrip("/")
+        if base in {"", "."} or path == base or path.startswith(base + "/"):
+            return True
+    return False
 
 
 def judging_test_paths(paths: tuple[str, ...], command: tuple[str, ...],
@@ -227,8 +322,9 @@ def verification_evidence_for_tests(source: str | None, kind: str, command: tupl
                                     output: str, *, passed: bool, declared: bool,
                                     repo: Path | None = None) -> tuple[str | None, str | None, bool]:
     """Sole authority for a final test source and its human verification label."""
+    # Pytest receipts prove explicitly selected modules even when names are unusual.
     evidence = bool(source == "tests" and declared and passed and
-                    (repo is None or has_discovered_test_files(repo)) and
+                    (repo is None or kind == "pytest" or has_discovered_test_files(repo)) and
                     command_runs_tests(kind, command, set(), output=output, repo=repo))
     if evidence:
         return "tests", "verified by tests", True
@@ -257,7 +353,13 @@ def lock_initial_failing_tests(row: dict[str, object], before: dict[str, object]
 def repository_paths(repo: Path) -> set[str]:
     """List source files without following links or generated dependency trees."""
     files = []
-    for root, dirs, names in os.walk(repo, followlinks=False):
+
+    def scan_error(error: OSError) -> None:
+        path = error.filename or repo
+        detail = error.strerror or str(error)
+        raise TestDiscoveryError(f"cannot scan test discovery directory {path}: {detail}") from error
+
+    for root, dirs, names in os.walk(repo, followlinks=False, onerror=scan_error):
         dirs[:] = sorted(name for name in dirs if name not in IGNORE_DIRS
                          and not (Path(root) / name).is_symlink())
         files.extend((Path(root) / name).relative_to(repo).as_posix()
@@ -270,15 +372,20 @@ def has_discovered_test_files(repo: Path) -> bool:
     return any(is_test_file(path) for path in repository_paths(repo))
 
 
-def discover_check(repo: Path) -> tuple[str | None, str, bool]:
-    """Use pytest only when a conventionally named Python test module exists.
+def discover_check(
+    repo: Path, *, pytest_paths: list[str] | None = None
+) -> tuple[str | None, str, bool]:
+    """Use pytest only when a runnable Python test module exists.
 
-    The broader test-resource inventory still protects fixtures and other files
-    under test directories. The final boolean here means pytest has a test-module
-    candidate, not merely that the repository contains test resources.
+    Broader test-resource matching remains separate so fixtures and documentation
+    cannot suppress a usable build check. ``pytest_paths`` receives selectors
+    resolved from the repository's configured pytest collection settings.
     """
     paths = repository_paths(repo)
-    has_tests = any(is_pytest_test_file(path) for path in paths)
+    discovered_tests = discover_pytest_paths(paths, repo=repo)
+    if pytest_paths is not None:
+        pytest_paths.extend(discovered_tests)
+    has_tests = bool(discovered_tests)
     if has_tests:
         return None, "tests", True
     if any(name in paths for name in ("pyproject.toml", "setup.cfg", "setup.py")):
