@@ -73,7 +73,7 @@ def _real_job_dispatch_code():
     )
     return compile(ast.fix_missing_locations(ast.Module(
         body=[gates[0], loop], type_ignores=[],
-    )), react_repair.__file__, "exec"), react_repair._tool_reply_for_call
+    )), react_repair.__file__, "exec"), vars(react_repair)
 
 
 def test_collapsed_job_launch_is_denied_before_execution(tmp_path, monkeypatch):
@@ -149,12 +149,13 @@ def test_collapsed_job_launch_is_denied_before_execution(tmp_path, monkeypatch):
             "name": "job", "arguments": json.dumps(arguments),
         },
     }]}]
-    code, tool_reply = _real_job_dispatch_code()
+    code, worker_globals = _real_job_dispatch_code()
     scope = {
+        **worker_globals,
         "_hook_wiring_for_run": wiring,
         "_name": "job", "_args": arguments, "tool_call_id": call_id,
         "measurement": runtime, "bolt": bolt, "msgs": messages,
-        "toolcall_mode": True, "_tool_reply_for_call": tool_reply,
+        "toolcall_mode": True,
     }
     try:
         exec(code, scope)

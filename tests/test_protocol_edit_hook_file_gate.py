@@ -1,9 +1,8 @@
 """Protocol edits (edit_source / rewrite_source) must refuse hook-protected files.
 
-The legacy edit tools gate hook definitions and bundled inputs in ``_hook_gate``. The protocol
-tools carry handles, not paths, so their refusal lives in ``_ep_not_editable`` inside
-``react_repair.work``. Both closures are nested in ``work``; they are compiled out of its real
-source (same technique as test_hook_wiring_core) so the production code under test is what runs.
+The dispatch gate protects hook definitions and bundled inputs before pre-tool hooks run.
+The protocol executor also guards its resolved path in ``_ep_not_editable``. These tests
+compile the two closures from ``react_repair.work`` to exercise the production predicates.
 """
 from __future__ import annotations
 
@@ -47,7 +46,7 @@ def _work_def(name: str) -> ast.FunctionDef:
 
 def _compile_def(name: str, scope: dict) -> object:
     module = ast.fix_missing_locations(ast.Module(body=[_work_def(name)], type_ignores=[]))
-    namespace = dict(scope)
+    namespace = {**vars(react_repair), **scope}
     exec(compile(module, react_repair.__file__, "exec"), namespace)
     return namespace[name]
 

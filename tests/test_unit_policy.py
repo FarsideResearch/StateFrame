@@ -1,8 +1,11 @@
 from types import SimpleNamespace
 from dataclasses import replace
 
+import pytest
+
 import kernel_unit_policy
 from kernel_capability_floor import admissible_floor_names
+from kernel_edit_tool_names import EDIT_TOOL_NAMES
 from kernel_parallel_records import CheckRecipe, ParallelLimits, UnitContract, UnitSpec
 from kernel_stateframe_runtime import StateFrameRuntime
 from kernel_unit_policy import UNIT_BLOCKED_TOOL, UnitPolicy
@@ -25,7 +28,10 @@ def test_tool_and_mutation_capabilities_are_exact():
         'read', 'grep', 'str_replace', 'insert_before', 'file_create',
     'run_tests', 'done', 'subframe_blocked',
     })
-    assert policy.mutating_tools == frozenset({'str_replace', 'insert_before', 'file_create'})
+    assert policy.mutating_tools & policy.allowed_tools == frozenset({
+        'str_replace', 'insert_before', 'file_create',
+    })
+    assert policy.mutating_tools == EDIT_TOOL_NAMES
     assert policy.authorize_tool('shell').reason == 'SCOPE_VIOLATION'
     assert policy.authorize_tool('run_tests') is None
     assert policy.authorize_mutation('edit', 'pkg/a.py', created_by_unit=False) is None
@@ -40,6 +46,15 @@ def test_tool_and_mutation_capabilities_are_exact():
     assert UNIT_BLOCKED_TOOL['function']['name'] == 'subframe_blocked'
     assert 'unit' not in str(UNIT_BLOCKED_TOOL).casefold()
     assert UNIT_BLOCKED_TOOL['function']['parameters']['properties']['detail']['maxLength'] == 300
+
+
+@pytest.mark.parametrize("editor", ["edit_source", "rewrite_source"])
+def test_unit_classifies_protocol_mutations_without_offering_them(editor):
+    policy = UnitPolicy(make_spec())
+
+    assert "str_replace" in policy.mutating_tools
+    assert editor in policy.mutating_tools
+    assert policy.authorize_tool(editor).reason == "SCOPE_VIOLATION"
 
 
 def test_first_request_uses_admitted_token_limit():

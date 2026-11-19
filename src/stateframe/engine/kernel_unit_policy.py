@@ -19,8 +19,10 @@ from pathlib import Path, PurePosixPath
 from typing import Callable, Mapping, Sequence
 
 if __package__:
+    from .kernel_edit_tool_names import EDIT_TOOL_NAMES
     from .kernel_parallel_records import CheckReceipt, Refusal, UnitSpec
 else:
+    from kernel_edit_tool_names import EDIT_TOOL_NAMES
     from kernel_parallel_records import CheckReceipt, Refusal, UnitSpec
 
 
@@ -46,7 +48,6 @@ UNIT_BLOCKED_TOOL = {
 
 _BASE_TOOLS = frozenset({"read", "grep", "str_replace", "insert_before",
                          "file_create", "done", "subframe_blocked"})
-_MUTATING_TOOLS = frozenset({"str_replace", "insert_before", "file_create"})
 _PYTEST_FRAME = re.compile(r'^\s*(?:File\s+)?(?:"?([^"\s:]+\.py)"?):(\d+)(?::|\s|$)')
 _PYTHON_TRACE_FRAME = re.compile(r'^\s*File "([^"]+)", line (\d+)')
 _PYTEST_FILE = re.compile(r'^([^\s:][^:]*\.py[a-z]?):(\d+):')
@@ -324,7 +325,7 @@ class UnitPolicy:
 
     @property
     def mutating_tools(self) -> frozenset[str]:
-        return _MUTATING_TOOLS
+        return EDIT_TOOL_NAMES
 
     def digest(self) -> str:
         return self.spec.policy_digest
