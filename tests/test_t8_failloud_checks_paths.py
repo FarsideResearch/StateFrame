@@ -51,14 +51,14 @@ class _MemoModeRuntime:
 
 
 def test_receipt_memo_mode_failure_defaults_to_off() -> None:
-    """Site kernel_check_receipts:1321. A failing mode read falls back to the 'off' default (no memo reuse)."""
+    """Site kernel_check_receipts:1347. A failing mode read falls back to the 'off' default (no memo reuse)."""
     from kernel_check_receipts import _check_receipt_memo_mode
 
     assert _check_receipt_memo_mode(_MemoModeRuntime()) == "off"
 
 
 def test_shadow_emit_failure_never_fails_receipt_recording() -> None:
-    """Site kernel_check_receipts:720. Shadow telemetry is advisory: a failing journal emit must not raise."""
+    """Site kernel_check_receipts:744. Shadow telemetry is advisory: a failing journal emit must not raise."""
     from kernel_check_receipts import _emit_shadow_mismatch
 
     class Journal:
@@ -79,7 +79,7 @@ class _BrokenItems(dict):
 
 
 def test_receipt_content_compare_failure_reports_changed() -> None:
-    """Site kernel_check_receipts:760. A comparison failure returns False, so the receipt is rewritten
+    """Site kernel_check_receipts:784. A comparison failure returns False, so the receipt is rewritten
     (generation bump) instead of being suppressed as unchanged. This is the safe direction."""
     from kernel_check_receipts import _receipt_content_equal
 
@@ -514,17 +514,17 @@ _MODULE_PATHS = (
 # No pilot sites live in these modules (checked against tests/test_t8_failloud_pilot.py).
 _PILOT: set[tuple[str, int]] = set()
 
-# Every broad except in the modules. The census lists 25 silent sites; receipts 1188 (re-raise, census LOUD),
+# Every broad except in the modules. The census lists 25 silent sites; receipts 1214 (re-raise, census LOUD),
 # truth adapter 405 (raise on a non-callable projection) and spans 525 (terminal stats fallback, child template) are
-# triaged here too. Opt-in fixes: truth adapter 69 (raises in binding 'on'), 414 (UNKNOWN certificate), receipts 890
-# (honest pinned-scope flag); receipts 741 is the journal emit those fixes report through (logs if the journal fails).
+# triaged here too. Opt-in fixes: truth adapter 69 (raises in binding 'on'), 414 (UNKNOWN certificate), receipts 914
+# (honest pinned-scope flag); receipts 765 is the journal emit those fixes report through (logs if the journal fails).
 _TRIAGED: set[tuple[str, int]] = {
     ("kernel_authored_check_lifecycle", 70), ("kernel_authored_check_lifecycle", 518),
     ("kernel_authored_check_lifecycle", 520),
-    ("kernel_check_receipts", 156), ("kernel_check_receipts", 213), ("kernel_check_receipts", 720),
-    ("kernel_check_receipts", 741), ("kernel_check_receipts", 760), ("kernel_check_receipts", 890),
-    ("kernel_check_receipts", 1188), ("kernel_check_receipts", 1258), ("kernel_check_receipts", 1321),
-    ("kernel_check_receipts", 1334), ("kernel_check_receipts", 1350),
+    ("kernel_check_receipts", 156), ("kernel_check_receipts", 213), ("kernel_check_receipts", 744),
+    ("kernel_check_receipts", 765), ("kernel_check_receipts", 784), ("kernel_check_receipts", 914),
+    ("kernel_check_receipts", 1214), ("kernel_check_receipts", 1284), ("kernel_check_receipts", 1347),
+    ("kernel_check_receipts", 1360), ("kernel_check_receipts", 1376),
     ("kernel_check_truth_adapter", 69), ("kernel_check_truth_adapter", 95),
     ("kernel_check_truth_adapter", 405), ("kernel_check_truth_adapter", 414),
     ("kernel_test_run_spans", 251), ("kernel_test_run_spans", 294), ("kernel_test_run_spans", 301),
