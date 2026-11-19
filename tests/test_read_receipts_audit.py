@@ -297,7 +297,7 @@ def _grep_route(source=None):
     return compile(ast.fix_missing_locations(ast.Module(body=[loop], type_ignores=[])), "grep_route", "exec")
 
 
-def _grep(rt, root, *, native=False, source=None):
+def _grep(rt, root, *, native=False, source=None, bolt=None):
     env = dict(line="grep VALUE app.py", _name="grep" if native else "",
         _args={"pattern": "VALUE", "path": "app.py"} if native else {},
         begin_read_attempt=receipts.begin_read_attempt, measurement=rt, root=root,
@@ -305,7 +305,8 @@ def _grep(rt, root, *, native=False, source=None):
         resolve_tool_path=lambda root, path: root / path, AmbiguousToolPath=ValueError,
         information=SimpleNamespace(check_path=lambda *a: True),
         _hook_gate_route=lambda *a: False, MODEL="scripted", multifile=False,
-        bolt=SimpleNamespace(receipt=lambda *a, **k: None, sure_observe=lambda *a: None),
+        bolt=bolt if bolt is not None else SimpleNamespace(
+            receipt=lambda *a, **k: None, sure_observe=lambda *a: None),
         interventions=False, re=re, sys=sys, json=json, msgs=[],
         _workspace_truth=SimpleNamespace(enabled=lambda: False,
             render_legacy_symbol_answer=lambda *args: ""))
@@ -320,6 +321,34 @@ def test_grep_source_reply_has_exactly_one_result(tmp_path, native):
     assert "VALUE = 1" in _grep(rt, tmp_path, native=native)
     result, = _results(rt)
     assert result["status"] == "GREP" and "capture_id" not in result
+
+
+@pytest.mark.parametrize("native,allocator", [(True, "on"), (True, "off"), (False, "on")])
+def test_complete_grep_receipt_binds_only_allocator_native_calls(tmp_path, monkeypatch, native, allocator):
+    from functools import partial
+
+    from kernel_bolt import KernelBolt
+    from kernel_navigation_pages import search_repository
+
+    monkeypatch.setenv("STATEFRAME_WORKING_SET_ALLOCATOR", allocator)
+    (tmp_path / "app.py").write_text("VALUE = 1\nVALUE = 2\n", encoding="utf-8")
+    rt = runtime(tmp_path)
+    rt.current_tool_call_id = "grep-call" if native else None
+    rt.completed_receipt = lambda *args: None
+    bolt = SimpleNamespace(measurement=rt, sure_observe=lambda *a: None)
+    bolt.receipt = partial(KernelBolt.receipt, bolt)
+
+    reply = _grep(rt, tmp_path, native=native, bolt=bolt)
+    receipt = bolt._receipts[-1]
+    assert receipt["result_set_digest"] == search_repository(
+        tmp_path, "VALUE", tmp_path / "app.py").metadata["result_set_digest"]
+    if native and allocator == "on":
+        assert receipt["grep_page"] == {
+            "provider_call_id": "grep-call", "chars": len(reply),
+            "sha256": hashlib.sha256(reply.encode()).hexdigest(),
+        }
+    else:
+        assert "grep_page" not in receipt
 
 
 def test_grep_on_off_model_visible_reply_is_identical(tmp_path, monkeypatch):
