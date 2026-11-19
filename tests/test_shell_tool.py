@@ -440,12 +440,17 @@ def test_effect_summary_is_bounded_and_names_omission():
     assert "5904 bytes omitted" in text
 
 
-def test_failed_protected_restore_is_fatal_not_an_ordinary_tool_error(setup_tool):
+def test_failed_protected_restore_is_fatal_not_an_ordinary_tool_error(setup_tool, monkeypatch):
+    from kernel_effects import EffectError
     from kernel_shell_tool import ShellCleanupFailed, ShellExecutionFailed
-    make, root, _ = setup_tool
+    make, _, _ = setup_tool
     tool, _ = make(lambda cwd: (cwd / "test_app.py").write_text("changed\n"))
-    digest = tool.baseline["test_app.py"].digest
-    tool.baseline_store._path(digest).unlink()
+
+    def missing(digest):
+        assert digest == tool.baseline["test_app.py"].digest
+        raise EffectError("baseline object unavailable")
+
+    monkeypatch.setattr(tool.baseline_store, "get", missing)
     with pytest.raises(ShellExecutionFailed, match="EffectRestoreError"):
         tool.execute({"command": "python change.py"}, "call-1")
     assert not issubclass(ShellCleanupFailed, Exception)

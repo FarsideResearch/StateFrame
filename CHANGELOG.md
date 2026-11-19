@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Fixed shell rollback snapshots to save file contents in one pack and publish the snapshot only after its contents and index are durable. Existing snapshots remain readable.
+- Read admission prices completed sibling results and resident source together. A retried read can deliver a measured prefix of a long line. The allocator can shorten a pageable search at a whole hit and page recoverable source. If paging cannot reduce the floor, the run pauses before the next send with the measured constraint.
+
 ## 0.7.78 (2026-11-19)
 
 - Fixed: a task that says "Change no other file" or "Only edit X" now limits the run to the files it names. A task that names a new output file (for example answer.json) starts with that file; an explicit --edit outside the task's files is refused with a clear message; negated, quoted, conditional or URL paths are not treated as allowed files; and every direct write, move and delete is checked against the list. Writes to other files are refused with a REFUSED OUTSIDE_TASK_SCOPE reason the model sees, new files are allowed only when the task names them, and a final result that changes any other file is dropped instead of submitted.
