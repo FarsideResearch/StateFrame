@@ -318,6 +318,8 @@ class WorkspaceEffectPolicy:
     baseline_manifest: Manifest | None = None
     directory_allowed: Callable[[str], bool] | None = None
     collection_guard: Callable[[str, bool, str | None, str | None], str | None] | None = None
+    # Files a task's explicit file-scope rule allows ("Change no other file"); None when no rule.
+    task_scope: tuple[str, ...] | None = None
 
     def authorize(self, effect: Effect) -> tuple[bool, str]:
         if self.protected(effect.path):
@@ -358,6 +360,9 @@ class WorkspaceEffectPolicy:
                 if allowed
                 else "new directory is not allowed",
             )
+        # The task's file-scope rule is a hard limit and is checked before the generic edit scope.
+        if self.task_scope is not None and effect.path not in self.task_scope:
+            return False, "outside task file scope"
         if self.edit_scope is not None and not self.edit_scope(effect.path):
             return False, "outside edit scope"
         if effect.before is None and not self.new_file_allowed(effect.path):
@@ -398,6 +403,9 @@ def effect_policy_for_run(
     if not isinstance(files, Mapping):
         raise EffectError("run row has no product files mapping")
     editable = frozenset(str(path) for path in files)
+    named_scope = row.get("task_file_scope")
+    task_scope = (tuple(str(path) for path in named_scope)
+                  if isinstance(named_scope, (list, tuple)) and named_scope else None)
     original_paths = frozenset(
         (baseline_manifest or scan(root, exclude=lambda _: False)).keys()
     )
@@ -487,6 +495,7 @@ def effect_policy_for_run(
         new_file_allowed=lambda path: _is_product_path(path, row),
         collection_guard=collection_guard if guarded else None,
         baseline_manifest=baseline_manifest,
+        task_scope=task_scope,
         directory_allowed=lambda path: (
             (
                 row.get("tier") == "USER-REPO"

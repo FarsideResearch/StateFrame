@@ -28,7 +28,8 @@ from kernel_edit_drift import (
 from kernel_edit_handles import HandleMap, HandleRecord, SpanKind
 from kernel_edit_refusal_codes import Refusal, RefusalCode
 from kernel_edit_source_batch import (
-    UNRESOLVED_PATH, BatchEdit, BatchInputError, BatchValidation, CoveredSpan, validate_edit_source_batch)
+    UNRESOLVED_PATH, BatchEdit, BatchInputError, BatchValidation, CoveredSpan, task_scope_refusal,
+    validate_edit_source_batch)
 from kernel_edit_tool_names import EDIT_SOURCE_TOOL, REWRITE_SOURCE_TOOL, is_destructive_edit_tool
 from kernel_paged_source import source_revision
 from kernel_revision_bound_edit import CandidateTransaction, EditAuthority, EditPlanError, validate_source
@@ -310,10 +311,22 @@ def execute_edit_source(root: Path, args: Mapping[str, object], *, state: EditPr
             return state.remember(key, _rejected(tool, refusals=refusals))
 
         relative = primary.path
-        reason = not_editable(relative) if not_editable is not None else None
-        if reason:
-            return state.remember(key, _rejected(tool, path=relative, detail=reason, refusals=(
-                Refusal.build(RefusalCode.NOT_EDITABLE, edit_index=0, path=relative, old_text=""),)))
+        # Resolve authority for every submitted handle before reading or publishing.
+        # A mixed-file batch may contain a forbidden file after an allowed primary.
+        if not_editable is not None:
+            checked: dict[str, str | None] = {}
+            for index, edit in enumerate(edits):
+                record = state.lookup(edit.get("handle")) if isinstance(edit, Mapping) else None
+                if record is None:
+                    continue
+                if record.path not in checked:
+                    checked[record.path] = not_editable(record.path)
+                reason = checked[record.path]
+                if reason:
+                    return state.remember(key, _rejected(
+                        tool, path=record.path, detail=reason, refusals=(
+                            Refusal.build(RefusalCode.NOT_EDITABLE, edit_index=index,
+                                          path=record.path, old_text=""),)))
 
         current = _read_current(root, relative, read_bytes, mappings, tool)
         if isinstance(current, EditOutcome):
@@ -445,4 +458,5 @@ __all__ = [
     "APPLIED", "AUTHORITY_REF", "EXECUTORS", "REJECTED", "REPLAYED", "SOURCE_RECEIPT",
     "EditOutcome", "EditProtocolRunState", "covered_spans", "default_write_bytes",
     "execute_edit_source", "execute_rewrite_source", "python_parse_check",
+    "task_scope_refusal",
 ]

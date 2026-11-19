@@ -1187,6 +1187,10 @@ def _is_product_path(relative: str, row: Mapping[str, object]) -> bool:
     except (ImportError, ValueError):
         return False
     parts = pathlib.PurePosixPath(path).parts
+    # The task cap applies to editable tests as well as ordinary product files.
+    scope = row.get("task_file_scope")
+    if isinstance(scope, (list, tuple)) and scope and path not in scope:
+        return False
     if (row.get("protect_tests") in {"task", "off"}
             and path in row.get("test_file_paths", ())
             and path not in row.get("protected_test_paths", ())):
@@ -1204,6 +1208,9 @@ def _is_product_path(relative: str, row: Mapping[str, object]) -> bool:
     if (parts[-1].startswith("test_") or parts[-1].endswith("_test.py")
             or parts[-1] == "conftest.py"):
         return False
+    # A task's file-scope rule names the only product files this run may touch, new ones included.
+    if isinstance(scope, (list, tuple)) and scope:
+        return True
     # Ordinary unscoped user repositories admit new product roots as well as
     # files present at startup. Exclusions and test guards above still apply.
     if row.get("tier") == "USER-REPO" and row.get("scoped_edits") is False:
@@ -1242,6 +1249,10 @@ def _edit_scope_widen_refusal(root: pathlib.Path, relative: object, row: Mapping
         return "path is not a normalized workspace path"
     if path != relative:
         return "path is not a normalized workspace path"
+    if row.get("task_file_scope"):
+        from kernel_edit_source_tool import task_scope_refusal
+        return (task_scope_refusal(path, row["task_file_scope"])
+                or "edit scope widening is disabled by task_file_scope")
     if path in fileset.parent:
         return "path is already editable"
     widened = row.get(EDIT_SCOPE_WIDENED_KEY, ())
@@ -1299,7 +1310,7 @@ def _widen_edit_scope(root: pathlib.Path, relative: object, row: dict, fileset: 
     that the shell effect policy consults. Off by default; a refusal leaves the
     caller's existing rejection unchanged.
     """
-    if not (_edit_scope_widen_enabled() and fileset.is_multi_file
+    if row.get("task_file_scope") or not (_edit_scope_widen_enabled() and fileset.is_multi_file
             and row.get("scoped_edits") is True):
         return None
     refusal = _edit_scope_widen_refusal(root, relative, row, fileset, baseline_tests,
@@ -1884,7 +1895,7 @@ def _typed_edit_rejection(code: str, path: pathlib.Path, *,
                           root: pathlib.Path | None = None,
                           hint: str = "", symbol: str | None = None,
                           definitions: Sequence[Mapping[str, object]] | None = None,
-                          include_hint: bool = False) -> str:
+                          include_hint: bool = False, detail: str = "") -> str:
     """Return the JSON edit-rejection envelope shown to the model and frame.
 
     The executor is the authority for the target path.  Keeping the alternative in the
@@ -1925,6 +1936,8 @@ def _typed_edit_rejection(code: str, path: pathlib.Path, *,
         "path": path_text,
         "status": "REJECTED",
     }
+    if detail:
+        payload["detail"] = detail
     if include_hint and hint:
         alternative["hint"] = str(hint).strip()[:600]
     if symbol:
@@ -7850,8 +7863,23 @@ def work(d, *, resume=None):
                 _scope_widen_notes.append(note)
             return note
 
+        def _task_scope_reason(relative):
+            from kernel_edit_source_tool import task_scope_refusal
+            if not d.get("task_file_scope") or not isinstance(relative, str):
+                return None
+            reason = task_scope_refusal(relative, d.get("task_file_scope"))
+            # Check both the named path and its actual target (including symlinks).
+            # Failed resolution must not remove a known task refusal.
+            try:
+                resolved = (root / relative).resolve().relative_to(root.resolve()).as_posix()
+            except (OSError, RuntimeError, ValueError):
+                return reason
+            return reason or task_scope_refusal(resolved, d.get("task_file_scope"))
+
         def _outside_edit_scope(relative):
-            """Existing files outside a scoped run cannot reach a workspace writer."""
+            """Task caps apply to every path, before declared/created-file shortcuts."""
+            if _task_scope_reason(relative) is not None:
+                return True
             if not (multifile and d.get("scoped_edits") is True):
                 return False
             if not isinstance(relative, str) or relative in fileset.paths:
@@ -7870,6 +7898,11 @@ def work(d, *, resume=None):
             return str(path) not in created_this_run and path.is_file()
 
         def _scope_rejection(relative):
+            reason = _task_scope_reason(relative)
+            if reason is not None:
+                return _typed_edit_rejection(
+                    "NOT_EDITABLE", root / relative, root=root,
+                    hint=reason, include_hint=True, detail=reason)
             return _typed_edit_rejection(
                 "NOT_EDITABLE", root / relative, root=root,
                 hint=(f"{relative} is not listed in the EditAuthority's editable_paths. "
@@ -11009,7 +11042,10 @@ def work(d, *, resume=None):
                             _dest_arg = _args.get("destination") if _name == "file_move" else None
                             if multifile and isinstance(_source_arg, str):
                                 _scope_widen(_source_arg)
-                            _file_scope_refused = _outside_edit_scope(_source_arg)
+                            # Task refusals use the normalized admission callbacks below,
+                            # after the file operation's path and protection checks.
+                            _file_scope_refused = (_outside_edit_scope(_source_arg)
+                                                   and _task_scope_reason(_source_arg) is None)
                             _paths = ()
                             _file_replay = FileOperationReplay(
                                 root, _name, _args, tool_call_id,
@@ -11023,7 +11059,9 @@ def work(d, *, resume=None):
                                                   if _hook_wiring_for_run is not None else set())),
                                            "new_files_forbidden": new_files_forbidden(measurement),
                                            "allowed_product_paths": d.get("allowed_product_paths"),
-                                           "new_file_roots": d.get("new_file_roots")},
+                                           "new_file_roots": d.get("new_file_roots"),
+                                           **({"task_file_scope": d["task_file_scope"]}
+                                              if d.get("task_file_scope") else {})},
                                 environment_identity=_shell.identity() if _shell is not None else "disabled")
                             try:
                                 if _file_scope_refused:
@@ -11037,9 +11075,20 @@ def work(d, *, resume=None):
                                     return protected_test_path(path, baseline_tests)
 
                                 def _editable(relative):
+                                    if _task_scope_reason(relative) is not None:
+                                        raise FileOperationRefused(
+                                            "NOT_EDITABLE", _scope_rejection(relative))
                                     return (not _outside_edit_scope(relative)
                                             and (relative in fileset.paths
                                                  or str(root / relative) in created_this_run))
+
+                                def _new_file_allowed(relative):
+                                    if _task_scope_reason(relative) is not None:
+                                        raise FileOperationRefused(
+                                            "NEW_FILE_FORBIDDEN", _scope_rejection(relative))
+                                    return (not new_files_forbidden(measurement)
+                                            and _row_is_product_path(relative, d))
+
                                 if _name == "file_delete":
                                     _effect = file_delete(root, _source_arg, protected=_protected,
                                                           editable=_editable)
@@ -11047,9 +11096,7 @@ def work(d, *, resume=None):
                                     _effect = file_move(
                                         root, _source_arg, _dest_arg, protected=_protected,
                                         editable=_editable,
-                                        new_file_allowed=lambda relative: (
-                                            not new_files_forbidden(measurement)
-                                            and _row_is_product_path(relative, d)),
+                                        new_file_allowed=_new_file_allowed,
                                     )
                                 _paths = _effect.changed_paths
                                 _obs = f"{_name} applied. {', '.join(_paths)}"
@@ -11127,7 +11174,8 @@ def work(d, *, resume=None):
                             tool_call_id_fc = tool_call_id
                             if _create_error:
                                 _obs = f"file_create REJECTED: {_create_error}"
-                            elif _outside_edit_scope(_create_rel):
+                            elif (_outside_edit_scope(_create_rel)
+                                  and not (_fc.exists() and protected_test_path(_fc, baseline_tests))):
                                 _obs = _scope_rejection(_create_rel)
                             elif _fc.exists():
                                 if protected_test_path(_fc, baseline_tests):
@@ -11675,6 +11723,13 @@ def work(d, *, resume=None):
                     elif (_bound_refusal := _bound_edit_refusal(
                             root, pending_edit_path, tool_target_ref)) is not None:
                         obs = "edit REJECTED: " + _bound_refusal
+                    elif _task_scope_reason(_pending_rel) is not None:
+                        if protected_test_path(pending_edit_path, baseline_tests):
+                            obs = _typed_edit_rejection(
+                                "NOT_EDITABLE", pending_edit_path, root=root,
+                                hint="pre-existing test files are read-only")
+                        else:
+                            obs = _scope_rejection(_pending_rel)
                     elif multifile:
                         _pending_rel = str(pending_edit_path.relative_to(root))
                         _scope_widen(_pending_rel)
@@ -13806,7 +13861,8 @@ def work(d, *, resume=None):
                     if multifile:
                         _scope_widen(relative)
                     if _outside_edit_scope(relative):
-                        return "NOT_EDITABLE: path is outside editable_paths"
+                        return (_task_scope_reason(relative)
+                                or "NOT_EDITABLE: path is outside editable_paths")
                     return None
 
                 def _ep_write(path: pathlib.Path, data: bytes) -> tuple[bool, str | None]:
@@ -13855,6 +13911,10 @@ def work(d, *, resume=None):
                     else:
                         obs = _repair.observation()
                         _pending_edit_repair = _repair.render()
+                        # Compaction must retain task authority in both model messages.
+                        if _ep_out.detail and _ep_out.detail == _task_scope_reason(_ep_out.path):
+                            obs += "\n" + _ep_out.detail
+                            _pending_edit_repair += "\n\n" + _ep_out.detail
                         # The repair request's handles are the only valid ones for the next call.
                         _edit_protocol_state.set_request(_repair.handle_map)
                         trip_loop_breaker_if_blocked(measurement, _repair, _ep_tool)
@@ -13909,9 +13969,10 @@ def work(d, *, resume=None):
                             else:
                                 _batch_reason = _bound_edit_refusal(
                                     root, _batch_path, _batch_edit.get("target_ref"))
-                                if multifile and _batch_reason is None:
+                                if _batch_reason is None:
                                     _batch_relative = _batch_path.relative_to(root).as_posix()
-                                    _scope_widen(_batch_relative)
+                                    if multifile:
+                                        _scope_widen(_batch_relative)
                                     if _outside_edit_scope(_batch_relative):
                                         _batch_scope_rejection = _scope_rejection(_batch_relative)
                                         _batch_reason = "NOT_EDITABLE: path is outside editable_paths"
@@ -14379,6 +14440,8 @@ def work(d, *, resume=None):
                             "RETRY_GATE", p, root=root,
                             hint=(_pd_outcome2.decision.message or
                                   "retry denied before dispatch."))
+                    elif _task_scope_reason(_edit_path_label(p, root)) is not None:
+                        obs = _scope_rejection(_edit_path_label(p, root))
                     elif multifile:
                         _scope_widen(resolved_path)
                         if _outside_edit_scope(resolved_path) or resolved_path not in fileset.paths:

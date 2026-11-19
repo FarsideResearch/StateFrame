@@ -34,6 +34,7 @@ from kernel_plain_contracts import (
 from kernel_plain_hooks import HookSettings, PlainHooks
 from kernel_plain_http import AbortiveHTTPTransport
 from kernel_bounded_http import send_with_gzip_fallback
+from kernel_edit_source_tool import task_scope_refusal
 from kernel_plain_loop import (
     OUT_CAP, TOOLS, Limits, ProviderHTTPError, ProviderTransportError, run_loop,
 )
@@ -92,8 +93,9 @@ class PlainHost:
     SUPPORTED = frozenset({"list_dir", "read_file", "grep", "str_replace", "write_file", "run_tests", "shell"})
 
     def __init__(self, authority: EditAuthority, *, check_runner: CheckRunner, journal, hooks: PlainHooks,
-                 on_product_edit: Callable[[], None] = lambda: None):
+                 on_product_edit: Callable[[], None] = lambda: None, task_scope: object = None):
         self.authority, self.check_runner, self.journal, self.hooks = authority, check_runner, journal, hooks
+        self.task_scope = tuple(task_scope) if isinstance(task_scope, (list, tuple)) else ()
         self.on_product_edit = on_product_edit
         self.book = ReceiptBook()
         self._tool_call_id = ""
@@ -182,7 +184,7 @@ class PlainHost:
 
     def _str_replace(self, a: dict) -> str:
         scope, path, relative = self.authority.classify(a["path"])
-        if scope == "refused":
+        if scope == "refused" or task_scope_refusal(relative, self.task_scope):
             return self._refused("str_replace", relative)
         old_rev = file_revision(path)
         text = path.read_text(encoding="utf-8")
@@ -203,7 +205,7 @@ class PlainHost:
 
     def _write_file(self, a: dict) -> str:
         scope, path, relative = self.authority.classify(a["path"])
-        if scope == "refused":
+        if scope == "refused" or task_scope_refusal(relative, self.task_scope):
             return self._refused("write_file", relative)
         old_rev = file_revision(path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -283,7 +285,11 @@ class PlainHost:
 
     def _refused(self, tool: str, relative: str) -> str:
         self.book.refused_edits += 1
-        self._edit_receipt(tool, relative, "refused", False, "unchanged", "unchanged", None, "outside edit authority")
+        reason = task_scope_refusal(relative, self.task_scope)
+        self._edit_receipt(tool, relative, "refused", False, "unchanged", "unchanged", None,
+                           reason or "outside edit authority")
+        if reason:
+            return f"error: {relative} is not editable; {reason}"
         return self.authority.refusal(relative)
 
     def _applied(self, tool: str, relative: str, scope: str, old_rev: str, path: Path, n: int | None) -> str:
@@ -751,7 +757,7 @@ def run_plain(row: Mapping[str, object], output: Path, *,
             lock, output.parent / "test-lock.jsonl", preflight_argv=capability_preflight_argv(root, row),
             on_preflight=lambda receipt: journal.write("capability_preflight", **receipt))
     host = PlainHost(authority, check_runner=check_runner, journal=journal, hooks=hooks,
-                     on_product_edit=lambda: export("product_edit"))
+                     on_product_edit=lambda: export("product_edit"), task_scope=row.get("task_file_scope"))
     if provider is None:
         url = env.get("DS_URL", "")
         if not url:

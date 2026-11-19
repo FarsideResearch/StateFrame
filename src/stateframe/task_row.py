@@ -13,6 +13,7 @@ import posixpath
 import re
 from pathlib import Path, PurePosixPath
 
+from .task_file_scope import TaskFileScopeError, parse_task_file_scope
 from .workcopy import WorkCopy, WorkCopyError
 from .test_runners import (discover_pytest_paths, is_test_file, judging_test_paths,
                            protected_paths, validate_patterns)
@@ -32,6 +33,13 @@ NONPUBLIC_PARTS = frozenset({
 
 class TaskRowError(ValueError):
     pass
+
+
+def _parse_task_scope(task: str) -> tuple[str, ...] | None:
+    try:
+        return parse_task_file_scope(task, strict=True)
+    except TaskFileScopeError as exc:
+        raise TaskRowError(str(exc)) from exc
 
 
 def discover_checks(files: dict[str, str], *, repo: Path | None = None) -> list[str]:
@@ -127,6 +135,21 @@ def _output_hint(task: str, product: dict[str, str]) -> str | None:
     return None
 
 
+def _task_scope_entry(entry: str | None, named: tuple[str, ...],
+                      product: dict[str, str], baseline: dict[str, str],
+                      protected: set[str]) -> str | None:
+    """Choose a public scoped source or a named output that is genuinely new."""
+    if entry in product and _public_hint(entry):
+        return entry
+    existing = guess_entry({path: text for path, text in product.items()
+                            if _public_hint(path)}, {})
+    if existing is not None:
+        return existing
+    # An excluded existing file must never be reintroduced as a new output.
+    return next((path for path in named if path not in baseline
+                 and path not in protected and _public_hint(path)), None)
+
+
 AUTO_SCOPE_LIMIT = 12
 AUTO_SCOPE_CHECK_LIMIT = 8
 
@@ -181,6 +204,7 @@ DECLARE_ALL_LIMIT = 200
 SCOPE_EXPLICIT = "explicit"          # --target and/or --edit given
 SCOPE_INFERRED = "inferred"          # over the limit: auto_scope found files from the task/checks
 SCOPE_WHOLE_REPO = "whole_repo"      # at or below the limit with no flags: unscoped, as before
+SCOPE_TASK_TEXT = "task_text"        # the task states a file-scope rule ("Change no other file")
 
 
 def resolve_edit_scope(task: str, product: dict[str, str], *, target: str | None,
@@ -188,15 +212,24 @@ def resolve_edit_scope(task: str, product: dict[str, str], *, target: str | None
     """Return (editable product files, scoped_edits, scope_source) for a row.
 
     ``target``/``edits`` are already validated against ``product``. ``--edit`` always scopes; a
-    ``--target`` alone scopes only over the limit (small repos keep it as a hint, as before). A repo
-    at or below DECLARE_ALL_LIMIT with no flags stays unscoped. Over the limit with no flags,
+    ``--target`` alone scopes only over the limit (small repos keep it as a hint, as before). A
+    task's explicit file-scope rule ("Change no other file", "Only edit X") scopes to its named
+    files at any size and wins over the size-based fallbacks below. A repo at or below
+    DECLARE_ALL_LIMIT with no flags and no task rule stays unscoped. Over the limit with no flags,
     auto_scope chooses the files; if it finds none, refuse before the run so every product file
     cannot accidentally become editable.
     """
+    named = _parse_task_scope(task)
     large = len(product) > DECLARE_ALL_LIMIT
     if edits or (large and target):
         paths = list(dict.fromkeys(([target] if target else []) + edits))
+        if named and any(path not in named for path in paths):
+            raise TaskRowError(
+                f"explicit --edit/--target paths {paths!r} conflict with task file scope "
+                f"{list(named)!r}; remove paths outside the task scope or update --task")
         return {path: product[path] for path in paths}, True, SCOPE_EXPLICIT
+    if named:
+        return {path: product[path] for path in named if path in product}, True, SCOPE_TASK_TEXT
     if not large:
         return product, False, SCOPE_WHOLE_REPO
     inferred = auto_scope(task, product, steering)
@@ -219,9 +252,10 @@ def widened_scope_paths(row: dict, candidate_paths, baseline, *, hook_paths=()) 
     """Existing product files outside a scoped row's files that edit scope widening may write.
 
     Host-side check, independent of the engine: the path existed in the repository, is not a
-    test or protected file. ``candidate_paths`` is in admission order.
+    test or protected file. ``candidate_paths`` is in admission order. A task's file-scope rule
+    is a hard limit, so widening is refused entirely for such a row.
     """
-    if row.get("scoped_edits") is not True:
+    if row.get("scoped_edits") is not True or row.get("task_file_scope"):
         return []
     declared = set(row.get("files") or ())
     excluded = (set(row.get("protected_test_paths") or ())
@@ -313,19 +347,24 @@ def build_row(work: WorkCopy, *, task: str, checks: list[str] | None = None,
     # sandbox as context. Other tests stay in the repository copy, not the row.
     product, scoped, scope_source = resolve_edit_scope(
         task, all_product, target=target, edits=edits, steering=steering)
+    named = _parse_task_scope(task)
     if not scoped:
         # Other tests under tests/ (fixtures, conftest, helpers) stay visible as public test files.
         extra = [path for path in texts if path.startswith("tests/") and path not in public_tests]
         for path in extra:
             public_tests[path] = texts[path]
     entry = target or guess_entry(product, {p: public_tests[p] for p in declared_checks})
-    if entry is None:
-        entry = _output_hint(task, product)
-    if entry is not None and not _public_hint(entry):
-        entry = _output_hint(task, product)
+    if named:
+        entry = _task_scope_entry(entry, named, product, work.baseline,
+                                  set(declared_checks) | locked_tests)
+    else:
         if entry is None:
-            entry = guess_entry({path: text for path, text in product.items()
-                                 if _public_hint(path)}, {})
+            entry = _output_hint(task, product)
+        if entry is not None and not _public_hint(entry):
+            entry = _output_hint(task, product)
+            if entry is None:
+                entry = guess_entry({path: text for path, text in product.items()
+                                     if _public_hint(path)}, {})
     if entry is None:
         raise TaskRowError("could not pick a public starting file; name an output path in --task "
                            "or pass --target for an existing product file")
@@ -359,6 +398,8 @@ def build_row(work: WorkCopy, *, task: str, checks: list[str] | None = None,
         "test_src": public_tests[first_check],
         "_skip_db": True,
     }
+    if named:
+        row["task_file_scope"] = list(named)
     if protect_tests != "all":
         row.update(protect_tests=protect_tests,
                    test_file_paths=sorted(test_files),
@@ -417,6 +458,7 @@ def _build_generic_row(work: WorkCopy, *, task: str, checks: list[str] | None,
         steering = {path: texts[path] for path in sorted(steered) if path in texts}
     product, scoped, scope_source = resolve_edit_scope(
         task, product, target=selected_target, edits=edits, steering=steering)
+    named = _parse_task_scope(task)
     source_files = {path: text for path, text in product.items() if path not in test_files}
     candidates = source_files or product
     entry = selected_target or next(
@@ -425,13 +467,19 @@ def _build_generic_row(work: WorkCopy, *, task: str, checks: list[str] | None,
                                   ".c", ".cc", ".cpp", ".sh"}
          and not path.endswith("/__init__.py")), None)
     entry = entry or guess_entry(candidates, {})
-    if entry is None:
-        entry = _output_hint(task, product)
-    if entry is not None and not _public_hint(entry):
-        entry = _output_hint(task, product)
+    if named:
+        protected_outputs = set(protected_paths(
+            named, kind="generic", extra_patterns=patterns, command=test_command))
+        entry = _task_scope_entry(entry, named, product, work.baseline,
+                                  protected | protected_outputs)
+    else:
         if entry is None:
-            entry = guess_entry({path: text for path, text in product.items()
-                                 if _public_hint(path)}, {})
+            entry = _output_hint(task, product)
+        if entry is not None and not _public_hint(entry):
+            entry = _output_hint(task, product)
+            if entry is None:
+                entry = guess_entry({path: text for path, text in product.items()
+                                     if _public_hint(path)}, {})
     if entry is None:
         raise TaskRowError("could not pick a starting file; name an output path in --task")
     new_roots = [entry.split("/", 1)[0]] if entry not in product else []
@@ -452,6 +500,8 @@ def _build_generic_row(work: WorkCopy, *, task: str, checks: list[str] | None,
         "new_file_roots": new_roots, "entry": {"fn": "", "path": entry},
         "path": entry, "rel": entry, "fn": "", "_skip_db": True,
     }
+    if named:
+        row["task_file_scope"] = list(named)
     if protect_tests != "all":
         row["protect_tests"] = protect_tests
         row["test_file_paths"] = sorted(test_files)

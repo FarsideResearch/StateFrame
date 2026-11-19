@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.78 (2026-11-19)
+
+- Fixed: a task that says "Change no other file" or "Only edit X" now limits the run to the files it names. A task that names a new output file (for example answer.json) starts with that file; an explicit --edit outside the task's files is refused with a clear message; negated, quoted, conditional or URL paths are not treated as allowed files; and every direct write, move and delete is checked against the list. Writes to other files are refused with a REFUSED OUTSIDE_TASK_SCOPE reason the model sees, new files are allowed only when the task names them, and a final result that changes any other file is dropped instead of submitted.
+
 ## 0.7.77 (2026-11-19)
 
 - New opt-in switch `STATEFRAME_SHARED_CHECK_CACHE=on` (off by default, so the shipped profile and default runs are unchanged). When on, the check run after each edit and the check run at closure share one proof cache, so a check that already ran on the same snapshot, with the same inputs, is reused (pass or fail) instead of run again.

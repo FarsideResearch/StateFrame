@@ -301,6 +301,12 @@ def _refuse_submitted_delivery(summary: dict) -> None:
     summary["engine_result"] = DELIVERY_REFUSED
 
 
+def _out_of_task_scope_paths(candidate: dict[str, bytes | None], scope) -> list[str]:
+    """Candidate paths (writes and deletes) that a task's file-scope rule does not allow."""
+    allowed = set(scope)
+    return sorted(path for path in candidate if path not in allowed)
+
+
 def checkpoint_resume_off(spec: dict) -> bool:
     """An explicit current or recorded opt-out blocks restore and all later saves."""
     current = os.environ.get("STATEFRAME_CHECKPOINT", "").strip().lower()
@@ -4528,8 +4534,14 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
             declared.update(mutation_kept)
             # Preserve detected scope violations even if applying retained files raises.
             dropped_paths = _dropped_existing_candidate_paths(work, candidate, declared)
+            task_scope = spec["public_row"].get("task_file_scope")
+            out_of_task_scope = _out_of_task_scope_paths(candidate, task_scope) if task_scope else []
+            if out_of_task_scope:
+                dropped_paths = sorted(set(dropped_paths) | set(out_of_task_scope))
             written, _, candidate_error = _apply_sealed_candidate(
                 work, candidate, declared, printer, dropped_paths=dropped_paths)
+            if out_of_task_scope:
+                candidate_error = "sealed candidate changed files outside the task's file scope"
     except RunDeadlineExceeded:
         raise
     except (RunError, workcopy.WorkCopyError, OSError, ValueError) as error:
