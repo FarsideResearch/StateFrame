@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.7.75 (2026-11-19)
 
 - Timed-out Jedi lookups no longer hold the interpreter open. Engine teardown after completion or cancellation bounds output draining and worker cleanup while preserving the published result.
