@@ -1,9 +1,25 @@
 # Changelog
 
-## Unreleased
+## 0.7.79 (2026-11-19)
 
 - Fixed shell rollback snapshots to save file contents in one pack and publish the snapshot only after its contents and index are durable. Existing snapshots remain readable.
+- Fixed: completion-token totals now require a valid count for every send and preserve measured zero.
+- Fixed default pytest discovery to use the path manifest and declared Python encodings; selected checks that cannot be read or decoded now stop with a visible error.
+- Fixed runner selection so explicit pytest selectors and configured file patterns keep the pytest runner.
+- Fix: work copy creation, change manifests, candidate digests, and test discovery now raise typed path-specific errors when a directory cannot be scanned. Incomplete trees can no longer appear as deletions, empty digests, or missing checks.
+- Changed: Python analyzer trees now share a 24 MiB source-byte LRU with a 16,384-entry backstop; the boot symbol registry and coordinated-change validation reuse read-only cached trees. Oversized sources parse without evicting warm entries.
+- Python files now share one indexing pass for the call graph, coordinated-change ledger and symbol registry. Fresh runs reuse unchanged file facts from the StateFrame home cache.
+- Typed evidence pin on the wire: the pin body neutralizes marker text when built (`kernel_evidence_pin.py`), and the wire check requires the exact typed pin to be the only well-formed `[EVIDENCEPIN]` block, so a stray start marker in task or tool text no longer swallows the real pin (`kernel_completion_owner._wire_pin_is_typed`). Tests: `tests/test_evidence_pin_wire_markers.py`, `tests/test_t4_host_marker_injection.py`.
+- Fixed: the resume-event classifier now explicitly rejects `completion_owner_submission_reopened` tail events until replay reconciliation is defined.
 - Read admission prices completed sibling results and resident source together. A retried read can deliver a measured prefix of a long line. The allocator can shorten a pageable search at a whole hit and page recoverable source. If paging cannot reduce the floor, the run pauses before the next send with the measured constraint.
+- Fixed: offline sandboxed commands can read the system's public CA certificates (never `/etc/ssl/private`). Debian's bundled pip loads them on import, so building a run env failed inside the sandbox on Debian and Ubuntu and checks then ran a bare `python` that does not exist.
+- Fixed: share stat-identity file digests between green-lock and workspace binding to avoid re-reading unchanged product files each turn; reject raced hashes and workspace snapshots, recheck timestamp safety, evict failed lookups, independently verify seeded digests, and discard digest observations on clock rollback and checkpoint restore.
+- Fixed: probe the optional tree-sitter language pack once per engine interpreter; reuse missing-pack results and send subsequent Python outlines directly to the AST fallback without changing outline output or caching individual grammar failures.
+- Fixed: the project test interpreter handoff is no longer described as a shell override. The guide now records CLI selection precedence and explains that `--test-python` selects an alternate project interpreter.
+- Fixed: a positive generic runner receipt is labeled as test verification only when test discovery finds files; a command with a positive receipt and no discovered tests remains a check command.
+- Fixed: a repeated read-only call suppressed by the host now settles as not applied without granting source credit, so continuation no longer blocks on an unknown effect.
+- Fixed: `source_roots` deduplicates roots as they are added and indexes import providers per directory, avoiding repeated provider scans on large workspaces.
+- Fixed repository-signal inventories to prune excluded directories before descent and read only the retained 200,000-character source prefix.
 
 ## 0.7.78 (2026-11-19)
 
