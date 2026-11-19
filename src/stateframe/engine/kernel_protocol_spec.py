@@ -733,6 +733,11 @@ def _event_rows() -> list[dict[str, object]]:
             "fully_equal_enrichment_would_be_suppressed",
             "kernel_check_receipts.record_check_output",
         ),
+        "check_receipt_unchanged": EventRef(
+            "check_receipt_unchanged", "HOST_OBSERVED",
+            "dedup_suppressed_check_execution_counted",
+            "kernel_check_receipts.record_check_output",
+        ),
         "test_run_profile": EventRef(
             "test_run_profile", "HOST_OBSERVED", "monotonic_public_pytest_timing",
             "kernel_test_run_spans.TestRunProfile.finalize",

@@ -839,6 +839,7 @@ OPT_IN_SWITCHES = {
     "STATEFRAME_PARALLEL_BYTE_TOKEN_HEADROOM_PCT": (),
     "STATEFRAME_PARALLEL_USAGE_FEEDBACK": ("observe", "off"),
     "STATEFRAME_PARALLEL_DROP_TOOL_AFTER_TERMINAL": ("on", "off"),
+    "STATEFRAME_PARALLEL_SALVAGE_ADOPT": ("off", "on"),  # opt-in: offer a stopped subframe's kept edits to the commit gates
     "STATEFRAME_PARALLEL_FORCE_MANIFEST": (),  # internal benchmark-only; stability may change
     "STATEFRAME_QUEUE_WAIT_MAX_S": (),  # finite positive seconds; a profile may set it too
     "STATEFRAME_SEND_STALL_S": (),  # 10-600 seconds without request-body progress
@@ -857,6 +858,7 @@ OPT_IN_SWITCHES = {
 }
 PARALLEL_CONTROL_SWITCHES = frozenset({
     "STATEFRAME_PARALLEL_DROP_TOOL_AFTER_TERMINAL",
+    "STATEFRAME_PARALLEL_SALVAGE_ADOPT",
     "STATEFRAME_PARALLEL_FORCE_MANIFEST",
     "STATEFRAME_PARALLEL_SUGGEST",
     "STATEFRAME_PARALLEL_SUGGEST_BACKEND",
@@ -880,6 +882,7 @@ PARALLEL_LIMIT_SHELL_SWITCHES = frozenset(name for name in OPT_IN_SWITCHES
                                               "STATEFRAME_PARALLEL_SUGGEST_EDIT_FRACTION_PCT",
                                               "STATEFRAME_PARALLEL_SUGGEST_TOKENS_PER_EDIT_LINE",
                                               "STATEFRAME_PARALLEL_DROP_TOOL_AFTER_TERMINAL",
+                                              "STATEFRAME_PARALLEL_SALVAGE_ADOPT",
                                               "STATEFRAME_PARALLEL_FORCE_MANIFEST",
                                           })
 INTERNAL_BENCHMARK_SWITCHES = {

@@ -354,33 +354,24 @@ def require_complete_source(final_messages: Sequence[Mapping[str, object]], *, p
 def file_floor_messages(path: str, source: str) -> list[dict[str, str]]:
     """The cheapest request payload that proves ``path`` in full: every page plus its map line.
 
-    Pages follow the allocator's page ceilings (lines and characters), so pricing
-    these messages prices the FILE floor the allocator can never go below.
+    Pages come from the allocator's own page planner (``page_spans``: the line ceiling
+    and the character budget net of the page header reserve), so pricing these
+    messages prices the FILE floor the allocator can never go below.
     """
     if __package__:
-        from .kernel_request_source_window import _MAX_PAGE_CHARS, _MAX_PAGE_LINES
-        from .kernel_working_set_windows import render_frozen_span
+        from .kernel_working_set_windows import page_spans, render_frozen_span
     else:
-        from kernel_request_source_window import _MAX_PAGE_CHARS, _MAX_PAGE_LINES
-        from kernel_working_set_windows import render_frozen_span
+        from kernel_working_set_windows import page_spans, render_frozen_span
 
     lines = source.splitlines(keepends=True)
     revision = "sha256:" + hashlib.sha256(source.encode("utf-8", errors="surrogateescape")).hexdigest()
+    spans = page_spans(lines, 1, len(lines), path, revision) if lines else []
     messages: list[dict[str, str]] = []
-    spans: list[tuple[int, int]] = []
-    first = 0
-    while first < len(lines):
-        last, chars = first, 0
-        while last < len(lines) and last - first < _MAX_PAGE_LINES and (
-                last == first or chars + len(lines[last]) <= _MAX_PAGE_CHARS):
-            chars += len(lines[last])
-            last += 1
+    for first, last in spans:
         page, _ = render_frozen_span(
             {"path": path, "revision": revision, "total_lines": len(lines)},
-            {"start_line": first + 1, "end_line": last}, "".join(lines[first:last]))
+            {"start_line": first, "end_line": last}, "".join(lines[first - 1:last]))
         messages.append({"role": "user", "content": page})
-        spans.append((first + 1, last))
-        first = last
     block = render_source_map({path: (revision, spans)})
     if block is not None:
         messages.append({"role": "user", "content": block})

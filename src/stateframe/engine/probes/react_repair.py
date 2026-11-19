@@ -6590,6 +6590,25 @@ def _never_legacy_complete(content: object) -> bool:
     return False
 
 
+def _unit_edit_needs_sent_view(unit: object, *, op: str, path: str,
+                               file: pathlib.Path) -> bool:
+    """True when a subframe mutation must pass the sent-wire edit gate (FU-070-ALLOC).
+
+    The gate runs only with the working-set allocator on (``kernel_read_receipts.enabled``,
+    the one switch reader every allocator branch uses), for an ``edit`` of a regular,
+    non-symlink file the unit's contract owns. Allocator-off mutations never reach it.
+
+    Scope is ``contract.owns`` only. An edit of a ``contract.creates`` path the child
+    created itself is not gated: the child wrote those bytes, and a unit's only edit
+    tools (``str_replace``, ``insert_before``) anchor on the file's current bytes (an
+    exact, unique ``old_str`` or a revision-bound ``target_ref``).
+    """
+    from kernel_read_receipts import enabled as allocator_enabled
+
+    return bool(op == "edit" and path and path in unit.spec.contract.owns
+                and file.is_file() and not file.is_symlink() and allocator_enabled())
+
+
 def _admit_sent_edit(prepared: object, *, path: str, source: bytes) -> tuple[bool, str, str]:
     """Admit a child edit only against the sent wire (FU-070-ALLOC)."""
     from kernel_edit_admission import admit_unit_edit
@@ -10415,10 +10434,8 @@ def work(d, *, resume=None):
                                 # last request sent in _provider_request_once).
                                 _edit_norm = _unit_module._path(_requested_path)
                                 _edit_file = root / _requested_path
-                                if (_unit_refusal is None and _op == "edit" and _edit_norm
-                                        and _edit_norm in _unit.spec.contract.owns
-                                        and _edit_file.is_file() and not _edit_file.is_symlink()
-                                        and os.environ.get("STATEFRAME_WORKING_SET_ALLOCATOR") == "on"):
+                                if _unit_refusal is None and _unit_edit_needs_sent_view(
+                                        _unit, op=_op, path=_edit_norm, file=_edit_file):
                                     _edit_raw = _edit_file.read_bytes()
                                     _edit_ok, _edit_why, _edit_detail = _admit_sent_edit(
                                         _prepared, path=_edit_norm, source=_edit_raw)
@@ -10426,7 +10443,7 @@ def work(d, *, resume=None):
                                         measurement.journal.emit(
                                             "edit_admission_refused", path=_edit_norm,
                                             reason=_edit_why or "incomplete_view",
-                                            request=_prepared.capture.request_id)
+                                            request=getattr(getattr(_prepared, "capture", None), "request_id", None))
                                         _unit_refusal = _unit_module._refusal(
                                             "SOURCE_NOT_VERIFIED", _edit_detail, _edit_norm)
                             if _unit_refusal is not None:

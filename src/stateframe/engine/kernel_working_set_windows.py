@@ -42,7 +42,29 @@ def _unit_active() -> bool:
     """Only subframe children page oversized plan units; other allocator runs are unchanged."""
     import sys
     module = sys.modules.get("kernel_unit_policy")
-    return module is not None and module.active() is not None
+    active = getattr(module, "active", None) if module is not None else None
+    return bool(callable(active) and active() is not None)
+
+
+def page_spans(lines, first, last, path, revision):
+    """Inclusive 1-based read-page spans covering ``lines[first-1:last]``, in order.
+
+    A page holds at most MAX_READ_LINES lines and MAX_READ_CHARS characters less the
+    page header reserve; a single longer line is a page of its own. This is the one
+    page planner: subframe paging (``_plan_spans``) emits these pages and the FILE
+    floor (``kernel_source_view.file_floor_messages``) prices the same pages.
+    """
+    from kernel_working_set_recovery import MAX_READ_CHARS, MAX_READ_LINES, read_page_header_reserve
+    budget = MAX_READ_CHARS - read_page_header_reserve(path, revision)
+    spans, start, chars = [], first, 0
+    for number in range(first, last + 1):
+        size = len(lines[number - 1])
+        if number > start and (number - start >= MAX_READ_LINES or chars + size > budget):
+            spans.append((start, number - 1))
+            start, chars = number, 0
+        chars += size
+    spans.append((start, last))
+    return spans
 
 
 def _plan_spans(lines, first, last, path, revision, anchors):
@@ -55,19 +77,10 @@ def _plan_spans(lines, first, last, path, revision, anchors):
     """
     if not _unit_active():
         return ((first, last, anchors),)
-    from kernel_working_set_recovery import MAX_READ_CHARS, MAX_READ_LINES, read_page_header_reserve
-    budget = MAX_READ_CHARS - read_page_header_reserve(path, revision)
-    spans, start, chars = [], first, 0
-    for number in range(first, last + 1):
-        size = len(lines[number - 1])
-        if number > start and (number - start >= MAX_READ_LINES or chars + size > budget):
-            spans.append((start, number - 1, []))
-            start, chars = number, 0
-        chars += size
-    if not spans:
+    spans = page_spans(lines, first, last, path, revision)
+    if len(spans) == 1:
         return ((first, last, anchors),)
-    spans.append((start, last, []))
-    return tuple(spans)
+    return tuple((start, end, []) for start, end in spans)
 
 
 def frozen_plan_windows(runtime, existing, current_revisions):

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import dataclasses
 import ast
+import base64
+import binascii
 import copy
 import errno
 from functools import lru_cache
@@ -2105,9 +2107,24 @@ def _expanded_plan_lines(request: ParallelRequest | None) -> list[str]:
     return lines
 
 
+def _salvage_line(call_id: str, record: Mapping[str, object]) -> str:
+    """One parent-visible line for a subframe that stopped with unsubmitted edits."""
+    files = ", ".join(str(path) for path in record.get("files") or ()) or "not determined"
+    if record.get("adoption") == "ADOPTED":
+        verdict = f"its edits passed the commit gates and were adopted (txn {record.get('txn_id')})"
+    else:
+        reason = " ".join(str(record.get("reason") or "").split())[:300]
+        verdict = f"its edits are kept but not adopted ({reason})"
+    return (f"Subframe {record.get('unit')} salvage: stopped {record.get('terminal')} before submitting; "
+            f"{verdict}; files: {files}; bundle parallel/{call_id}/{record.get('path')} "
+            f"sha256={record.get('sha256')}")
+
+
 def _observation(admission: AdmissionResult, outcomes: tuple[UnitOutcome, ...],
                  final_check: str, integration: str, measured: ParallelMeasured,
-                 request: ParallelRequest | None = None, *, tiny_plan: bool = False) -> str:
+                 request: ParallelRequest | None = None, *, tiny_plan: bool = False,
+                 salvage: Mapping[str, Mapping[str, object]] | None = None,
+                 call_id: str = "") -> str:
     if admission.refusal is not None:
         refusal = admission.refusal
         evidence = "; ".join(f"{item.path}:{item.line} {item.text}" for item in refusal.evidence)
@@ -2135,6 +2152,8 @@ def _observation(admission: AdmissionResult, outcomes: tuple[UnitOutcome, ...],
         lines.append(f"Subframe {item.unit_id}: {item.status}; {files}; contract={item.contract_ok}; "
                       f"check={item.check}; requests={item.usage.requests}" +
                       (f"; reason={_render_reason(item.reason, item.detail)}" if item.reason else ""))
+        if salvage and item.unit_id in salvage:
+            lines.append(_salvage_line(call_id, salvage[item.unit_id]))
     invalid = [item.unit_id for item in outcomes if item.check == "INVALID"]
     if invalid:
         lines.append(f"Check INVALID (not a pass) for: {', '.join(invalid)}")
@@ -2330,7 +2349,8 @@ def _result(context: ParallelContext, call_root: Path, request: ParallelRequest,
     tiny_plan = (admission.status == "ADMITTED"
                  and _tiny_plan(request, _StartSnapshot(call_root / "snapshots" / "g0", 0)))
     observation = _observation(admission, ordered, final_check, integration, measured,
-                               request, tiny_plan=tiny_plan)
+                               request, tiny_plan=tiny_plan,
+                               salvage=_salvage_adoptions(call_root, request), call_id=request.call_id)
     result = ParallelResult(request.call_id, admission, ordered,
                             tuple(record.txn_id for record, _ in _latest_records(store)),
                             final_check, unknown_pairs, integration, observation, measured,
@@ -2564,36 +2584,120 @@ def _declared_dependencies(admission: AdmissionResult) -> dict[str, set[str]]:
 
 
 _SALVAGE_MAX_BYTES = 16 << 20
+_SALVAGE_JOURNAL_FILES = 64
+_SALVAGE_JOURNAL_PATH_CHARS = 200
 
 
-def preserve_unit_candidate(call_root: Path, unit_id: str) -> dict[str, object] | None:
-    """Keep an unsubmitted subframe's newest candidate bundle in the parent call root.
+def _read_salvage_file(path: Path) -> bytes | None:
+    """Read a regular file of at most _SALVAGE_MAX_BYTES without following a symlink.
+
+    The open refuses a symlink itself (O_NOFOLLOW), so a path swapped after an
+    earlier check cannot redirect the read. Returns None for a symlink, a
+    non-regular file or an oversized one; other OS errors propagate.
+    """
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0))
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            return None
+        raise
+    with os.fdopen(descriptor, "rb") as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_size > _SALVAGE_MAX_BYTES:
+            return None
+        raw = handle.read(_SALVAGE_MAX_BYTES + 1)
+    return raw if len(raw) <= _SALVAGE_MAX_BYTES else None
+
+
+def _salvage_bundle_number(name: str) -> int:
+    return int(name[:-len(".json")])
+
+
+def _salvage_changed_files(bundle: Mapping, base: Path | None, oldest: Mapping | None) -> list[str]:
+    """Paths a candidate bundle changed, judged against the bytes the subframe started from.
+
+    The bundle's patch covers its single target file only, so it cannot be the
+    edit signal by itself. With the start snapshot the comparison is exact; without
+    it the oldest bundle of the same subframe stands in for the starting bytes.
+    """
+    hashes = bundle.get("file_hashes")
+    hashes = hashes if isinstance(hashes, Mapping) else {}
+    earlier = oldest.get("file_hashes") if isinstance(oldest, Mapping) else None
+    changed = set()
+    for name, digest in hashes.items():
+        if not isinstance(name, str) or not isinstance(digest, str):
+            continue
+        if base is not None:
+            relative = Path(name)
+            if relative.is_absolute() or ".." in relative.parts:
+                continue
+            try:
+                current = _read_salvage_file(base / relative)
+            except OSError:
+                current = None  # absent or unreadable in the start snapshot: the bundle changed it
+            if current is None or hashlib.sha256(current).hexdigest() != digest:
+                changed.add(name)
+        elif isinstance(earlier, Mapping) and earlier.get(name) != digest:
+            changed.add(name)
+    deleted = bundle.get("deleted_files")
+    if isinstance(deleted, list):
+        changed.update(name for name in deleted if isinstance(name, str))
+    patch, target = bundle.get("patch"), bundle.get("target")
+    if isinstance(patch, str) and patch.strip() and isinstance(target, str) and target:
+        changed.add(target)
+    return sorted(changed)
+
+
+def preserve_unit_candidate(call_root: Path, unit_id: str, *,
+                            start_generation: int | None = None) -> dict[str, object] | None:
+    """Keep a subframe's newest readable candidate bundle in the parent call root.
 
     The child captures its workspace edits as worker/candidates/NNNN.json before every
-    request. When it ends without a submission (a refused or exhausted replan, a
-    harness or budget stop), that bundle is the only record of its edits. Copy it,
-    byte for byte, to parallel/<call>/salvage/<unit>.json so the parent keeps it
-    regardless of unit-directory cleanup. Returns the receipt, or None when the unit
-    left no edit. Never raises: salvage must not change the unit's terminal outcome.
+    request. When its work does not reach the parent (it ended without a submission,
+    or its submission was not accepted), that bundle is the only record of its edits.
+    Copy it, byte for byte, to parallel/<call>/salvage/<unit>.json so the parent keeps
+    it regardless of unit-directory cleanup. A bundle cut short by a killed worker is
+    skipped for the previous one. Returns the receipt, or None when the unit left no
+    edit. Never raises: salvage must not change the unit's terminal outcome.
     """
     try:
         candidates = call_root / "units" / unit_id / "worker" / "candidates"
         if candidates.is_symlink() or not candidates.is_dir():
             return None
-        names = sorted(path.name for path in candidates.iterdir()
-                       if re.fullmatch(r"\d{4,}\.json", path.name))
+        names = sorted((path.name for path in candidates.iterdir()
+                        if re.fullmatch(r"\d{4,}\.json", path.name)), key=_salvage_bundle_number)
         if not names:
             return None
-        source = candidates / names[-1]
-        if source.is_symlink() or not source.is_file() or source.stat().st_size > _SALVAGE_MAX_BYTES:
-            return {"status": "REFUSED", "reason": "candidate bundle is a symlink or too large"}
-        raw = source.read_bytes()
-        bundle = json.loads(raw)
-        patch = bundle.get("patch") if isinstance(bundle, Mapping) else None
-        if not isinstance(patch, str) or not patch.strip():
+        chosen = None
+        for name in reversed(names):
+            raw = _read_salvage_file(candidates / name)
+            if raw is None:
+                return {"status": "REFUSED", "reason": "candidate bundle is a symlink or too large"}
+            try:
+                bundle = json.loads(raw)
+            except (ValueError, RecursionError):
+                continue  # a capture interrupted mid-write; the previous one is still whole
+            if isinstance(bundle, Mapping):
+                chosen = name, raw, bundle
+                break
+        if chosen is None:
+            return {"status": "FAILED", "reason": "no readable candidate bundle"}
+        name, raw, bundle = chosen
+        base = oldest = None
+        if start_generation is not None:
+            base = call_root / "snapshots" / f"g{start_generation}"
+            if base.is_symlink() or not base.is_dir():
+                base = None
+        if base is None and name != names[0]:
+            first = _read_salvage_file(candidates / names[0])
+            if first is not None:
+                try:
+                    oldest = json.loads(first)
+                except (ValueError, RecursionError):
+                    oldest = None
+        changed = _salvage_changed_files(bundle, base, oldest)
+        if not changed:
             return None
-        hashes = bundle.get("file_hashes")
-        files = sorted(str(path) for path in hashes) if isinstance(hashes, Mapping) else []
         target = call_root / "salvage" / f"{unit_id}.json"
         target.parent.mkdir(parents=True, exist_ok=True)
         descriptor, temporary = tempfile.mkstemp(dir=target.parent, prefix=f".{unit_id}.", suffix=".tmp")
@@ -2608,9 +2712,145 @@ def preserve_unit_candidate(call_root: Path, unit_id: str) -> dict[str, object] 
                 os.unlink(temporary)
             raise
         return {"status": "PRESERVED", "path": str(target.relative_to(call_root)),
-                "source": names[-1], "sha256": hashlib.sha256(raw).hexdigest(), "files": files}
-    except (OSError, ValueError, TypeError) as error:
-        return {"status": "FAILED", "reason": f"{type(error).__name__}: {str(error)[:200]}"}
+                "source": name, "sha256": hashlib.sha256(raw).hexdigest(),
+                "files": [path[:_SALVAGE_JOURNAL_PATH_CHARS] for path in changed[:_SALVAGE_JOURNAL_FILES]],
+                "files_total": len(changed)}
+    except Exception as error:  # noqa: BLE001 - bookkeeping; the journal gets the type, never host paths
+        return {"status": "FAILED", "reason": type(error).__name__}
+
+
+def _journal_salvage(context: ParallelContext, unit_id: str, terminal: str,
+                     salvage: Mapping[str, object], **fields: object) -> None:
+    try:
+        context.runtime.journal.emit("parallel_unit_salvaged", unit=unit_id, terminal=terminal,
+                                     **salvage, **fields)
+    except Exception:  # noqa: BLE001 - a journal failure must not change the unit's outcome
+        pass
+
+
+SALVAGE_ADOPT_SWITCH = "STATEFRAME_PARALLEL_SALVAGE_ADOPT"
+SALVAGE_ADOPTION_SCHEMA = "stateframe-parallel-salvage-adoption/1"
+# The child's candidate capture never records these directories.
+_SALVAGE_UNCAPTURED_PARTS = frozenset({"__pycache__", ".pytest_cache", ".test-tmp"})
+
+
+def salvage_adopt_enabled() -> bool:
+    """Whether the parent offers a stopped subframe's salvaged edits to the commit gates."""
+    value = os.environ.get(SALVAGE_ADOPT_SWITCH, "off")
+    if value not in {"on", "off"}:
+        raise ParallelError(f"{SALVAGE_ADOPT_SWITCH} must be on or off")
+    return value == "on"
+
+
+def _salvage_proposal(call_root: Path, unit: UnitContract, spec, incarnation: int,
+                      receipt: Mapping[str, object]) -> tuple[Proposal, dict[str, bytes]]:
+    """Turn a preserved candidate bundle into a proposal against the subframe's start snapshot.
+
+    The bundle holds the subframe's declared files and every file that differs from
+    its starting bytes; a file it does not list is unchanged. Entries are derived
+    here, by the parent, from bytes the parent authenticated: the start snapshot the
+    subframe was launched on and the bundle digest recorded when it was preserved.
+    The result carries no check receipt, so acceptance reruns the frozen check itself.
+    """
+    path = call_root / "salvage" / f"{unit.id}.json"
+    if receipt.get("status") != "PRESERVED":
+        raise ParallelError(f"SALVAGE_INVALID: candidate bundle was not preserved: {receipt.get('reason')}")
+    try:
+        raw = _read_salvage_file(path)
+    except OSError:
+        raw = None
+    if raw is None:
+        raise ParallelError("SALVAGE_INVALID: candidate bundle is missing, a symlink or too large")
+    if hashlib.sha256(raw).hexdigest() != receipt.get("sha256"):
+        raise ParallelError("SALVAGE_INVALID: candidate bundle differs from its preserved digest")
+    try:
+        bundle = json.loads(raw)
+    except ValueError as error:
+        raise ParallelError(f"SALVAGE_INVALID: candidate bundle is not JSON: {error}") from error
+    encoded = bundle.get("files_base64") if isinstance(bundle, Mapping) else None
+    if not isinstance(encoded, Mapping) or not all(
+            isinstance(name, str) and isinstance(data, str) for name, data in encoded.items()):
+        raise ParallelError("SALVAGE_INVALID: candidate bundle has no file capture")
+    if bundle.get("deleted_files"):
+        raise ParallelError("SALVAGE_UNSUPPORTED: subframe proposals do not support deleted files: "
+                            f"{[str(name)[:120] for name in list(bundle['deleted_files'])[:6]]}")
+    snapshot = _StartSnapshot(call_root / "snapshots" / f"g{spec.start_generation}", spec.start_generation)
+    if snapshot.manifest_digest != spec.start_manifest_digest:
+        raise ParallelError("SALVAGE_INVALID: start snapshot differs from the subframe launch")
+    rows = json.loads((snapshot.root / "snapshot-manifest.json").read_bytes())["files"]
+    before = {row["path"]: (row["sha256"], row["mode"]) for row in rows}
+
+    def captured(name: str) -> bool:
+        return not _SALVAGE_UNCAPTURED_PARTS.intersection(Path(name).parts)
+
+    files: dict[str, bytes] = {}
+    for name, data in encoded.items():
+        relative = Path(name)
+        if relative.is_absolute() or ".." in relative.parts or relative.as_posix() != name or not name:
+            raise ParallelError(f"SALVAGE_INVALID: candidate bundle has an unsafe path: {name[:120]}")
+        try:
+            files[name] = base64.b64decode(data, validate=True)
+        except (ValueError, binascii.Error) as error:
+            raise ParallelError(f"SALVAGE_INVALID: candidate bundle bytes are malformed: {name}") from error
+    after = {name: hashlib.sha256(data).hexdigest() for name, data in files.items()}
+    changed = sorted(name for name, digest in after.items()
+                     if captured(name) and (name not in before or before[name][0] != digest))
+    allowed = set(unit.owns) | set(unit.creates)
+    outside = [name for name in changed if name not in allowed]
+    if outside:
+        raise ParallelError(f"SCOPE_VIOLATION: salvaged subframe edits exceed declared ownership: {outside[:6]}")
+    if not changed:
+        raise ParallelError("SALVAGE_EMPTY: candidate bundle holds no change to the start snapshot")
+    missing = sorted(set(unit.creates) - set(changed))
+    if missing:
+        raise ParallelError(f"SALVAGE_INCOMPLETE: subframe stopped before creating declared files: {missing[:6]}")
+    entries = []
+    for name in changed:
+        if name in unit.creates:
+            entries.append(ProposalEntry(name, "create", None, after[name], 0o644))
+        elif name in before:
+            entries.append(ProposalEntry(name, "modify", before[name][0], after[name], before[name][1]))
+        else:
+            raise ParallelError(f"SCOPE_VIOLATION: salvaged subframe created an undeclared file: {name}")
+    proposal = Proposal(spec.call_id, unit.id, spec.execution_id, incarnation, tuple(entries),
+                        unit.digest(), None)
+    return proposal, {entry.after_sha256: files[entry.path] for entry in entries}
+
+
+def _record_salvage_adoption(call_root: Path, unit_id: str, terminal: str,
+                             receipt: Mapping[str, object], files: Sequence[str],
+                             outcome: UnitOutcome | None, reason: str | None) -> dict[str, object]:
+    record = {"schema": SALVAGE_ADOPTION_SCHEMA, "unit": unit_id, "terminal": terminal,
+              "path": receipt.get("path"), "sha256": receipt.get("sha256"), "files": list(files),
+              "adoption": "ADOPTED" if outcome is not None else "REFUSED",
+              "txn_id": outcome.txn_id if outcome is not None else None,
+              "reason": None if outcome is not None else " ".join(str(reason or "").split())[:300]}
+    try:
+        _atomic_json(call_root / "salvage" / f"{unit_id}.adoption.json", record, replace=True)
+    except (ParallelError, OSError):
+        pass  # the journal still carries the verdict; bookkeeping never changes an outcome
+    return record
+
+
+def _salvage_adoptions(call_root: Path, request: ParallelRequest) -> dict[str, dict[str, object]]:
+    """Adoption records the parent wrote for this call; none exist while the switch is off."""
+    folder = call_root / "salvage"
+    result = {}
+    if folder.is_symlink() or not folder.is_dir():
+        return result
+    for unit in request.units:
+        path = folder / f"{unit.id}.adoption.json"
+        try:
+            raw = _read_salvage_file(path)
+            if raw is None:
+                continue
+            record = json.loads(raw)
+        except (OSError, ValueError):
+            continue
+        if (isinstance(record, dict) and record.get("schema") == SALVAGE_ADOPTION_SCHEMA
+                and record.get("unit") == unit.id):
+            result[unit.id] = record
+    return result
 
 
 def _failure_outcome(unit_id: str, reason: str, detail: str, usage: UnitUsage,
@@ -3038,6 +3278,7 @@ def execute_parallel(context: ParallelContext, args: Mapping, *, host: HostClien
                       env_identity=str(context.runtime.binding().get("environment_revision") or "disabled"))
         return result
 
+    adopt_salvage = salvage_adopt_enabled()
     started = time.monotonic()
     host = host or HostClient(call_root, context.attempt)
     dependencies = _declared_dependencies(admission)
@@ -3274,6 +3515,13 @@ def execute_parallel(context: ParallelContext, args: Mapping, *, host: HostClien
                     check = error.check_status if isinstance(error, CompositionCheckFailed) else "NOT_RUN"
                     outcome = _failure_outcome(unit_id, reason, detail or str(error), usage,
                                                wall, queue_wait, check=check)
+                    # A submission the parent did not accept leaves its edits in the same
+                    # private directory; keep them. It already failed the gates, so it is
+                    # never offered to them a second time.
+                    salvage = preserve_unit_candidate(call_root, unit_id,
+                                                      start_generation=info["spec"].start_generation)
+                    if salvage is not None:
+                        _journal_salvage(context, unit_id, "SUBMITTED", salvage)
             else:
                 if terminal == "SUBFRAME_BLOCKED":
                     try:
@@ -3289,11 +3537,36 @@ def execute_parallel(context: ParallelContext, args: Mapping, *, host: HostClien
                                   f"cap={info['spec'].limits.unit_request_tokens}")
                     outcome = _failure_outcome(unit_id, reason, detail, usage, wall, queue_wait)
                 # An unsubmitted unit's edits live only in its candidate bundle.
-                salvage = preserve_unit_candidate(call_root, unit_id)
-                if salvage is not None:
-                    context.runtime.journal.emit("parallel_unit_salvaged", unit=unit_id,
-                                                 terminal=str(terminal or "ENGINE_ERROR"),
-                                                 **salvage)
+                salvage = preserve_unit_candidate(call_root, unit_id,
+                                                  start_generation=info["spec"].start_generation)
+                if salvage is not None and adopt_salvage:
+                    # The salvaged edits earn publication only through the gates a
+                    # submitted proposal passes; a refusal leaves the unit's outcome as is.
+                    stopped = str(terminal or "ENGINE_ERROR")
+                    adopted, refusal = None, None
+                    salvage_files = tuple(salvage.get("files") or ())
+                    try:
+                        proposal, blobs = _salvage_proposal(call_root, units[unit_id], info["spec"],
+                                                            info["incarnation"], salvage)
+                        salvage_files = tuple(entry.path for entry in proposal.entries)
+                        adopted, generation, pairs = _accept_proposal(
+                            context, request, admission, info["spec"], proposal, blobs,
+                            call_root, store, generation, usage, wall, queue_wait)
+                    except (ParallelError, OSError, ValueError, RuntimeError) as error:
+                        refusal = str(error) or type(error).__name__
+                    else:
+                        for pair in pairs:
+                            if pair.status == "UNKNOWN":
+                                unknown[pair.a, pair.b] = pair
+                        committed.add(unit_id)
+                        outcome = adopted
+                    adoption = _record_salvage_adoption(call_root, unit_id, stopped, salvage,
+                                                        salvage_files, adopted, refusal)
+                    _journal_salvage(context, unit_id, stopped, salvage,
+                                     adoption=adoption["adoption"], adoption_reason=adoption["reason"],
+                                     adopted_files=adoption["files"])
+                elif salvage is not None:
+                    _journal_salvage(context, unit_id, str(terminal or "ENGINE_ERROR"), salvage)
             _record_outcome(call_root, outcome, budget, parent_steps)
             outcomes[unit_id] = outcome
             context.runtime.journal.emit("parallel_unit_terminal", unit=unit_id,

@@ -54,6 +54,10 @@ MAX_FRAMEFIT_RECEIPT_FIELD_CHARS = 1024
 GROUP_COMMIT_ENV = "SF_JOURNAL_GROUP_COMMIT"
 BATCHABLE_TELEMETRY_KINDS = frozenset({"turn_timing", "action_envelope_metrics"})
 CHECKPOINT_KIND = "continuation_worker_checkpoint"
+# One journal kind per check execution. A re-record that dedup suppresses writes no check_receipt row, so it
+# journals CHECK_RECEIPT_UNCHANGED instead (emitted only in dedup "on" mode; off-mode bytes never change).
+CHECK_RECEIPT_UNCHANGED_KIND = "check_receipt_unchanged"
+CHECK_EXECUTION_KINDS = frozenset({"check_receipt", CHECK_RECEIPT_UNCHANGED_KIND})
 FRAMEFIT5_JOURNAL_ORIGIN_ENV = "STATEFRAME_FRAMEFIT5_JOURNAL_ORIGIN"
 _HOST_EVENT_SPAN_PAIRS = (
     ("runtime_snapshot_to_organ_wiring", "runtime_mode_snapshot",
@@ -800,6 +804,9 @@ class ContinuationJournal(AuditJournal):
         # Completed check receipts so far; rebuilt on replay, so a resumed run
         # numbers check executions exactly as the original did.
         self.check_receipt_count = 0
+        # Check executions so far (stored receipt rows + dedup-suppressed re-records). Owns execution
+        # numbering; dedup can drop a row but never an execution, so ids match with dedup on and off.
+        self.check_execution_count = 0
         self._receipt_generation = 0
         self._outline_capability_reports: set[tuple[str, str, str, str]] = set()
         self._outline_capability_listener_token: contextvars.Token | None = None
@@ -1197,6 +1204,8 @@ class ContinuationJournal(AuditJournal):
                     self._tool_reconciliation_records[(namespace, identity)] = {
                         "kind": kind, "record": {**projected, field: identity},
                     }
+        if kind in CHECK_EXECUTION_KINDS:
+            self.check_execution_count += 1
         if kind == "check_receipt":
             self.check_receipt_count += 1
             self._vacuity_latest_check = {
@@ -1523,6 +1532,7 @@ class ContinuationJournal(AuditJournal):
         self._vacuity_latest_check = None
         self._vacuity_last_edit = None
         self.check_receipt_count = 0
+        self.check_execution_count = 0
         self._receipt_generation = 0
         self._action_receipt_ordinal_step = None
         self._action_receipt_ordinal_step_set = False
@@ -1838,7 +1848,9 @@ class ContinuationJournal(AuditJournal):
                                  "_vacuity_last_edit", "_receipt_generation",
                                  "_action_receipt_ordinal_step",
                                  "_action_receipt_ordinal_step_set",
-                                 "_action_receipt_ordinal_counts"):
+                                 "_action_receipt_ordinal_counts",
+                                 # Check numbering must survive resume; without these a resumed run restarts at 1.
+                                 "check_receipt_count", "check_execution_count"):
                         setattr(self, name, getattr(projection, name))
                     if sequence == self._sequence:
                         for name in ("_framefit_receipt_records", "_framefit_receipt_history",

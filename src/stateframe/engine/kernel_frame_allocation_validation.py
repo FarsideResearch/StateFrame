@@ -72,14 +72,70 @@ READ_FACT_DELIVERY_KEYS = frozenset({
     "body_delivery", "delivery_notice", "visible_symbols", "receipts",
     "historical_receipts", "journal_workspace_revisions",
     "historical_workspace_revisions", "receipt_count", "revision_scope",
-    # Also removed by _prune_redundant_source_metadata once a whole-file window
-    # is on the wire (the host view prunes, the allocator's frame is pre-window).
-    "content_sha256", "lines",
 })
+# Removed by _prune_redundant_source_metadata on the host view once a
+# current-revision whole-file window for the path is on the wire (the
+# allocator's frame is pre-window). They are authority everywhere else.
+READ_FACT_WHOLE_FILE_PRUNE_KEYS = frozenset({"content_sha256", "lines"})
 
 
-def _authority_view(frame: Mapping[str, object]) -> dict[str, object]:
-    """Return the frame with per-request delivery metadata removed from read_facts."""
+def whole_file_window_paths(
+    messages: Sequence[Mapping[str, object]], read_facts: object,
+) -> frozenset[str]:
+    """Paths whose complete source window on the wire matches the facts' revision.
+
+    Mirrors the condition _prune_redundant_source_metadata prunes under.
+    """
+    from kernel_request_source_window import parse_model_source_window
+
+    revisions: dict[str, object] = {}
+    for message in messages:
+        meta = parse_model_source_window(message.get("content"))
+        if (meta is not None and meta.get("absence") == "NONE"
+                and meta.get("status") == "COMPLETE" and isinstance(meta.get("path"), str)):
+            revisions[meta["path"]] = meta.get("revision")
+    complete = set(revisions)
+    for fact in read_facts if isinstance(read_facts, list) else ():
+        if (isinstance(fact, Mapping) and fact.get("path") in complete
+                and isinstance(fact.get("current_revision"), str)
+                and fact["current_revision"] != revisions[fact["path"]]):
+            complete.discard(fact["path"])
+    return frozenset(complete)
+
+
+def _whole_file_pruned_keys(
+    frame: Mapping[str, object], projection: Mapping[str, object],
+    whole_file_paths: frozenset[str],
+) -> dict[str, frozenset[str]]:
+    """Per path, the prune keys exactly one view lacks under a whole-file window."""
+    if not whole_file_paths:
+        return {}
+    present: list[dict[str, set[str]]] = []
+    for view in (frame, projection):
+        seen: dict[str, set[str]] = {}
+        facts = view.get("read_facts")
+        for fact in facts if isinstance(facts, list) else ():
+            if isinstance(fact, Mapping) and fact.get("path") in whole_file_paths:
+                keys = READ_FACT_WHOLE_FILE_PRUNE_KEYS & set(fact)
+                path = fact["path"]
+                seen[path] = seen[path] & keys if path in seen else set(keys)
+        present.append(seen)
+    return {
+        path: frozenset(present[0].get(path, set()) ^ present[1].get(path, set()))
+        for path in whole_file_paths
+    }
+
+
+def _authority_view(
+    frame: Mapping[str, object],
+    pruned_keys: Mapping[str, frozenset[str]] | None = None,
+) -> dict[str, object]:
+    """Return the frame with per-request delivery metadata removed from read_facts.
+
+    ``pruned_keys`` names, per path, the whole-file prune keys to leave out; with
+    none given, content_sha256 and lines are compared like any other field.
+    """
+    pruned = pruned_keys or {}
     view = dict(frame)
     for key in ("open_sites",):
         rows = view.get(key)
@@ -90,7 +146,9 @@ def _authority_view(frame: Mapping[str, object]) -> dict[str, object]:
     facts = view.get("read_facts")
     if isinstance(facts, list):
         view["read_facts"] = [
-            {key: value for key, value in fact.items() if key not in READ_FACT_DELIVERY_KEYS}
+            {key: value for key, value in fact.items()
+             if key not in READ_FACT_DELIVERY_KEYS
+             and key not in pruned.get(fact.get("path"), ())}
             if isinstance(fact, Mapping) else fact
             for fact in facts
         ]
@@ -433,10 +491,14 @@ def validate_allocation_authority(
         # The host projection re-derives exact range pins from the journal. Apply the
         # fit's delivery rule so a pin this request already carries is compared as the
         # same-request representation the fitted frame holds.
+        # Only the working-set allocator's fit applies that rule on every request;
+        # with it off the fitted frame keeps the host's pins and is compared as is.
+        from kernel_read_receipts import enabled as allocator_enabled
         from kernel_stateframe_capacity import drop_delivered_range_pins, drop_unbacked_range_pins
 
         projected_ledger = copy.deepcopy(wire_projection.get("action_ledger"))
-        if isinstance(projected_ledger, dict) and isinstance(projected_ledger.get("reads"), list):
+        if (allocator_enabled() and isinstance(projected_ledger, dict)
+                and isinstance(projected_ledger.get("reads"), list)):
             drop_unbacked_range_pins(projected_ledger, semantic_messages(messages), frame)
             drop_delivered_range_pins(projected_ledger, semantic_messages(messages), frame)
             wire_projection = {**wire_projection, "action_ledger": projected_ledger}
@@ -451,9 +513,13 @@ def validate_allocation_authority(
             # The singleton alias omits open_sites; the host projection always
             # lists it. Drop it only when it is exactly the aliased next_site.
             wire_projection = {k: v for k, v in wire_projection.items() if k != "open_sites"}
-        if _authority_view(frame) != _authority_view(wire_projection):
-            authority_frame_view = _authority_view(frame)
-            authority_projection_view = _authority_view(wire_projection)
+        pruned_keys = _whole_file_pruned_keys(
+            frame, wire_projection,
+            whole_file_window_paths(semantic_messages(messages), wire_projection.get("read_facts")),
+        )
+        authority_frame_view = _authority_view(frame, pruned_keys)
+        authority_projection_view = _authority_view(wire_projection, pruned_keys)
+        if authority_frame_view != authority_projection_view:
             changed = sorted(
                 key for key in set(authority_frame_view) | set(authority_projection_view)
                 if authority_frame_view.get(key) != authority_projection_view.get(key)

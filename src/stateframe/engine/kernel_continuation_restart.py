@@ -1090,6 +1090,12 @@ DOCUMENTED_REJECT.update({
     ),
 })
 
+DOCUMENTED_REJECT.update({
+    "check_receipt_unchanged": (
+        "A dedup-suppressed check re-record advances the check execution count, which a checkpoint restore does not replay."
+    ),
+})
+
 
 def resume_event_rejection_reason(
         kind: str, runtime=None, *, allowed_tail: frozenset[str] | None = None) -> str | None:

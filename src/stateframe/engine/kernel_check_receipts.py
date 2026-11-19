@@ -335,10 +335,14 @@ def canonical_execution_id(
 
 
 def _next_check_execution_ordinal(journal: object | None) -> int:
-    """Allocate the next check-execution number from journal-derived counts."""
+    """Allocate the next check-execution number from the journal's execution count.
+
+    The count covers stored receipt rows and dedup-suppressed re-records alike, so
+    the numbering (and every handle derived from it) is the same with dedup on or off.
+    """
     if journal is None:
         return 1
-    completed = getattr(journal, "check_receipt_count", 0)
+    completed = getattr(journal, "check_execution_count", 0)
     allocated = getattr(journal, "check_execution_allocations", 0)
     completed = completed if isinstance(completed, int) else 0
     allocated = allocated if isinstance(allocated, int) else 0
@@ -705,6 +709,26 @@ def _emit(runtime: object, receipt: Mapping[str, object], *,
             wrapper_parse_error=receipt.get("wrapper_parse_error", ""),
             dispatch=False,
         )
+
+
+def _emit_unchanged_execution(runtime: object, receipt: Mapping[str, object]) -> None:
+    """Journal a dedup-suppressed re-record so its check execution still counts.
+
+    Carries only the execution and receipt identities. Failures propagate: the
+    count it feeds decides every later execution id, so it must not be lost silently.
+    """
+    journal = getattr(runtime, "journal", None)
+    emit = getattr(journal, "emit", None)
+    if not callable(emit):
+        return
+    emit(
+        "check_receipt_unchanged",
+        producer="kernel_check_receipts",
+        event_schema=SCHEMA,
+        execution_id=receipt["execution_id"],
+        receipt_id=receipt["receipt_id"],
+        dispatch=False,
+    )
 
 
 def _emit_shadow_mismatch(
@@ -1163,6 +1187,8 @@ def record_check_output(
               memory_limit_mechanism=private.get("memory_limit_mechanism"),
               cgroup_leaf_pattern=cgroup_leaf_pattern,
               execution_stop=private.get("execution_stop"))
+    else:
+        _emit_unchanged_execution(runtime, public)
     setattr(runtime, "_latest_check_receipt", dict(public))
     _refresh_referencing_rows(runtime, public)
     return dict(public)

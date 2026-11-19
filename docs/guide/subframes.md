@@ -316,6 +316,35 @@ Outcome statuses describe what happened to a proposal:
 | `ENGINE_ERROR` | Launch, execution, or result handling failed. | Inspect the subframe process log and call result; resolve the named error before retrying. |
 | `RECOVERY_REQUIRED` | An interrupted durable decision or publication must be reconciled before work can continue. | Resume the parent run; keep its records intact. |
 
+### Edits from a subframe that stopped early
+
+A subframe that ends without submitting (for example `HARNESS_CONTRACT` or `BUDGET_EXHAUSTED` after it already
+edited a file) is recorded as `REFUSED` or with its stop status, and its edits do not reach the parent candidate.
+The parent keeps the newest readable capture of that subframe's files at `parallel/<call>/salvage/<subframe>.json`
+and journals `parallel_unit_salvaged` with its digest and the changed files (at most 64 names, with the full count in
+`files_total`). A capture is kept when any file differs from the bytes the subframe started from or a file was
+deleted, not only when its main target file changed. The same is done for a subframe whose submission the parent did
+not accept. By default nothing reads that file; it is there for you to inspect.
+
+Set `STATEFRAME_PARALLEL_SALVAGE_ADOPT=on` to let the parent offer the kept edits of a subframe that never submitted to the ordinary commit path.
+A submission that was already refused is kept but not offered again. The
+default is `off`, which leaves request bytes, outcomes, and records unchanged. With it on, the parent compares the
+capture with the snapshot the subframe started from, builds a proposal from the owned files that changed, and runs
+it through the same gates as a submitted proposal: the parent file must still match the subframe's starting bytes
+(`STALE_BASE` otherwise), contracts are verified, and the subframe's check is rerun on the composed files
+(`COMPOSITION_CHECK_FAILED` otherwise). The final check then covers it like any other commit. Nothing is bypassed,
+and a subframe's own check result is never trusted for salvaged edits.
+
+| Result | What the parent sees | What to do |
+|---|---|---|
+| Adopted | The subframe's status becomes `COMMITTED` or `COMMITTED_UNVERIFIED`, and a `Subframe <id> salvage:` line names why it stopped, the adopted files, the transaction, and the capture's path and SHA-256. | Review it as a commit from a subframe that never declared itself done. |
+| Not adopted | The subframe keeps its stop status. The salvage line gives the refusal reason, the files that had changed, and the capture's path and SHA-256. | Use the reason: redo the work on current files after `STALE_BASE`, fix the edit after a failed check, or revise ownership after `SCOPE_VIOLATION`. |
+
+Adoption is also refused with `SALVAGE_INVALID` (the capture is missing, altered, or malformed),
+`SALVAGE_UNSUPPORTED` (the subframe deleted a file), `SALVAGE_INCOMPLETE` (a declared new file was never created), or
+`SALVAGE_EMPTY` (no owned file differs from the starting snapshot). Each verdict is also written to
+`parallel/<call>/salvage/<subframe>.adoption.json` and added to the `parallel_unit_salvaged` journal entry.
+
 Check statuses are separate: `PASS`, `FAIL`, `INVALID`, or `NOT_RUN`. An `INVALID` check may have written files,
 failed isolation or cleanup, or been unable to acquire a shared check permit. It is not passing evidence.
 

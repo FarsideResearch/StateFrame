@@ -211,9 +211,9 @@ def _recoverable(snapshot: PreparationSnapshot, slot: SourceSlot) -> bool:
 
 def _unit_active() -> bool:
     """Only subframe children retire covered pages; every other allocator run keeps them FULL."""
-    import sys
     module = sys.modules.get("kernel_unit_policy")
-    return module is not None and module.active() is not None
+    active = getattr(module, "active", None) if module is not None else None
+    return bool(callable(active) and active() is not None)
 
 
 def _covered_by_standing_window(snapshot: PreparationSnapshot, slot: SourceSlot) -> bool:
@@ -484,8 +484,7 @@ def _current_source_map(current, locations) -> str | None:
         from kernel_source_view import page_carries_span, render_source_map
     # Only subframe workers (an active unit policy) gate their first request on the
     # map; every other allocator request keeps its exact pinned bytes.
-    unit_module = sys.modules.get("kernel_unit_policy")
-    if unit_module is None or unit_module.active() is None:
+    if not _unit_active():
         return None
     entries: dict[str, tuple[str, list[tuple[int, int]]]] = {}
     for slot in current:
