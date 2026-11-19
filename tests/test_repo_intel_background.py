@@ -6,7 +6,7 @@ import threading
 import time
 from types import ModuleType, SimpleNamespace
 
-from mc_repo_intel_vendor import call_graph, lsp_resolve, repo_map, ts_extract
+from mc_repo_intel_vendor import background, call_graph, lsp_resolve, repo_map, ts_extract
 
 
 def test_broken_grammar_is_probed_once(tmp_path, monkeypatch, record_property):
@@ -207,6 +207,48 @@ def test_request_keeps_its_graph_until_a_workspace_mutation(tmp_path, monkeypatc
     WorkspaceViewStore(root, "fixture").note_mutation((test.name,), "applied")
 
     assert view.fact(root, test.name, 1) == (("file_01.py",), False)
+
+
+def test_claim_and_census_snapshots_retire_on_edit(tmp_path, monkeypatch):
+    import kernel_repo_dependencies as visibility
+    from kernel_callsite_census import _scoped_census
+    from kernel_claim_grounding import ClaimGrounding
+    from kernel_live_projection import WorkspaceViewStore
+
+    root = tmp_path / "workspace"
+    root.mkdir()
+    _enable(monkeypatch, tmp_path / "cache")
+    monkeypatch.setenv("CODE_GRAPH_LSP", "off")
+    monkeypatch.setenv("STATEFRAME_CLAIM_GROUNDING", "on")
+    module = root / "models.py"
+    module.write_text("class Original: pass\n")
+    for name in ("first.py", "second.py"):
+        (root / name).write_text("from models import Original\n\nvalue = Original()\n")
+
+    view = visibility.DependencyView(lambda: None)
+    monkeypatch.setattr(visibility, "active", view)
+    view.advance(root)
+    deadline = time.monotonic() + 10
+    while not all(background.snapshot(root, kind)[0] is not None for kind in ("claim", "census")):
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    view.advance(root)
+    claims = ClaimGrounding(root)
+    assert claims.resolve("Original").exists
+    mode, (_, census) = view.analysis(root, "census", "fixture")
+    assert mode == "full"
+    assert census.calls_by_path["first.py"][0].identity == "repository:models.py::Original"
+
+    module.write_text("class Replacement: pass\n")
+    WorkspaceViewStore(root, "fixture").note_mutation((module.name,), "applied")
+
+    assert view.analysis(root, "census", "fixture")[0] == "scoped"
+    assert not claims.resolve("Original").exists
+    assert claims.resolve("Replacement").resolved_path == "models.py"
+    _, scoped = _scoped_census(root, ("first.py", "second.py"))
+    assert not scoped.calls_by_path["first.py"]
+    assert not scoped.calls_by_path["second.py"]
+    assert view.analysis_rows_for_send()["census"]["fixture"] == ["full", "scoped"]
 
 
 def test_intake_does_not_join_the_map_worker(tmp_path, monkeypatch):

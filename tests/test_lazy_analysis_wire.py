@@ -64,6 +64,9 @@ hold_until = config.get("hold_until")
 demand_at = config.get("demand_at")
 stop_at = config.get("stop_at")
 wait_for_graph = config.get("wait_for_graph")
+hold_analysis = config.get("hold_analysis")
+ready_during_replay = config.get("ready_during_replay")
+observe_census = hold_analysis or ready_during_replay
 os.environ.update(CODE_GRAPH_LSP="off", EDIT_NTURN="off")
 
 def wait_until(ready, seconds):
@@ -77,7 +80,14 @@ class GraphProbe:
     def find_spec(self, fullname, path=None, target=None):
         if block and fullname.split(".")[0] in ("networkx", "tree_sitter", "tree_sitter_language_pack"):
             raise ImportError(fullname)
-        if fullname not in ("mc_repo_intel_vendor.call_graph", "kernel_v46_mechanism_wiring"):
+        analysis_builders = {
+            "kernel_claim_grounding": "claim",
+            "kernel_callsite_census": "census",
+        }
+        if (fullname not in ("mc_repo_intel_vendor.call_graph", "kernel_v46_mechanism_wiring")
+                and not (ready_during_replay and fullname == "kernel_repo_dependencies")
+                and not (observe_census and fullname == "kernel_callsite_census")
+                and (not hold_analysis or analysis_builders.get(fullname) != hold_analysis)):
             return None
         spec = importlib.machinery.PathFinder.find_spec(fullname, path)
         load = spec.loader.exec_module
@@ -86,6 +96,17 @@ class GraphProbe:
             load(module)
             if fullname == "kernel_v46_mechanism_wiring":
                 instrument_observations(module)
+                return
+            if fullname == "kernel_repo_dependencies":
+                instrument_replay_visibility(module)
+                return
+            if fullname in analysis_builders:
+                if fullname == "kernel_claim_grounding":
+                    instrument_analysis(module._AstIndex, "_build")
+                else:
+                    instrument_census(module)
+                    if hold_analysis == "census":
+                        instrument_analysis(module, "build_structural_index")
                 return
             original = module._build_graph_uncached
 
@@ -112,6 +133,45 @@ class GraphProbe:
         return spec
 
 sys.meta_path.insert(0, GraphProbe())
+
+def instrument_census(module):
+    original = module.prepare_request
+
+    def prepare(*args, **kwargs):
+        delivery = original(*args, **kwargs)
+        if (Path("wire/0001.response.json").exists() and not Path("wire/0002.request.json").exists()
+                and delivery.packet is not None):
+            events.append(["analysis_packet", delivery.packet.payload])
+        return delivery
+
+    module.prepare_request = prepare
+
+def instrument_replay_visibility(module):
+    original = module.DependencyView.advance
+
+    def advance(view, root):
+        original(view, root)
+        if root is not None and not Path("wire/0002.request.json").exists():
+            assert wait_until(lambda: module.background.snapshot(root, ready_during_replay)[0], 15)
+            original(view, root)
+
+    module.DependencyView.advance = advance
+
+def instrument_analysis(owner, name):
+    original = getattr(owner, name)
+
+    def build(*args, **kwargs):
+        if kwargs.get("focus_paths") or any(row[0] == "analysis_start" for row in events):
+            return original(*args, **kwargs)
+        events.append(["analysis_start", time.monotonic_ns()])
+        response = Path("wire/0002.response.json")
+        wait_until(response.exists, config["gate_seconds"])
+        try:
+            return original(*args, **kwargs)
+        finally:
+            events.append(["analysis_finish", time.monotonic_ns()])
+
+    setattr(owner, name, build)
 
 @atexit.register
 def save_observations():
@@ -141,7 +201,7 @@ def instrument_observations(module):
 
     module.after_observation = observe
 
-if stop_at or hold_until == "0002":
+if stop_at or hold_until == "0002" or hold_analysis:
     def attach(frame, event, arg):
         if event != "call" or frame.f_code.co_name != "emit" or not frame.f_code.co_filename.endswith("/_child.py"):
             return
@@ -155,6 +215,8 @@ if stop_at or hold_until == "0002":
             send = fields["send"]
             if send == 2 and hold_until == "0002":
                 assert wait_until(lambda: any(event[0] == "finish" for event in events), 25)
+            if send == 2 and hold_analysis:
+                assert wait_until(lambda: any(row[0] == "analysis_finish" for row in events), 15)
             if send == stop_at:
                 save_observations()
                 os._exit(91)
@@ -166,7 +228,7 @@ if stop_at or hold_until == "0002":
 
 
 def _run(tree, work, *, minimal="off", indexed=None, hold=False, fallback=False,
-         sends=None, resume=False, gate_seconds=None):
+         sends=None, resume=False, gate_seconds=None, analysis=None, analysis_resume=False):
     work.mkdir()
     repo = work / "repo"
     run = work / "run"
@@ -175,6 +237,19 @@ def _run(tree, work, *, minimal="off", indexed=None, hold=False, fallback=False,
     steps = json.loads((EXAMPLES / "discount_bug.script.json").read_bytes())["steps"]
     if sends is not None:
         steps = steps[:sends]
+    scope = []
+    if analysis:
+        (repo / "shop" / "models.py").write_text("class LineItem: pass\n")
+        snippet = "\nfrom .models import LineItem\n\ndef build_item():\n    return LineItem()\n"
+        pricing = repo / "shop" / "pricing.py"
+        pricing.write_text(pricing.read_text() + snippet)
+        for name in ("other", "unrelated"):
+            (repo / "shop" / f"{name}.py").write_text(snippet)
+        scope = ["--target", "shop/pricing.py", "--edit", "shop/other.py"]
+        paths = ["shop/other.py", "shop/pricing.py"] + ([TEST_PATH] if analysis_resume else [])
+        steps = [{"tool": "read", "required": True, "arguments": {"path": path}} for path in paths]
+        steps[0]["arguments"]["symbol"] = "build_item"
+        sends = len(steps)
     if resume:
         # A repository-wide short-name match exists outside the scoped imports.
         # Using scoped facts by accident during replay changes the tape.
@@ -194,6 +269,8 @@ def _run(tree, work, *, minimal="off", indexed=None, hold=False, fallback=False,
     env.update(STATEFRAME_HOME=str(home), STATEFRAME_PROVIDER="llama.cpp", STATEFRAME_CHECKPOINT="off",
                PYTHONPATH=os.pathsep.join(str(tree / path) for path in ("src", "src/stateframe/engine")))
     config = {"fallback": fallback, "gate_seconds": gate_seconds or 35}
+    if analysis:
+        config.update(hold_analysis=analysis, stop_at=2)
     if hold:
         config.update(hold_until="0002", demand_at=1)
     if resume:
@@ -203,7 +280,7 @@ def _run(tree, work, *, minimal="off", indexed=None, hold=False, fallback=False,
         probe.write_text(f"config = {config!r}\n" + PROBE, encoding="utf-8")
         return subprocess.run([sys.executable, "-B", "-c", DRIVER, str(probe), *arguments],
                               cwd=tree, env=env, capture_output=True, text=True, check=False,
-                              timeout=scaled(100))
+                              timeout=scaled(160 if analysis else 100))
 
     def diagnostic(result):
         log = run / "engine.log"
@@ -213,21 +290,73 @@ def _run(tree, work, *, minimal="off", indexed=None, hold=False, fallback=False,
         result = launch(["run", "--repo", str(repo), "--task", "Fix the pricing code so the tests pass.",
                          "--endpoint", endpoint, "--model", "scripted", "--run-dir", str(run), "--quiet",
                          "--test-python", sys.executable, "--no-run-env", "--profile", str(profile),
-                         "--timeout", "85", "--max-turns", str(sends or 9)])
+                         "--timeout", "85", "--max-turns", str(sends or 9), *scope])
         if resume:
             assert result.returncode != 0 and len(trace.requests) == 3, diagnostic(result)
             config.update(wait_for_graph=False, stop_at=None, hold_until="0003")
+            result = launch(["resume", str(run), "--endpoint", endpoint])
+        if analysis_resume:
+            assert result.returncode != 0 and len(trace.requests) == 2, diagnostic(result)
+            recorded_events = json.loads((run / "graph-observations.json").read_bytes())
+            config.update(hold_analysis=None, stop_at=None, ready_during_replay=analysis)
             result = launch(["resume", str(run), "--endpoint", endpoint])
         assert len(trace.requests) == len(trace.responses) == len(steps), diagnostic(result)
         trace.script.assert_consumed()
         if sends is None:
             assert result.returncode == 0, diagnostic(result)
     events = json.loads((run / "graph-observations.json").read_bytes())
+    if analysis_resume:
+        packets = [row[1] for row in recorded_events if row[0] == "analysis_packet"]
+        assert packets and [row[1] for row in events if row[0] == "analysis_packet"] == packets
     submitted = [row for row in measurement_events(run) if row["kind"] == "request_submitted"]
     assert len(submitted) == len(steps)
     assert all(0 < row["socket_timeout_s"] <= REQUEST_BUDGET for row in submitted)
     assert all(0 < row["wall_timeout_s"] <= REQUEST_BUDGET for row in submitted)
     return trace, events, run, home
+
+
+@pytest.mark.host_sandbox
+@pytest.mark.parametrize("analysis", ["claim", "census"])
+@pytest.mark.parametrize("baseline", [True, False], ids=["before", "after"])
+def test_following_send_preserves_needed_facts_with_a_held_analysis(
+    tmp_path, tmp_path_factory, analysis, baseline,
+):
+    tree = pinned_tree("4c5149502", tmp_path_factory) if baseline else ROOT
+    trace, events, run, _ = _run(tree, tmp_path / "held", analysis=analysis, fallback=True,
+                                 gate_seconds=6 if baseline else 25, minimal="on", indexed="on")
+    first, second = (request[0] for request in trace.requests)
+    start = next(row[1] for row in events if row[0] == "analysis_start")
+    finish = next(row[1] for row in events if row[0] == "analysis_finish")
+    print(f"{analysis}, {'before' if baseline else 'after'}: {(second - first) / 1e9:.3f}s")
+    assert start < second
+    assert (finish < second) if baseline else (second < finish)
+    packets = [row[1] for row in events if row[0] == "analysis_packet"]
+    assert packets
+    assert all("group shop.models.LineItem:" in packet and "shop/other.py::build_item" in packet
+               and "shop/pricing.py::build_item" in packet for packet in packets)
+    claims = [row for row in measurement_events(run) if row["kind"] == "claim_check"]
+    assert any(row.get("cited") == "build_item" and row.get("exists") is True
+               for row in claims)
+    if not baseline:
+        assert all("relation totals are lower bounds" in packet
+                   and "shop/unrelated.py::build_item" not in packet for packet in packets)
+
+
+@pytest.mark.host_sandbox
+def test_replay_keeps_the_cold_census_with_a_ready_worker(tmp_path):
+    trace, _, run, _ = _run(ROOT, tmp_path / "replayed", analysis="census", fallback=True,
+                           gate_seconds=25, analysis_resume=True, minimal="on", indexed="on")
+    for send, (_, request) in enumerate(trace.requests[:2], 1):
+        assert (run / "wire" / f"{send:04d}.request.json").read_bytes() == request
+    metadata = Path("wire/0002.repository-analysis.json")
+    archived = (run / "attempts" / "1" / metadata).read_bytes()
+    assert {mode for choices in json.loads(archived)["census"].values()
+            for mode in choices} == {"scoped"}
+    assert (run / metadata).read_bytes() == archived
+    assert [row.get("replayed", False) for row in
+            map(json.loads, (run / "sends.jsonl").read_text().splitlines())] == [
+                True, True, False,
+            ]
 
 
 @pytest.mark.host_sandbox
