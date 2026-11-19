@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Tests: acceptance fixtures that wait for a checkpoint now fail fast with the engine's reason and the child's exit code instead of waiting out the timeout.
 - Fixed the bundled example determinism guard to compare request hashes after a completed engine run even if the host refuses candidate delivery.
 
 ## 0.7.71 (2026-11-18)
