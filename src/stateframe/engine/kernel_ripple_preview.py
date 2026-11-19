@@ -154,10 +154,6 @@ _FAMILY_PRIORITY = {
     "unknown": 5,
 }
 
-_EDIT_KINDS = frozenset({
-    "edit", "str_replace", "file_create", "replace_module", "write", "replace",
-})
-
 
 def mode() -> str:
     """Read and validate the strict three-way activation switch."""

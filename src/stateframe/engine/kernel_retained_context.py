@@ -5,6 +5,7 @@ import json
 import os
 import hashlib
 from pathlib import Path
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 
 
 def enabled() -> bool:
@@ -225,7 +226,7 @@ class RetainedContext:
     def focus_applied_edit(self, record: dict) -> None:
         """Select current observed edit results; never refresh old test evidence."""
         self._guard_archive()
-        if record.get("tool") not in {"edit", "str_replace", "file_create"} or record.get("result") != "APPLIED":
+        if record.get("tool") not in {"edit", "str_replace", "file_create", *PROTOCOL_EDIT_TOOL_NAMES} or record.get("result") != "APPLIED":
             return
         before = record.get("before_binding", {}).get("product_files", {})
         after = record.get("after_binding", {}).get("product_files", {})

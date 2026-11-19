@@ -11,6 +11,7 @@ import json
 import os
 import re
 from collections.abc import Mapping, Sequence
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 
 
 MODE_ENV = "STATEFRAME_FIRST_GREEN_DISCLOSURE"
@@ -22,6 +23,7 @@ ACTION_HINT = (
 )
 _EDIT_KINDS = frozenset({
     "edit", "str_replace", "file_create", "replace_module", "write", "replace",
+    *PROTOCOL_EDIT_TOOL_NAMES,
 })
 _READ_KINDS = frozenset({"read", "grep", "find", "search"})
 _PROBE_KINDS = frozenset({"probe", "predict"})

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Mapping
 
 from kernel_step_limits import reached, remaining, runtime_unbounded
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 
 
 MODE_ENV = "STATEFRAME_EDIT_CHURN_BUDGET"
@@ -309,7 +310,7 @@ def observe_settled_action(runtime: object, record: Mapping[str, object]) -> str
         return None
     tool = str(record.get("tool", record.get("action", "")) or "").strip().lower()
     result = str(record.get("result", record.get("result_class", "")) or "").upper()
-    product_changed = tool in {"edit", "str_replace", "file_create", "replace_module", "write", "replace"} and result in {
+    product_changed = tool in {"edit", "str_replace", "file_create", "replace_module", "write", "replace", *PROTOCOL_EDIT_TOOL_NAMES} and result in {
         "APPLIED", "PASS", "SUCCESS", "OK",
     }
     evidence_delta = record.get("evidence_delta", record.get("new_evidence", {}))

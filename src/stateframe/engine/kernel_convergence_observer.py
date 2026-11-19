@@ -14,6 +14,8 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+from kernel_edit_tool_names import EDIT_TOOL_NAMES
+
 
 MODE_ENV = "STATEFRAME_CONVERGENCE_OBSERVER"
 SCHEMA = "stateframe-convergence-observer/1"
@@ -27,9 +29,6 @@ _VOLATILE_KEYS = frozenset({
     "event_id", "step_record_id", "request_id", "call_id", "run_id",
     "sequence", "ordinal", "turn", "step", "timestamp", "created_at", "updated_at",
     "observed_at", "started_at", "finished_at", "time", "ts",
-})
-_EDIT_TOOLS = frozenset({
-    "edit", "str_replace", "file_create", "replace_module", "write", "replace",
 })
 _READ_TOOLS = frozenset({"read", "grep", "search", "locate"})
 _CHECK_TOOLS = frozenset({"run_tests", "test", "pytest", "verification"})
@@ -215,7 +214,7 @@ def _handle(runtime: object, row: Mapping[str, object]) -> str:
 
 
 def _real_change(row: Mapping[str, object], tool: str, status: str) -> bool:
-    if tool not in _EDIT_TOOLS or status not in {"APPLIED", "PASS", "SUCCESS", "OK"}:
+    if tool not in EDIT_TOOL_NAMES or status not in {"APPLIED", "PASS", "SUCCESS", "OK"}:
         return False
     if "byte_changed" in row:
         return bool(row["byte_changed"])
@@ -241,7 +240,7 @@ def _route(status: str, unresolved: object, row: Mapping[str, object], tool: str
         if values:
             return values
     if status in _RED or status in _REFUSED:
-        if tool in _EDIT_TOOLS:
+        if tool in EDIT_TOOL_NAMES:
             return ("str_replace", "edit", "read_check_receipt")
         return ("edit", "str_replace", "read_check_receipt")
     if unresolved not in (None, "", (), [], {}):
@@ -433,9 +432,7 @@ def apply_menu(runtime: object, tools: Sequence[dict]) -> list[dict]:
     candidate = [tool for tool in selected
                  if str(tool.get("function", {}).get("name", "")) != repeated]
     candidate_names = [str(tool.get("function", {}).get("name", "")) for tool in candidate]
-    if current.red and repeated in _EDIT_TOOLS and not set(candidate_names) & _EDIT_TOOLS:
-        candidate = selected
-    if current.red and not set(candidate_names) & _EDIT_TOOLS:
+    if current.red and not set(candidate_names) & EDIT_TOOL_NAMES:
         # A red assertion must retain at least one repair action.  Do not turn
         # convergence into a completion veto or an accidental done-only menu.
         candidate = selected

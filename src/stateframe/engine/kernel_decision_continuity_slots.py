@@ -11,6 +11,7 @@ import copy
 import json
 from collections.abc import Mapping, Sequence
 
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 from kernel_context import token_estimate
 from kernel_prompt_compact import short_id
 
@@ -668,7 +669,7 @@ class SlotDecisionContinuityStore:
         result = str(record.get("result", record.get("result_class", ""))).strip().upper()
         if (path and result == "APPLIED"
                 and kind in {"edit", "str_replace", "file_create", "replace_module",
-                             "write", "replace"}):
+                             "write", "replace", *PROTOCOL_EDIT_TOOL_NAMES}):
             self.invalidate_after_edit(path, step=record.get("step"))
         if self._work_carry is not None:
             self._work_carry.record_action(record, pending=pending)
@@ -707,7 +708,7 @@ class SlotDecisionContinuityStore:
         kind = str(receipt.get("kind", receipt.get("tool", ""))).lower()
         result = str(receipt.get("result_class", receipt.get("result", ""))).upper()
         path = receipt.get("path", receipt.get("target_path", receipt.get("file")))
-        if kind in {"edit", "str_replace", "write", "replace", "file_create"} and result == "APPLIED" and path:
+        if kind in {"edit", "str_replace", "write", "replace", "file_create", *PROTOCOL_EDIT_TOOL_NAMES} and result == "APPLIED" and path:
             return self.invalidate_after_edit(str(path), step=receipt.get("turn"))
         return {"accepted": True, "invalidated_refs": []}
 

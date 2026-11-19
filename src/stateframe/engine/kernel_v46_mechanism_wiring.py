@@ -18,6 +18,7 @@ import traceback
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 
 
 EVENT_SCHEMA = "stateframe-v46-mechanism-wiring/1"
@@ -37,6 +38,7 @@ _ERROR_LONG_TOKEN = re.compile(
 _ERROR_LOCAL_PATH = re.compile(r"(?i)(?:/Users|/home)/[^\s,;:'\"]+")
 EDIT_KINDS = frozenset({
     "edit", "str_replace", "file_create", "replace_module", "write", "replace",
+    *PROTOCOL_EDIT_TOOL_NAMES,
 })
 
 FLAGS = {

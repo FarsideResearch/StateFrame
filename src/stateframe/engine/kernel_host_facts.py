@@ -14,6 +14,7 @@ import json
 import os
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 
 
 MODE_ENV = "STATEFRAME_HOST_FACTS"
@@ -34,6 +35,7 @@ _STATUSES = frozenset({CURRENT, STALE, CONFLICT})
 
 _EDIT_KINDS = frozenset({
     "edit", "str_replace", "file_create", "replace_module", "write", "replace",
+    *PROTOCOL_EDIT_TOOL_NAMES,
 })
 _TEST_KINDS = frozenset({
     "test", "run_tests", "pytest", "verification", "test_receipt",

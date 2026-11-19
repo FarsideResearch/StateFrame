@@ -30,6 +30,8 @@ import json
 import os
 from collections.abc import Mapping, Sequence
 
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
+
 MODE_ENV = "STATEFRAME_DONE_CHALLENGE_ONCE"
 OVERRIDE_CODE = "DONE_CHALLENGE_OVERRIDDEN"
 CHALLENGE_SUFFIX = ("[done challenge] This done was challenged once at this revision. "
@@ -72,8 +74,10 @@ def challenge_class(codes: object) -> str:
 
 # Mutating repair actions: a menu offering one of these can make progress on a
 # repair-blocked row.  run_tests alone cannot fix a counterexample.
-REPAIR_EDIT_TOOLS = frozenset({"edit", "str_replace", "write", "file_create", "file_delete", "file_move", "replace",
-                               "replace_module"})
+REPAIR_EDIT_TOOLS = frozenset({
+    "edit", "str_replace", "write", "file_create", "file_delete", "file_move", "replace",
+    "replace_module", *PROTOCOL_EDIT_TOOL_NAMES,
+})
 QUALIFYING_ACTIONS = frozenset({
     *REPAIR_EDIT_TOOLS, "read", "grep", "find", "search", "probe", "predict",
 })

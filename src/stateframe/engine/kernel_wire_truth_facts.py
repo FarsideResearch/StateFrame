@@ -8,6 +8,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import NoReturn
 
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 from kernel_request_seal import RequestSealError
 
 
@@ -185,7 +186,7 @@ def _action_name(receipt: Mapping[str, object]) -> str:
             continue
         if fallback == "UNKNOWN":
             fallback = value
-        if value in {"edit", "str_replace", "write", "apply_patch", "done"}:
+        if value in {"edit", "str_replace", "write", "apply_patch", "done", *PROTOCOL_EDIT_TOOL_NAMES}:
             return value
     return fallback
 
@@ -267,13 +268,13 @@ def _context_facts(
     applied_edit = any(
         isinstance(row, Mapping)
         and _result(row) == "APPLIED"
-        and _action_name(row) in {"edit", "str_replace", "write", "apply_patch"}
+        and _action_name(row) in {"edit", "str_replace", "write", "apply_patch", *PROTOCOL_EDIT_TOOL_NAMES}
         for row in receipts
     )
     refused_edit = any(
         isinstance(row, Mapping)
         and _result(row) in {"REFUSED", "REJECTED", "DENIED", "BLOCKED"}
-        and _action_name(row) in {"edit", "str_replace", "write", "apply_patch"}
+        and _action_name(row) in {"edit", "str_replace", "write", "apply_patch", *PROTOCOL_EDIT_TOOL_NAMES}
         for row in receipts
     )
     public_check = _current_public_check(runtime, binding)

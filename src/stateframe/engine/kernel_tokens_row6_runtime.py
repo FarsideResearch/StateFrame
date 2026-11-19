@@ -15,9 +15,10 @@ from kernel_tokens_row6_projection import (
     replace_handoff_extension,
 )
 from kernel_tokens_row6_state import RepeatEvent, RepeatState
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 
 _EDIT_TOOLS = frozenset({"edit", "str_replace", "file_create", "write", "replace",
-                         "replace_module"})
+                         "replace_module", *PROTOCOL_EDIT_TOOL_NAMES})
 _MAX_UNEXECUTED_BATCH_ACTIONS = 16
 
 

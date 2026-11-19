@@ -37,6 +37,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 from kernel_bounded_locate_code import OBSERVATION_TOOLS
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 from kernel_measurement import profiled_function_span
 
 
@@ -47,11 +48,15 @@ EMPTY_OUTCOME = "green_lock_no_permitted_action"
 EMPTY_OVERFLOW_KIND = "GREEN_LOCK_NO_PERMITTED_ACTION"
 EDIT_ACTIONS = frozenset({
     "edit", "str_replace", "file_create", "file_delete", "file_move", "shell", "replace_module", "write", "replace", "parallel",
+    *PROTOCOL_EDIT_TOOL_NAMES,
 })
 VERIFY_ACTIONS = frozenset({"run_tests", "test", "pytest", "predict"})
 WINDOW_ACTIONS = frozenset({"read", "probe"})
 # Product capabilities the readiness disposition never removes under hard-budget-only terminals (earlier run).
-_READINESS_NEVER_STRIPS = frozenset({"edit", "str_replace", "file_create", "file_delete", "file_move", "shell", "run_tests", "read_check_receipt"})
+_READINESS_NEVER_STRIPS = frozenset({
+    "edit", "str_replace", "file_create", "file_delete", "file_move", "shell",
+    "run_tests", "read_check_receipt", *PROTOCOL_EDIT_TOOL_NAMES,
+})
 UPSTREAM_REFUSAL = "MENU: {action} is not offered on this request; use an offered tool."
 
 
@@ -713,7 +718,9 @@ def decide(lock: object, action: object, arguments: Mapping[str, object] | None 
     name = canonical_action(requested)
     args = dict(arguments) if isinstance(arguments, Mapping) else {}
     from kernel_tool_surface import dispatch_admissible
-    if not dispatch_admissible(name, runtime=lock.runtime):
+    # A protocol tool still needs its own runner capability.
+    dispatch_name = requested if requested in PROTOCOL_EDIT_TOOL_NAMES else name
+    if not dispatch_admissible(dispatch_name, runtime=lock.runtime):
         # The runner has no execution branch for this capability now (tool-surface
         # signal absent, ledger/closure mode off): never offer it, refuse it.
         # NO_VETO removes policy vetoes, not execution limits.
@@ -934,7 +941,10 @@ def project_request_menu(runtime: object, selected: Sequence[dict],
         reopened = reopen_empty_menu(
             lock, surface, _name,
             lambda name: bool(
-                dispatch_admissible(canonical_action(name), runtime=runtime)
+                dispatch_admissible(
+                    name if name in PROTOCOL_EDIT_TOOL_NAMES else canonical_action(name),
+                    runtime=runtime,
+                )
                 and _lock_decide(lock, canonical_action(name), {}, for_menu=True).allowed))
         if reopened:
             offered = reopened

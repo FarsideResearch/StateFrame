@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import stat
 
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 from kernel_effects import effect_policy_for_run
 from kernel_hook_exec import HookRunner
 from kernel_hooks import PanelEntry, event_id, render_panel, sanitize
@@ -386,6 +387,7 @@ class HookWiring:
             name in {
                 "edit", "str_replace", "insert_before", "replace_module",
                 "file_create", "file_delete", "file_move", "shell",
+                *PROTOCOL_EDIT_TOOL_NAMES,
             }
             or name in getattr(getattr(self, "agent_tools", None), "names", ())
         )

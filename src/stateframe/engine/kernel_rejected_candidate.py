@@ -6,10 +6,11 @@ import difflib
 import os
 
 from kernel_measurement import digest
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 
 _RENDER_ROOM = 40000
 _CONTEXT_RADIUS = 32
-_EDIT_TOOLS = frozenset({"edit", "str_replace", "file_create"})
+_EDIT_TOOLS = frozenset({"edit", "str_replace", "file_create", *PROTOCOL_EDIT_TOOL_NAMES})
 
 
 def enabled() -> bool:

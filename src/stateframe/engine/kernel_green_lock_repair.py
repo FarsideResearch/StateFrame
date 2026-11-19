@@ -17,6 +17,8 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
+
 
 MODE_ENV = "STATEFRAME_GREEN_LOCK_REPAIR"
 ADVISORY = "ADVISORY"
@@ -35,9 +37,10 @@ ADVISORY_REASONS = frozenset({
     "ADVISORY_ONLY",
 })
 
-_EDIT_ACTIONS = frozenset({
+_REPAIR_MENU_EDIT_ACTIONS = frozenset({
     "edit", "str_replace", "file_create", "replace_module", "write", "replace",
 })
+_EDIT_ACTIONS = _REPAIR_MENU_EDIT_ACTIONS | PROTOCOL_EDIT_TOOL_NAMES
 _READ_ACTIONS = frozenset({
     "read", "probe", "run_tests", "test", "pytest", "work",
 })
@@ -684,7 +687,7 @@ def repair_terminal_menu(current_tools: Sequence[dict], all_tools: Sequence[dict
     result = list(current_tools)
     present = {str(item.get("function", {}).get("name")) for item in result
                if isinstance(item, Mapping) and isinstance(item.get("function"), Mapping)}
-    allowed = _EDIT_ACTIONS | _READ_ACTIONS
+    allowed = _REPAIR_MENU_EDIT_ACTIONS | _READ_ACTIONS
     for tool in all_tools:
         if not isinstance(tool, Mapping) or not isinstance(tool.get("function"), Mapping):
             continue

@@ -15,6 +15,8 @@ import os
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
+
 
 MODE_ENV = "STATEFRAME_GREEN_COHERENCE"
 COUNTEREXAMPLE = "COUNTEREXAMPLE"
@@ -478,7 +480,7 @@ def observe_model_menu(runtime: object, tools: Sequence[dict]) -> None:
         tool.get("function", {}).get("name") for tool in tools
         if isinstance(tool, Mapping) and isinstance(tool.get("function"), Mapping)
     }
-    if names.intersection(EDIT_TOOLS):
+    if names.intersection(EDIT_TOOLS | PROTOCOL_EDIT_TOOL_NAMES):
         missing = 0
     else:
         missing += 1

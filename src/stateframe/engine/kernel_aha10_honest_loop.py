@@ -17,6 +17,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
+
 
 SCHEMA = "stateframe-aha10-honest-loop/1"
 FREE_MODE = "FREE"
@@ -80,7 +82,10 @@ def _tool_name(tool: object) -> str:
 
 _CAPABILITY_ALIASES = {
     "source": ("read", "grep", "list_files", "references", "where_defined", "who_calls"),
-    "write": ("edit", "str_replace", "file_create", "apply_patch", "write_file", "create_file", "patch"),
+    "write": (
+        "edit", "str_replace", "file_create", "apply_patch", "write_file", "create_file", "patch",
+        *sorted(PROTOCOL_EDIT_TOOL_NAMES),
+    ),
     "witness": ("typed_test_writer", "run_tests", "probe", "check", "execute", "authored_check"),
     "settlement": ("done", "submit", "complete", "question_gate", "recover"),
 }

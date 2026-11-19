@@ -26,7 +26,6 @@ MAX_TIMELINE_STEPS = 16
 MAX_FORK_SEQUENCES = 32
 TRIGGERS = {"after_edit", "after_red", "before_done", "repetition", "manual"}
 _GREEN = {"OK", "GREEN", "PASS", "PASSED", "SUCCESS", "APPLIED"}
-_EDIT_KINDS = {"edit", "str_replace", "file_create"}
 
 
 def thinking_mode() -> str:

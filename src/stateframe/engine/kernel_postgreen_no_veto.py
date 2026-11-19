@@ -15,6 +15,8 @@ import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
+
 
 MODE_ENV = "STATEFRAME_POSTGREEN_NO_VETO"
 PLUGGED_KEY = "stateframe_postgreen_no_veto"
@@ -26,6 +28,7 @@ RULE_DONE_REFUSED = "postgreen_no_veto_done_refused"
 
 EDIT_ACTIONS = frozenset({
     "edit", "str_replace", "file_create", "replace_module", "write", "replace",
+    *PROTOCOL_EDIT_TOOL_NAMES,
 })
 READ_ACTIONS = frozenset({"read"})
 PRODUCT_ACTIONS = EDIT_ACTIONS | READ_ACTIONS

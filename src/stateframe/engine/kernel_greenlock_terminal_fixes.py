@@ -8,6 +8,8 @@ import os
 import re
 from collections.abc import Callable, Mapping, Sequence
 
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
+
 FIRST_EDIT_ENV = "STATEFRAME_GREENLOCK_FIRST_EDIT"
 NO_RED_TERMINAL_ENV = "STATEFRAME_NO_RED_TERMINAL"
 CAP1_ENV = "STATEFRAME_DONE_CHALLENGE_CAP1"
@@ -18,7 +20,10 @@ CAP1_EVENT = "done_challenge_capped"
 
 PRODUCER = "kernel_greenlock_terminal_fixes"
 
-EDIT_ACTIONS = frozenset({"edit", "str_replace", "file_create", "replace_module", "write", "replace"})
+EDIT_ACTIONS = frozenset({
+    "edit", "str_replace", "file_create", "replace_module", "write", "replace",
+    *PROTOCOL_EDIT_TOOL_NAMES,
+})
 RUN_TESTS_ACTIONS = frozenset({"run_tests", "test", "pytest"})
 RULE_FIRST_EDIT = "greenlock_first_edit"
 RULE_RUN_TESTS_CAP = "greenlock_run_tests_cap"

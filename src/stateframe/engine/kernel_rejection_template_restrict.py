@@ -8,6 +8,7 @@ import json
 import os
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 
 ENV = "STATEFRAME_REJECTION_TEMPLATE_RESTRICT"
 TURNS_ENV = "STATEFRAME_REJECTION_TEMPLATE_RESTRICT_TURNS"
@@ -761,7 +762,7 @@ def release_after_product_mutation(
     name = str(tool_name or "").strip()
     mutation_tools = {
         "edit", "str_replace", "file_create", "insert_before",
-        "replace_module", "write", "replace",
+        "replace_module", "write", "replace", *PROTOCOL_EDIT_TOOL_NAMES,
     }
     if current_id is None or name not in mutation_tools:
         return False
@@ -812,7 +813,7 @@ def release_noread_after_mutation(
     name = str(tool_name or "").strip()
     if current_id is None or name not in {
         "edit", "str_replace", "file_create", "insert_before",
-        "replace_module", "write", "replace",
+        "replace_module", "write", "replace", *PROTOCOL_EDIT_TOOL_NAMES,
     }:
         return False
     state = getattr(runtime, NOREAD_STATE_ATTR, None)

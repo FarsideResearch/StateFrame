@@ -22,6 +22,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 
 try:  # Supports the v46 flat-module loader and package imports.
     from kernel_continuation_journal import journal_safe_fields
@@ -807,7 +808,7 @@ def _citation_ids(record: Mapping[str, object]) -> tuple[str, ...]:
 def _is_successful_edit(record: Mapping[str, object], kind: str) -> bool:
     operation = str(record.get("operation", record.get("action", record.get("tool", "")))).lower()
     if kind not in _EDIT_KINDS and not (
-        kind == "action_outcome_closed" and operation in {"edit", "str_replace"}
+        kind == "action_outcome_closed" and operation in {"edit", "str_replace", *PROTOCOL_EDIT_TOOL_NAMES}
     ):
         return False
     accepted = record.get("accepted")

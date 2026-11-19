@@ -16,6 +16,7 @@ from kernel_completion_authority import refusal_reason_codes as _authority_refus
 from kernel_evidence_pin import typed_pin_is_sole_wire_block, well_formed_pin_blocks
 from kernel_harden8 import record_failure
 from kernel_done_acceptance import done_accepted
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 
 
 MODE_ENV = "STATEFRAME_COMPLETION_OWNER"
@@ -50,7 +51,7 @@ NO_HOST_CHECKS_TERMINAL_LINE = (
 )
 _STALL_RULE_TRUTHY = frozenset({"1", "on", "true", "yes"})
 _STALL_RULE_TOOLS = ("edit", "str_replace", "read")
-_STALL_RULE_EDIT_TOOLS = frozenset({"edit", "str_replace"})
+_STALL_RULE_EDIT_TOOLS = frozenset({"edit", "str_replace", *PROTOCOL_EDIT_TOOL_NAMES})
 _DECLARED_REPAIR_TOOLS = ("edit", "str_replace", "read")
 _CHURN_DECISIONS = frozenset({"ALLOW", "VERIFY_REQUIRED", "RECOVERY_REQUIRED", "STOP_INCOMPLETE"})
 MAX_DECLARED_REPAIR_RESPONSES = 3
@@ -169,8 +170,12 @@ _EVIDENCE_GAP_CODES = frozenset({
 _EVIDENCE_ROUTE_TOOLS = frozenset({
     "authored_check", "dispute_check", "probe", "read_check_receipt", "run_tests",
 })
+# Repair routes recognize source-content edits; file creation and moves keep
+# their existing routing on legacy surfaces.
+_SOURCE_REPAIR_EDIT_TOOLS = frozenset({"edit", "str_replace", *PROTOCOL_EDIT_TOOL_NAMES})
 _PRODUCT_EDIT_TOOLS = frozenset({
     "edit", "file_create", "file_delete", "file_move", "shell", "replace", "replace_module", "str_replace", "write",
+    *PROTOCOL_EDIT_TOOL_NAMES,
 })
 _ADVISORY_ERROR_KIND = "completion_owner_advisory_gate_error"
 _ADVISORY_FAILURE_CAP = 100_000
@@ -913,7 +918,7 @@ def _progress_key(record: object) -> tuple[str, str] | None:
             for item in changes
             if isinstance(item, Mapping) and item.get("role", "product") == "product"
         ]
-    if tool in {"edit", "str_replace", "file_create", "file_delete", "file_move", "shell", "replace_module", "write", "replace"}:
+    if tool in {"edit", "str_replace", "file_create", "file_delete", "file_move", "shell", "replace_module", "write", "replace", *PROTOCOL_EDIT_TOOL_NAMES}:
         explicit_byte_change = any(
             record.get(name) is True for name in ("byte_changed", "file_changed", "artifact_change")
         )
@@ -5807,7 +5812,7 @@ def _contract_route(runtime: object, messages: object, tool_names: Sequence[str]
     if not tool_names:
         return _empty_tool_route(runtime)
     if (_green_open_work(runtime)
-            and {"edit", "str_replace", "read", "run_tests", "work", "work_update"}
+            and (_SOURCE_REPAIR_EDIT_TOOLS | {"read", "run_tests", "work", "work_update"})
             .intersection(tool_names)):
         return "repair", None
     terminal_text = _contract_terminal_text(runtime)
@@ -5821,7 +5826,8 @@ def _contract_route(runtime: object, messages: object, tool_names: Sequence[str]
             and state.get("final_submit_request_pending")
             and _reserved_terminal_menu_names(runtime, terminal_menu)):
         return "submit", None
-    if "run_tests" in tool_names and not {"edit", "str_replace", "work", "work_update"}.intersection(tool_names):
+    if ("run_tests" in tool_names
+            and (_SOURCE_REPAIR_EDIT_TOOLS | {"work", "work_update"}).isdisjoint(tool_names)):
         return "verify", None
     return "repair", None
 
@@ -6716,7 +6722,7 @@ def establish_request_action_contract(
         if isinstance(tool, Mapping)
     )
     if (_green_open_work(runtime) and route == "repair"
-            and any(name in {"edit", "str_replace", "read", "run_tests"} for name in names)
+            and (_SOURCE_REPAIR_EDIT_TOOLS | {"read", "run_tests"}).intersection(names)
             and tuple(names) == tuple(getattr(runtime, "completion_menu", ()) or ())
             and tuple(names) == dispatch_names):
         _emit(runtime, "owner_green_open_repair_kept",

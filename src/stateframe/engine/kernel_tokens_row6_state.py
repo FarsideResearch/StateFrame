@@ -8,10 +8,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from kernel_tokens_row6_basis import Basis, KnownBasis, UnknownBasis
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 
 SCHEMA = "tokens-row6-state/1"
 _EDIT_TOOLS = frozenset({"edit", "str_replace", "file_create", "write", "replace",
-                         "replace_module"})
+                         "replace_module", *PROTOCOL_EDIT_TOOL_NAMES})
 _OBSERVATION_TOOLS = frozenset({"read", "grep", "list", "ls", "probe", "search"})
 
 

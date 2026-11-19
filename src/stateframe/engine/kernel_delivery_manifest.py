@@ -16,6 +16,7 @@ import json
 import os
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 
 
 MODE_ENV = "STATEFRAME_DELIVERY_CONTRACT"
@@ -36,7 +37,7 @@ _NON_CHECK_KINDS = frozenset({
 })
 _EDIT_KINDS = frozenset({
     "edit", "edit_receipt", "file_create", "replace", "replace_module",
-    "str_replace", "write",
+    "str_replace", "write", *PROTOCOL_EDIT_TOOL_NAMES,
 })
 
 

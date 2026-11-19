@@ -14,6 +14,7 @@ import json
 import os
 import re
 from collections.abc import Mapping, Sequence
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 
 
 MODE_ENV = "STATEFRAME_CLAUSE_REVIEW"
@@ -575,7 +576,7 @@ def note_action_result(runtime: object, record: Mapping[str, object]) -> None:
         return
     tool = _text(record.get("tool", record.get("action_kind", "")), 80).lower()
     result = _text(record.get("result", record.get("result_class", "")), 80).upper()
-    if tool not in {"edit", "str_replace", "replace_module", "file_create", "write"} \
+    if tool not in {"edit", "str_replace", "replace_module", "file_create", "write", *PROTOCOL_EDIT_TOOL_NAMES} \
             or result not in _REPAIR_RESULTS:
         return
     current["used_repairs"] = int(current.get("used_repairs", 0) or 0) + 1

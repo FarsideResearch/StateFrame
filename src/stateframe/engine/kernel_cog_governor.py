@@ -22,6 +22,7 @@ from types import MappingProxyType
 from typing import TypeAlias
 
 from kernel_liveness import Evidence, OrganCensusSpec, TriState
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 
 
 SCHEMA = "poc.kernel_cog_governor/1"
@@ -121,10 +122,10 @@ ADVISORY_ORGANS = frozenset(
 )
 
 _TEST_KINDS = frozenset({"test", "pytest", "test_run"})
-_EDIT_KINDS = frozenset({"edit", "str_replace", "file_create"})
+_EDIT_KINDS = frozenset({"edit", "str_replace", "file_create", *PROTOCOL_EDIT_TOOL_NAMES})
 _PRODUCT_KINDS = frozenset(
     {"edit", "str_replace", "file_create", "test", "pytest", "test_run",
-     "contract_fact", "new_contract_fact", "new_contract", "fact"}
+     "contract_fact", "new_contract_fact", "new_contract", "fact", *PROTOCOL_EDIT_TOOL_NAMES}
 )
 _IDLE_KINDS = frozenset({"read", "grep", "list", "collect", "collect_only"})
 _NON_PRODUCT_RESULTS = frozenset(

@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from kernel_evictfix_mode import enabled as evictfix_enabled
 from kernel_obligation_assess import UnavailableEvidence, _unavailable_evidence
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 
 
 ACTION_SCHEMA_ENV = "STATEFRAME_ACTION_SCHEMA"
@@ -1852,7 +1853,7 @@ def is_edit_action_line(line: object) -> bool:
     if not isinstance(line, str) or not line.strip():
         return False
     return line.strip().split(maxsplit=1)[0] in {
-        "edit", "str_replace", "insert_before", "file_create", "replace_module",
+        "edit", "str_replace", "insert_before", "file_create", "replace_module", *PROTOCOL_EDIT_TOOL_NAMES,
     }
 
 

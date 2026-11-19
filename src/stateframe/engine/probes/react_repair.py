@@ -170,7 +170,7 @@ from kernel_silent_off_organs import (  # noqa: E402
 )
 from sampler_config import apply_to_request as _apply_sampler_fields  # noqa: E402
 from kernel_done_acceptance import done_accepted  # noqa: E402
-from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES  # noqa: E402
+from kernel_edit_tool_names import EDIT_SOURCE_TOOL, PROTOCOL_EDIT_TOOL_NAMES  # noqa: E402
 import kernel_workspace_truth as _workspace_truth  # noqa: E402
 import kernel_frame_routes as _frame_routes  # noqa: E402
 from kernel_routing_schema import routing_v2  # noqa: E402
@@ -461,6 +461,7 @@ def _task_public_brief(row: object) -> str:
 _LOOP_BREAKING_COMMANDS = frozenset({
     "edit", "str_replace", "file_create", "insert_before", "replace_module", "write",
     "test", "run_tests", "authored_check", "done", "work", "abstain",
+    *PROTOCOL_EDIT_TOOL_NAMES,
 })
 
 
@@ -2617,7 +2618,7 @@ def _render_contract_rejection(tool_name: str, errors: Sequence[str], *, binding
     rendered = "[step-contract] REJECTED before dispatch: " + "; ".join(details)
     # Soak C4 anchor recovery (default off): edits refused before dispatch (bad/ungrounded
     # refs, unoffered edit tool) are the LAB10 failure shape; the executor tail never sees them.
-    if tool_name in {"edit", "str_replace", "file_create", "insert_before"}:
+    if tool_name in {"edit", "str_replace", "file_create", "insert_before", *PROTOCOL_EDIT_TOOL_NAMES}:
         from kernel_anchor_recovery import annotate_rejection
         rendered = annotate_rejection(rendered, rejected=True)
     return rendered
@@ -2867,6 +2868,7 @@ SCOPED_WRITE_TOOLS = frozenset({
     "edit", "str_replace", "insert_before", "replace_module",
     "file_create", "file_delete", "file_move", *PROTOCOL_EDIT_TOOL_NAMES,
 })
+_PATH_ADDRESSED_WRITE_TOOLS = SCOPED_WRITE_TOOLS - PROTOCOL_EDIT_TOOL_NAMES
 
 def _nonpy_neutralize_tool_surface(tools: Sequence[Mapping[str, object]]) -> list:
     """Make user-facing action descriptions describe changes, not only repairs."""
@@ -3302,9 +3304,12 @@ def _parse_r1_tool_calls(content: str) -> list:
     the real args sometimes split into a following ```json fence. Merge every JSON
     object in the reply that carries a "function" key (fenced or bare); later objects'
     keys fill earlier gaps. Never raises; [] when nothing matches."""
-    _TOOLS = ("grep", "read", "edit", "str_replace", "insert_before", "authored_check", "file_create", "file_delete", "file_move", "shell",
-               "replace_module", "run_tests", "reproduce", "test", "probe", "done",
-               "where_defined", "who_calls", "references", "skill_load")
+    from kernel_edit_protocol_switch import HANDLES, MODE_ENV
+    edit_tools = (SCOPED_WRITE_TOOLS if os.environ.get(MODE_ENV, "").strip().lower() == HANDLES
+                  else _PATH_ADDRESSED_WRITE_TOOLS)
+    _TOOLS = ("grep", "read", "authored_check", "shell", "run_tests", "reproduce",
+              "test", "probe", "done", "where_defined", "who_calls", "references",
+              "skill_load", *sorted(edit_tools))
     # Fix round (rv_figure_it_out_REPORT.md finding 3): the three figure_it_out
     # operator names must only be recognized -- and so only turned into native
     # calls from this parser -- when STATEFRAME_FIGURE_IT_OUT is actually on.
@@ -9437,14 +9442,21 @@ def work(d, *, resume=None):
                         )
                 except FileOperationRefused:
                     return False
-            if name in {"edit", "str_replace", "insert_before", "replace_module",
-                        "file_create", "file_delete", "file_move"}:
-                paths = [arguments.get(key) for key in ("path", "source", "destination")]
-                if any(isinstance(path, str) and _hook_wiring_for_run.protected(root / path)
-                       for path in paths):
-                    refusal = "REFUSED HOOK_FILE: hook definition or bundled input is read-only"
+            paths = ()
+            if name in PROTOCOL_EDIT_TOOL_NAMES:
+                if name == EDIT_SOURCE_TOOL:
+                    edits = arguments.get("edits")
+                    handles = (edit.get("handle") for edit in edits if isinstance(edit, Mapping)) \
+                        if isinstance(edits, list) else ()
                 else:
-                    refusal = _hook_wiring_for_run.pre_action(name, arguments, call_id)
+                    handles = (arguments.get("handle"),)
+                paths = tuple(record.path for handle in handles
+                              if (record := _edit_protocol_state.lookup(handle)) is not None)
+            elif name in _PATH_ADDRESSED_WRITE_TOOLS:
+                paths = tuple(arguments.get(key) for key in ("path", "source", "destination"))
+            if any(isinstance(path, str) and _hook_wiring_for_run.protected(root / path)
+                   for path in paths):
+                refusal = "REFUSED HOOK_FILE: hook definition or bundled input is read-only"
             else:
                 refusal = _hook_wiring_for_run.pre_action(name, arguments, call_id)
             if refusal is None:
@@ -10258,7 +10270,7 @@ def work(d, *, resume=None):
                         start_turn_timing_step("tool_execution")
                         if (_edit_nturn_request_active
                                 and _name not in {"edit", "file_create", "file_delete", "file_move", "shell", "str_replace",
-                                                  "insert_before", "replace_module"}):
+                                                  "insert_before", "replace_module", *PROTOCOL_EDIT_TOOL_NAMES}):
                             _finish_edit_nturn()
                         try:
                             _args = json.loads(_fn.get("arguments") or "{}")
@@ -10419,7 +10431,7 @@ def work(d, *, resume=None):
                                         "unit_hidden_path", producer=_name, path=_requested_path)
                             if _unit_refusal is None and _name == "run_tests":
                                 _unit_refusal = _unit.authorize_check_target(_args)
-                            if _unit_refusal is None and _name in _unit.mutating_tools:
+                            if _unit_refusal is None and _unit.is_mutating_tool(_name):
                                 _requested_path = str(_args.get("path") or "")
                                 _created_by_unit = str(root / _requested_path) in created_this_run
                                 _op = "create" if _name == "file_create" else "edit"
@@ -10606,9 +10618,7 @@ def work(d, *, resume=None):
                                                    " next: read one file by path, edit, run_tests or done.")
                             msgs.append(_tool_reply_for_call(msgs, tool_call_id, _reject_text))
                             continue
-                        if _collection_guarded and _name in {
-                                "file_create", "file_delete", "file_move", "edit", "str_replace",
-                                "insert_before", "replace_module"}:
+                        if _collection_guarded and _name in _PATH_ADDRESSED_WRITE_TOOLS:
                             _guard_paths = (
                                 (_args.get("source"), _args.get("destination"))
                                 if _name == "file_move" else
@@ -15321,7 +15331,7 @@ def work(d, *, resume=None):
                 if _typed_observation is not None:
                     obs = _typed_observation
             # Soak C4 anchor recovery (default off): note on a rejected edit result.
-            if _edit_verb in {"edit", "str_replace", "file_create", "insert_before"}:
+            if _edit_verb in {"edit", "str_replace", "file_create", "insert_before", *PROTOCOL_EDIT_TOOL_NAMES}:
                 from kernel_anchor_recovery import annotate_rejection as _anchor_note
                 obs = _anchor_note(obs, rejected=(
                     _edit_observation_is_rejection(obs)

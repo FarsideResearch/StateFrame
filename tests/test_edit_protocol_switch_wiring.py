@@ -13,6 +13,7 @@ import re
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -55,8 +56,10 @@ def _menus(protocol: str | None, monkeypatch) -> list[str]:
             for gate in (False, True) for probe in (False, True)]
 
 
-def _drive(tmp_path: Path, monkeypatch, *, protocol: str | None, steps: list[dict], stop_at: int):
+def _drive(tmp_path: Path, monkeypatch, *, protocol: str | None, steps: list[dict], stop_at: int,
+           target: str = RULES_PATH, handle_kind: SpanKind | None = None):
     """Run the real worker against a scripted endpoint; capture each request's messages and tools."""
+    import kernel_edit_request_map
     from kernel_measurement import ACTIVE_REQUEST
     from kernel_pilot import ACTIVE_PARENT, ACTIVE_RUNTIME
     from kernel_stateframe_runtime import StateFrameRuntime
@@ -67,13 +70,13 @@ def _drive(tmp_path: Path, monkeypatch, *, protocol: str | None, steps: list[dic
     from stateframe.workcopy import create
 
     repo = tmp_path / "repo"
-    (repo / "shop/pricing").mkdir(parents=True)
-    (repo / RULES_PATH).write_text(RULES, encoding="utf-8")
+    (repo / target).parent.mkdir(parents=True)
+    (repo / target).write_text(RULES, encoding="utf-8")
     (repo / "tests").mkdir()
     (repo / "tests/test_pricing.py").write_text("def test_pricing():\n    assert False\n", encoding="utf-8")
     copy_root = tmp_path / "copy"
     row = build_row(create(repo, copy_root), task="Raise the minimum spend",
-                    target=RULES_PATH, task_id="edit-proto")
+                    target=target, task_id="edit-proto")
     output = tmp_path / "run/worker/measurement-runs"
     output.mkdir(parents=True)
     private_temp = tmp_path / "worker-tmp"
@@ -110,10 +113,22 @@ def _drive(tmp_path: Path, monkeypatch, *, protocol: str | None, steps: list[dic
         sends.append((json.loads(json.dumps(messages)), json.loads(json.dumps(tools or []))))
         if len(sends) >= stop_at:
             raise _Stop
-        return original_ask(messages, *args, **kwargs)
+        response = original_ask(messages, *args, **kwargs)
+        if handle_kind is not None:
+            binding = kernel_edit_request_map.current_binding()
+            assert binding is not None
+            # This harness bypasses final wire composition. Supply the map
+            # that the transport would bind for the delivered target.
+            source = (binding.root / target).read_text(encoding="utf-8")
+            binding.state.set_request(mint_handles(1, [
+                DeliveredSpan.from_source(target, source, kind=handle_kind),
+            ]))
+        return response
 
     capture._wiring_original = original_ask
     monkeypatch.setattr(react_repair, "ask_tools", capture)
+    monkeypatch.setattr(kernel_edit_request_map, "_RUN_BINDING",
+                        kernel_edit_request_map.current_binding())
     contexts = (ACTIVE_PARENT, ACTIVE_RUNTIME, ACTIVE_REQUEST, _ACTIVE_PROVIDER)
     tokens = [context.set(None) for context in contexts]
     try:
@@ -144,6 +159,47 @@ def _edit_source_step(handle: str, old: str = "25", new: str = "30") -> dict:
 def _str_replace_step(old: str, new: str) -> dict:
     return {"tool": "str_replace", "required": True,
             "arguments": {"path": RULES_PATH, "old_str": old, "new_str": new}}
+
+
+def _guarded_edit_step(editor: str, target: str) -> tuple[dict, SpanKind | None]:
+    if editor == EDIT_SOURCE_TOOL:
+        return _edit_source_step("q1h1"), SpanKind.SPAN
+    if editor == REWRITE_SOURCE_TOOL:
+        return ({"tool": editor, "required": True, "arguments": {
+            "handle": "q1h1", "new_text": RULES.replace("25", "30"),
+        }}, SpanKind.REWRITE)
+    step = _str_replace_step("25", "30")
+    step["arguments"]["path"] = target
+    return step, None
+
+
+@pytest.mark.parametrize("editor", ("str_replace", *PROTOCOL_TOOLS))
+def test_edit_guards_pytest_collection(editor, tmp_path, monkeypatch):
+    target = "shop/pricing/pytest_settings.py"
+    step, kind = _guarded_edit_step(editor, target)
+    sends, root = _drive(tmp_path, monkeypatch, protocol="handles" if kind else None,
+                         steps=[step], stop_at=2, target=target, handle_kind=kind)
+
+    assert "protected test tree: pytest_settings.py can change test collection" in _tool_replies(sends[-1][0])[-1]
+    assert (root / target).read_text() == RULES
+
+
+@pytest.mark.parametrize("editor", ("str_replace", *PROTOCOL_TOOLS))
+def test_edit_refuses_protected_hook_path_before_pre_tool(editor, tmp_path, monkeypatch):
+    from stateframe.engine.probes import react_repair
+
+    hooks = Mock(protected_paths=(), state={})
+    hooks.protected.side_effect = lambda path: path.as_posix().endswith("/" + RULES_PATH)
+    hooks.pre_action.return_value = None
+    monkeypatch.setattr(react_repair, "_hook_wiring", hooks, raising=False)
+    step, kind = _guarded_edit_step(editor, RULES_PATH)
+
+    sends, root = _drive(tmp_path, monkeypatch, protocol="handles" if kind else None,
+                         steps=[step], stop_at=2, handle_kind=kind)
+
+    hooks.pre_action.assert_not_called()
+    assert "REFUSED HOOK_FILE" in _tool_replies(sends[-1][0])[-1]
+    assert (root / RULES_PATH).read_text() == RULES
 
 
 def _repo_file(tmp_path: Path, text: str, name: str = "pkg/mod.py") -> tuple[Path, Path]:

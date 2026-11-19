@@ -25,6 +25,8 @@ import sys
 from dataclasses import dataclass, field
 from typing import Iterator
 
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
+
 SCHEMA = "poc.stateframe.shadow/2"
 
 # Recorded transcripts do not carry a live source resolver or content revision.
@@ -35,7 +37,7 @@ _REVISION_UNAVAILABLE_REASON = "not_recorded_in_transcript"
 _HISTORICAL_RESOLVER_UNAVAILABLE_REASON = "offline_projection_has_no_resolver"
 
 # Tool names that mutate the sandbox vs. inspect it (mirrors the loop's TOOLS).
-_EDIT_TOOLS = {"edit", "str_replace", "file_create"}
+_EDIT_TOOLS = {"edit", "str_replace", "file_create", *PROTOCOL_EDIT_TOOL_NAMES}
 _TEST_TOOLS = {"run_tests", "test"}
 _READ_TOOLS = {"read", "grep"}
 

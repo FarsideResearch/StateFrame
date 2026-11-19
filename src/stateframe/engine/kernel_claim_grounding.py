@@ -21,6 +21,7 @@ from pathlib import Path
 import kernel_parse_cache as _parse_cache
 import kernel_turn0_persistence as _turn0
 import kernel_workspace_truth as _workspace_truth
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 
 
 MODE_ENV = "STATEFRAME_CLAIM_GROUNDING"
@@ -29,7 +30,9 @@ SCHEMA = "stateframe-claim-grounding/1"
 _SKIP_DIRS = frozenset({
     ".git", ".venv", "__pycache__", "node_modules", "site-packages", "backup", "backups",
 })
-_MUTATING_TOOLS = frozenset({"edit", "str_replace", "replace_module", "write", "replace"})
+_MUTATING_TOOLS = frozenset({
+    "edit", "str_replace", "replace_module", "write", "replace", *PROTOCOL_EDIT_TOOL_NAMES,
+})
 _PATH_FIELDS = frozenset({
     "path", "target_path", "file", "filename", "source_path", "test_path",
     "working_path", "reference", "target",

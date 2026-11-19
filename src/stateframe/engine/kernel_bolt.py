@@ -26,6 +26,7 @@ from kernel_history_receipts import (
     new_receipt as _new_receipt,
     receipts as _receipt_history,
 )
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 
 POC = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(POC))
@@ -1151,7 +1152,7 @@ class KernelBolt:
     def take_invalidation_notice(self, action_kind: object) -> str | None:
         """Keep invalidation notices off an edit or terminal submission receipt."""
         action = str(action_kind or "").strip().lower()
-        if action in {"edit", "str_replace", "file_create", "delete", "move", "done"}:
+        if action in {"edit", "str_replace", "file_create", "delete", "move", "done", *PROTOCOL_EDIT_TOOL_NAMES}:
             return None
         notice = getattr(self, "_inval_pending", None)
         if not isinstance(notice, str) or not notice.strip():

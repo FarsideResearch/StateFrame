@@ -32,6 +32,7 @@ import os
 import re
 from collections.abc import Mapping
 
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 from kernel_context import token_estimate
 
 
@@ -391,7 +392,7 @@ def classify_receipt(tool_name: str, arguments_json: str, result_content: str) -
         return row("READ_REJECTED", head)
     if re.search(r"\bREFUSED\b", head):
         return row("REFUSED", head)
-    if tool in {"edit", "str_replace", "write", "insert"} and re.search(r"\bREJECTED\b", head, re.I):
+    if tool in {"edit", "str_replace", "write", "insert", *PROTOCOL_EDIT_TOOL_NAMES} and re.search(r"\bREJECTED\b", head, re.I):
         return row("EDIT_REJECTED", head)
     if tool == "grep":
         lines = [line for line in content.strip().split("\n") if line.strip()]

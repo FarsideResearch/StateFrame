@@ -22,8 +22,8 @@ ENGINE = Path(__file__).resolve().parents[1] / "src" / "stateframe" / "engine"
 # Every broad except site triaged in this batch: (module, line). A moved site must be retriaged.
 TRIAGED_SITES: tuple[tuple[str, int], ...] = (
     ("kernel_evidence_contracts", 1125),
-    ("kernel_evidence_relevance_shadow", 586),
-    ("kernel_evidence_relevance_shadow", 1243),
+    ("kernel_evidence_relevance_shadow", 587),
+    ("kernel_evidence_relevance_shadow", 1244),
     ("kernel_green_evidence_owner", 35),
     ("kernel_green_evidence_owner", 145),
     ("kernel_revision_bound_edit", 1209),
@@ -112,7 +112,7 @@ def test_snapshot_outline_parser_failure_is_typed_degraded(monkeypatch: pytest.M
 
 
 def test_shadow_reservation_account_failure_is_typed_reason() -> None:
-    """:586: an account error becomes a typed SHADOW_RESOURCE_ACCOUNT_<Error> reason code."""
+    """:587: an account error becomes a typed SHADOW_RESOURCE_ACCOUNT_<Error> reason code."""
     import kernel_evidence_relevance_shadow as shadow
 
     class Account:

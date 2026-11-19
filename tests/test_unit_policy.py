@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 from dataclasses import replace
 
+import pytest
+
 import kernel_unit_policy
 from kernel_capability_floor import admissible_floor_names
 from kernel_parallel_records import CheckRecipe, ParallelLimits, UnitContract, UnitSpec
@@ -40,6 +42,17 @@ def test_tool_and_mutation_capabilities_are_exact():
     assert UNIT_BLOCKED_TOOL['function']['name'] == 'subframe_blocked'
     assert 'unit' not in str(UNIT_BLOCKED_TOOL).casefold()
     assert UNIT_BLOCKED_TOOL['function']['parameters']['properties']['detail']['maxLength'] == 300
+
+
+@pytest.mark.parametrize("editor", ["edit_source", "rewrite_source"])
+def test_unit_classifies_protocol_mutations_without_offering_them(editor):
+    policy = UnitPolicy(make_spec())
+
+    assert policy.is_mutating_tool("str_replace")
+    assert policy.is_mutating_tool(editor)
+    assert not policy.is_mutating_tool("shell")
+    assert editor not in policy.mutating_tools
+    assert policy.authorize_tool(editor).reason == "SCOPE_VIOLATION"
 
 
 def test_first_request_uses_admitted_token_limit():

@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from kernel_obligation_assess import UnavailableEvidence, _unavailable_evidence
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 
 
 MODE_ENV = "STATEFRAME_INTENT_CARRY"
@@ -28,7 +29,7 @@ PENDING_INTENT_HEADER = "[Pending intent — host reminder, not edit authority]"
 MODEL_STATED = "MODEL_STATED"
 MODEL_REJECTED_EDIT = "MODEL_REJECTED_EDIT"
 _EDIT_TOOLS = frozenset({
-    "edit", "str_replace", "file_create", "replace_module", "write", "replace",
+    "edit", "str_replace", "file_create", "replace_module", "write", "replace", *PROTOCOL_EDIT_TOOL_NAMES,
 })
 _MAX_SUMMARY = 200
 _MAX_AGE = 3

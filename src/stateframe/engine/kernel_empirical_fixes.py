@@ -15,6 +15,7 @@ import re
 import textwrap
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 
 
 MODE_ENV = "STATEFRAME_EMPIRICAL_FIXES"
@@ -535,7 +536,7 @@ def change_after_green_from_receipts(receipts: object) -> str:
     last_green = green_positions[-1]
     changed_after = any(
         index > last_green
-        and _receipt_kind(row) in {"edit", "str_replace", "file_create", "replace_module", "write"}
+        and _receipt_kind(row) in {"edit", "str_replace", "file_create", "replace_module", "write", *PROTOCOL_EDIT_TOOL_NAMES}
         and _receipt_result(row) == "APPLIED"
         for index, row in enumerate(rows)
     )
@@ -571,7 +572,7 @@ def collapse_stale_test_results(frame: Mapping[str, object], receipts: object = 
     timeline = _receipt_timeline(receipts)
     latest_edit = max(
         (index for index, row in enumerate(timeline)
-         if _receipt_kind(row) in {"edit", "str_replace", "file_create", "replace_module", "write"}
+         if _receipt_kind(row) in {"edit", "str_replace", "file_create", "replace_module", "write", *PROTOCOL_EDIT_TOOL_NAMES}
          and _receipt_result(row) == "APPLIED"),
         default=-1,
     )
@@ -605,7 +606,7 @@ def collapse_stale_test_results(frame: Mapping[str, object], receipts: object = 
                     position < 0 and step is not None and any(
                         _row_step(edit) is not None and _row_step(edit) > step
                         for edit in timeline
-                        if _receipt_kind(edit) in {"edit", "str_replace", "file_create", "replace_module", "write"}
+                        if _receipt_kind(edit) in {"edit", "str_replace", "file_create", "replace_module", "write", *PROTOCOL_EDIT_TOOL_NAMES}
                         and _receipt_result(edit) == "APPLIED"))
             if stale_revision or stale_step:
                 stale.append(row)
@@ -1026,7 +1027,7 @@ def replay_change_after_green_states(events: Sequence[Mapping[str, object]]) -> 
             continue
         kind = _receipt_kind(row)
         if kind not in {"test", "run_tests", "pytest", "verification", "edit",
-                        "str_replace", "file_create", "replace_module", "write"}:
+                        "str_replace", "file_create", "replace_module", "write", *PROTOCOL_EDIT_TOOL_NAMES}:
             continue
         receipts.append(row)
         states.append(change_after_green_from_receipts(receipts))

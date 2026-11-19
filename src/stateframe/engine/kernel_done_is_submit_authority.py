@@ -16,6 +16,7 @@ import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 
 MODE_ENV = "STATEFRAME_DONE_IS_SUBMIT"
 ADVISORY_ENV = "STATEFRAME_DONE_ADVISORY"
@@ -33,7 +34,7 @@ _ADVISORY_SPECS = {
 }
 TERMINAL_RESULT = "SUBMITTED"
 MAX_SETTLE_SECONDS = 30.0
-_MUTATION_TOOLS = frozenset({"edit", "str_replace", "file_create", "file_delete", "file_move"})
+_MUTATION_TOOLS = frozenset({"edit", "str_replace", "file_create", "file_delete", "file_move", *PROTOCOL_EDIT_TOOL_NAMES})
 _REQUIRED_CANDIDATE_TOOLS = ("edit", "str_replace", "file_create", "file_delete", "file_move", "done")
 _REQUIRED_CANDIDATE_MUTATION_TOOLS = _REQUIRED_CANDIDATE_TOOLS[:-1]
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
