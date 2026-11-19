@@ -12,6 +12,13 @@ SECRET_GLOBS = (
     ".git-credentials", "secrets.json", "secrets.yaml", "secrets.yml", "secrets.toml",
     "*.secret", "*.secrets",
 )
+# Data/config files whose name mentions a secret or credential (client_secret.json, credentials.yaml,
+# aws_credentials.ini). Source modules are exempted by the suffix guard below, never by these rules.
+SECRET_NAME_GLOBS = ("*secret*", "*credential*")
+# Same idea for git pathspecs, which cannot apply the suffix guard: only data/config extensions.
+_DATA_SUFFIXES = ("json", "yaml", "yml", "toml", "ini", "cfg", "conf", "env", "txt", "xml", "properties")
+SECRET_PATHSPEC_GLOBS = SECRET_GLOBS + tuple(
+    f"*{word}*.{suffix}" for word in ("secret", "credential") for suffix in _DATA_SUFFIXES)
 _SOURCE_SUFFIXES = frozenset({
     ".py", ".pyi", ".pyw", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts",
     ".go", ".rs", ".java", ".kt", ".kts", ".scala", ".rb", ".php", ".cs", ".fs", ".fsx",
@@ -31,4 +38,4 @@ def is_secret_file(name: str) -> bool:
     # Keep those modules in the copy so dependent imports still resolve.
     if splitext(name)[1] in _SOURCE_SUFFIXES:
         return False
-    return any(fnmatchcase(name, pattern) for pattern in SECRET_GLOBS)
+    return any(fnmatchcase(name, pattern) for pattern in SECRET_GLOBS + SECRET_NAME_GLOBS)

@@ -8,7 +8,7 @@ import re
 import stat
 from typing import Callable, Mapping
 
-from stateframe.engine.kernel_secret_paths import SECRET_DIRS, SECRET_GLOBS
+from stateframe.engine.kernel_secret_paths import SECRET_DIRS, SECRET_PATHSPEC_GLOBS
 from stateframe.workcopy import IGNORE_DIRS, IGNORE_GLOBS, _ignored
 
 _OID = re.compile(r"[0-9a-fA-F]{40,64}\Z")
@@ -200,7 +200,7 @@ class GitView:
         patterns = [f":(exclude,glob)**/{name}/**" for name in sorted(IGNORE_DIRS - SECRET_DIRS)]
         patterns += [f":(exclude,glob,icase)**/{name}/**" for name in sorted(SECRET_DIRS)]
         # Git's glob exclusions have no source-suffix exception; explicit paths use _excluded.
-        patterns += [f":(exclude,glob,icase)**/{name}" for name in SECRET_GLOBS]
+        patterns += [f":(exclude,glob,icase)**/{name}" for name in SECRET_PATHSPEC_GLOBS]
         patterns += [f":(exclude,glob)**/{name}" for name in IGNORE_GLOBS]
         return [".", *patterns]
 

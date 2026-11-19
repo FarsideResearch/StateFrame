@@ -14,11 +14,13 @@ KEPT = (
     "secret_binding.py", "secrets_manager.py", "credential_store.py", "id_utils.py",
     "app/models/secret_binding.py", ".env.schema.ts", "id_rsa_tools.go",
     "id_dsa_config.rs", "id_ecdsa_loader.java", "id_ed25519_check.rb", ".env.setup.js",
-    "id_rsa_codec.c", "id_rsa_codec.H", "credentials.example.json", "secret_helper.sh",
+    "id_rsa_codec.c", "id_rsa_codec.H", "secret_helper.sh",
     "credential_store/module.py", ".envrc.example",
 )
 EXCLUDED = (
     ".env", ".env.local", "server.pem", "id_rsa", "id_ed25519.pub",
+    # Data/config files that name a secret or credential stay out even when the name is not a fixed rule.
+    "client_secret.json", "credentials.yaml", "aws_credentials.ini", "credentials.example.json",
     "credentials.json", ".netrc", "secrets.yaml", "config/app.secret",
     "server.key", "id_dsa", "id_ecdsa", "server.p12", "server.pfx", ".npmrc", ".pypirc",
     "credentials", ".git-credentials", "secrets.json", "secrets.yml", "secrets.toml",
