@@ -10,7 +10,7 @@ that look like a broken task. Order:
    in-project poetry environment both create ``.venv``).
 4. ``python3`` on PATH.
 
-StateFrame's own environment is never chosen silently: a PATH ``python3`` that lives inside it
+StateFrame's own virtual environment is never chosen silently: a PATH ``python3`` that lives inside it
 is skipped, and when nothing qualifies the run stops with a message naming ``--test-python``.
 No external tool (poetry, uv) is run: detection is offline and only looks at files.
 """
@@ -37,7 +37,9 @@ def _venv_python(directory: Path) -> Path | None:
 
 
 def _is_own_environment(python: Path, own_prefix: Path) -> bool:
-    """True when ``python`` belongs to StateFrame's environment (not a project or system one)."""
+    """True when ``python`` belongs to StateFrame's own virtual environment."""
+    if sys.prefix == sys.base_prefix:
+        return False
     try:
         parent = python.parent.resolve()
         unresolved = python.parent.absolute()
