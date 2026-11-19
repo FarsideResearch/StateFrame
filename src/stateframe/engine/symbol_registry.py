@@ -39,10 +39,65 @@ from __future__ import annotations
 import ast
 import difflib
 import json
+import logging
 import pathlib
 import sys
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+from itertools import chain, islice
 
+import kernel_parse_cache as _parse_cache
 import kernel_workspace_truth as _workspace_truth
+from mc_repo_intel_vendor import python_index
+
+_READ_WINDOW = 64
+_READ_CHARS = 64 * 1024
+
+
+def _read_source(path: pathlib.Path, limit: int = -1) -> str | None:
+    try:
+        with path.open(errors="strict") as stream:
+            return stream.read(limit)
+    except (UnicodeDecodeError, OSError):
+        return None
+
+
+def _finish_read(path, future):
+    if future is None:
+        return path, _read_source(path)
+    prefix = future.result()
+    # Bound queued text to 64 Ki characters per path. Long inputs are read in
+    # full, one at a time, on the consuming thread.
+    if prefix is not None and len(prefix) > _READ_CHARS:
+        return path, _read_source(path)
+    return path, prefix
+
+
+def _sources(root, skip):
+    paths = (p for p in root.rglob("*.py") if not any(part in skip for part in p.parts))
+    first = tuple(islice(paths, _READ_WINDOW))
+    if len(first) < _READ_WINDOW:
+        for path in first:
+            yield path, _read_source(path)
+        return
+    # Cold workcopies can spend most of boot waiting on sequential opens.
+    # Overlap reads while preserving rglob order and single-threaded analysis.
+    pending = deque()
+    parallel = True
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        for path in chain(first, paths):
+            future = None
+            if parallel:
+                try:
+                    future = pool.submit(_read_source, path, _READ_CHARS + 1)
+                except (RuntimeError, OSError) as exc:
+                    logging.getLogger(__name__).debug("Registry prefetch unavailable: %s", type(exc).__name__)
+                    parallel = False
+            pending.append((path, future))
+            if len(pending) == _READ_WINDOW:
+                yield _finish_read(*pending.popleft())
+        while pending:
+            yield _finish_read(*pending.popleft())
 
 
 class SymbolRegistry:
@@ -59,21 +114,29 @@ class SymbolRegistry:
     def build(self, root: pathlib.Path, skip=("__pycache__", ".git", "node_modules",
                                                ".venv", "site-packages")) -> "SymbolRegistry":
         self.root = pathlib.Path(root).resolve()
-        for p in root.rglob("*.py"):
-            if any(s in p.parts for s in skip):
-                continue
-            try:
-                src = p.read_text(errors="strict")
-                tree = ast.parse(src)
-            except (SyntaxError, UnicodeDecodeError, OSError):
-                # A file we cannot parse is an UNKNOWN, never a "does not exist". Counted so
-                # the registry can report its own blind spots rather than answering
-                # confidently about a file it never read.
-                self.files_failed += 1
-                continue
-            self.files_scanned += 1
-            rel = str(p.relative_to(root))
-            self._walk(tree, rel, None)
+        with python_index.open_index(self.root) as index:
+            for p, src in _sources(root, skip):
+                if src is None:
+                    self.files_failed += 1
+                    continue
+                rel = p.relative_to(root).as_posix()
+                try:
+                    rows = index.optional_projection(src, rel, "registry")
+                    if rows is None:
+                        self._walk(_parse_cache.parse(src, filename=rel), rel, None)
+                    else:
+                        for name, line, cls, kind, signature in rows:
+                            self.defs.setdefault(name, []).append({
+                                "file": rel, "line": line, "cls": cls, "kind": kind,
+                                "signature": signature,
+                            })
+                except (SyntaxError, UnicodeDecodeError, OSError):
+                    # A file we cannot parse is an UNKNOWN, never a "does not exist". Counted so
+                    # the registry can report its own blind spots rather than answering
+                    # confidently about a file it never read.
+                    self.files_failed += 1
+                    continue
+                self.files_scanned += 1
         return self
 
     def _walk(self, node, rel: str, cls: str | None) -> None:
@@ -101,26 +164,7 @@ class SymbolRegistry:
             else:
                 self._walk(child, rel, cls)
 
-    @staticmethod
-    def _sig(fn) -> str:
-        # KEEP THE / AND * MARKERS. the audit showed `def f(a, /, *, key=1)` rendering as
-        # `def f(a, key)` — which tells the agent it may pass `key` positionally when Python
-        # will reject that. A signature that is subtly wrong is worse than none, because the
-        # agent trusts it and writes a call that cannot work.
-        a = fn.args
-        parts = [x.arg for x in a.posonlyargs]
-        if a.posonlyargs:
-            parts.append("/")
-        parts += [x.arg for x in a.args]
-        if a.vararg:
-            parts.append("*" + a.vararg.arg)
-        elif a.kwonlyargs:
-            parts.append("*")
-        parts += [x.arg for x in a.kwonlyargs]
-        if a.kwarg:
-            parts.append("**" + a.kwarg.arg)
-        prefix = "async def" if isinstance(fn, ast.AsyncFunctionDef) else "def"
-        return f"{prefix} {fn.name}({', '.join(parts)})"
+    _sig = staticmethod(python_index.registry_signature)
 
     # ------------------------------------------------------------------ query
     def exists(self, name: str) -> bool:

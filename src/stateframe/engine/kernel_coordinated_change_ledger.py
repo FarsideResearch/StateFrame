@@ -31,6 +31,7 @@ from pathlib import Path
 from types import ModuleType
 
 import kernel_parse_cache as _parse_cache
+from mc_repo_intel_vendor import python_index
 import kernel_workspace_truth as _workspace_truth
 from kernel_measurement import profiled_function_span
 import kernel_turn0_persistence as _turn0
@@ -91,7 +92,7 @@ _TEXT_SUFFIXES = frozenset({
     ".css", ".scss", ".json", ".md", ".txt", ".yaml", ".yml", ".go", ".rs",
     ".java", ".php",
 })
-_SYMBOL = r"[A-Za-z_][A-Za-z0-9_]*"
+_SYMBOL = python_index.IDENTIFIER_PATTERN
 _MISSING_IMPORT = re.compile(
     r"cannot import name [\"'](?P<symbol>[A-Za-z_]\w*)[\"']\s+from\s+"
     r"[\"'](?P<module>[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)[\"']",
@@ -567,29 +568,30 @@ def _scan_repository(root: str | Path, *, overlays: Mapping[str, str] | None = N
     # ``_dedupe_sites`` result, and dict insertion order is unchanged.
     usage_parts: dict[str, list[tuple[UsageSite, ...]]] = {}
     importer_parts: dict[str, list[tuple[UsageSite, ...]]] = {}
-    for relative in files:
-        source = _source_for(root_path, relative, overlays)
-        if source is None:
-            continue
-        module = _module_for_path(relative)
-        try:
-            if relative.endswith(".py"):
-                scanned = _parse_cache.derived(
-                    ("ccl.scan_py", relative, module), source, relative,
-                    lambda tree, relative=relative, module=module, source=source:
-                        _file_scan(_python_rows(tree, relative, module), source, relative))
-            else:
-                scanned = _parse_cache.derived_source(
-                    ("ccl.scan_text", relative), source, relative,
-                    lambda text, relative=relative: _file_scan((), text, relative))
-        except SyntaxError:
-            continue
-        file_definitions, file_importers, file_usages = scanned
-        definitions.extend(file_definitions)
-        for symbol, sites in file_importers:
-            importer_parts.setdefault(symbol, []).append(sites)
-        for symbol, sites in file_usages:
-            usage_parts.setdefault(symbol, []).append(sites)
+    with python_index.open_index(root_path) as index:
+        for relative in files:
+            source = _source_for(root_path, relative, overlays)
+            if source is None:
+                continue
+            module = _module_for_path(relative)
+            try:
+                if relative.endswith(".py"):
+                    scanned = _parse_cache.derived_source(
+                        ("ccl.scan_py", relative, module), source, relative,
+                        lambda text, relative=relative, module=module:
+                            _indexed_scan(index, text, relative, module))
+                else:
+                    scanned = _parse_cache.derived_source(
+                        ("ccl.scan_text", relative), source, relative,
+                        lambda text, relative=relative: _file_scan((), text, relative))
+            except SyntaxError:
+                continue
+            file_definitions, file_importers, file_usages = scanned
+            definitions.extend(file_definitions)
+            for symbol, sites in file_importers:
+                importer_parts.setdefault(symbol, []).append(sites)
+            for symbol, sites in file_usages:
+                usage_parts.setdefault(symbol, []).append(sites)
 
     return ScanResult(
         tuple(sorted(definitions, key=lambda item: (item.path, item.line, item.symbol))),
@@ -599,7 +601,7 @@ def _scan_repository(root: str | Path, *, overlays: Mapping[str, str] | None = N
     )
 
 
-_SYMBOL_TOKEN = re.compile(rf"\b({_SYMBOL})\b")
+_SYMBOL_TOKEN = python_index.IDENTIFIER
 _FileScan = tuple[tuple["DefinitionSite", ...],
                   tuple[tuple[str, tuple["UsageSite", ...]], ...],
                   tuple[tuple[str, tuple["UsageSite", ...]], ...]]
@@ -612,6 +614,32 @@ def _dedupe_file_sites(sites: list[UsageSite]) -> tuple[UsageSite, ...]:
 
 def _concat_sites(parts: list[tuple[UsageSite, ...]]) -> tuple[UsageSite, ...]:
     return parts[0] if len(parts) == 1 else tuple(site for part in parts for site in part)
+
+
+def _indexed_scan(index, source: str, relative: str, module: str) -> _FileScan:
+    facts = index.optional_projection(source, relative, "ledger")
+    if facts is None:
+        rows = _python_rows(_parse_cache.parse(source, relative), relative, module)
+        return _file_scan(rows, source, relative)
+
+    structural_rows, text_sites = facts
+    definitions = []
+    import_rows = {}
+    for symbol, line, kind in structural_rows:
+        if kind == "import":
+            import_rows.setdefault(symbol, []).append(UsageSite(symbol, relative, line, kind, module))
+        else:
+            definitions.append(DefinitionSite(symbol, relative, line, kind, module))
+    importers = {symbol: _dedupe_file_sites(rows) for symbol, rows in import_rows.items()}
+    contexts = [line.strip()[:180] for line in source.splitlines()]
+    usages = importers.copy()
+    for symbol, numbers in text_sites.items():
+        sites = tuple(UsageSite(symbol, relative, number, "text", contexts[number - 1])
+                      for number in numbers)
+        if symbol in importers:
+            sites = tuple(sorted((*importers[symbol], *sites), key=lambda item: (item.line, item.kind)))
+        usages[symbol] = sites
+    return tuple(definitions), tuple(importers.items()), tuple(usages.items())
 
 
 def _python_rows(tree: ast.AST, relative: str, module: str) -> list[tuple[object, ...]]:
@@ -1706,7 +1734,7 @@ def _validate_file(source: str, relative: str) -> str | None:
     suffix = Path(relative).suffix.lower()
     if suffix == ".py":
         try:
-            ast.parse(source, filename=relative)
+            _parse_cache.parse(source, filename=relative)
         except SyntaxError as error:
             return f"Python syntax error at line {error.lineno}: {error.msg}"
         return None
@@ -1756,7 +1784,7 @@ def _python_import_failures(root: Path, overlays: Mapping[str, str],
         if source is None:
             continue
         try:
-            tree = ast.parse(source, filename=relative)
+            tree = _parse_cache.parse(source, filename=relative)
         except SyntaxError:
             continue
         names: set[str] = set()
