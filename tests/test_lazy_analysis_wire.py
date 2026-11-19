@@ -201,7 +201,7 @@ def instrument_observations(module):
 
     module.after_observation = observe
 
-if stop_at or hold_until == "0002" or hold_analysis:
+if stop_at or hold_until or hold_analysis:
     def attach(frame, event, arg):
         if event != "call" or frame.f_code.co_name != "emit" or not frame.f_code.co_filename.endswith("/_child.py"):
             return
@@ -213,7 +213,7 @@ if stop_at or hold_until == "0002" or hold_analysis:
             if kind != "send":
                 return
             send = fields["send"]
-            if send == 2 and hold_until == "0002":
+            if hold_until == f"{send:04d}":
                 assert wait_until(lambda: any(event[0] == "finish" for event in events), 25)
             if send == 2 and hold_analysis:
                 assert wait_until(lambda: any(row[0] == "analysis_finish" for row in events), 15)
@@ -274,7 +274,7 @@ def _run(tree, work, *, minimal="off", indexed=None, hold=False, fallback=False,
     if hold:
         config.update(hold_until="0002", demand_at=1)
     if resume:
-        config.update(wait_for_graph=True, demand_at=2, stop_at=3)
+        config.update(wait_for_graph=True, demand_at=2, stop_at=3, gate_seconds=180)
     # The hold, provider timeout and requested send count are the proof's
     # bounds. Leave extra time for setup when the build host is busy.
     run_timeout = 300
