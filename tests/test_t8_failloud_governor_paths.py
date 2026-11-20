@@ -1,4 +1,4 @@
-"""T8 fail-loud triage, batch 3: probes/ and governor / policy / guard modules.
+"""T8 fail-loud triage for probes/ and governor / policy / guard modules.
 
 Every broad ``except`` in the batch was classified (see the batch verdict table
 in the test-gap notes).  No site was a CRASH-HIDER on a default path, so there
