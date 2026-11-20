@@ -491,6 +491,48 @@ def test_repeated_interruption_during_report_recovery_keeps_original_rows(tmp_pa
         assert journal.cached_records()[-1]["previous_hash"] == summary["record_hash"]
 
 
+@pytest.mark.parametrize("marker_written", [False, True])
+def test_report_recovery_preserves_record_order_around_identity_markers(tmp_path, monkeypatch, marker_written):
+    from kernel_verdict_identity import FIRED_EVENT, SWITCH, RunIdentityProvider, attach_journal
+
+    monkeypatch.setenv(SWITCH, "on")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    task = "observer-identity-order"
+    with ContinuationJournal(tmp_path, task, {}) as journal:
+        attach_journal(journal, RunIdentityProvider(workspace, journal.run_id, release_id="test"))
+        for index in range(22):
+            journal.subscribe(f"rejecting-{index}", _reject, kinds=(_EVENT,))
+        emit = journal.emit
+
+        def emit_with_stop(kind, **fields):
+            if kind == FIRED_EVENT and fields.get("source_event") == _FAILURE:
+                if marker_written:
+                    emit(kind, **fields)
+                raise KeyboardInterrupt("stop at report identity marker")
+            return emit(kind, **fields)
+
+        monkeypatch.setattr(journal, "emit", emit_with_stop)
+        with pytest.raises(KeyboardInterrupt, match="stop at report identity marker"):
+            journal.emit(_EVENT)
+        path = journal.path
+
+    prefix = path.read_bytes()
+    rows = list(map(json.loads, prefix.splitlines()))
+    assert rows[-1]["kind"] == (FIRED_EVENT if marker_written else _FAILURE)
+    probe, = [row for row in rows if row["kind"] == _EVENT]
+    first_detail, = [row for row in rows if row["kind"] == _FAILURE]
+    with ContinuationJournal.resume(path, task_id=task, manifest={},
+                                    expected_head=rows[-1]["record_hash"]) as journal:
+        *details, summary = _failures_on_disk(journal)
+        assert path.read_bytes().startswith(prefix)
+        assert details[0] == first_detail
+        assert details[1]["previous_hash"] == rows[-1]["record_hash"]
+        assert [row["subscriber"] for row in details] == [f"rejecting-{index}" for index in range(20)]
+        assert summary["first_event_sequence"] == summary["last_event_sequence"] == probe["sequence"]
+        assert summary["dropped_count"] == 2
+
+
 @pytest.mark.parametrize("stop_point", ["between_rows", "during_summary_write"])
 def test_replay_resume_archives_the_completed_observer_failure_report(tmp_path, stop_point):
     from stateframe.resume import archive_attempt
