@@ -198,6 +198,15 @@ if stop_point == "during_delivery":
 
 def interrupt(kind, **fields):
     global written
+    if kind == "journal_observer_failed" and "dropped_count" in fields and stop_point == "after_summary_fsync":
+        fsync = os.fsync
+
+        def stop_after_summary_fsync(fd):
+            fsync(fd)
+            if fd == journal._fd:
+                os.kill(os.getpid(), signal.SIGKILL)
+
+        os.fsync = stop_after_summary_fsync
     if kind == "journal_observer_failed" and written == stop_after:
         if stop_point == "during_summary_write":
             assert "dropped_count" in fields
@@ -226,7 +235,7 @@ journal.emit_batch([("observer_probe", {})] * 32, atomic=True)
 
 @pytest.mark.parametrize(("stop_after", "stop_point"), [
     (1, "between_rows"), (20, "between_rows"), (20, "during_delivery"),
-    (20, "during_summary_write"), (21, "between_rows"),
+    (20, "during_summary_write"), (21, "after_summary_fsync"), (21, "between_rows"),
 ])
 def test_resume_finishes_an_interrupted_failure_report_exactly_once(tmp_path, stop_after, stop_point):
     crashed = subprocess.run([sys.executable, "-c", _STOP_DURING_FAILURE_REPORT,
