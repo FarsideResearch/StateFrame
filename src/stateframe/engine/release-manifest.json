@@ -95,7 +95,7 @@
   "kernel_agent_authored_check.py": "6d2bbc82f4dfe7e793730f46deb0b14a93af6fee027b1c7dcb005e7394798274",
   "kernel_agent_jobs.py": "d9d904b7e4468d04641126e0cbf7055159ab55d7d24321aa1efb24cbe9831a8d",
   "kernel_agent_schemas.py": "2029ea1a580ba2ba6a6022593d297bbd21136f7ea6e0b747323ad7cfe7546147",
-  "kernel_agent_tools.py": "a15a6134cbffc7f470fcfc50ce925e44aab97af45eea26e388c075370cb8cab4",
+  "kernel_agent_tools.py": "d7b94628674fb3d6a21b84d6ec707313e02151937a8df3fe8e737b0626496b18",
   "kernel_aha10_honest_loop.py": "cc437fb783eb9d40cd6625a87b5b8a62cbbf5a9d925cda918283eb25d8675479",
   "kernel_aha10_r3_contract.py": "547b30cff528e4a41254e628c695620ce30c7990c97a1b6d9c01188972bcebab",
   "kernel_aha11_native_honesty.py": "5dc4657e469cd352be04aa82d7e017dbdd9e322321ea9e5adec42da09cd215cd",

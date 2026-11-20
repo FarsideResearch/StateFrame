@@ -65,7 +65,10 @@ def _replayed_schema_budget(spec):
             raise ValueError("invalid run start")
     except (OSError, ValueError, TypeError, KeyError) as error:
         raise ToolReplayRefused("Invalid startup journal for the recorded request") from error
-    return manifest.get("startup_schema_budget")
+    budget = manifest.get("startup_schema_budget")
+    if budget is None:
+        raise ToolReplayRefused("Recorded startup schema counts are missing")
+    return budget
 
 
 class AgentTools:
