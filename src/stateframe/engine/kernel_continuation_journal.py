@@ -832,6 +832,7 @@ class ContinuationJournal(AuditJournal):
         self._replaying = False
         self._notifying = False
         self._subscribers: dict[str, Callable[[dict], None]] = {}
+        self._subscriber_audit_advance: dict[str, Callable[[int], None]] = {}
         self._subscriber_kinds: dict[str, frozenset[str] | None] = {}
         self._subscriber_cursors: dict[str, int] = {}
         self._subscriber_cursor_kinds: dict[str, frozenset[str] | None] = {}
@@ -1127,11 +1128,14 @@ class ContinuationJournal(AuditJournal):
             yield
 
     def subscribe(self, name: str, observer: Callable[[dict], None], *,
-                  kinds: Sequence[str] | None = None) -> None:
-        """Validate replay, commit each completed delivery, then attach the observer."""
+                  kinds: Sequence[str] | None = None,
+                  advance_audit: Callable[[int], None] | None = None) -> None:
+        """Replay and attach an observer, with optional audit-only cursor updates."""
         with self.ownership():
             if self._notifying or not name or name in self._subscribers or not callable(observer):
                 raise JournalError("invalid or already attached projection")
+            if advance_audit is not None and not callable(advance_audit):
+                raise JournalError("audit cursor update must be callable")
             selected = None if kinds is None else frozenset(str(kind) for kind in kinds)
             if selected is not None and not all(selected):
                 raise JournalError("subscriber kinds must be non-empty strings")
@@ -1191,8 +1195,13 @@ class ContinuationJournal(AuditJournal):
                         # not filter, deliver, or copy those already committed rows.
                         if legacy_mode and sequence <= resume_cursor:
                             continue
-                        if (_is_observer_failure_overflow(record)
-                                or (selected is not None and record.get("kind") not in selected)):
+                        if _is_observer_failure_overflow(record):
+                            if advance_audit is not None:
+                                self.assert_owner()
+                                advance_audit(sequence)
+                                self._subscriber_cursors[name] = sequence
+                            continue
+                        if selected is not None and record.get("kind") not in selected:
                             continue
                         self.assert_owner()
                         # Match live fanout: ordinary observer exceptions are
@@ -1209,6 +1218,8 @@ class ContinuationJournal(AuditJournal):
                     # publication advances the cursor for every durable row.
                     self._subscriber_cursors[name] = final_cursor
                 self._subscribers[name] = observer
+                if advance_audit is not None:
+                    self._subscriber_audit_advance[name] = advance_audit
                 self._subscriber_kinds[name] = selected
             finally:
                 self._notifying = False
@@ -2385,7 +2396,12 @@ class ContinuationJournal(AuditJournal):
                         raise JournalError("subscriber sequence gap")
                     self._subscriber_cursors[name] = record["sequence"]
                     selected = self._subscriber_kinds.get(name)
-                    if not audit_only and (selected is None or record.get("kind") in selected):
+                    if audit_only:
+                        advance_audit = self._subscriber_audit_advance.get(name)
+                        if advance_audit is not None:
+                            advance_audit(record["sequence"])
+                        self._publication_stats["filtered"] += 1
+                    elif selected is None or record.get("kind") in selected:
                         self._publication_stats["published"] += 1
                         self._publication_stats["deep_copies"] += 1
                         self._notify_isolated(name, observer, record)
