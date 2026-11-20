@@ -364,8 +364,9 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
 
     dependencies = None
     if repository_context is not None:
-        dependencies = kernel_repo_dependencies.DependencyView(
-            replayer.next_request_path if replayer is not None else lambda: None)
+        if kernel_repo_dependencies.enabled():
+            dependencies = kernel_repo_dependencies.DependencyView(
+                replayer.next_request_path if replayer is not None else lambda: None)
         kernel_repo_dependencies.active = dependencies
 
     if replayer is not None:

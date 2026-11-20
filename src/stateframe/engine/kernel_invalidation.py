@@ -1136,14 +1136,14 @@ class LedgerIndex:
                 digest=digest,
                 source_kind=source_kind,
             )
-        complete = True
+        complete = getattr(self._call_graph, "index_status", "ready") == "ready"
         if _is_test_path(node.path) and not node.dependencies:
             derived, complete = self._dependency_fact(node.path, node.workspace_revision)
             if derived:
                 node = replace(node, dependencies=derived)
         if _is_test_path(node.path) and node.source_kind == "check":
             checks = getattr(self, "_pending_graph_checks", None)
-            if not complete:
+            if not complete and not dependencies:
                 if checks is None:
                     checks = self._pending_graph_checks = {}
                 checks[node.path] = node.node_id

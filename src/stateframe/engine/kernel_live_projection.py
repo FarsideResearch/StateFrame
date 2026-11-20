@@ -372,9 +372,12 @@ class WorkspaceViewStore:
         """Invalidate all derived views after a host-visible mutation."""
         has_paths = bool(changed_paths)
         if has_paths or outcome is not None:
-            from mc_repo_intel_vendor.background import invalidate
+            from kernel_repo_dependencies import active
 
-            invalidate(self.root)
+            if active is not None or os.environ.get("STATEFRAME_TURN_REPO_INTEL", "off") == "on":
+                from mc_repo_intel_vendor.background import invalidate
+
+                invalidate(self.root)
             self.mutation_epoch += 1
             self._dirty = True
             state = getattr(self, "_workspace_state", None)

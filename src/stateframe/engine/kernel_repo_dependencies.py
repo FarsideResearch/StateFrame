@@ -13,6 +13,10 @@ ANALYSIS_SUFFIX = ".repository-analysis.json"
 _ANALYSES = ("claim", "census")
 
 
+def enabled() -> bool:
+    return os.environ.get("STATEFRAME_BACKGROUND_REPOSITORY_ANALYSIS", "off") == "on"
+
+
 def _produce_analysis(root: Path, kind: str):
     if kind == "claim":
         from kernel_claim_grounding import build_ast_index

@@ -199,15 +199,16 @@ def test_mutation_fences_pre_edit_graph(tmp_path, monkeypatch):
 
 
 def test_request_keeps_its_graph_until_a_workspace_mutation(tmp_path, monkeypatch):
+    import kernel_repo_dependencies as visibility
     from kernel_live_projection import WorkspaceViewStore
-    from kernel_repo_dependencies import DependencyView
 
     root = _repo(tmp_path / "workspace")
     _enable(monkeypatch, tmp_path / "cache")
     monkeypatch.setenv("CODE_GRAPH_LSP", "off")
     test = root / "test_service.py"
     test.write_text("from file_00 import run\n\ndef test_service(): run()\n")
-    view = DependencyView(lambda: None)
+    view = visibility.DependencyView(lambda: None)
+    monkeypatch.setattr(visibility, "active", view)
     view.advance(root)
     _ready(root)
 
@@ -297,7 +298,8 @@ def test_analysis_switch_pairs_reach_child(
 
     selected = {**overrides, feature: "on" if pair[0] == "1" else "off",
                 companion: "on" if pair[1] == "1" else "off"}
-    expected = {f"STATEFRAME_{name}": value for name, value in selected.items()}
+    expected = {"STATEFRAME_BACKGROUND_REPOSITORY_ANALYSIS": "on",
+                **{f"STATEFRAME_{name}": value for name, value in selected.items()}}
     options = runner.RunOptions(repo=tmp_path, task="Check analysis scheduling.",
                                 endpoint=None, extra_env=expected)
     effective = runner._provider_environment(options)

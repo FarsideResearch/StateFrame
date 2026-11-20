@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PUBLIC_DOCS = ("README.md", "CHANGELOG.md", "KNOWN_LIMITATIONS.md", "AGENTS.md", "docs/guide/*.md")
 # Engine switches documented as profile-only: the docs must say "profile" in the same sentence.
 PROFILE_ONLY = {
+    "STATEFRAME_BACKGROUND_REPOSITORY_ANALYSIS",
     "STATEFRAME_ROUTING_SCHEMA",
     "STATEFRAME_DECIDE2_MODEL",
     "STATEFRAME_WORK_FRAME_MODEL",
