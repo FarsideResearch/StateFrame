@@ -5,10 +5,11 @@ import json
 import shutil
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from http.server import ThreadingHTTPServer
 from pathlib import Path
-from threading import Thread
+from threading import Barrier, Thread, current_thread
 from types import SimpleNamespace
 
 import pytest
@@ -27,7 +28,7 @@ pytestmark = pytest.mark.host_sandbox
 
 
 @contextmanager
-def tokenizer(*, trickle):
+def tokenizer(*, trickle, trickle_posts=1):
     script = Script(json.loads((ROOT / "examples/discount_bug.script.json").read_text()))
     schema_posts = []
 
@@ -37,14 +38,21 @@ def tokenizer(*, trickle):
             if content.get("messages") != [] or not content.get("tools"):
                 return super()._tokenize(raw)
             schema_posts.append(content)
-            if not trickle or len(schema_posts) > 1:
+            if not trickle or len(schema_posts) > trickle_posts:
                 self._send(200, {"tokens": [1, 2, 3]})
                 return
             # Each byte arrives within the socket timeout, but the full body takes over a second.
             body = b'{"tokens": [1, 2, 3]}'
-            self.send_response(200)
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
+            if trickle == "headers":
+                body = b"HTTP/1.1 200 OK\r\nContent-Length: 21\r\n\r\n" + body
+            else:
+                self.send_response(200)
+                if trickle == "chunked":
+                    self.send_header("Transfer-Encoding", "chunked")
+                    body = b"15;extension=abcdefghijklmno\r\n" + body + b"\r\n0\r\n\r\n"
+                else:
+                    self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
             try:
                 for byte in body:
                     self.wfile.write(bytes([byte]))
@@ -87,6 +95,48 @@ def test_bind_bounds_schema_metering_and_keeps_fast_counts(tmp_path, monkeypatch
         else:
             assert tools.schema_budget == {name: {"tokens": 3, "method": "tokenize"} for name in fallback}
         assert json.loads(tools.schema_budget_path.read_text()) == tools.schema_budget
+
+
+@pytest.mark.parametrize("trickle", [True, "headers", "chunked"], ids=["body", "headers", "chunked"])
+def test_parallel_binds_share_one_tokenizer_with_bounded_workers(tmp_path, monkeypatch, trickle):
+    import kernel_request_diet
+    from kernel_provider_dialect import LLAMA_CPP, RUN_CAPABILITY_CACHE, ProviderCapabilities, origin_of
+
+    monkeypatch.setattr(kernel_request_diet, "TOKENIZE_REQUEST_TIMEOUT_CAP_SECONDS", CAP)
+    original_tokenize = kernel_request_diet._http_tokenize
+    workers = []
+
+    def record_worker(*args, **kwargs):
+        workers.append(current_thread())
+        return original_tokenize(*args, **kwargs)
+
+    monkeypatch.setattr(kernel_request_diet, "_http_tokenize", record_worker)
+    fallback = measure_schemas()
+    callers = 4
+    ready = Barrier(callers)
+    with tokenizer(trickle=trickle, trickle_posts=callers) as (endpoint, schema_posts):
+        monkeypatch.setitem(RUN_CAPABILITY_CACHE, origin_of(endpoint), ProviderCapabilities(dialect=LLAMA_CPP))
+
+        def bind(index):
+            run_dir = tmp_path / str(index)
+            run_dir.mkdir()
+            shell = SimpleNamespace(spec={"chat_url": endpoint + "/chat/completions"},
+                                    run_dir=run_dir, settings=ToolSettings())
+            ready.wait(timeout=5)
+            start = time.monotonic()
+            tools = AgentTools(shell, CustomToolSet((), "empty"), defer_schema_budget=True)
+            tools.bind()
+            return time.monotonic() - start, tools.schema_budget
+
+        with ThreadPoolExecutor(max_workers=callers) as pool:
+            for elapsed, counts in pool.map(bind, range(callers)):
+                assert elapsed < CAP + 0.35
+                assert counts == fallback
+        assert len(schema_posts) == len(workers) == callers
+        cleanup_deadline = time.monotonic() + 0.35
+        for worker in workers:
+            worker.join(timeout=max(0, cleanup_deadline - time.monotonic()))
+        assert not any(worker.is_alive() for worker in workers)
 
 
 def test_startup_fallback_is_journaled_and_replayed_byte_for_byte(tmp_path, monkeypatch):
