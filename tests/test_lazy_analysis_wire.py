@@ -96,7 +96,7 @@ class GraphProbe:
             "kernel_claim_grounding": "claim",
             "kernel_callsite_census": "census",
         }
-        if (fullname not in ("mc_repo_intel_vendor.call_graph", "kernel_v46_mechanism_wiring")
+        if (fullname not in ("repo_intel_core.call_graph", "kernel_v46_mechanism_wiring")
                 and not ((ready_during_replay or analysis_source) and fullname == "kernel_repo_dependencies")
                 and not (observe_census and fullname == "kernel_callsite_census")
                 and (not hold_analysis or analysis_builders.get(fullname) != hold_analysis)):
@@ -214,7 +214,7 @@ def instrument_observations(module):
     def observe(runtime, action, observation):
         nonlocal seeded, waited
         if wait_for_graph and not waited and Path("wire/0001.response.json").exists():
-            from mc_repo_intel_vendor import background
+            from repo_intel_core import background
             root = Path(runtime.owner.root)
             assert wait_until(lambda: background.graph_snapshot(root)[0] is not None, 12)
             waited = True

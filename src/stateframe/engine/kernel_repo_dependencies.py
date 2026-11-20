@@ -6,7 +6,7 @@ import os
 from collections.abc import Callable
 from pathlib import Path
 
-from mc_repo_intel_vendor import background
+from repo_intel_core import background
 
 SUFFIX = ".repo-dependencies.json"
 ANALYSIS_SUFFIX = ".repository-analysis.json"
@@ -167,7 +167,7 @@ class DependencyView:
                 dependencies = graph.dependency_files(path)
                 source = "graph" if getattr(graph, "index_status", "ready") == "ready" else "static"
             else:
-                from mc_repo_intel_vendor.call_graph import scoped_test_dependencies
+                from repo_intel_core.call_graph import scoped_test_dependencies
 
                 dependencies = scoped_test_dependencies(root, path)
                 source = "scoped"

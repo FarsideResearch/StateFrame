@@ -6029,7 +6029,7 @@ class StateFrameRuntime:
             from kernel_repo_dependencies import active
 
             if active is not None:
-                from mc_repo_intel_vendor.background import invalidate
+                from repo_intel_core.background import invalidate
 
                 invalidate(Path(self.owner.root).resolve())
         return 0
