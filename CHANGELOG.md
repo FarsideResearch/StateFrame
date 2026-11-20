@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.8.9 (2026-11-20)
 
 - Changed: the repository intelligence package is now named repo_intel_core; behaviour is unchanged.
