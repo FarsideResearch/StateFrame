@@ -183,7 +183,8 @@ def reject(_row):
 
 journal = ContinuationJournal(Path(sys.argv[1]), "observer-crash-recovery", {})
 print(journal.path, flush=True)
-journal.subscribe("rejecting", reject, kinds=("observer_probe", "journal_observer_failed"))
+subscriber = sys.argv[4] if len(sys.argv) > 4 else "rejecting"
+journal.subscribe(subscriber, reject, kinds=("observer_probe", "journal_observer_failed"))
 emit = journal.emit
 stop_after = int(sys.argv[2])
 stop_point = sys.argv[3]
@@ -305,6 +306,31 @@ def test_replay_resume_archives_the_completed_observer_failure_report(tmp_path, 
     assert overflow["dropped_count"] == 32
     assert overflow["first_event_sequence"] == probes[20]["sequence"]
     assert overflow["last_event_sequence"] == details[-1]["sequence"]
+
+
+def test_archive_refuses_an_unreadable_pending_observer_detail(tmp_path):
+    from stateframe.resume import ResumeRefused, archive_attempt
+
+    measurements = tmp_path / "worker" / "measurement-runs"
+    measurements.mkdir(parents=True)
+    crashed = subprocess.run([sys.executable, "-c", _STOP_DURING_FAILURE_REPORT,
+                              str(measurements), "0", "between_rows", "π" * 3000],
+                             capture_output=True, text=True, timeout=45, check=False)
+    assert crashed.returncode == -signal.SIGKILL, crashed.stderr
+    path = Path(crashed.stdout.strip())
+    prefix = path.read_bytes()
+    assert [row["kind"] for row in map(json.loads, prefix.splitlines())].count(_EVENT) == 32
+    blob, = (path.parent / "blobs").glob("*.zlib")
+    blob.write_bytes(b"unreadable compressed data")
+
+    spec = {"schema": "stateframe-run/1", "environment": {}, "max_turns": 2}
+    (tmp_path / "spec.json").write_text(json.dumps(spec))
+    state = {"run": tmp_path, "spec": spec, "attempt": 1, "max_turns": 2}
+    with pytest.raises(ResumeRefused, match="journal publication could not be recovered"):
+        archive_attempt(state, tmp_path / "engine", use_checkpoint=False)
+
+    assert path.read_bytes() == prefix
+    assert not (tmp_path / "attempts").exists()
 
 
 def test_interrupted_replay_reports_its_failures_before_a_later_single_append(tmp_path):
