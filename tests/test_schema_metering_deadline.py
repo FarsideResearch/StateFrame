@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import shutil
 import socket
+import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -40,6 +41,10 @@ def tokenizer(*, trickle, trickle_posts=1):
             if content.get("messages") != [] or not content.get("tools"):
                 return super()._tokenize(raw)
             schema_posts.append(content)
+            if trickle == "after-exact" and content["tools"][0]["function"]["name"] == "shell":
+                time.sleep(CAP / 3)
+                self._send(200, {"tokens": [1, 2, 3]})
+                return
             if not trickle or len(schema_posts) > trickle_posts:
                 self._send(200, {"tokens": [1, 2, 3]})
                 return
@@ -72,12 +77,16 @@ def tokenizer(*, trickle, trickle_posts=1):
             worker.join()
 
 
-@pytest.mark.parametrize("trickle", [True, False], ids=["trickle", "fast"])
-def test_bind_bounds_schema_metering_and_keeps_fast_counts(tmp_path, monkeypatch, trickle):
+@pytest.mark.parametrize(("trickle", "cap"), [(True, CAP), (False, None), (False, 0)],
+                         ids=["trickle", "fast-default-cap", "zero-cap"])
+def test_bind_bounds_schema_metering_and_keeps_fast_counts(tmp_path, monkeypatch, trickle, cap):
+    import kernel_agent_tools
     import kernel_request_diet
     from kernel_provider_dialect import LLAMA_CPP, RUN_CAPABILITY_CACHE, ProviderCapabilities, origin_of
 
-    monkeypatch.setattr(kernel_request_diet, "TOKENIZE_REQUEST_TIMEOUT_CAP_SECONDS", CAP)
+    if cap is not None:
+        monkeypatch.setattr(kernel_request_diet, "TOKENIZE_REQUEST_TIMEOUT_CAP_SECONDS", cap)
+    monkeypatch.setattr(kernel_agent_tools, "time", SimpleNamespace(monotonic=time.monotonic))
     fallback = measure_schemas()
     with tokenizer(trickle=trickle) as (endpoint, schema_posts):
         # Product runs seed the child's provider proof from the host preflight.
@@ -89,34 +98,40 @@ def test_bind_bounds_schema_metering_and_keeps_fast_counts(tmp_path, monkeypatch
         tools.bind()
         elapsed = time.monotonic() - start
 
-        assert schema_posts
-        if trickle:
+        if cap == 0:
+            assert elapsed < 0.35
+            assert tools.schema_budget == fallback
+            assert schema_posts == []
+        elif trickle:
             assert elapsed < CAP + 0.35
             assert tools.schema_budget == fallback
             assert len(schema_posts) == 1
         else:
+            assert len(schema_posts) == len(fallback)
             assert tools.schema_budget == {name: {"tokens": 3, "method": "tokenize"} for name in fallback}
         assert json.loads(tools.schema_budget_path.read_text()) == tools.schema_budget
 
 
-@pytest.mark.parametrize("trickle", [True, "headers", "chunked"], ids=["body", "headers", "chunked"])
+@pytest.mark.parametrize("trickle", [True, "headers", "chunked", "after-exact"],
+                         ids=["body", "headers", "chunked", "after-exact"])
 def test_parallel_binds_share_one_tokenizer_with_bounded_workers(tmp_path, monkeypatch, trickle):
     import kernel_request_diet
     from kernel_provider_dialect import LLAMA_CPP, RUN_CAPABILITY_CACHE, ProviderCapabilities, origin_of
 
     monkeypatch.setattr(kernel_request_diet, "TOKENIZE_REQUEST_TIMEOUT_CAP_SECONDS", CAP)
     original_tokenize = kernel_request_diet._http_tokenize
-    workers = []
+    requests = []
 
     def record_worker(*args, **kwargs):
-        workers.append(current_thread())
+        requests.append((current_thread(), kwargs["deadline"]))
         return original_tokenize(*args, **kwargs)
 
     monkeypatch.setattr(kernel_request_diet, "_http_tokenize", record_worker)
     fallback = measure_schemas()
     callers = 4
+    posts_per_bind = 2 if trickle == "after-exact" else 1
     ready = Barrier(callers)
-    with tokenizer(trickle=trickle, trickle_posts=callers) as (endpoint, schema_posts):
+    with tokenizer(trickle=trickle, trickle_posts=callers * posts_per_bind) as (endpoint, schema_posts):
         monkeypatch.setitem(RUN_CAPABILITY_CACHE, origin_of(endpoint), ProviderCapabilities(dialect=LLAMA_CPP))
 
         def bind(index):
@@ -134,14 +149,19 @@ def test_parallel_binds_share_one_tokenizer_with_bounded_workers(tmp_path, monke
             for elapsed, counts in pool.map(bind, range(callers)):
                 assert elapsed < CAP + 0.35
                 assert counts == fallback
-        assert len(schema_posts) == len(workers) == callers
+        assert len(schema_posts) == len(requests) == callers * posts_per_bind
+        workers = {worker for worker, _ in requests}
+        assert len(workers) == callers
+        for worker in workers:
+            assert len({deadline for caller, deadline in requests if caller is worker}) == 1
         cleanup_deadline = time.monotonic() + 0.35
         for worker in workers:
             worker.join(timeout=max(0, cleanup_deadline - time.monotonic()))
         assert not any(worker.is_alive() for worker in workers)
 
 
-def test_expired_schema_worker_does_not_connect_after_resolution(tmp_path, monkeypatch):
+@pytest.mark.parametrize("stall", ["resolution", "first-address"])
+def test_expired_schema_worker_does_not_start_a_connection(tmp_path, monkeypatch, stall):
     import kernel_request_diet
     from kernel_provider_dialect import LLAMA_CPP, RUN_CAPABILITY_CACHE, ProviderCapabilities, origin_of
 
@@ -157,14 +177,25 @@ def test_expired_schema_worker_does_not_connect_after_resolution(tmp_path, monke
         port = urlsplit(endpoint).port
         monkeypatch.setitem(RUN_CAPABILITY_CACHE, origin_of(endpoint), ProviderCapabilities(dialect=LLAMA_CPP))
 
+        def wait_for_bind():
+            workers.append(current_thread())
+            started.set()
+            assert release.wait(5), "test did not release the tokenizer worker"
+
         def resolve(host, service, *args, **kwargs):
-            if (host, service) == ("127.0.0.1", port):
-                workers.append(current_thread())
-                started.set()
-                assert release.wait(5), "test did not release address resolution"
-            return original_resolve(host, service, *args, **kwargs)
+            addresses = original_resolve(host, service, *args, **kwargs)
+            if (host, service) != ("127.0.0.1", port):
+                return addresses
+            if stall == "resolution":
+                wait_for_bind()
+                return addresses
+            family, kind, protocol, canonical, _ = addresses[0]
+            return [(family, kind, protocol, canonical, ("127.0.0.2", port)), *addresses]
 
         def connect(sock, address):
+            if address == ("127.0.0.2", port):
+                wait_for_bind()
+                raise TimeoutError("first address did not respond")
             if address == ("127.0.0.1", port):
                 connections.append(address)
             return original_connect(sock, address)
@@ -186,6 +217,46 @@ def test_expired_schema_worker_does_not_connect_after_resolution(tmp_path, monke
                 worker.join(timeout=1)
         assert not any(worker.is_alive() for worker in workers)
         assert connections == []
+
+
+def test_stuck_address_resolution_does_not_hold_interpreter_open(tmp_path):
+    child = """
+import socket
+import sys
+from pathlib import Path
+from threading import Event
+from types import SimpleNamespace
+
+sys.path[:0] = sys.argv[2:]
+import kernel_request_diet
+from kernel_agent_tools import AgentTools
+from kernel_custom_tools import CustomToolSet
+from kernel_provider_dialect import LLAMA_CPP, RUN_CAPABILITY_CACHE, ProviderCapabilities
+from kernel_tool_settings import ToolSettings
+
+started = Event()
+blocked = Event()
+
+def resolve(*args, **kwargs):
+    started.set()
+    blocked.wait()
+
+socket.getaddrinfo = resolve
+kernel_request_diet.TOKENIZE_REQUEST_TIMEOUT_CAP_SECONDS = 0.25
+origin = "http://127.0.0.1:9"
+RUN_CAPABILITY_CACHE[origin] = ProviderCapabilities(dialect=LLAMA_CPP)
+shell = SimpleNamespace(spec={"chat_url": origin + "/v1/chat/completions"},
+                        run_dir=Path(sys.argv[1]), settings=ToolSettings())
+tools = AgentTools(shell, CustomToolSet((), "empty"), defer_schema_budget=True)
+assert started.wait(3), "tokenizer did not reach address resolution"
+tools.bind()
+assert tools.startup_schema_budget["reason"] == "deadline"
+"""
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", child, str(tmp_path), str(ROOT / "src"), str(ROOT / "src/stateframe/engine")],
+        capture_output=True, text=True, timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_resume_before_first_send_can_start_without_a_journal(tmp_path, monkeypatch):
