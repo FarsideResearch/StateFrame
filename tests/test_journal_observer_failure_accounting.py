@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import kernel_continuation_journal as journal_module
 import pytest
 from kernel_continuation_journal import ContinuationJournal
+from kernel_generated_context import GeneratedContext
 
 _EVENT = "observer_probe"
 _FAILURE = "journal_observer_failed"
@@ -112,6 +113,32 @@ def test_failed_delivery_of_failure_report_is_accounted_without_recursing(tmp_pa
         assert [row["sequence"] for row in replayed] == [probe["sequence"], detail["sequence"]]
         assert journal.subscriber_cursor("replay") == overflow["sequence"]
         assert journal.path.read_bytes() == before_replay
+
+
+def test_overflow_keeps_the_live_artifact_index_in_step_with_single_appends(tmp_path):
+    with ContinuationJournal(tmp_path, "observer-artifact-sequence", {}) as journal:
+        context = GeneratedContext(journal)
+        journal.subscribe("rejecting", _reject, kinds=(_EVENT,))
+
+        first = journal.emit_batch([(_EVENT, {})] * 20, atomic=True)
+        second = journal.emit_batch([(_EVENT, {})] * 21, atomic=True)
+        artifact = journal.emit(
+            "rejected_candidate_artifact",
+            reference="stateframe://artifacts/rejected/probe", text="candidate",
+        )
+        last = journal.emit(_EVENT)
+
+        assert context.index.sequence == journal.cached_records()[-1]["sequence"]
+        assert context.index.completeness == "COMPLETE"
+        assert any(item["text"] == "candidate" for item in context.index.records.values())
+        failures = _failures_on_disk(journal)
+        assert [row["event_sequence"] for row in failures if "dropped_count" not in row] == [
+            row["sequence"] for row in [*first, *second[:-1], last]
+        ]
+        overflow, = [row for row in failures if "dropped_count" in row]
+        assert overflow["dropped_count"] == 1
+        assert overflow["first_event_sequence"] == overflow["last_event_sequence"] == second[-1]["sequence"]
+        assert overflow["sequence"] + 1 == artifact["sequence"]
 
 
 def test_no_failure_batch_and_single_append_are_byte_identical_after_replay_and_resume(tmp_path, monkeypatch):
