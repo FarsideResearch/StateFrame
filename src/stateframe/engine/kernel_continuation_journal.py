@@ -660,7 +660,10 @@ def _recover_publication(path: Path, fd: int) -> None:
 
 
 def recover_publication_mirror(path: Path) -> None:
-    """Repair a stopped continuation journal before a legacy reader opens it."""
+    """Repair pending appends and reports before a stopped journal is archived."""
+    if os.path.lexists(path.parent / _OBSERVER_FAILURE_INTENT):
+        ContinuationJournal._recover_observer_failure_mirror(path)
+        return
     if not os.path.lexists(path.parent / _PUBLICATION_INTENT):
         return
     fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -1182,28 +1185,16 @@ class ContinuationJournal(AuditJournal):
         obj._initialize(Path(path))
         try:
             obj._open(create=False)
-            first = None
-            last = None
-            for record in obj.records():
-                if record.get("kind") == CHECKPOINT_KIND:
-                    obj._checkpoint_seen = True
-                if first is None:
-                    first = record
-                last = record
-            if first is None or last is None:
-                raise JournalError("empty journal")
+            first, last = obj._read_resume_bounds()
             if (first.get("manifest") != expected_manifest
                     or first.get("config_hash") != expected_config
                     or first["task_id"] != task_id):
                 raise JournalError("task/config identity mismatch")
             if expected_head is not None and last["record_hash"] != expected_head:
                 raise JournalError("trusted journal head mismatch")
-            obj.run_id, obj.task_id = first["run_id"], task_id
+            obj._restore_resume_state(first, last)
             from kernel_wire_identity import bind_wire_task_identity
             bind_wire_task_identity(task_id)
-            obj.manifest = copy.deepcopy(first["manifest"])
-            obj.config_hash = expected_config
-            obj._sequence, obj._head = last["sequence"], last["record_hash"]
             obj._resume_observer_failure_report()
             # The trusted anchor precedes any audit rows written by recovery.
             obj.emit("continuation_writer_resumed", previous_head=last["record_hash"],
@@ -1214,6 +1205,37 @@ class ContinuationJournal(AuditJournal):
         except BaseException:
             obj.close()
             raise
+
+    def _read_resume_bounds(self) -> tuple[dict, dict]:
+        first = last = None
+        for record in self.records():
+            if record.get("kind") == CHECKPOINT_KIND:
+                self._checkpoint_seen = True
+            if first is None:
+                first = record
+            last = record
+        if first is None or last is None:
+            raise JournalError("empty journal")
+        return first, last
+
+    def _restore_resume_state(self, first: dict, last: dict) -> None:
+        self.run_id, self.task_id = first["run_id"], first["task_id"]
+        self.manifest = copy.deepcopy(first["manifest"])
+        self.config_hash = first["config_hash"]
+        self._sequence, self._head = last["sequence"], last["record_hash"]
+
+    @classmethod
+    def _recover_observer_failure_mirror(cls, path: Path) -> None:
+        """Finish the audit report under the writer lease before archiving."""
+        obj = cls.__new__(cls)
+        obj._initialize(path)
+        try:
+            obj._open(create=False)
+            first, last = obj._read_resume_bounds()
+            obj._restore_resume_state(first, last)
+            obj._resume_observer_failure_report()
+        finally:
+            obj.close()
 
     @contextmanager
     def ownership(self) -> Iterator[None]:

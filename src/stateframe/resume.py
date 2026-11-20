@@ -1010,15 +1010,21 @@ def archive_attempt(state: dict[str, object], engine_dir: Path, *, use_checkpoin
     atomic_publication = (
         spec.get("environment", {}).get("STATEFRAME_TURN_ATOMIC_PUBLICATION", "").strip().lower() == "on"
     )
-    publication_intents = list((run / "worker" / "measurement-runs").glob("*/.journal-publication"))
-    if publication_intents:
-        from .engine.kernel_continuation_journal import JournalError, recover_publication_mirror
+    measurements = run / "worker" / "measurement-runs"
+    pending_journals = {intent.parent / "events.jsonl"
+                        for name in (".journal-publication", ".journal-observer-report")
+                        for intent in measurements.glob(f"*/{name}")}
+    if pending_journals:
+        from .runner import _workspace_engine_imports
 
-        try:
-            for intent in publication_intents:
-                recover_publication_mirror(intent.parent / "events.jsonl")
-        except (JournalError, OSError) as error:
-            raise ResumeRefused("journal publication could not be recovered") from error
+        with _workspace_engine_imports():
+            from .engine.kernel_continuation_journal import JournalError, recover_publication_mirror
+
+            try:
+                for journal_path in sorted(pending_journals):
+                    recover_publication_mirror(journal_path)
+            except (JournalError, OSError) as error:
+                raise ResumeRefused("journal publication could not be recovered") from error
     external = _tool_safety(run, spec, replay_external=replay_external) if restart_live else []
     interrupted_archive_tape = _interrupted_archive_tape(run, spec) if not restart_live else None
     number = int(state["attempt"])
