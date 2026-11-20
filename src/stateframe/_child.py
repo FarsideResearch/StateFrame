@@ -352,13 +352,22 @@ class SubframeBudgetExhausted(BaseException):
 def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = None,
                           routed_endpoints: set[str] | None = None, hook_wiring=None,
                           *, send_ledger=None, send_cap: int | None = None,
-                          launch_started_ns: int | None = None) -> None:
+                          launch_started_ns: int | None = None,
+                          repository_context: dict | None = None) -> None:
     """Record every physical chat send: exact identity bytes, response bytes, usage.
 
     On ``stateframe resume`` a send the interrupted attempt already completed is answered from its
     recorded response (``replayer``), and is recorded here like any other send, marked ``replayed``.
     """
     import kernel_bounded_http
+    import kernel_repo_dependencies
+
+    dependencies = None
+    if repository_context is not None:
+        if kernel_repo_dependencies.enabled():
+            dependencies = kernel_repo_dependencies.DependencyView(
+                replayer.next_request_path if replayer is not None else lambda: None)
+        kernel_repo_dependencies.active = dependencies
 
     if replayer is not None:
         replay_tape = _replay_tape_module()
@@ -517,6 +526,20 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
             if routed_endpoints is not None:
                 atomic_bytes(stem.with_suffix(".route.json"), json.dumps(
                     route, sort_keys=True, separators=(",", ":")).encode())
+            dependency_rows = dependencies.rows_for_send() if dependencies is not None else None
+            if dependency_rows:
+                encoded = json.dumps(dependency_rows, separators=(",", ":")).encode()
+                atomic_bytes(stem.with_suffix(kernel_repo_dependencies.SUFFIX), encoded)
+                capture = ACTIVE_REQUEST.get()
+                journal = getattr(capture, "journal", None)
+                if journal is not None:
+                    journal.emit("repository_dependencies_visible", request_id=capture.request_id,
+                                 send=index, facts=len(dependency_rows),
+                                 sha256=hashlib.sha256(encoded).hexdigest(), dispatch=False)
+            analysis_rows = dependencies.analysis_rows_for_send() if dependencies is not None else None
+            if analysis_rows:
+                atomic_bytes(stem.with_suffix(kernel_repo_dependencies.ANALYSIS_SUFFIX), json.dumps(
+                    analysis_rows, sort_keys=True, separators=(",", ":")).encode())
             if identity is not None and request_path.exists():
                 if request_path.is_symlink() or request_path.read_bytes() != wire:
                     raise ValueError("subframe wire request changed for an existing send")
@@ -592,6 +615,8 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
                 _start_resumed_deadline()
             replay_position = replayer.cursor if replayer is not None else None
             replay_total = len(replayer.tape) if replayer is not None else None
+            if dependencies is not None:
+                dependencies.advance(repository_context.get("root"))
         authorized_ids: list[str] = []
         def before_attempt(attempt_index: int) -> None:
             if send_cap is None:
@@ -1867,6 +1892,7 @@ def main(argv: list[str], *, teardown: EngineTeardown | None = None) -> int:
         launch_record = spec.get("turn_launch") if resume is None and unit_spec is None else None
         install_wire_recorder(run, spec["chat_url"], replayer, routed_endpoints, hook_wiring,
                               send_ledger=send_ledger, send_cap=send_cap,
+                              repository_context=HOST_STATE["repo_context"],
                               **({"launch_started_ns": launch_record["prepare_started_ns"]}
                                  if launch_record is not None else {}))
         previous_checks = Path(resume["previous_attempt"]) / "checks" if resume is not None else None

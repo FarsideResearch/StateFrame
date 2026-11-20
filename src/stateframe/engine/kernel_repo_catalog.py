@@ -184,6 +184,11 @@ def scan_entry_set(root: Path) -> tuple[tuple[str, str], ...] | None:
     return _scan_inventory(Path(root)).entries
 
 
+def scan_source_paths(root: Path) -> tuple[str, ...]:
+    """List source candidates without requiring a complete validation inventory."""
+    return _scan_inventory(Path(root)).source_paths
+
+
 @dataclass(frozen=True, slots=True)
 class _ScanResult:
     paths: tuple[str, ...]
@@ -486,7 +491,7 @@ class StructuralIndex:
         contents: Mapping[str, ContentHandle],
         bodies: Mapping[str, bytes],
         outlines: Mapping[str, Mapping[str, object]],
-        cache_path: Path,
+        cache_path: Path | None,
         stats: IndexStats,
         scan_entries: Sequence[tuple[str, str]] | None = None,
         scan_stable: bool = False,
@@ -613,7 +618,8 @@ class StructuralIndex:
             "spans": [item.as_dict() for item in self.spans],
             "dependencies": [item.as_dict() for item in self.dependencies],
             "coverage": {key: value.to_dict() for key, value in sorted(self.coverage.items())},
-            "stats": self.stats.as_dict(), "cache_path": str(self.cache_path),
+            "stats": self.stats.as_dict(),
+            "cache_path": str(self.cache_path) if self.cache_path is not None else None,
         }
 
 
@@ -882,6 +888,7 @@ def build_structural_index(
     include_call_graph: bool = True,
     capture_scan_entries: bool = False,
     rendered: bool = True,
+    use_cache: bool = True,
 ) -> StructuralIndex:
     """Build or refresh a language-neutral index for ``root``.
 
@@ -901,8 +908,8 @@ def build_structural_index(
     )
     paths = scan.paths
     overrides = {str(key).replace("\\", "/"): value for key, value in (source_overrides or {}).items()}
-    cache_path = _cache_path(resolved)
-    persisted = _load_cache(cache_path) if not overrides else {}
+    cache_path = _cache_path(resolved) if use_cache else None
+    persisted = _load_cache(cache_path) if cache_path is not None and not overrides else {}
     cache_files: dict[str, object] = dict(persisted)
     modules: list[ModuleRecord] = []
     configs: list[ConfigRecord] = []
@@ -943,7 +950,7 @@ def build_structural_index(
                 outline = {"schema": "mc-outline/1", "file": relpath, "language": "unknown",
                            "parser": "unavailable", "degraded": True, "degraded_reason": type(exc).__name__}
             file_coverage = _coverage(content, outline)
-            if not overrides and len(body) <= MAX_CACHED_BODY_BYTES:
+            if cache_path is not None and not overrides and len(body) <= MAX_CACHED_BODY_BYTES:
                 cache_files[relpath] = {
                     "content": content.to_dict(), "coverage": file_coverage.to_dict(),
                     "outline": dict(outline), "body_base64": base64.b64encode(body).decode("ascii"),
@@ -964,7 +971,7 @@ def build_structural_index(
         types.extend(file_types)
         configs.extend(file_configs)
 
-    if not overrides:
+    if cache_path is not None and not overrides:
         _save_cache(cache_path, cache_files)
     dependencies: list[DependencyRecord] = []
     for module in modules:

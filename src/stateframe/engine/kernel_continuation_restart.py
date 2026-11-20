@@ -713,7 +713,8 @@ DOCUMENTED_REJECT: dict[str, str] = {
         rejection_template_restrict_armed rejection_template_restrict_fired render_degraded
         repair_blocks_done_advisory repair_blocks_done_non_progress repair_blocks_done_stopped_incomplete
         repair_packet_request_audit repair_packet_unrenderable repeated_zero repeated_zero_suppressed
-        repo_intel_query repo_intel_query_failed repo_map_modes repo_outline repro_first_gate_fired
+        repo_intel_query repo_intel_query_failed repo_map_modes repo_outline repository_dependencies_visible
+        repro_first_gate_fired
         request_action_pin_repaired request_budget_exceeded request_budget_final_wire
         request_budget_revalidation_consistency request_contract_revision_rebind_shadow_mismatch
         request_final_validation_blocked request_not_admitted request_prepare_timing request_reprepared

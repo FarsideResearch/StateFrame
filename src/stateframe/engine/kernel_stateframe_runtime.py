@@ -6025,6 +6025,13 @@ class StateFrameRuntime:
         store = getattr(self, "_workspace_view_store", None)
         if store is not None:
             return store.note_mutation(changed_paths, outcome)
+        if changed_paths or outcome is not None:
+            from kernel_repo_dependencies import active
+
+            if active is not None:
+                from mc_repo_intel_vendor.background import invalidate
+
+                invalidate(Path(self.owner.root).resolve())
         return 0
 
     def _note_applied_mutation(self, changed_paths: object = (), outcome: object = None) -> int:

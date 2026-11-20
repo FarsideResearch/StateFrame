@@ -1,12 +1,25 @@
 """Work budgets for repository intelligence on the engine's foreground paths."""
 
 import importlib
+import json
+import os
 import sys
 import threading
 import time
 from types import ModuleType, SimpleNamespace
 
-from mc_repo_intel_vendor import call_graph, lsp_resolve, repo_map, ts_extract
+import pytest
+from mc_repo_intel_vendor import (
+    background,
+    call_graph,
+    lsp_resolve,
+    repo_map,
+    ts_extract,
+)
+from test_parallel_worker_prep import _unit_fixture
+
+from stateframe import _child, profiles, runner
+from stateframe.parallel_worker import prepare_worker
 
 
 def test_broken_grammar_is_probed_once(tmp_path, monkeypatch, record_property):
@@ -183,6 +196,135 @@ def test_mutation_fences_pre_edit_graph(tmp_path, monkeypatch):
 
     assert host_where_defined(root, "renamed")["status"] == "PARTIAL"
     assert _ready(root).find_definition("renamed").file == path.name
+
+
+def test_request_keeps_its_graph_until_a_workspace_mutation(tmp_path, monkeypatch):
+    import kernel_repo_dependencies as visibility
+    from kernel_live_projection import WorkspaceViewStore
+
+    root = _repo(tmp_path / "workspace")
+    _enable(monkeypatch, tmp_path / "cache")
+    monkeypatch.setenv("CODE_GRAPH_LSP", "off")
+    test = root / "test_service.py"
+    test.write_text("from file_00 import run\n\ndef test_service(): run()\n")
+    view = visibility.DependencyView(lambda: None)
+    monkeypatch.setattr(visibility, "active", view)
+    view.advance(root)
+    _ready(root)
+
+    assert view.fact(root, test.name, 0) == (("file_00.py",), False)
+    view.advance(root)
+    assert view.fact(root, test.name, 0) == (("file_00.py",), True)
+
+    monkeypatch.setenv("STATEFRAME_TURN_REPO_INTEL", "off")
+    test.write_text("from file_01 import run\n\ndef test_service(): run()\n")
+    WorkspaceViewStore(root, "fixture").note_mutation((test.name,), "applied")
+
+    assert view.fact(root, test.name, 1) == (("file_01.py",), False)
+
+
+def test_claim_and_census_snapshots_retire_on_edit(tmp_path, monkeypatch):
+    import kernel_repo_dependencies as visibility
+    from kernel_callsite_census import _scoped_census
+    from kernel_claim_grounding import ClaimGrounding
+    from kernel_live_projection import WorkspaceViewStore
+
+    root = tmp_path / "workspace"
+    root.mkdir()
+    _enable(monkeypatch, tmp_path / "cache")
+    monkeypatch.setenv("CODE_GRAPH_LSP", "off")
+    monkeypatch.setenv("STATEFRAME_CLAIM_GROUNDING", "on")
+    module = root / "models.py"
+    module.write_text("class Original: pass\n")
+    for name in ("first.py", "second.py"):
+        (root / name).write_text("from models import Original\n\nvalue = Original()\n")
+
+    view = visibility.DependencyView(lambda: None)
+    monkeypatch.setattr(visibility, "active", view)
+    view.advance(root)
+    deadline = time.monotonic() + 10
+    while not all(background.snapshot(root, kind)[0] is not None for kind in ("claim", "census")):
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    view.advance(root)
+    claims = ClaimGrounding(root)
+    assert claims.resolve("Original").exists
+    mode, (_, census) = view.analysis(root, "census", "fixture")
+    assert mode == "full"
+    assert census.calls_by_path["first.py"][0].identity == "repository:models.py::Original"
+
+    module.write_text("class Replacement: pass\n")
+    WorkspaceViewStore(root, "fixture").note_mutation((module.name,), "applied")
+
+    assert view.analysis(root, "census", "fixture")[0] == "scoped"
+    assert not claims.resolve("Original").exists
+    assert claims.resolve("Replacement").resolved_path == "models.py"
+    _, scoped = _scoped_census(root, ("first.py", "second.py"))
+    assert not scoped.calls_by_path["first.py"]
+    assert not scoped.calls_by_path["second.py"]
+    assert view.analysis_rows_for_send()["census"]["fixture"] == ["full", "scoped"]
+
+
+def test_workspace_edit_retires_analysis_without_a_workspace_view(tmp_path, monkeypatch):
+    import kernel_repo_dependencies as visibility
+    from kernel_stateframe_runtime import StateFrameRuntime
+
+    root = tmp_path.resolve()
+    view = visibility.DependencyView(lambda: None)
+    monkeypatch.setattr(visibility, "active", view)
+    invalidated = []
+    monkeypatch.setattr(background, "invalidate", invalidated.append)
+    runtime = SimpleNamespace(owner=SimpleNamespace(root=root))
+
+    StateFrameRuntime.note_mutation(runtime, ("models.py",), "applied")
+
+    assert invalidated == [root]
+
+
+@pytest.mark.parametrize(
+    "analysis,feature,companion,overrides,enabled_pair",
+    [
+        ("claim", "CLAIM_GROUNDING", "EXISTENCE_ORACLE", {}, "10"),
+        ("census", "CALLSITE_CENSUS", "CENSUS_INDEX_REUSE", {"CALLSITE_CENSUS_EDIT": "off"}, "11"),
+        ("census", "CALLSITE_CENSUS_EDIT", "CENSUS_INDEX_REUSE", {"CALLSITE_CENSUS": "off"}, "11"),
+    ],
+    ids=["claim", "census", "edit-census"],
+)
+@pytest.mark.parametrize("pair", ["00", "01", "10", "11"])
+def test_analysis_switch_pairs_reach_child(
+    tmp_path, monkeypatch, analysis, feature, companion, overrides, enabled_pair, pair,
+):
+    from kernel_repo_dependencies import DependencyView
+
+    selected = {**overrides, feature: "on" if pair[0] == "1" else "off",
+                companion: "on" if pair[1] == "1" else "off"}
+    expected = {"STATEFRAME_BACKGROUND_REPOSITORY_ANALYSIS": "on",
+                **{f"STATEFRAME_{name}": value for name, value in selected.items()}}
+    options = runner.RunOptions(repo=tmp_path, task="Check analysis scheduling.",
+                                endpoint=None, extra_env=expected)
+    effective = runner._provider_environment(options)
+    assert {name: effective.get(name) for name in expected} == expected
+    snapshot, run_dir, spec_path, unit, parent, _ = _unit_fixture(tmp_path)
+    shipped = profiles.load(options.profile)
+    parent["environment"].update({name: effective[name] for name in shipped | expected})
+    prepare_worker(unit, spec_path, run_dir, snapshot, parent_spec=parent)
+    child_spec = json.loads((run_dir / "spec.json").read_bytes())
+    assert {name: child_spec["environment"].get(name) for name in expected} == expected
+
+    scheduled = []
+    monkeypatch.setattr(background, "request", lambda root, kind, work: scheduled.append(kind))
+    # Model the launch in an isolated environment with conflicting inherited values.
+    monkeypatch.setattr(os, "environ", {name: "off" if value == "on" else "on"
+                                       for name, value in expected.items()})
+    monkeypatch.setattr(_child, "_RUNNER_HOME_IDENTITY_CAPTURED", False)
+    monkeypatch.setattr(_child, "_RUNNER_HOME_IDENTITY_PIN", None)
+    _child.install_environment(child_spec)
+    assert {name: os.environ.get(name) for name in expected} == expected
+
+    view = DependencyView(lambda: None)
+    view.advance(run_dir / "workspace")
+    assert "graph" in scheduled
+    assert scheduled.count(analysis) == int(pair == enabled_pair)
 
 
 def test_intake_does_not_join_the_map_worker(tmp_path, monkeypatch):
