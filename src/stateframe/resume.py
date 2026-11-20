@@ -206,34 +206,35 @@ def _interrupted_archive_tape(run: Path, spec: dict) -> list[dict[str, object]] 
     return []
 
 
-def _interrupted_archive_worker(run: Path, spec: dict) -> Path | None:
-    """Recover a worker moved before the wire tape by an interrupted archive."""
-    if (run / "worker").exists() or not (run / "wire").is_dir():
-        return None
+def _interrupted_archive(run: Path, spec: dict) -> Path | None:
+    """Find the unfinished archive of the attempt still named by the live spec."""
     attempts = run / "attempts"
     seed = spec.get("run_identity_seed")
     if not isinstance(seed, str) or not attempts.is_dir():
         return None
     active_attempt = (spec.get("resume") or {}).get("attempt", 1)
+    if type(active_attempt) is not int:
+        return None
     folders = sorted((p for p in attempts.iterdir() if p.name.isdecimal()
+                      and int(p.name) >= active_attempt
                       and p.is_dir() and not p.is_symlink()), key=lambda p: int(p.name), reverse=True)
     for folder in folders:
-        if (folder / "wire").exists():
-            break
-        worker = folder / "worker"
-        if not worker.is_dir() or worker.is_symlink():
+        if not any(path.is_dir() and not path.is_symlink()
+                   for path in (folder / "worker", folder / "wire")):
             continue
         try:
             archived = json.loads((folder / "spec.json").read_bytes())
             archived_attempt = (archived.get("resume") or {}).get("attempt", 1)
         except (OSError, ValueError, AttributeError):
             continue
-        if archived.get("run_identity_seed") != seed or archived_attempt != active_attempt:
-            continue
-        if problem := _journal_lineage_ok(folder):
-            raise ResumeRefused(f"the engine journal is damaged ({problem}); this run cannot be resumed")
-        return worker
+        if archived.get("run_identity_seed") == seed and archived_attempt == active_attempt:
+            return folder
     return None
+
+
+def _attempt_file(run: Path, archive: Path | None, name: str) -> Path:
+    live = run / name
+    return archive / name if archive is not None and not live.exists() else live
 
 
 def _pending_marker_matches(wire_dir: Path, pending: dict[str, object],
@@ -732,9 +733,12 @@ def assess(run: Path, *, max_turns: int | None = None, model: str | None = None,
     for key in ("environment", "public_row", "parent_snapshot", "chat_url", "model", "max_turns", "repo"):
         if key not in spec:
             raise ResumeRefused(f"spec.json lacks {key!r}; this run was made by an older stateframe")
+    interrupted = _interrupted_archive(run, spec)
     terminal = outcomes.terminal_receipt(run)
+    if not terminal and interrupted is not None:
+        terminal = outcomes.terminal_receipt(interrupted)
     status = terminal.get("result")
-    summary_path = run / "summary.json"
+    summary_path = _attempt_file(run, interrupted, "summary.json")
     try:
         summary = json.loads(summary_path.read_text()) if summary_path.is_file() else {}
     except (OSError, ValueError):
@@ -777,7 +781,8 @@ def assess(run: Path, *, max_turns: int | None = None, model: str | None = None,
         raise ResumeRefused(f"this run directory was moved: it was created at {original}, and its records "
                             f"use that path. Move it back to {original} (or copy it there) and resume from there")
 
-    blocked_dispatch = _blocked_dispatch_marker(run)
+    worker_root = _attempt_file(run, interrupted, "worker").parent
+    blocked_dispatch = _blocked_dispatch_marker(worker_root)
     if blocked_dispatch is not None and status not in (None, "SUBFRAME_BLOCKED"):
         raise ResumeRefused("subframe blocked dispatch conflicts with the terminal receipt")
     if blocked_dispatch is not None and status == "SUBFRAME_BLOCKED" and (
@@ -810,28 +815,30 @@ def assess(run: Path, *, max_turns: int | None = None, model: str | None = None,
     if external and not replay_external:
         names = ", ".join(f"{item['call_id']} ({item['tool']})" for item in external)
         raise ResumeRefused(f"external operation {names} requires --replay-external")
-    problem = _journal_lineage_ok(run)
+    problem = _journal_lineage_ok(worker_root)
     if problem:
         raise ResumeRefused(f"the engine journal is damaged ({problem}); this run cannot be resumed")
     try:
-        own_tape = replay_tape.build(run / "wire", run / "sends.jsonl",
-                                     routes_required=bool(spec.get("routes")))
+        wire = _attempt_file(run, interrupted, "wire")
+        sends = _attempt_file(run, interrupted, "sends.jsonl")
+        own_tape = replay_tape.build(wire, sends, routes_required=bool(spec.get("routes")))
         tape, _, _, _ = carry_forward_records(
-            spec, own_tape, None, run / "wire",
-            diverged=(run / "resume-divergence.json").exists(),
-            interrupted_archive_tape=_interrupted_archive_tape(run, spec))
+            spec, own_tape, None, wire,
+            diverged=_attempt_file(run, interrupted, "resume-divergence.json").exists(),
+            interrupted_archive_tape=_interrupted_archive_tape(run, spec) if interrupted is None else None)
         if spec.get("routes"):
-            replay_tape.pending_request(run / "wire", routes_required=True)
+            replay_tape.pending_request(wire, routes_required=True)
     except (OSError, replay_tape.TapeError) as error:
         raise ResumeRefused(f"the recorded model exchanges are damaged ({error}); "
                             "this run cannot be resumed") from None
     attempts = sorted(int(p.name) for p in (run / "attempts").glob("[0-9]*") if p.name.isdigit()) \
         if (run / "attempts").is_dir() else []
+    attempt = int(interrupted.name) if interrupted is not None else (attempts[-1] if attempts else 0) + 1
     result = {"run": run, "spec": spec, "tape_count": len(tape), "previous_status": status,
               "previous_error": terminal.get("error"), "max_turns": turns,
               "external_operations": external,
               "model_swap": model_swap_for(spec, model),
-              "attempt": (attempts[-1] if attempts else 0) + 1}
+              "attempt": attempt}
     if parallel_recovery is not None:
         result["parallel_recovery"] = parallel_recovery
     return result
@@ -1040,7 +1047,9 @@ def archive_attempt(state: dict[str, object], engine_dir: Path, *, use_checkpoin
     atomic_publication = (
         spec.get("environment", {}).get("STATEFRAME_TURN_ATOMIC_PUBLICATION", "").strip().lower() == "on"
     )
-    measurements = run / "worker" / "measurement-runs"
+    interrupted = _interrupted_archive(run, spec)
+    worker = _attempt_file(run, interrupted, "worker")
+    measurements = worker / "measurement-runs"
     pending_journals = {intent.parent / "events.jsonl"
                         for name in (".journal-publication", ".journal-observer-report")
                         for intent in measurements.glob(f"*/{name}")}
@@ -1056,16 +1065,20 @@ def archive_attempt(state: dict[str, object], engine_dir: Path, *, use_checkpoin
             except (JournalError, OSError) as error:
                 raise ResumeRefused("journal publication could not be recovered") from error
     external = _tool_safety(run, spec, replay_external=replay_external) if restart_live else []
-    interrupted_worker = _interrupted_archive_worker(run, spec) if not restart_live else None
-    # If only the worker moved, the original wire still proves the first attempt's in-flight request.
-    interrupted_archive_tape = (None if restart_live or interrupted_worker is not None
-                                else _interrupted_archive_tape(run, spec))
-    number = int(state["attempt"])
-    folder = run / "attempts" / str(number)
-    folder.mkdir(parents=True)
-    shutil.copy2(run / "spec.json", folder / "spec.json")
+    if interrupted is None:
+        interrupted_archive_tape = None if restart_live else _interrupted_archive_tape(run, spec)
+        number = int(state["attempt"])
+        folder = run / "attempts" / str(number)
+        folder.mkdir(parents=True)
+        shutil.copy2(run / "spec.json", folder / "spec.json")
+    else:
+        # Finish the original archive so the journal stays beside the wire on another interruption.
+        folder = interrupted
+        number = int(folder.name)
+        # Preserve the first routed resume's conservative pending check once the wire was moved.
+        interrupted_archive_tape = [] if (folder / "wire").is_dir() else None
     for name in ATTEMPT_FILES:
-        source_path = interrupted_worker if name == "worker" and interrupted_worker is not None else run / name
+        source_path = run / name
         if source_path.exists():
             os.replace(source_path, folder / name)
     # Rebuilt from the moved files, so the tape's paths name the archived bytes the child will read.
