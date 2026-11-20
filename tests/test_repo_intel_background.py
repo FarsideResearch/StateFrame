@@ -1,12 +1,25 @@
 """Work budgets for repository intelligence on the engine's foreground paths."""
 
 import importlib
+import json
+import os
 import sys
 import threading
 import time
 from types import ModuleType, SimpleNamespace
 
-from mc_repo_intel_vendor import background, call_graph, lsp_resolve, repo_map, ts_extract
+import pytest
+from mc_repo_intel_vendor import (
+    background,
+    call_graph,
+    lsp_resolve,
+    repo_map,
+    ts_extract,
+)
+from test_parallel_worker_prep import _unit_fixture
+
+from stateframe import _child, profiles, runner
+from stateframe.parallel_worker import prepare_worker
 
 
 def test_broken_grammar_is_probed_once(tmp_path, monkeypatch, record_property):
@@ -265,6 +278,51 @@ def test_workspace_edit_retires_analysis_without_a_workspace_view(tmp_path, monk
     StateFrameRuntime.note_mutation(runtime, ("models.py",), "applied")
 
     assert invalidated == [root]
+
+
+@pytest.mark.parametrize(
+    "analysis,feature,companion,overrides,enabled_pair",
+    [
+        ("claim", "CLAIM_GROUNDING", "EXISTENCE_ORACLE", {}, "10"),
+        ("census", "CALLSITE_CENSUS", "CENSUS_INDEX_REUSE", {"CALLSITE_CENSUS_EDIT": "off"}, "11"),
+        ("census", "CALLSITE_CENSUS_EDIT", "CENSUS_INDEX_REUSE", {"CALLSITE_CENSUS": "off"}, "11"),
+    ],
+    ids=["claim", "census", "edit-census"],
+)
+@pytest.mark.parametrize("pair", ["00", "01", "10", "11"])
+def test_analysis_switch_pairs_reach_child(
+    tmp_path, monkeypatch, analysis, feature, companion, overrides, enabled_pair, pair,
+):
+    from kernel_repo_dependencies import DependencyView
+
+    selected = {**overrides, feature: "on" if pair[0] == "1" else "off",
+                companion: "on" if pair[1] == "1" else "off"}
+    expected = {f"STATEFRAME_{name}": value for name, value in selected.items()}
+    options = runner.RunOptions(repo=tmp_path, task="Check analysis scheduling.",
+                                endpoint=None, extra_env=expected)
+    effective = runner._provider_environment(options)
+    assert {name: effective.get(name) for name in expected} == expected
+    snapshot, run_dir, spec_path, unit, parent, _ = _unit_fixture(tmp_path)
+    shipped = profiles.load(options.profile)
+    parent["environment"].update({name: effective[name] for name in shipped | expected})
+    prepare_worker(unit, spec_path, run_dir, snapshot, parent_spec=parent)
+    child_spec = json.loads((run_dir / "spec.json").read_bytes())
+    assert {name: child_spec["environment"].get(name) for name in expected} == expected
+
+    scheduled = []
+    monkeypatch.setattr(background, "request", lambda root, kind, work: scheduled.append(kind))
+    # Model the launch in an isolated environment with conflicting inherited values.
+    monkeypatch.setattr(os, "environ", {name: "off" if value == "on" else "on"
+                                       for name, value in expected.items()})
+    monkeypatch.setattr(_child, "_RUNNER_HOME_IDENTITY_CAPTURED", False)
+    monkeypatch.setattr(_child, "_RUNNER_HOME_IDENTITY_PIN", None)
+    _child.install_environment(child_spec)
+    assert {name: os.environ.get(name) for name in expected} == expected
+
+    view = DependencyView(lambda: None)
+    view.advance(run_dir / "workspace")
+    assert "graph" in scheduled
+    assert scheduled.count(analysis) == int(pair == enabled_pair)
 
 
 def test_intake_does_not_join_the_map_worker(tmp_path, monkeypatch):
