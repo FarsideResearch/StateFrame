@@ -57,7 +57,7 @@ def test_initial_rulebook_defers_owner_context_and_full_outline(tmp_path, monkey
     import kernel_parse_cache
     from kernel_stateframe_runtime import StateFrameRuntime
     from kernel_unknowns_ledger import observe
-    from mc_repo_intel_vendor import ts_dispatch
+    from repo_intel_core import ts_dispatch
 
     _switches(monkeypatch, "on" if pinned else "off")
     monkeypatch.setenv("STATEFRAME_UNKNOWNS_LEDGER", "on")

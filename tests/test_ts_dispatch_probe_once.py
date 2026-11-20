@@ -11,7 +11,7 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from mc_repo_intel_vendor import ts_dispatch
+from repo_intel_core import ts_dispatch
 
 
 def _load_dispatch(monkeypatch: pytest.MonkeyPatch, probe):
@@ -25,7 +25,7 @@ def _load_dispatch(monkeypatch: pytest.MonkeyPatch, probe):
 
     monkeypatch.setattr(builtins, "__import__", controlled_import)
     monkeypatch.delitem(sys.modules, "tree_sitter_language_pack", raising=False)
-    name = "mc_repo_intel_vendor._probe_dispatch"
+    name = "repo_intel_core._probe_dispatch"
     spec = importlib.util.spec_from_file_location(name, ts_dispatch.__file__)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)

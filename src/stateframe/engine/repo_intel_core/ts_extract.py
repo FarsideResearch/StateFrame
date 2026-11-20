@@ -25,12 +25,12 @@ Design rules (inherited from call_graph.py — rule):
     is announced as a ``DispatchBoundary`` (see call_graph.dispatch_boundaries),
     never emitted as a wrong call edge.
 
-Extractor config model + node-type lists ported from CodeGraph
+Extractor config model + node-type lists adapted from CodeGraph
 (colbymchenry/codegraph, MIT — declarative ``LanguageExtractor`` in
 ``src/extraction/languages/*.ts`` and the Vue ``<script>``-block strategy in
 ``src/extraction/vue-extractor.ts``). Reimplemented in Python against the
-``tree_sitter_language_pack`` grammars actually shipped in the agent-runner
-image (tree-sitter 0.26 core), so it's a clean re-implementation, not a copy.
+``tree_sitter_language_pack`` grammars available at runtime, so this is a
+clean re-implementation, not a copy.
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# ── Tree-sitter availability probe (mirrors repo_intel/signatures.py) ─────────
+# ── Tree-sitter availability probe ────────────────────────────────────────────
 # The runtime image pins tree-sitter + tree_sitter_language_pack; a coding
 # task can nonetheless land in an env where the core/grammar versions disagree,
 # so we probe once and degrade to the Python-only graph rather than raise.
@@ -69,7 +69,7 @@ def is_tree_sitter_functional() -> bool:
 
     A tree-sitter core bump can break a grammar binding's API at parse time even
     when the import succeeds — we prove a real parse before advertising support,
-    exactly like ``repo_intel.signatures.is_tree_sitter_functional``.
+    with the same API surface used by extraction.
 
     The probe must exercise the SAME Node API surface ``_TSVisitor._walk`` and
     ``_build_import_table`` actually use — ``root_node``, ``.children``,

@@ -5034,7 +5034,7 @@ def _module_level_label(lines: Sequence[str], start: int, end: int) -> str:
 # per call, so each call evicted the whole cache.  Pure function; size only.
 @functools.lru_cache(maxsize=4096)
 def _outline_cached(path: str, source: str, capability_key: str) -> Mapping[str, object]:
-    from mc_repo_intel_vendor.ts_dispatch import outline_source
+    from repo_intel_core.ts_dispatch import outline_source
     return outline_source(source, path)
 
 
@@ -5042,7 +5042,7 @@ def _outline_cached(path: str, source: str, capability_key: str) -> Mapping[str,
 def _outline_for(path: str, source: str) -> Mapping[str, object]:
     """Resolve an outline with parser capability in the cache identity."""
 
-    from mc_repo_intel_vendor.ts_dispatch import (
+    from repo_intel_core.ts_dispatch import (
         outline_capability_key,
         report_outline_parser_capability,
     )

@@ -12,7 +12,7 @@ import kernel_measurement
 import kernel_ship_tree_smoke
 from kernel_exec_capability import shell_capability
 from kernel_exec_session import ExecSession
-from mc_repo_intel_vendor import call_graph
+from repo_intel_core import call_graph
 
 FILE_COUNT = 5_000
 PAYLOAD = b"from pathlib import Path\n"

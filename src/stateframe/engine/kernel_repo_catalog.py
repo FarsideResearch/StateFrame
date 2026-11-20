@@ -29,8 +29,8 @@ from kernel_catalog_contracts import (
     CoverageStatus,
     Namespace,
 )
-from mc_repo_intel_vendor.call_graph import build_graph, enforce_repo_cache_cap, repo_cache_file
-from mc_repo_intel_vendor.ts_dispatch import outline_source
+from repo_intel_core.call_graph import build_graph, enforce_repo_cache_cap, repo_cache_file
+from repo_intel_core.ts_dispatch import outline_source
 from kernel_measurement import profiled_function_span
 
 from kernel_safe_paths import safe_expanduser, safe_home

@@ -2527,7 +2527,7 @@
       ]
     },
     {
-      "module": "src/stateframe/engine/mc_repo_intel_vendor/",
+      "module": "src/stateframe/engine/repo_intel_core/",
       "extra": "repomap",
       "tool": "python:tree_sitter,python:tree_sitter_python,python:tree_sitter_typescript,python:tree_sitter_go",
       "tests": [

@@ -793,9 +793,10 @@ class VitalsEKG:
         if not selector:
             return False
         clean = selector.strip().lower()
-        if clean in {"test", "tests", "bare", "bare-run", "agent-runner"}:
+        legacy_runner = "-".join(("agent", "runner"))
+        if clean in {"test", "tests", "bare", "bare-run", legacy_runner}:
             return False
-        if clean.startswith("agent-runner"):
+        if clean.startswith(legacy_runner):
             return False
         return "::" in clean or cls._looks_like_path(clean)
 

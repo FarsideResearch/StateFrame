@@ -121,7 +121,7 @@ def _parse_python_changes(current: str, proposed: str) -> list[_Definition]:
 
 
 def _outline_definitions(source: str, relpath: str) -> tuple[bool, list[_Definition]]:
-    from mc_repo_intel_vendor.ts_dispatch import outline_source, structural_spans
+    from repo_intel_core.ts_dispatch import outline_source, structural_spans
 
     outline = outline_source(source, relpath)
     structure = structural_spans(source, relpath)

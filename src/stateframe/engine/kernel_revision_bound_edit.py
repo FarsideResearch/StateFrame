@@ -1295,7 +1295,7 @@ def _language(path: str) -> str:
 
 def _outline(source: str, path: str) -> dict[str, object]:
     try:
-        from mc_repo_intel_vendor.ts_dispatch import outline_source
+        from repo_intel_core.ts_dispatch import outline_source
         value = outline_source(source, path)
     except Exception as error:  # noqa: BLE001 - unavailable parser is typed below
         return {"parser": "unavailable", "degraded": True, "error": type(error).__name__}

@@ -969,7 +969,7 @@ class ContinuationJournal(AuditJournal):
         self._receipt_generation = 0
         self._outline_capability_reports: set[tuple[str, str, str, str]] = set()
         self._outline_capability_listener_token: contextvars.Token | None = None
-        from mc_repo_intel_vendor.ts_dispatch import bind_outline_capability_listener
+        from repo_intel_core.ts_dispatch import bind_outline_capability_listener
 
         self._outline_capability_listener_token = bind_outline_capability_listener(
             self._record_outline_parser_capability)
@@ -2817,7 +2817,7 @@ class ContinuationJournal(AuditJournal):
                 token = self._outline_capability_listener_token
                 self._outline_capability_listener_token = None
                 if token is not None:
-                    from mc_repo_intel_vendor.ts_dispatch import reset_outline_capability_listener
+                    from repo_intel_core.ts_dispatch import reset_outline_capability_listener
 
                     reset_outline_capability_listener(token)
             if sync_error is not None:

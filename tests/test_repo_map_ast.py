@@ -88,7 +88,7 @@ PROBE = textwrap.dedent('''\
         sys.modules["tree_sitter_language_pack"] = None
         sys.modules["tree_sitter_languages"] = None
         installed = False
-    from mc_repo_intel_vendor import repo_map, ts_dispatch
+    from repo_intel_core import repo_map, ts_dispatch
     outlines = {}
     for rel in sorted(json.loads(sys.argv[4])):
         outline = ts_dispatch.outline_source(open(fixture + "/" + rel, encoding="utf-8").read(), rel)
@@ -264,7 +264,7 @@ BROKEN_PARSER = textwrap.dedent('''\
             raise RuntimeError("grammar ABI mismatch")
         return original(name)
     sys.modules["tree_sitter_language_pack"].get_parser = broken
-    from mc_repo_intel_vendor import repo_map
+    from repo_intel_core import repo_map
     print(json.dumps(repo_map._generate_repo_map(fixture)))
     ''')
 
@@ -378,7 +378,7 @@ STALE_CACHE = textwrap.dedent('''\
     sys.path[:0] = [src, src + "/stateframe/engine"]
     sys.modules["tree_sitter_language_pack"] = None
     sys.modules["tree_sitter_languages"] = None
-    from mc_repo_intel_vendor import repo_map
+    from repo_intel_core import repo_map
     commit = "0" * 40
     # The key an older build (before the repo-map/2 rules) used for this repo at this commit.
     old_key = hashlib.sha256(f":{commit}".encode()).hexdigest()[:20]

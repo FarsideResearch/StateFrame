@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Changed: the repository intelligence package is now named repo_intel_core; behaviour is unchanged.
 ## 0.8.8 (2026-11-20)
 
 ### Fixed

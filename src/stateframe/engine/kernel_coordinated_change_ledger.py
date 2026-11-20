@@ -32,7 +32,7 @@ from pathlib import Path
 from types import ModuleType
 
 import kernel_parse_cache as _parse_cache
-from mc_repo_intel_vendor import python_index
+from repo_intel_core import python_index
 import kernel_workspace_truth as _workspace_truth
 from kernel_measurement import profiled_function_span
 import kernel_turn0_persistence as _turn0

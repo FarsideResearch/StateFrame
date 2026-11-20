@@ -215,7 +215,7 @@ def _rule_sort_key(rule_id: str) -> Tuple[int, str]:
 
 
 def discover_rule_ids(claude_md_path: str) -> Tuple[str, ...]:
-    """MEASURE the rule ids actually present in ``project rules`` — a scan, not an
+    """MEASURE the rule ids actually present in the instruction file — a scan, not an
     assumption (rules: never trust a compressed or remembered
     count). Pure I/O helper; ``generate_premortem`` itself never touches the
     filesystem — callers freeze this result before generation.

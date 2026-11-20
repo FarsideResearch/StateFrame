@@ -421,8 +421,7 @@ def validate_zoom_slice(zs: ZoomSlice) -> ValidationResult:
          reason: it does not flip `ok` to False by itself.
       8. `omitted.count > 0` requires at least one of `reasons` or
          `continuation_token` to be set -- an omission with neither is
-         exactly the silent-drop failure family (#181c/#202 in the project
-         rules): "not shown" must always be auditable.
+         a silent-drop failure: "not shown" must always be auditable.
       9. If `parent_zoom_id` is set, it must not equal `zoom_id` (a slice
          cannot be its own parent -- guards against a trivial cycle).
      10. `budget_receipt` is present. hierarchical-working-model.md's ZOOM

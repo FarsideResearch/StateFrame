@@ -18,7 +18,7 @@ def test_stalled_lookup_allows_interpreter_exit(tmp_path):
         import os
         import sys
         from pathlib import Path
-        from mc_repo_intel_vendor import lsp_resolve as resolver
+        from repo_intel_core import lsp_resolve as resolver
 
         # Model a backend that has started reading a reply from a live, silent peer.
         def stalled_lookup(*args):

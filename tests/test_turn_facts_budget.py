@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from kernel_invalidation import LedgerIndex
-from mc_repo_intel_vendor.call_graph import CallSite, CodeGraph, SymbolDef
+from repo_intel_core.call_graph import CallSite, CodeGraph, SymbolDef
 
 
 class CountingDefinitions(dict):

@@ -12,7 +12,7 @@ import pytest
 
 def _measure(root):
     import kernel_coordinated_change_ledger as ledger
-    from mc_repo_intel_vendor import call_graph
+    from repo_intel_core import call_graph
     from symbol_registry import SymbolRegistry
 
     counts = {"parses": 0, "module_walks": 0}
@@ -81,7 +81,7 @@ def test_nested_source_matches_original_index_bytes(tmp_path, monkeypatch):
 
     import kernel_coordinated_change_ledger as ledger
     import kernel_parse_cache as cache
-    from mc_repo_intel_vendor import call_graph
+    from repo_intel_core import call_graph
     from symbol_registry import SymbolRegistry
 
     root = tmp_path / "repository"
@@ -126,7 +126,7 @@ action = lambda x: run(x)
 
 
 def test_graph_imports_follow_sibling_creation(tmp_path, monkeypatch):
-    from mc_repo_intel_vendor import call_graph
+    from repo_intel_core import call_graph
 
     root = tmp_path / "repository"
     root.mkdir()
@@ -203,7 +203,7 @@ def test_registry_read_ahead_preserves_order_errors_and_long_sources(tmp_path, m
 
 
 def test_older_graph_cache_upgrades_without_claiming_a_source_edit(tmp_path, monkeypatch):
-    from mc_repo_intel_vendor import call_graph
+    from repo_intel_core import call_graph
 
     root = tmp_path / "repo"
     root.mkdir()
@@ -220,7 +220,7 @@ def test_older_graph_cache_upgrades_without_claiming_a_source_edit(tmp_path, mon
 
 
 def test_uncached_graph_keeps_persistence_disabled(tmp_path, monkeypatch):
-    from mc_repo_intel_vendor import call_graph
+    from repo_intel_core import call_graph
 
     root = tmp_path / "repo"
     root.mkdir()

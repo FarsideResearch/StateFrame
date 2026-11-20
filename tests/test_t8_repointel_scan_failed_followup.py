@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from stateframe.engine import kernel_localize as localize
-from stateframe.engine.mc_repo_intel_vendor import call_graph, ts_dispatch
+from stateframe.engine.repo_intel_core import call_graph, ts_dispatch
 
 
 def _inventory(path: str, text: str) -> SimpleNamespace:
@@ -22,7 +22,7 @@ def _inventory(path: str, text: str) -> SimpleNamespace:
 
 def test_localize_keeps_scan_failed_marker_when_task_terms_are_set(monkeypatch: pytest.MonkeyPatch) -> None:
     # Localization imports the vendor package by its top-level name (the engine dir is on sys.path).
-    graph_module = importlib.import_module("mc_repo_intel_vendor.call_graph")
+    graph_module = importlib.import_module("repo_intel_core.call_graph")
     marker = graph_module._scan_failed_boundary("pkg/app.ts", "RuntimeError")
     unrelated = graph_module.DispatchBoundary(file="pkg/app.ts", lineno=7, kind="getattr",
                                               key_expr="handler", note="registry lookup")

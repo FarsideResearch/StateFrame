@@ -7,22 +7,22 @@ import re
 ROOT = Path(__file__).resolve().parents[1]
 OLD_MODULE = "_".join(("mc", "repo", "intel", "vendor"))
 PRIVATE_PHRASES = (
-    " ".join(("project", "rules")),
+    r"\s+".join(("project", "rules")),
     r"rule\s*\#\s*\d+",
     "-".join(("agent", "runner")),
-    " ".join(("agent", "runner")),
-    " ".join(("mission", "control")),
+    r"\s+".join(("agent", "runner")),
+    r"\s+".join(("mission", "control")),
     "-".join(("mission", "control")),
     "".join(("a", "h", "a")),
     "".join(("far", "side")),
-    " ".join(("Code", "Studio")),
+    r"\s+".join(("Code", "Studio")),
     "_".join(("blast", "radius")) + r"\.py",
     "_".join(("repo", "intel")) + r"[./]signatures",
 )
 PRIVATE_PATTERN = re.compile(
     r"(?<!\w)(?:" + "|".join(PRIVATE_PHRASES) + r")(?!\w)", re.IGNORECASE
 )
-OLD_MODULE_PATTERN = re.compile(r"(?<!\w)" + re.escape(OLD_MODULE) + r"(?!\w)")
+OLD_MODULE_PATTERN = re.compile(re.escape(OLD_MODULE))
 
 
 def _source_files(directory: str):

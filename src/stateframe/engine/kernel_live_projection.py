@@ -375,7 +375,7 @@ class WorkspaceViewStore:
             from kernel_repo_dependencies import active
 
             if active is not None or os.environ.get("STATEFRAME_TURN_REPO_INTEL", "off") == "on":
-                from mc_repo_intel_vendor.background import invalidate
+                from repo_intel_core.background import invalidate
 
                 invalidate(self.root)
             self.mutation_epoch += 1

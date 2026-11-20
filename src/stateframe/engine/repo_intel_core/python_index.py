@@ -18,7 +18,7 @@ except ImportError:  # Python can be built without the optional SQLite extension
 
 from . import call_graph as graph
 
-if __package__ and __package__.endswith("engine.mc_repo_intel_vendor"):
+if __package__ and __package__.endswith("engine.repo_intel_core"):
     from .. import kernel_parse_cache as cache
 else:
     import kernel_parse_cache as cache

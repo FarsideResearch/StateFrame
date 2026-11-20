@@ -9,7 +9,7 @@ computed once per run (the inventory describes the PARENT) and rendered beside
 the other site facts, so it counts against the request budget.
 
 Owner fields are resolved language-generically: type spans come from the
-shared parser outline (``mc_repo_intel_vendor.ts_dispatch.outline_source``;
+shared parser outline (``repo_intel_core.ts_dispatch.outline_source``;
 Python uses stdlib AST when tree-sitter is unavailable; Go, Rust, TS/JS, Java,
 and PHP keep their tree-sitter parser path. Field declarations are lines inside
 a type span and outside its methods.
@@ -257,7 +257,7 @@ def _read(root: Path, relative: str, *, observed: File | None = None) -> str | N
 
 def _outline(path: str, source: str, *, policy: str | None = None) -> Mapping[str, object]:
     try:
-        from mc_repo_intel_vendor.ts_dispatch import (
+        from repo_intel_core.ts_dispatch import (
             outline_capability_key,
             outline_source,
             report_outline_parser_capability,
@@ -723,7 +723,7 @@ def render(inventory: Inventory) -> str:
 def _legacy_inventory(runtime: object, root: Path, candidates: tuple[str, ...],
                       parent: Mapping[str, str], *,
                       include_contexts: bool) -> tuple[Inventory | None, tuple[object, ...]]:
-    from mc_repo_intel_vendor.ts_dispatch import detect_language
+    from repo_intel_core.ts_dispatch import detect_language
 
     scan = scan_product_files(root)
     policy = _parser_policy()
@@ -789,7 +789,7 @@ def _pinned_files(tree: Directory) -> tuple[ProductFileScan, dict[str, File]]:
 
 
 def _parser_policy() -> dict[str, str]:
-    from mc_repo_intel_vendor.ts_dispatch import detect_language, outline_capability_key
+    from repo_intel_core.ts_dispatch import detect_language, outline_capability_key
 
     # One capability probe per language. The extra suffix covers shebang detection
     # on extensions the dispatcher does not recognize, such as .kt.
@@ -842,7 +842,7 @@ def _project_inventory(root: Path, tree: Directory, candidates: tuple[str, ...],
                        parent: dict[str, str],
                        previous: _InventoryProjection | None, *,
                        include_contexts: bool) -> _InventoryProjection:
-    from mc_repo_intel_vendor.ts_dispatch import detect_language
+    from repo_intel_core.ts_dispatch import detect_language
 
     policy = _parser_policy()
     key = (candidates, include_contexts, tuple(policy.items()))

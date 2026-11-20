@@ -9,7 +9,7 @@ import time
 from types import ModuleType, SimpleNamespace
 
 import pytest
-from mc_repo_intel_vendor import (
+from repo_intel_core import (
     background,
     call_graph,
     lsp_resolve,

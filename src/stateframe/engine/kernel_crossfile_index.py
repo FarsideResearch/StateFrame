@@ -6,7 +6,7 @@ Prior art, reused vs added:
   * kernel_reference_index: reused the content-digest cache idea and the skip-dir set.
   * kernel_workspace_truth: reused its "unknown is quiet, never a false absent" stance;
     added what it lacks (lowercase module vars, re-exports) and parses each file once.
-  * mc_repo_intel_vendor/call_graph + kernel_repo_intel: function-level call graph with an
+  * repo_intel_core/call_graph + kernel_repo_intel: function-level call graph with an
     optional tree-sitter/LSP stack; too heavy and name-keyed here, so not wrapped.
   * func_index: per-function digests for ranking; no imports or refs, so not reused.
   * Added: scope-aware resolution, imports with re-export following, refs with receiver

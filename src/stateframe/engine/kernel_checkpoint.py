@@ -300,7 +300,7 @@ DROP_GLOBALS = {
         "process-local file observations; never valid across checkpoint restore",
     ("kernel_fl_checkpoint_capture", "_API"):
         "lazy import holder of checkpoint helper classes; re-created on first use",
-    ("mc_repo_intel_vendor.lsp_resolve", "_PROJECTS"):
+    ("repo_intel_core.lsp_resolve", "_PROJECTS"):
         "jedi project cache holding a live jedi subprocess; rebuilt on demand from the files",
     ("kernel_request_auth_identity", "_AUTH_BINDING_SECRET_CACHE"):
         "installation keys are reloaded from StateFrame home after restore",

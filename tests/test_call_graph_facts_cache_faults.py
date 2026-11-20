@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 
 import pytest
-from mc_repo_intel_vendor import call_graph, lsp_resolve
+from repo_intel_core import call_graph, lsp_resolve
 
 
 @pytest.fixture

@@ -15,15 +15,15 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from kernel_repo_catalog import StructuralIndexError, build_structural_index
-from mc_repo_intel_vendor import MC_COMMIT, SOURCE_PATH, VENDOR_SCHEMA
-from mc_repo_intel_vendor import background
-from mc_repo_intel_vendor import repo_map as _repo_map_module
-from mc_repo_intel_vendor.call_graph import build_graph
-from mc_repo_intel_vendor.repo_map import (
+from repo_intel_core import MC_COMMIT, SOURCE_PATH, VENDOR_SCHEMA
+from repo_intel_core import background
+from repo_intel_core import repo_map as _repo_map_module
+from repo_intel_core.call_graph import build_graph
+from repo_intel_core.repo_map import (
     build_repo_map_with_stats,
     get_current_commit_sha,
 )
-from mc_repo_intel_vendor.ts_dispatch import outline_file as outline
+from repo_intel_core.ts_dispatch import outline_file as outline
 
 logger = logging.getLogger(__name__)
 
