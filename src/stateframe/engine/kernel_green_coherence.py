@@ -41,6 +41,7 @@ _CHURN_KEYS = frozenset({
     "green_lock_refusals", "terminal_refusals",
     "step", "receipt_count", "budget", "closure_budget", "last_observation",
 })
+_READ_BINDING = object()
 
 
 def mode(lock_mode: str | None = None) -> str:
@@ -674,11 +675,14 @@ class TerminalStatus(Mapping[str, object]):
 
 def terminal_status(runtime: object | None = None, frame: Mapping[str, object] | None = None,
                     *, verdict: object = None, receipts: Sequence[Mapping[str, object]] | None = None,
-                    completion: object = None) -> TerminalStatus:
+                    completion: object = None, _frame_binding: object = _READ_BINDING) -> TerminalStatus:
     source = frame if isinstance(frame, Mapping) else {}
     required = _required(runtime, source)
     rows = list(receipts) if receipts is not None else _receipt_rows(runtime, source)
-    current_binding = _binding(runtime, source)
+    # Only a detached, frame-only projection can supply this observation.
+    # Live callers continue to read their own authority at this boundary.
+    current_binding = (_frame_binding if runtime is None and _frame_binding is not _READ_BINDING
+                       else _binding(runtime, source))
     if isinstance(current_binding, UnavailableEvidence):
         return TerminalStatus(
             green=False, public_check_status="UNAVAILABLE",
@@ -902,7 +906,10 @@ def collapse_test_rows(frame: Mapping[str, object], *, current_revision: object 
     Older rows remain available as bounded stale evidence when no current row
     exists, but they are never allowed to masquerade as the current check.
     """
-    public = copy.deepcopy(dict(frame))
+    return _collapse_owned_test_rows(copy.deepcopy(dict(frame)), current_revision)
+
+
+def _collapse_owned_test_rows(public: dict[str, object], current_revision: object) -> dict[str, object]:
     current = current_revision if current_revision is not None else _frame_revision(public)
     alias = _revision_alias(public, current)
     required = tuple(_required(None, public))
@@ -1029,6 +1036,9 @@ def project_frame(frame: Mapping[str, object], *, runtime: object | None = None,
     from kernel_terminal_surface_unify import (
         ADVISORY_OBLIGATIONS_FIELD, REFUSAL_LEAD,
     )
+    from kernel_wire_truth_gate import assembly_reuse_enabled
+
+    reuse = assembly_reuse_enabled()
     source = copy.deepcopy(dict(frame))
     runtime_rows = []
     if runtime is not None:
@@ -1037,9 +1047,21 @@ def project_frame(frame: Mapping[str, object], *, runtime: object | None = None,
         if runtime_rows:
             source_rows = _rows(source.get("test_receipts"))
             source["test_receipts"] = [*source_rows, *copy.deepcopy(runtime_rows)]
-    public = collapse_test_rows(source, current_revision=_revision(_binding(runtime, source)),
-                                receipts=_receipt_rows(runtime, source))
-    status = terminal_status(runtime, public)
+    binding = _binding(runtime, source)
+    revision = _revision(binding)
+    receipts = _receipt_rows(runtime, source)
+    if reuse:
+        # The frame is detached before any live reads. Transfer ownership to
+        # the pure projection instead of copying the detached frame again.
+        public = _collapse_owned_test_rows(source, revision)
+    else:
+        public = collapse_test_rows(source, current_revision=revision, receipts=receipts)
+    if reuse and runtime is None:
+        # Collapsing check rows leaves the frame binding unchanged. A live
+        # binding, verdict, or GreenLock read cannot use this shortcut.
+        status = terminal_status(runtime, public, _frame_binding=binding)
+    else:
+        status = terminal_status(runtime, public)
     readiness = None
     if (runtime is not None
             and (getattr(runtime, "stateframe_readiness_authority_mode", "off") == "on"
@@ -1060,7 +1082,8 @@ def project_frame(frame: Mapping[str, object], *, runtime: object | None = None,
                 is_repairable_literal_counterexample(item) for item in status.counterexamples)
         except (ImportError, TypeError, ValueError):
             alignment_repairable = False
-    if lock is not None and getattr(runtime, "green_lock", None) is None:
+    if (lock is not None and getattr(runtime, "green_lock", None) is None
+            and (not reuse or runtime is not None)):
         # A small fixture may pass a lock without installing it on runtime.
         try:
             status = terminal_status(runtime, public)

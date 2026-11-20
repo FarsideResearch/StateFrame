@@ -71,6 +71,17 @@ def _canonical_json(value: object) -> bytes:
     ).encode("utf-8")
 
 
+def assembly_reuse_enabled() -> bool:
+    """Read the recorded pilot selection through the optional host interface."""
+    try:
+        from stateframe import _startup_optimization_enabled as pilot_enabled
+    except ModuleNotFoundError as error:
+        if error.name != "stateframe":
+            raise
+        return False
+    return pilot_enabled()
+
+
 def schema_digest(tools: object) -> str:
     """Return the canonical digest for one parsed provider tool list."""
     return "sha256:" + hashlib.sha256(_canonical_json(tools)).hexdigest()
@@ -441,8 +452,9 @@ def _source_failures(messages: object, context: Mapping[str, object],
     return failures
 
 
-def _authority_failures(tools: object, authorities: object,
-                        *, allow_done_expansion: bool) -> list[str]:
+def _authority_failures(tools: object, authorities: object, *,
+                        allow_done_expansion: bool,
+                        wire_schema_digest: str | None = None) -> list[str]:
     if not isinstance(authorities, Sequence) or isinstance(authorities, (str, bytes)):
         return []
     failures: list[str] = []
@@ -456,14 +468,14 @@ def _authority_failures(tools: object, authorities: object,
         names = authority.get("tool_names", authority.get("names"))
         matches = False
         if isinstance(schemas, list):
-            matches = schema_digest(schemas) == schema_digest(tools)
+            matches = schema_digest(schemas) == (wire_schema_digest or schema_digest(tools))
             if (not matches and allow_done_expansion and "done" in parsed_names
                     and "done" not in _tool_names(schemas)):
                 without_done = [tool for tool in tools
                                 if _tool_name(tool) != "done"] if isinstance(tools, list) else []
                 matches = schema_digest(schemas) == schema_digest(without_done)
         elif isinstance(digest, str):
-            matches = digest == schema_digest(tools)
+            matches = digest == (wire_schema_digest or schema_digest(tools))
             if (not matches and allow_done_expansion and "done" in parsed_names):
                 without_done = [tool for tool in tools
                                 if _tool_name(tool) != "done"] if isinstance(tools, list) else []
@@ -524,9 +536,12 @@ def evaluate_wire(wire: bytes, context: Mapping[str, object], *,
         failed.append("done_schema_not_registered")
     if names == ["done"] and context.get("has_applied_edit") is not True:
         failed.append("done_only_without_applied_edit")
+    # The parsed tools belong exclusively to this immutable wire. Authority
+    # inputs belong to their callers and are checked separately.
     failed.extend(_authority_failures(
         tools, context.get("schema_authorities"),
         allow_done_expansion=allow_done_expansion,
+        wire_schema_digest=digest if assembly_reuse_enabled() else None,
     ))
     failed.extend(fact_failures(
         messages, context.get("required_facts"),

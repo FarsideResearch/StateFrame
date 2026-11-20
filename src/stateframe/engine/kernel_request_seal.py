@@ -60,8 +60,9 @@ class OwnerPresentation:
             raise RequestSealError("owner presentation evidence differs from admitted contract")
         return cls(hashlib.sha256(freeze(contract)).hexdigest(), limits, pin)
 
-    def validate(self, contract: Mapping[str, object]) -> None:
-        if hashlib.sha256(freeze(contract)).hexdigest() != self.contract_digest:
+    def validate(self, contract: Mapping[str, object] | bytes) -> None:
+        encoded = contract if type(contract) is bytes else freeze(contract)
+        if hashlib.sha256(encoded).hexdigest() != self.contract_digest:
             _seal_violation("owner presentation belongs to another contract")
             raise RequestSealError("owner presentation belongs to another contract")
 
@@ -196,12 +197,17 @@ class QualifiedRequest:
             logical_request_id=self.lineage,
             tokenizer_identity=meter.tokenizer_identity(candidate, endpoint=endpoint),
         )
-        if (self.allocation.capacity["byte_ceiling"] != self.measurement.max_request_bytes
-                or self.allocation.capacity["token_ceiling"] != self.measurement.max_prompt_tokens
-                or self.allocation.capacity["measurement_identity"] != self.measurement.method):
+        capacity = self.allocation.capacity
+        if (capacity["byte_ceiling"] != self.measurement.max_request_bytes
+                or capacity["token_ceiling"] != self.measurement.max_prompt_tokens
+                or capacity["measurement_identity"] != self.measurement.method):
             _seal_violation("qualified allocation and measurement limits differ")
             raise RequestSealError("qualified allocation and measurement limits differ")
-        for name in ("request_action_contract", "_request_source_closure_override",
+        owner_contract = freeze(authority["request_action_contract"])
+        if freeze(getattr(capture, "request_action_contract", None)) != owner_contract:
+            _seal_violation("qualified request authority changed: request_action_contract")
+            raise RequestSealError("qualified request authority changed: request_action_contract")
+        for name in ("_request_source_closure_override",
                      "request_source_final_delivery", "request_budget_final_wire",
                      "final_tool_surface", "framefit5_product_validation"):
             if freeze(getattr(capture, name, None)) != freeze(authority[name]):
@@ -212,7 +218,7 @@ class QualifiedRequest:
                 != freeze(authority["host_contribution"])):
             _seal_violation("qualified host presentation authority changed")
             raise RequestSealError("qualified host presentation authority changed")
-        self.owner_presentation.validate(authority["request_action_contract"])
+        self.owner_presentation.validate(owner_contract)
         from kernel_completion_owner import assert_request_action_contract
         assert_request_action_contract(runtime, candidate["messages"], candidate.get("tools", []),
             request_id=self.request_id, boundary="qualified_request",

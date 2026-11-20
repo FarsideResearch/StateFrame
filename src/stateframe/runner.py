@@ -28,8 +28,9 @@ from itertools import chain
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Mapping, TextIO
 
-from . import (cache_metrics, outer_checks, outcomes, preflight, profiles, routes, storage_gc,
-               test_interpreter, workcopy)
+from . import (_STARTUP_SPEC_KEY, _STARTUP_SWITCH, _startup_optimization_enabled,
+               cache_metrics, outer_checks, outcomes, preflight, profiles, routes,
+               storage_gc, test_interpreter, workcopy)
 from .test_runners import (DECLARED_TEST_SOURCE, declared_test_evidence, discover_check,
                             lock_initial_failing_tests, parse_command, validate_patterns)
 from .test_changes import inspect_test_changes
@@ -49,6 +50,7 @@ from .storage_gc import _fsync_directory, _write_json_atomic
 from .engine.kernel_safe_paths import safe_expanduser, safe_home
 
 if TYPE_CHECKING:
+    from .endpoint import ProviderEpoch
     from .engine.kernel_hooks import HookSet
 
 PACKAGE = Path(__file__).resolve().parent
@@ -67,6 +69,7 @@ USER_ENV = ("LLAMA_CPP_TOKENIZE_URL",)
 TEST_PYTHON_ENV = "STATEFRAME_TEST_PYTHON"
 RUNNER_HOME_IDENTITY_ENV = "STATEFRAME_RUNNER_HOME_IDENTITY"
 _STARTUP_HOME_IDENTITY_UNSET = object()
+_DEFAULT_PROVIDER_EPOCH = object()
 # Engine checkpoint switches the runner copies into the run's environment (kernel_checkpoint).
 CHECKPOINT_ENV = {"STATEFRAME_CHECKPOINT": "save", "STATEFRAME_CHECKPOINT_EVERY": "1",
                   "STATEFRAME_CHECKPOINT_KEEP": "2",
@@ -471,6 +474,9 @@ class RunOptions:
     _cache_slot_reason: str | None = field(default=None, init=False, repr=False)
     _cache_slot_degraded: bool = field(default=False, init=False, repr=False)
     _capabilities: dict[str, object] = field(default_factory=dict, init=False, repr=False)
+    _send1_wave4: bool | None = field(default=None, init=False, repr=False)
+    _resuming: bool = field(default=False, init=False, repr=False)
+    _provider_epoch: ProviderEpoch | None = field(default=None, init=False, repr=False)
     # Environment for the repository's tests (engine checks and --test-cmd), e.g. test-only
     # settings a project needs to import. Declared to the engine as host task env keys.
     test_env: dict[str, str] = field(default_factory=dict)
@@ -686,7 +692,8 @@ def _probe_stopped_by_host(result: object) -> bool:
             and int(getattr(cleanup, "killed", 0) or 0) > 0)
 
 
-def _startup_probe(python: str, code: str, *, label: str) -> bytes:
+def _startup_probe(python: str, code: str, *, label: str,
+                   on_clean_success: Callable[[], None] | None = None) -> bytes:
     """Contain interpreter startup itself, before importing any project packages.
 
     A heavily loaded host can push a healthy interpreter past the wall limit, so a timeout (and
@@ -720,10 +727,13 @@ def _startup_probe(python: str, code: str, *, label: str) -> bytes:
         raise RunError(f"{label} {failure} in the isolated startup probe; the interpreter is broken "
                        f"or incomplete (exit {result.exit_code}, not a timeout); {install}"
                        f"sandbox restrictions must permit interpreter startup: {detail or 'no diagnostic output'}")
+    if on_clean_success is not None and wall == base_wall and not getattr(result, "probe_failures", ()):
+        on_clean_success()
     return result.output
 
 
-def _check_python(python: str, *, require_pytest: bool = True) -> str:
+def _check_python(python: str, *, require_pytest: bool = True,
+                  use_startup_cache: bool | None = None) -> str:
     """Resolve --python to an absolute executable (relative to the caller's cwd, BEFORE any chdir)
     and check it can run the engine and the checks. Returns the absolute path."""
     try:
@@ -731,8 +741,18 @@ def _check_python(python: str, *, require_pytest: bool = True) -> str:
     except preflight.PreflightError as error:
         raise RunError(str(error)) from None
     imports = "import sys, json, pytest" if require_pytest else "import sys, json"
-    output = _startup_probe(python, imports + "; print(json.dumps(list(sys.version_info[:3])))",
-                            label=f"engine interpreter {python}")
+    code = imports + "; print(json.dumps(list(sys.version_info[:3])))"
+    if use_startup_cache is None:
+        use_startup_cache = not require_pytest and _startup_optimization_enabled()
+    if use_startup_cache and not require_pytest:
+        _check_cached_python_version(python, code)
+    else:
+        output = _startup_probe(python, code, label=f"engine interpreter {python}")
+        _check_python_version(python, _read_python_version(python, output))
+    return python
+
+
+def _read_python_version(python: str, output: bytes) -> list[int]:
     try:
         version = json.loads(output)
         if (not isinstance(version, list) or len(version) != 3
@@ -740,11 +760,71 @@ def _check_python(python: str, *, require_pytest: bool = True) -> str:
             raise ValueError("expected three non-negative version integers")
     except (ValueError, UnicodeError) as error:
         raise RunError(f"engine interpreter {python} startup probe returned an invalid Python version") from error
+    return version
+
+
+def _check_python_version(python: str, version: list[int]) -> None:
     try:
         preflight.check_python_version(version=tuple(version))
     except preflight.PreflightError as error:
         raise RunError(f"interpreter {python}: {error}") from None
-    return python
+
+
+def _check_cached_python_version(python: str, code: str) -> None:
+    from . import send1_probe_cache, startup_cache_writes
+
+    fingerprint = None
+    wall = None
+    cached = None
+    cold = not send1_probe_cache.reads_available()
+    if not cold:
+        wall = _startup_probe_seconds()
+        fingerprint = send1_probe_cache.engine_fingerprint(python, code, wall)
+        cached = send1_probe_cache.lookup(send1_probe_cache.ENGINE_VERSION, fingerprint)
+    clean = False
+
+    def mark_clean():
+        nonlocal clean
+        clean = True
+
+    if (cached is not None and send1_probe_cache.check_sandbox(python, wall)
+            and fingerprint == send1_probe_cache.engine_fingerprint(python, code, wall)):
+        version = cached["version"]
+    else:
+        kwargs = {"on_clean_success": mark_clean} if fingerprint else {}
+        output = _startup_probe(python, code, label=f"engine interpreter {python}", **kwargs)
+        version = _read_python_version(python, output)
+    _check_python_version(python, version)
+    if cold:
+        startup_cache_writes.defer(send1_probe_cache.ENGINE_VERSION,
+                                  lambda: _seed_engine_version(python, code, version))
+    elif fingerprint and clean:
+        def publish_version():
+            if fingerprint == send1_probe_cache.engine_fingerprint(python, code, wall):
+                send1_probe_cache.publish(send1_probe_cache.ENGINE_VERSION, fingerprint, {"version": version})
+
+        startup_cache_writes.defer(send1_probe_cache.ENGINE_VERSION, publish_version)
+
+
+def _seed_engine_version(python, code, version):
+    from . import send1_probe_cache
+
+    # The cold foreground probe ran without a dependency fingerprint. A new
+    # supervised observation brackets the receipt with both dependency checks.
+    wall = _startup_probe_seconds()
+    fingerprint = send1_probe_cache.engine_fingerprint(python, code, wall)
+    if not fingerprint:
+        return
+    clean = False
+
+    def mark_clean():
+        nonlocal clean
+        clean = True
+
+    output = _startup_probe(python, code, label=f"engine interpreter {python}", on_clean_success=mark_clean)
+    if clean and json.loads(output) == version and fingerprint == send1_probe_cache.engine_fingerprint(
+            python, code, wall):
+        send1_probe_cache.publish(send1_probe_cache.ENGINE_VERSION, fingerprint, {"version": version})
 
 
 _ENGINE_SWITCHES: dict[str, frozenset[str]] = {}
@@ -1176,6 +1256,7 @@ SHELL_SETTINGS = frozenset({
     "STATEFRAME_EXEC_RPC_SECONDS", "STATEFRAME_STARTUP_PROBE_SECONDS", PLAIN_WALL_SETTING,
     *PARALLEL_TIMING_SETTINGS,
     *CHECKPOINT_ENV, *OPT_IN_SWITCHES, *CHECK_SETTINGS,
+    _STARTUP_SWITCH,
 })
 
 
@@ -1291,7 +1372,14 @@ def use_run_env_python(options: RunOptions, run_env: object) -> None:
 def _check_engine_python(options: RunOptions) -> None:
     """Check the engine interpreter; a pytest runner's probe also proves pytest imports from it."""
     pytest_runner = options.runner_kind != "generic"
-    options.python = _check_python(options.python, require_pytest=pytest_runner)
+    selected = options._send1_wave4 and not options._resuming and not pytest_runner
+    if selected:
+        from .send1_probe_cache import launch_scope
+
+        with launch_scope(True, options._stateframe_home_identity):
+            options.python = _check_python(options.python, require_pytest=False)
+    else:
+        options.python = _check_python(options.python, require_pytest=pytest_runner, use_startup_cache=False)
     options._pytest_proven = options.python if pytest_runner else None
 
 
@@ -1567,6 +1655,8 @@ def _configure_workspace_objects(run: Path, environment: dict, extra_env: Mappin
 
 def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy, dict]:
     prepare_started = time.monotonic_ns()
+    if options._send1_wave4 is None:
+        options._send1_wave4 = _startup_optimization_enabled()
     _validate_stateframe_home_boundary(options)
     if options._stateframe_home_identity is None:
         _capture_stateframe_home_identity(options)
@@ -1756,11 +1846,21 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
     else:
         run.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         private_directory(run)
-    work = workcopy.create(options.repo, run / "workspace")
+    work = workcopy.create(options.repo, run / "workspace", admit_snapshot=options._send1_wave4)
     instructions_record = _resolve_project_instructions(options, work.copy, environment)
     # Read-only reference copy of the starting state; the engine's finish path reads it, and
     # diffs are taken against it (never against the live original, which may change meanwhile).
-    shutil.copytree(work.copy, run / "parent", symlinks=False)
+    pin_parent = None
+    if options._send1_wave4:
+        try:
+            from .workspace_start_snapshot import pin_parent
+        except ModuleNotFoundError as error:
+            if error.name != f"{__package__}.workspace_start_snapshot":
+                raise
+    if pin_parent is None:
+        shutil.copytree(work.copy, run / "parent", symlinks=False)
+    else:
+        pin_parent(work, run / "parent")
     work.snapshot = run / "parent"
     row = build_row(work, task=options.task, checks=options.checks or None, target=options.target,
                      edit_paths=options.edit_paths or None, runner_kind=options.runner_kind,
@@ -1817,6 +1917,7 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
     environment.update(resolve_parallel_timing_env(parallel_enabled=mode != "off"))
     environment.update(opt_in)
     environment.update(options.extra_env)
+    environment.pop(_STARTUP_SWITCH, None)
     launch_switch = "STATEFRAME_TURN_MINIMAL_LAUNCH"
     configured_launch = environment.pop(launch_switch, None)
     ambient_launch = os.environ.get(launch_switch, "").strip()
@@ -1956,6 +2057,8 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
         "in_place": options.in_place,
         **({"mutations": mutation_options} if mutation_options is not None else {}),
     }
+    if options._send1_wave4:
+        spec[_STARTUP_SPEC_KEY] = True
     if options.parallel_mode != "off":
         spec["parallel_subframe_max_requests_explicit"] = unit_cap_explicit
     if options.parallel_mode != "off" and parallel_slots is not None:
@@ -2111,7 +2214,7 @@ def _idle_slot(slots: object) -> tuple[int | None, bool]:
 REQUIRED_SLOT_TOKENS = 65_536  # the default slot; a run uses options._context_tokens
 
 
-def check_slot_context(options: RunOptions, printer=print) -> None:
+def check_slot_context(options: RunOptions, printer=print) -> Endpoint.SlotObservation | None:
     """Refuse a server whose context slots are smaller than the prompt budget needs.
 
     Only a server that reports per-slot ``n_ctx`` on ``/slots`` (llama.cpp) is checked; one that does not
@@ -2124,8 +2227,14 @@ def check_slot_context(options: RunOptions, printer=print) -> None:
     if not capabilities.slots:
         return
     endpoint = replace(options.endpoint, timeout_s=min(options.endpoint.timeout_s, _remaining(options)))
+    pilot = getattr(options, "_send1_wave4", False)
     try:
-        slots = endpoint.get_slots()
+        if pilot:
+            slots = _provider_slots(options, endpoint, options._provider_epoch,
+                                    static=options.slot is not None)
+            observed_at = time.monotonic()
+        else:
+            slots = endpoint.get_slots()
     except (OSError, TimeoutError, EndpointError, ValueError) as error:
         _reason_log.emit_reason("fallback", "slot_status_unavailable", "runner",
                                 "context slot check skipped; server slot status unavailable",
@@ -2147,8 +2256,14 @@ def check_slot_context(options: RunOptions, printer=print) -> None:
                 f"{sizes[0]:,}-token cache and runs at the same time can overflow it; use "
                 f"--ctx-size = {need} x --parallel ({need * len(sizes):,} here).")
 
+    if pilot and slots is not None:
+        return Endpoint.SlotObservation(slots, observed_at, options.endpoint.base_url, options.endpoint.api_key())
+    return None
 
-def _select_prompt_cache_slot(options: RunOptions, printer=print) -> None:
+
+def _select_prompt_cache_slot(
+    options: RunOptions, printer=print, observation: Endpoint.SlotObservation | None = None,
+) -> None:
     """Use an explicit slot or pin one reported idle by a local llama.cpp server."""
     options._cache_slot = None
     options._cache_slot_selection = None
@@ -2198,15 +2313,24 @@ def _select_prompt_cache_slot(options: RunOptions, printer=print) -> None:
                 )
                 printer("cache: prompt-cache pin dropped because provider did not prove llama.cpp /slots")
             return
-        endpoint = replace(options.endpoint,
-                           timeout_s=min(options.endpoint.timeout_s, _remaining(options)))
-        try:
-            slots = endpoint.get_slots()
-        except (OSError, TimeoutError, EndpointError, ValueError) as error:
-            _reason_log.emit_reason("fallback", "cache_slot_status_unavailable", "runner",
-                                    "prompt-cache slot pin skipped; server slot status unavailable",
-                                    type(error).__name__, level="WARN")
-            slots = None
+        remaining = _remaining(options)
+        if observation is not None:
+            slots = _provider_probe(options, observation.current_slots, options.endpoint)
+            if slots is None:
+                refreshed = check_slot_context(options, printer)
+                slots = refreshed.slots if refreshed is not None else None
+        else:
+            endpoint = replace(options.endpoint, timeout_s=min(options.endpoint.timeout_s, remaining))
+            try:
+                if getattr(options, "_send1_wave4", False):
+                    slots = _provider_slots(options, endpoint, options._provider_epoch)
+                else:
+                    slots = endpoint.get_slots()
+            except (OSError, TimeoutError, EndpointError, ValueError) as error:
+                _reason_log.emit_reason("fallback", "cache_slot_status_unavailable", "runner",
+                                        "prompt-cache slot pin skipped; server slot status unavailable",
+                                        type(error).__name__, level="WARN")
+                slots = None
         slot, usable = _idle_slot(slots)
         if slot is None:
             options._cache_slot_selection = "not_pinned"
@@ -2261,6 +2385,20 @@ def _routed_endpoint(settings: dict[str, object]) -> Endpoint:
                     bool(settings.get("allow_remote")))
 
 
+def _check_routed_model(options: RunOptions, endpoint: Endpoint, role: str, sources: dict,
+                        epoch: ProviderEpoch | None) -> bool:
+    try:
+        probe = _provider_model(options, endpoint, epoch)
+    except EndpointError as error:
+        raise RunError(f"route {role} {error}; change {role}.endpoint or {role}.model") from None
+    if probe.get("model_found") is not False:
+        return True
+    if not (role.partition(" (unit ")[0] == "decide2" and sources.get("model") == "default"):
+        raise RunError(f"route {role} endpoint does not serve model {endpoint.model!r}; "
+                       f"change {role}.model or {role}.endpoint")
+    return False
+
+
 def _probe_routes(options: RunOptions, printer=print, *, resume_roles: dict | None = None,
                   warnings: list[str] | None = None) -> None:
     options._provider_route_dialects.clear()
@@ -2294,7 +2432,14 @@ def _probe_routes(options: RunOptions, printer=print, *, resume_roles: dict | No
             continue
         require_routed_static_slot(base_provider_capabilities)
         if options.endpoint.base_url not in slots_by_endpoint:
-            slots_by_endpoint[options.endpoint.base_url] = options.endpoint.get_slots()
+            slots_by_endpoint[options.endpoint.base_url] = _provider_slots(
+                options, options.endpoint, options._provider_epoch,
+            )
+        if options._provider_epoch is not None and options._provider_epoch.invalidated:
+            base_provider_capabilities = _provider_capabilities_for(
+                options.endpoint.chat_url, options.endpoint.api_key(), options,
+            )
+            require_routed_static_slot(base_provider_capabilities)
         recorded = (resume_roles or {}).get(role, {})
         selected = recorded.get("slot") if type(recorded.get("slot")) is int else None
         if selected is None:
@@ -2329,8 +2474,10 @@ def _probe_routes(options: RunOptions, printer=print, *, resume_roles: dict | No
             ((role, settings, table.sources[role]) for role, settings in table.roles.items()),
             effective_unit_routes()):
         endpoint = _routed_endpoint(settings)
+        epoch = _read_provider_epoch(options, endpoint, role) if options._send1_wave4 and not options._resuming else None
+        epoch_args = {"epoch": epoch} if options._provider_epoch is not None or epoch is not None else {}
         provider_capabilities = _provider_capabilities_for(
-            endpoint.chat_url, endpoint.api_key(), options,
+            endpoint.chat_url, endpoint.api_key(), options, **epoch_args,
         )
         if (endpoint.base_url != options.endpoint.base_url
                 and sources.get("slot") == "default"):
@@ -2342,22 +2489,29 @@ def _probe_routes(options: RunOptions, printer=print, *, resume_roles: dict | No
         elif type(selected_slot) is int:
             require_routed_static_slot(provider_capabilities, selected_slot)
         identity = (endpoint.base_url, endpoint.model, endpoint.api_key_env)
-        if identity not in checked:
-            try:
-                probe = endpoint.probe()
-            except EndpointError as error:
-                raise RunError(f"route {role} {error}; change {role}.endpoint or {role}.model") from None
-            if probe.get("model_found") is False:
-                if not (role.partition(" (unit ")[0] == "decide2" and sources.get("model") == "default"):
-                    raise RunError(f"route {role} endpoint does not serve model {endpoint.model!r}; "
-                                   f"change {role}.model or {role}.endpoint")
-            else:
+        if epoch is not None or identity not in checked:
+            if _check_routed_model(options, endpoint, role, sources, epoch):
                 checked.add(identity)
-        if endpoint.base_url not in slots_by_endpoint:
-            slots_by_endpoint[endpoint.base_url] = (
-                endpoint.get_slots() if provider_capabilities.slots else None
-            )
-        slots = slots_by_endpoint[endpoint.base_url]
+        if epoch is not None:
+            # Static answers carry no occupancy and only apply to this route's proof.
+            slots = (_provider_slots(options, endpoint, epoch, static=selected_slot != "auto")
+                     if provider_capabilities.slots else None)
+            if epoch.invalidated:
+                _check_routed_model(options, endpoint, role, sources, None)
+                provider_capabilities = _provider_capabilities_for(
+                    endpoint.chat_url, endpoint.api_key(), options, epoch=None,
+                )
+                if selected_slot == "auto" or type(selected_slot) is int:
+                    require_routed_static_slot(provider_capabilities, selected_slot
+                                               if type(selected_slot) is int else None)
+                slots = (_provider_slots(options, endpoint, None)
+                         if provider_capabilities.slots else None)
+        else:
+            if endpoint.base_url not in slots_by_endpoint:
+                slots_by_endpoint[endpoint.base_url] = (
+                    _provider_slots(options, endpoint, None) if provider_capabilities.slots else None
+                )
+            slots = slots_by_endpoint[endpoint.base_url]
         selected = settings.get("slot")
         if selected == "auto":
             recorded = (resume_roles or {}).get(role, {})
@@ -2403,7 +2557,9 @@ def _probe_routes(options: RunOptions, printer=print, *, resume_roles: dict | No
             try:
                 tokenizer_endpoint = Endpoint(str(tokenizer), endpoint.model, endpoint.api_key_env,
                                               endpoint.timeout_s, bool(settings.get("allow_remote")))
-                result = tokenizer_endpoint.probe()
+                tokenizer_epoch = (_read_provider_epoch(options, tokenizer_endpoint, f"{role}.tokenizer")
+                                   if options._send1_wave4 and not options._resuming else None)
+                result = _provider_model(options, tokenizer_endpoint, tokenizer_epoch)
             except EndpointError as error:
                 raise RunError(f"route {role}.tokenizer cannot be used: {error}; change {role}.tokenizer") from None
             if result.get("model_found") is not True:
@@ -2509,13 +2665,74 @@ def _apply_operator_reasoning_effort(
         environment["REACT_REASONING_EFFORT"] = value
 
 
-def _provider_capabilities_for(endpoint: str, key: str, options: RunOptions):
+def _provider_capabilities_for(endpoint: str, key: str, options: RunOptions, *,
+                               epoch=_DEFAULT_PROVIDER_EPOCH):
     from .engine.kernel_provider_dialect import capabilities_for
 
-    return capabilities_for(
-        endpoint, key, cache=options._provider_capabilities,
-        environ=_provider_environment(options),
+    if epoch is _DEFAULT_PROVIDER_EPOCH:
+        epoch = getattr(options, "_provider_epoch", None)
+    environment = _provider_environment(options)
+    if epoch is None:
+        return capabilities_for(endpoint, key, cache=options._provider_capabilities, environ=environment)
+    return _provider_probe(
+        options, capabilities_for, endpoint, key, cache=options._provider_capabilities,
+        environ=environment, epoch=epoch,
     )
+
+
+def _provider_probe(options: RunOptions, probe, *args, **kwargs):
+    # Provider adapters keep their existing live API. A recorded run can opt
+    # into persistent hints while resume preflight keeps the existing checks.
+    if not options._send1_wave4 or options._resuming:
+        if not _startup_optimization_enabled():
+            return probe(*args, **kwargs)
+        from .send1_wave4 import launch_selection
+
+        with launch_selection(False):
+            return probe(*args, **kwargs)
+    from .send1_probe_cache import launch_scope
+
+    with launch_scope(True, options._stateframe_home_identity):
+        return probe(*args, **kwargs)
+
+
+def _read_provider_epoch(options: RunOptions, endpoint: Endpoint, route: str) -> ProviderEpoch | None:
+    if not options._send1_wave4 or options._resuming:
+        return None
+    proof = getattr(endpoint, "provider_epoch", None)
+    if proof is None:
+        return None
+    from . import send1_probe_cache, startup_cache_writes
+
+    if not send1_probe_cache.reads_available():
+        def seed_provider_facts():
+            epoch = _provider_probe(options, proof, route)
+            if epoch is None:
+                return
+            _provider_model(options, endpoint, epoch)
+            from .engine.kernel_provider_dialect import capabilities_for
+
+            capabilities = _provider_probe(options, capabilities_for, endpoint.chat_url, endpoint.api_key(),
+                                           cache={}, environ=_provider_environment(options), epoch=epoch)
+            if capabilities.slots:
+                _provider_slots(options, endpoint, epoch, static=True)
+
+        startup_cache_writes.defer("provider-facts", seed_provider_facts)
+        return None
+    return _provider_probe(options, proof, route)
+
+
+def _provider_model(options: RunOptions, endpoint: Endpoint, epoch: ProviderEpoch | None):
+    if epoch is None:
+        return endpoint.probe()
+    return _provider_probe(options, endpoint.probe, epoch=epoch)
+
+
+def _provider_slots(options: RunOptions, endpoint: Endpoint, epoch: ProviderEpoch | None,
+                    *, static: bool = False):
+    if epoch is None:
+        return endpoint.get_slots()
+    return _provider_probe(options, endpoint.get_slots, epoch=epoch, static=static)
 
 
 def _provider_preflight_records(options: RunOptions) -> dict[str, dict[str, object]]:
@@ -2561,6 +2778,8 @@ USER_ERROR_TEXT = {
 
 def _render_event(event: dict) -> str | None:
     kind = event.get("kind")
+    if kind == "cache_write_failed":
+        return f"warning: could not write startup cache {event.get('cache')} ({event.get('error')})"
     if kind == "provider_dialects":
         endpoints = event.get("endpoints")
         if not isinstance(endpoints, list):
@@ -2797,6 +3016,13 @@ def drive(run: Path, options: RunOptions, printer=print) -> int:
     with log_path.open("a", encoding="utf-8") as log:
         _remaining(options)
         child_env = _child_env(options)
+        cache_writer = None
+        if options._send1_wave4 and not options._resuming:
+            from . import send1_probe_cache, startup_cache_writes
+
+            cache_writer = startup_cache_writes.active_writer()
+            if cache_writer is not None and not send1_probe_cache.reads_available():
+                child_env[send1_probe_cache.STORE_MISSING_ENV] = "1"
         if spec_path.exists():
             # Hash randomization is fixed at interpreter start: the child applying the spec's
             # PYTHONHASHSEED to os.environ itself would be too late to change its own set order.
@@ -2877,10 +3103,12 @@ def drive(run: Path, options: RunOptions, printer=print) -> int:
                                 watchdog.cancel()
                             until = time.monotonic() + ENGINE_TEARDOWN_SECONDS
                             drain_until = until if drain_until is None else min(drain_until, until)
+                    if cache_writer is not None and event.get("kind") == "request_sealed":
+                        cache_writer.seal()
                     _warn_checkpoint_event(event, checkpoint_warned)
                     rendered = _render_event(event)
                     if rendered and (not options.quiet or event.get("kind") in {
-                            "token_counting_unavailable", "engine_error"}):
+                            "token_counting_unavailable", "engine_error", "cache_write_failed"}):
                         printer(rendered)
             log.write(output.finish())
             if not exited and engine_status is not None:
@@ -3895,10 +4123,21 @@ def run(options: RunOptions, printer=print) -> dict[str, object]:
             options._context_tokens, options._prompt_budget, how, options._context_env = resolve_context(
                 profiles.load(options.profile))
             options._context_display = how
+            options._send1_wave4 = _startup_optimization_enabled()
             with _sigterm_as_interrupt():
+                if options._send1_wave4:
+                    from .send1_probe_cache import launch_scope
+                    from .startup_cache_writes import writer_scope
+
+                    with launch_scope(True, options._stateframe_home_identity), writer_scope(_report_cache_event):
+                        return _run(options, started, printer)
                 return _run(options, started, printer)
     finally:
         options._deadline = None
+
+
+def _report_cache_event(kind, **fields):
+    print(LOG_PREFIX + json.dumps({"kind": kind, **fields}), file=sys.stderr, flush=True)
 
 
 def _compare_resume_routes(recorded: object, current: routes.RouteTable | None,
@@ -4145,6 +4384,8 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
          keep_checkpoints=keep_checkpoints, keep_run_env=keep_run_env,
          allow_source_tree=bool(spec.get("allow_source_tree", False)))
     options._stateframe_home_identity = current_identity
+    options._send1_wave4 = spec.get(_STARTUP_SPEC_KEY) is True
+    options._resuming = True
     options.route_cli = route_cli or []
     options.routes_file = routes_file
     if "tool_settings" in spec:
@@ -4158,8 +4399,7 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
                 printer(_time_limit_line(options))
             printer(_step_limit_line(options))
             options.endpoint.check_locality()
-            options.python = _check_python(options.python,
-                                           require_pytest=options.runner_kind != "generic")
+            _check_engine_python(options)
             options._capabilities = dict(spec.get("capabilities") or {})
             started_env = spec.get("environment") or {}
             options._context_tokens = int(started_env.get(CONTEXT_TOKENS_ENV) or DEFAULT_CONTEXT_TOKENS)
@@ -4172,8 +4412,9 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
                                    "a resumed run keeps the context size it started with. Unset it to resume")
             # Resume keeps the run's recorded test interpreter (older runs: the engine's).
             options._test_python = str(options._capabilities.get("test_python") or options.python)
-            probe = replace(options.endpoint,
-                            timeout_s=min(options.endpoint.timeout_s, _remaining(options))).probe()
+            current_endpoint = replace(options.endpoint,
+                                       timeout_s=min(options.endpoint.timeout_s, _remaining(options)))
+            probe = _provider_model(options, current_endpoint, None)
             if probe.get("model_found") is False:
                 raise RunError(f"endpoint does not serve model {options.endpoint.model!r}; it lists: "
                                + ", ".join(probe.get("served_models") or [])
@@ -4415,7 +4656,70 @@ def _session_end_is_final(summary: dict[str, object]) -> bool:
                                         | outcomes.SEAL_FAILURES)
 
 
+def _wave4_provider_preflight(options: RunOptions) -> tuple[list[str], list[str]]:
+    from concurrent.futures import Future
+    from copy import copy
+
+    assert options.endpoint is not None
+    preflight_messages: list[str] = []
+    preflight_warnings: list[str] = []
+    endpoint = replace(options.endpoint, timeout_s=min(options.endpoint.timeout_s, _remaining(options)))
+    # Keep late probe results private if local preflight fails or the run is interrupted.
+    provider_options = copy(options)
+    provider_options._provider_capabilities = {}
+
+    def start_probe(probe, *args):
+        result = Future()
+
+        def run_probe():
+            try:
+                result.set_result(probe(*args))
+            except BaseException as error:
+                result.set_exception(error)
+
+        # A timeout or interrupt in the caller must not wait for socket retries to finish.
+        threading.Thread(target=run_probe, daemon=True).start()
+        return result
+
+    from contextvars import copy_context
+    from .send1_probe_cache import reads_available
+
+    epoch_probe = None
+    if reads_available():
+        epoch_probe = start_probe(copy_context().run, _read_provider_epoch, provider_options, endpoint, "default")
+    else:
+        _read_provider_epoch(provider_options, endpoint, "default")
+
+    def check_model():
+        epoch = epoch_probe.result() if epoch_probe is not None else None
+        return _provider_model(provider_options, endpoint, epoch)
+
+    def check_context():
+        if epoch_probe is not None:
+            provider_options._provider_epoch = epoch_probe.result()
+        return check_slot_context(provider_options, preflight_messages.append)
+
+    model_probe = start_probe(copy_context().run, check_model)
+    context_probe = start_probe(copy_context().run, check_context)
+    _check_engine_python(options)
+    options._capabilities = _probe_capabilities(options)
+    _require_provider_model(endpoint, model_probe.result())
+    observation = context_probe.result()
+    options._provider_epoch = provider_options._provider_epoch
+    options._provider_capabilities.update(provider_options._provider_capabilities)
+    _select_prompt_cache_slot(options, preflight_messages.append, observation)
+    if options._provider_epoch is not None and options._provider_epoch.invalidated:
+        options._provider_epoch = None
+        _require_provider_model(endpoint, endpoint.probe())
+        preflight_messages.clear()
+        observation = check_slot_context(options, preflight_messages.append)
+        _select_prompt_cache_slot(options, preflight_messages.append, observation)
+    return preflight_messages, preflight_warnings
+
+
 def _run(options: RunOptions, started: float, printer=print) -> dict[str, object]:
+    if options._send1_wave4 is None:
+        options._send1_wave4 = _startup_optimization_enabled()
     if options.endpoint is None:
         raise RunError("an endpoint is required")
     options.endpoint.check_locality()
@@ -4450,18 +4754,22 @@ def _run(options: RunOptions, started: float, printer=print) -> dict[str, object
             raise ValueError("a generic runner requires --test-cmd")
     except ValueError as error:
         raise RunError(str(error)) from error
-    _check_engine_python(options)
     options._provider_capabilities.clear()
     options._provider_route_dialects.clear()
-    options._capabilities = _probe_capabilities(options)
-    probe = replace(options.endpoint, timeout_s=min(options.endpoint.timeout_s, _remaining(options))).probe()
-    if probe.get("model_found") is False:
-        raise RunError(f"endpoint does not serve model {options.endpoint.model!r}; it lists: "
-                       + ", ".join(probe.get("served_models") or []))
-    preflight_messages: list[str] = []
-    preflight_warnings: list[str] = []
-    check_slot_context(options, preflight_messages.append)
-    _select_prompt_cache_slot(options, preflight_messages.append)
+    options._provider_epoch = None
+    if options._send1_wave4:
+        preflight_messages, preflight_warnings = _wave4_provider_preflight(options)
+    else:
+        _check_engine_python(options)
+        options._capabilities = _probe_capabilities(options)
+        probe = replace(options.endpoint, timeout_s=min(options.endpoint.timeout_s, _remaining(options))).probe()
+        if probe.get("model_found") is False:
+            raise RunError(f"endpoint does not serve model {options.endpoint.model!r}; it lists: "
+                           + ", ".join(probe.get("served_models") or []))
+        preflight_messages: list[str] = []
+        preflight_warnings: list[str] = []
+        check_slot_context(options, preflight_messages.append)
+        _select_prompt_cache_slot(options, preflight_messages.append)
     _probe_routes(options, preflight_messages.append, warnings=preflight_warnings)
     printer(f"{options._capabilities['display']}; {_provider_preflight_summary(options)}")
     for warning in _provider_preflight_warnings(options._provider_capabilities):
@@ -4481,6 +4789,12 @@ def _run(options: RunOptions, started: float, printer=print) -> dict[str, object
     printer(f"run directory: {run_dir}")
     lock = resume_module.hold_run_lock(run_dir)  # noqa: F841 - held until this run returns
     return _execute(options, started, printer, run_dir, work, spec)
+
+
+def _require_provider_model(endpoint: Endpoint, probe: dict) -> None:
+    if probe.get("model_found") is False:
+        raise RunError(f"endpoint does not serve model {endpoint.model!r}; it lists: "
+                       + ", ".join(probe.get("served_models") or []))
 
 
 class Terminated(KeyboardInterrupt):

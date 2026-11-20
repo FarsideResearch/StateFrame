@@ -17,6 +17,7 @@ from kernel_agent_schemas import (
     JOB_NAMES,
     OBSERVATION_NAMES,
     SchemaMeteringTimeout,
+    builtin_schema_snapshot,
     prepare_schema_measurement,
 )
 from kernel_exec_session import ExecSessionError
@@ -75,7 +76,17 @@ def _replayed_schema_budget(spec):
 class AgentTools:
     def __init__(self, shell, custom, mcp_servers=(), *, resume_active=False,
                  defer_schema_budget=False):
-        if custom.tools:
+        self._pilot_schema_budget = shell.spec.get("send1_wave4") is True and not resume_active
+        registration = None
+        if self._pilot_schema_budget:
+            try:
+                from kernel_agent_registration import registration_data
+            except ModuleNotFoundError as error:
+                if error.name != "kernel_agent_registration":
+                    raise
+            else:
+                registration = registration_data(shell, custom, mcp_servers, resume_active=resume_active)
+        if registration is None and custom.tools:
             from kernel_completion_owner import TOOL_SPECS
             from kernel_custom_tools import CustomToolError
             from kernel_lean import _KNOWN_TOOL_NAMES
@@ -88,9 +99,12 @@ class AgentTools:
         self.custom = {tool.name: tool for tool in custom.tools}
         self.mcp_servers = tuple(mcp_servers)
         self.resume_active = resume_active
-        self.custom_schemas = copy.deepcopy(custom.schemas())
-        for schema in self.custom_schemas:
-            schema["function"]["parameters"]["properties"].setdefault("why", {"type": "string"})
+        if registration is None:
+            self.custom_schemas = copy.deepcopy(custom.schemas())
+            for schema in self.custom_schemas:
+                schema["function"]["parameters"]["properties"].setdefault("why", {"type": "string"})
+        else:
+            self.custom_schemas = registration.custom_schemas
         wall = os.environ.get("STATEFRAME_RUN_WALL_SECONDS")
         self.deadline = time.monotonic() + float(wall) if wall else float("inf")
         self.jobs = AgentJobs(shell, self.deadline)
@@ -120,6 +134,10 @@ class AgentTools:
         # STATEFRAME_GIT_COMMIT: commit and branch tools, absent from every request when off.
         self.commit_names = frozenset(kernel_git_commit.TOOL_NAMES) if kernel_git_commit.enabled() else frozenset()
         self.names = OBSERVATION_NAMES | self.commit_names | self.custom.keys()
+        self._builtin_schema_snapshot = (
+            registration.builtin_schema_snapshot if registration is not None
+            else builtin_schema_snapshot() if self._pilot_schema_budget else None
+        )
         self._pending_schema_budget = None
         self.startup_schema_budget = None
         self._defer_schema_budget = defer_schema_budget and bool(shell.spec.get("chat_url"))
@@ -136,7 +154,10 @@ class AgentTools:
         auth_key, endpoint = _tokenizer_auth(self.shell.spec)
         return prepare_schema_measurement(self.custom_schemas, endpoint=endpoint,
                                           auth_key=auth_key, generation_endpoint=endpoint,
-                                          deadline=deadline)
+                                          deadline=deadline,
+                                          builtin_schemas=self._builtin_schema_snapshot,
+                                          recorded=self.shell.spec if self._pilot_schema_budget else None,
+                                          resume_active=self.resume_active)
 
     def _start_schema_budget(self):
         from concurrent.futures import Future
@@ -167,7 +188,7 @@ class AgentTools:
         self.schema_budget = budget
         with tempfile.NamedTemporaryFile(mode="w", prefix="tool-schema-budget-", suffix=".json",
                                          dir=self.shell.run_dir, delete=False) as report:
-            json.dump(self.schema_budget, report, sort_keys=True)
+            json.dump(budget, report, sort_keys=True)
             self.schema_budget_path = Path(report.name)
 
     def _finish_schema_budget(self):

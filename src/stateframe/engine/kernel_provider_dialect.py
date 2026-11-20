@@ -7,7 +7,11 @@ import threading
 import time
 import urllib.parse
 from collections.abc import Mapping, MutableMapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from stateframe.endpoint import ProviderEpoch
 
 try:  # Host runner imports the helper as a package; the engine loads it top-level.
     from .kernel_bounded_http import bounded_json_probe, last_probe_error
@@ -75,6 +79,7 @@ class ProviderCapabilities:
     props_status: int | None = None
     slots_status: int | None = None
     probe_degradation: ProbeDegradation | None = None
+    _preflight_epoch: ProviderEpoch | None = field(default=None, compare=False, repr=False)
 
     @property
     def continuation(self) -> bool:
@@ -96,6 +101,38 @@ class ProviderCapabilities:
                 }
             ),
         }
+
+
+def _verified_capability_record(record: object) -> ProviderCapabilities | None:
+    """Validate the successful, default preflight results eligible for disk reuse."""
+    if not isinstance(record, dict) or record.keys() != {
+        "dialect", "slots", "slot_ids", "reason", "props_status", "slots_status", "probe_degradation",
+    }:
+        return None
+    props_status, slots_status = record["props_status"], record["slots_status"]
+    ids = record["slot_ids"]
+    if (record["probe_degradation"] is not None
+            or type(props_status) is not int or props_status not in {200, 404}
+            or type(slots_status) is not int or slots_status not in {200, 404}
+            or type(record["slots"]) is not bool or record["slots"] != (slots_status == 200)
+            or not isinstance(ids, list) or len(ids) > 256
+            or any(type(slot_id) is not int or slot_id < 0 for slot_id in ids)
+            or ids != sorted(set(ids)) or bool(ids) != record["slots"]):
+        return None
+    dialect, reason = record["dialect"], record["reason"]
+    if dialect == LLAMA_CPP:
+        if reason == "proven by /props":
+            if props_status != 200:
+                return None
+        elif reason != "proven by /slots" or not record["slots"]:
+            return None
+    elif (dialect != OPENAI_STRICT or props_status != 404 or slots_status != 404
+          or reason != "openai-strict because /props was 404 and /slots was unproven"):
+        return None
+    return ProviderCapabilities(
+        dialect=dialect, slots=record["slots"], slot_ids=frozenset(ids), reason=reason,
+        props_status=props_status, slots_status=slots_status,
+    )
 
 
 def _probe_degradation_from_record(value: object) -> ProbeDegradation | None:
@@ -285,17 +322,29 @@ def capabilities_for(
     require_slots: bool = True,
     cache: MutableMapping[str, ProviderCapabilities] | None = None,
     environ: Mapping[str, str] | None = None,
+    epoch: ProviderEpoch | None = None,
 ) -> ProviderCapabilities:
     """Classify the selected origin once per run, using its selected API key.
 
     The engine child owns the default module cache for one run and seeds it from
     the host's route preflight. Standalone adapters can pass their own run cache.
+    A host supplying an epoch scopes its run cache to the same selected route.
     """
     origin = origin_of(endpoint)
     if not origin:
         return ProviderCapabilities()
     selected_cache = RUN_CAPABILITY_CACHE if cache is None else cache
-    cached = selected_cache.get(origin)
+    if epoch is not None and not epoch.matches(endpoint, key):
+        epoch = None
+
+    def run_cached() -> ProviderCapabilities | None:
+        result = selected_cache.get(origin)
+        if result is not None and (result._preflight_epoch is not epoch
+                                   or epoch is not None and epoch.invalidated):
+            return None
+        return result
+
+    cached = run_cached()
     if cached is not None and (
         not require_slots or cached.slots or cached.slots_status is not None
     ):
@@ -309,7 +358,7 @@ def capabilities_for(
         if remaining <= 0 or not origin_lock.acquire(timeout=remaining):
             raise TimeoutError("tokenizer request deadline expired")
     try:
-        cached = selected_cache.get(origin)
+        cached = run_cached()
         if cached is not None and (
             not require_slots or cached.slots or cached.slots_status is not None
         ):
@@ -321,6 +370,13 @@ def capabilities_for(
 
         source = os.environ if environ is None else environ
         override = str(source.get(PROVIDER_OVERRIDE_ENV, "")).strip().casefold() == LLAMA_CPP
+        persistent = epoch if require_slots and not override and cached_llama_proof is None else None
+        if persistent is not None:
+            verified = _verified_capability_record(persistent.lookup("capabilities"))
+            if verified is not None and verified.slots == persistent.covers_slots:
+                verified = replace(verified, _preflight_epoch=epoch)
+                selected_cache[origin] = verified
+                return verified
 
         started = time.monotonic()
 
@@ -426,7 +482,17 @@ def capabilities_for(
             props_status=props_status,
             slots_status=slots_status,
             probe_degradation=probe_degradation,
+            _preflight_epoch=epoch,
         )
+        if persistent is not None:
+            record = result.to_record()
+            complete = not slots or _slots_proof(slots_result, require_llama_shape=True)[0]
+            if slots_result is not None:
+                persistent.observe_slots(slots_result[1] if slots_status == 200 else None)
+            persistent.observe(
+                "capabilities", record if (complete and slots == persistent.covers_slots
+                                           and _verified_capability_record(record)) else None,
+            )
         if cached_llama_proof is not None:
             if not slots_cut_short:
                 selected_cache[origin] = result

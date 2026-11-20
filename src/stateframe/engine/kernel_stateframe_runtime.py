@@ -15,8 +15,6 @@ import copy
 import ast
 import dataclasses
 import functools
-import signal
-import difflib
 import hashlib
 import json
 import os
@@ -56,6 +54,19 @@ from kernel_verdict import (
     open_work_ids, repair_action_for,
 )
 from kernel_reason_log import bind_journal, configure, emit_reason, flush_summary
+
+try:
+    from stateframe import _startup_optimization_enabled as _send1_optimization_enabled
+except ModuleNotFoundError as error:
+    if error.name != "stateframe":
+        raise
+    _send1_optimization_enabled = None
+
+if _send1_optimization_enabled is not None and _send1_optimization_enabled():
+    difflib = signal = None
+else:
+    import signal
+    import difflib
 
 if TYPE_CHECKING:
     from kernel_named_layer_coverage import CoverageProjection
@@ -1639,9 +1650,12 @@ def self_edit_view_mode() -> str:
 def _compact_unified_diff(before: str | None, after: str | None, path: str,
                           limit: int = 40) -> str:
     """Render a bounded diff from host-observed file contents."""
+    diff_module = difflib
+    if diff_module is None:
+        import difflib as diff_module
     before_lines = [] if before is None else before.splitlines()
     after_lines = [] if after is None else after.splitlines()
-    lines = list(difflib.unified_diff(
+    lines = list(diff_module.unified_diff(
         before_lines, after_lines, fromfile="a/" + path, tofile="b/" + path,
         n=1, lineterm=""))
     if not lines:
@@ -8944,8 +8958,11 @@ class StateFrameRuntime:
                          else exit_code - 128 if isinstance(exit_code, int) and exit_code >= 128 else None)
         signal_name = None
         if signal_number is not None:
+            signal_module = signal
+            if signal_module is None:
+                import signal as signal_module
             try:
-                signal_name = signal.Signals(signal_number).name
+                signal_name = signal_module.Signals(signal_number).name
             except (ValueError, AttributeError):
                 signal_name = f"SIG{signal_number}"
         # Name the exact limit from the sandbox's evidence; a SIGKILL no limit explains is

@@ -24,6 +24,8 @@ EXPECTED_SITES = {
     ("_child.py", "_install_direct_opener", "helper"),
     ("endpoint.py", "get_json", "helper"),
     ("endpoint.py", "get_slots", "helper"),
+    # This loopback-only probe attaches just HTTPHandler to a bare director.
+    ("endpoint.py", "provider_epoch", "OpenerDirector"),
     ("engine/kernel_bounded_http.py", "_child", "helper"),
     ("engine/kernel_plain_http.py", "opener", "helper"),
     (HELPER, "build_credential_scoped_opener", "build_opener"),

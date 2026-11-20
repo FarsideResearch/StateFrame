@@ -73,7 +73,7 @@ def test_failed_handoff_keeps_slot_unavailable_until_claim_or_family_proof(
         "assert lease is not None",
         "_child.emit = lambda *args, **kwargs: None",
         "tree = ast.parse(Path(_child.__file__).read_text(encoding='utf-8'))",
-        "main = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'main')",
+        "main = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == '_main')",
         "outer = next(node for node in main.body if isinstance(node, ast.Try) and any(",
         "    isinstance(item, ast.Try) for item in node.finalbody))",
         "session = SimpleNamespace(containment_verified=False, _process=object(),",

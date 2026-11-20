@@ -5,6 +5,7 @@ import difflib
 import hashlib
 import json
 import os
+import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from threading import RLock
@@ -383,7 +384,6 @@ def _editable_product_paths(runtime: object) -> tuple[str, ...]:
 
 def _workspace_consumers(root: Path):
     # The host imports and registers the consumer only for a fenced attempt.
-    import sys
     module = sys.modules.get("kernel_workspace_consumers")
     consumers = module.consumers_for(root) if module is not None else None
     return consumers
@@ -712,6 +712,10 @@ def _product_sources(runtime: object, binding: Mapping[str, object] | None,
         target = _target_relative(runtime)
         if target and is_product_path(target):
             paths.add(target)
+    return _read_product_sources(root, paths)
+
+
+def _read_product_sources(root: Path, paths: set[str]) -> dict[str, str]:
     sources: dict[str, str] = {}
     for relative in paths:
         try:
@@ -769,6 +773,7 @@ class GreenLock:
         self._starting_revision: object = None
         self._starting_product_files: dict[str, object] = {}
         self._starting_product_sources: dict[str, str] = {}
+        self._deferred_product_sources: dict[str, bytes] = {}
         self._starting_editable_product_files: dict[str, object] = {}
         self._starting_editable_product_paths: tuple[str, ...] = ()
         if self.mode in {"on", "terminal"}:
@@ -783,9 +788,7 @@ class GreenLock:
                     self._starting_editable_product_paths = tuple(
                         str(path) for path in parent_paths)
             if self.mode == "terminal":
-                self._starting_product_files = _binding_product_files(self._starting_binding)
-                self._starting_product_sources = _product_sources(
-                    runtime, self._starting_binding, self._starting_product_files)
+                self._capture_terminal_sources(self._starting_binding)
         self._green = False
         self._green_revision: object = None
         self._product_edit_applied = False
@@ -988,10 +991,47 @@ class GreenLock:
         self._starting_binding = dict(current)
         self._starting_revision = revision
         if self.mode == "terminal":
-            self._starting_product_files = _binding_product_files(current)
-            self._starting_product_sources = _product_sources(
-                self.runtime, current, tuple(self._starting_product_files))
+            self._capture_terminal_sources(current)
         return True
+
+    def _capture_terminal_sources(self, binding: Mapping[str, object] | None) -> None:
+        self._starting_product_files = _binding_product_files(binding)
+        self._deferred_product_sources.clear()
+        admission = sys.modules.get("stateframe.workspace_start_snapshot")
+        root = getattr(getattr(self.runtime, "owner", None), "root", None)
+        original_files = binding.get("product_files") if isinstance(binding, Mapping) else None
+        if (admission is not None and root is not None and self._starting_product_files
+                and isinstance(original_files, Mapping)
+                and not getattr(self.runtime, "restart_enabled", False)
+                and admission.startup_observation(root, "terminal-source") is not None):
+            baseline = (getattr(self.runtime, "_host_done_facts_baseline", None)
+                        or getattr(self.runtime, "_delivery_contract_baseline", None))
+            if isinstance(baseline, Mapping):
+                eager_paths = set()
+                for relative, expected in self._starting_product_files.items():
+                    raw = baseline.get(relative)
+                    if (isinstance(raw, bytes) and original_files.get(relative) == expected
+                            and expected == "sha256:" + hashlib.sha256(raw).hexdigest()):
+                        self._deferred_product_sources[relative] = raw
+                    else:
+                        eager_paths.add(relative)
+                self._starting_product_sources = _read_product_sources(root, eager_paths)
+                return
+        self._starting_product_sources = _product_sources(
+            self.runtime, binding, self._starting_product_files)
+
+    def _materialize_starting_product_sources(self) -> None:
+        deferred = getattr(self, "_deferred_product_sources", None)
+        if not deferred:
+            return
+        for relative, raw in deferred.items():
+            try:
+                # Match the strict UTF-8 and universal newlines of read_text.
+                source = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+            except UnicodeError:
+                continue
+            self._starting_product_sources[relative] = source
+        deferred.clear()
 
     @staticmethod
     def _row_is_applied_product_edit(row: Mapping[str, object]) -> bool:
@@ -1036,6 +1076,7 @@ class GreenLock:
                 and revision is not None and revision != self._starting_revision)
 
     def _terminal_change_diff(self) -> str:
+        self._materialize_starting_product_sources()
         current = _current_binding(self.runtime)
         if isinstance(current, UnavailableEvidence):
             return ("--- a/<product>\n+++ b/<product>\n"

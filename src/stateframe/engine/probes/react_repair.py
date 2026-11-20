@@ -174,7 +174,20 @@ from kernel_edit_tool_names import EDIT_SOURCE_TOOL, PROTOCOL_EDIT_TOOL_NAMES  #
 import kernel_workspace_truth as _workspace_truth  # noqa: E402
 import kernel_frame_routes as _frame_routes  # noqa: E402
 from kernel_routing_schema import routing_v2  # noqa: E402
-from stateframe.test_runners import collection_change_reason, pytest_plugin_modules  # noqa: E402
+
+try:
+    from stateframe import _startup_optimization_enabled as _send1_optimization_enabled
+except ModuleNotFoundError as error:
+    if error.name != "stateframe":
+        raise
+    _send1_optimization_enabled = None
+
+_defer_dispatch_imports = (_send1_optimization_enabled is not None
+                           and _send1_optimization_enabled())
+if _defer_dispatch_imports:
+    collection_change_reason = pytest_plugin_modules = None
+else:
+    from stateframe.test_runners import collection_change_reason, pytest_plugin_modules
 
 API = os.environ.get("DS_URL", "")
 # DeepSeek V4 Flash is the model we actually care about — it is the current agentic/coding
@@ -7831,10 +7844,15 @@ def work(d, *, resume=None):
                           {str(root / p) for p in d.get("public_check_paths", ())})
         _collection_guarded = (d.get("runner_kind", "pytest") == "pytest"
                                and d.get("protect_tests", "all") in {"task", "all"})
-        _collection_plugins = (pytest_plugin_modules(root, tuple(
-            path.relative_to(root).as_posix()
-            for path in (*root.rglob("test_*.py"), *root.rglob("conftest.py"),
-                         *root.rglob("__init__.py")))) if _collection_guarded else ())
+        _collection_plugins = ()
+        if _collection_guarded:
+            find_pytest_plugins = pytest_plugin_modules
+            if find_pytest_plugins is None:
+                from stateframe.test_runners import pytest_plugin_modules as find_pytest_plugins
+            _collection_plugins = find_pytest_plugins(root, tuple(
+                path.relative_to(root).as_posix()
+                for path in (*root.rglob("test_*.py"), *root.rglob("conftest.py"),
+                             *root.rglob("__init__.py"))))
 
         def _collection_reason(path, *, created=None, after=None):
             if not _collection_guarded:
@@ -7847,13 +7865,16 @@ def work(d, *, resume=None):
                 created = not path.exists()
             before = (path.read_text(encoding="utf-8", errors="replace")
                       if not created and after is not None and path.is_file() else None)
-            return collection_change_reason(
+            change_reason = collection_change_reason
+            if change_reason is None:
+                from stateframe.test_runners import collection_change_reason as change_reason
+            return change_reason(
                 relative, kind="pytest", protected_tests=tuple(
                     pathlib.Path(name).relative_to(root).as_posix()
                     for name in baseline_tests),
                 test_files=tuple({*(d.get("test_file_paths", ()) or ()),
                                   *(d.get("public_check_paths", ()) or ())}),
-                pytest_plugins=(_collection_plugins + pytest_plugin_modules(
+                pytest_plugins=(_collection_plugins + find_pytest_plugins(
                     root, tuple(pathlib.Path(item).relative_to(root).as_posix()
                                 for item in created_this_run
                                 if str(item).endswith(".py")))), created=created,
@@ -7868,10 +7889,11 @@ def work(d, *, resume=None):
         _shell = shell_service()
         _hook_wiring_for_run = globals().get("_hook_wiring")
         from kernel_edit_protocol_switch import handles_enabled as _edit_protocol_handles
-        from kernel_edit_source_tool import EditProtocolRunState
-        # The transport attaches each request's handle map (kernel_edit_request_map);
-        # an empty map refuses every handle as STALE_HANDLE.
-        _edit_protocol_state = EditProtocolRunState()
+        _edit_protocol_state = None
+        if not _defer_dispatch_imports or _edit_protocol_handles():
+            from kernel_edit_source_tool import EditProtocolRunState
+            # The transport attaches the request's handle map to this state.
+            _edit_protocol_state = EditProtocolRunState()
         if _shell is not None:
             if _hook_wiring_for_run is None:
                 _shell.bind(root, d, baseline_tests)
@@ -8479,16 +8501,25 @@ def work(d, *, resume=None):
         # row's declared parent text (which can differ byte-wise from the materialized repo).
         _initial_product_sources = None
         if resume is None and isinstance(root, pathlib.Path):
+            initial_product_sources = None
+            if multifile and _defer_dispatch_imports:
+                try:
+                    from kernel_agent_registration import initial_product_sources
+                except ModuleNotFoundError as error:
+                    if error.name != "kernel_agent_registration":
+                        raise
             try:
-                if multifile:
-                    _initial_paths = _product_source_paths(root, fileset, d)
-                elif isinstance(target, pathlib.Path):
-                    _initial_relative = target.relative_to(root).as_posix()
-                    _initial_paths = (_initial_relative,)
+                if initial_product_sources is not None:
+                    _, _initial_product_sources = initial_product_sources(root, fileset, d)
                 else:
-                    _initial_paths = ()
-                if _initial_paths:
-                    _initial_product_sources = _initial_source_snapshot(root, _initial_paths)
+                    if multifile:
+                        _initial_paths = _product_source_paths(root, fileset, d)
+                    elif isinstance(target, pathlib.Path):
+                        _initial_paths = (target.relative_to(root).as_posix(),)
+                    else:
+                        _initial_paths = ()
+                    if _initial_paths:
+                        _initial_product_sources = _initial_source_snapshot(root, _initial_paths)
             except (OSError, TypeError, ValueError):
                 _initial_product_sources = None
         measurement = StateFrameRuntime(
