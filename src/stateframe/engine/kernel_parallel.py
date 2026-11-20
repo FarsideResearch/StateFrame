@@ -2683,6 +2683,10 @@ def preserve_unit_candidate(call_root: Path, unit_id: str, *,
         if chosen is None:
             return {"status": "FAILED", "reason": "no readable candidate bundle"}
         name, raw, bundle = chosen
+        if bundle.get("schema") == "stateframe-candidate-trees/1":
+            from kernel_workspace_candidate import salvage_candidate
+            target = call_root / "salvage" / f"{unit_id}.json"
+            return salvage_candidate(candidates.parent.parent, candidates / name, target)
         base = oldest = None
         if start_generation is not None:
             base = call_root / "snapshots" / f"g{start_generation}"

@@ -1,8 +1,7 @@
 """Raw no-hooks parity against this candidate's immediate base release.
 
-SF_TEST_BASELINE_IMMEDIATE may name an explicit checkout. Otherwise use the in-tree merge base with
-origin/main when it is a strict ancestor; without that ref, use the newest ancestor release commit
-(excluding HEAD) whose subject identifies a StateFrame version or release. Both sides explicitly
+SF_TEST_BASELINE_IMMEDIATE may name an explicit checkout. Otherwise use the latest release named
+in the changelog and present in HEAD's history (excluding HEAD). Both sides explicitly
 disable the stable tool head and v0.4.0 final cache layout, which changes wire order: this
 parity is about hooks, not tool lists or cache layout. The allocator is also
 explicitly disabled on both sides to retain the legacy request contract.
@@ -97,29 +96,51 @@ def test_journal_kind_parity_rejects_unexpected_extra_kind():
                                                         if kind != "prompt_cache_accounting"])
 
 
-def _assert_spec_keys_match_release(baseline_keys, current_keys):
+def _assert_spec_keys_match_release(baseline_keys, current_keys, *, run_env_created):
     # The fixture proves llama.cpp via /props, so the candidate records that proof in spec.json.
-    expected = baseline_keys | RUNNER_SPEC_FIELDS
-    if "provider_capabilities" not in baseline_keys:
-        expected.add("provider_capabilities")
+    expected = baseline_keys | RUNNER_SPEC_FIELDS | {"provider_capabilities"}
+    # CHANGELOG Unreleased, "offline sandboxed commands can read the system's public CA
+    # certificates": on Debian, pip can now initialize, so only successful provisioning
+    # can add the run_env key when the release fell back to the selected interpreter.
+    if run_env_created:
+        expected.add("run_env")
+    assert ("run_env" in current_keys) == run_env_created
     assert current_keys == expected
 
 
 def test_spec_key_parity_rejects_unexpected_extra_key():
     baseline = {"schema", "chat_url"}
     allowed = baseline | RUNNER_SPEC_FIELDS | {"provider_capabilities"}
-    _assert_spec_keys_match_release(baseline, allowed)
-    baseline_with_capabilities = baseline | {"provider_capabilities"}
-    _assert_spec_keys_match_release(
-        baseline_with_capabilities, baseline_with_capabilities | RUNNER_SPEC_FIELDS)
+    _assert_spec_keys_match_release(baseline, allowed, run_env_created=False)
+    _assert_spec_keys_match_release(baseline, allowed | {"run_env"}, run_env_created=True)
+    _assert_spec_keys_match_release(baseline | {"run_env"}, allowed | {"run_env"},
+                                    run_env_created=True)
     with pytest.raises(AssertionError):
-        _assert_spec_keys_match_release(
-            baseline_with_capabilities,
-            (baseline_with_capabilities | RUNNER_SPEC_FIELDS) - {"provider_capabilities"})
+        _assert_spec_keys_match_release(baseline, allowed, run_env_created=True)
     with pytest.raises(AssertionError):
-        _assert_spec_keys_match_release(baseline, baseline | RUNNER_SPEC_FIELDS)
+        _assert_spec_keys_match_release(baseline, allowed | {"run_env"}, run_env_created=False)
     with pytest.raises(AssertionError):
-        _assert_spec_keys_match_release(baseline, allowed | {"unexpected_spec_key"})
+        _assert_spec_keys_match_release(baseline | {"run_env"}, allowed, run_env_created=False)
+    with pytest.raises(AssertionError):
+        _assert_spec_keys_match_release(baseline, allowed - {"provider_capabilities"},
+                                        run_env_created=False)
+    with pytest.raises(AssertionError):
+        _assert_spec_keys_match_release(baseline, allowed | {"unexpected_spec_key"},
+                                        run_env_created=False)
+
+
+def _assert_run_spec_matches_release(baseline_keys, current_keys, run: Path) -> None:
+    created = (run / "env-sites.json").is_file()
+    _assert_spec_keys_match_release(baseline_keys, current_keys, run_env_created=created)
+    spec = json.loads((run / "spec.json").read_text())
+    assert spec["tool_settings"]["run_env"] is created
+    if created:
+        assert Path(spec["run_env"]["root"]) == run / "env"
+        assert Path(spec["capabilities"]["test_python"]) == run / "env" / "bin" / "python"
+
+
+def _assert_finished_diff_matches_release(baseline_run: Path, run: Path) -> None:
+    assert (run / "final.diff").read_bytes() == (baseline_run / "final.diff").read_bytes()
 
 
 def _assert_proven_fixture_capabilities(run: Path) -> None:
@@ -135,6 +156,7 @@ def _assert_proven_fixture_capabilities(run: Path) -> None:
             "props_status": 200,
             "slots_status": 404,
             "reasoning_controls": "llama.cpp reasoning controls unchanged",
+            "probe_degradation": None,
         },
     }
 
@@ -378,7 +400,8 @@ def _run_checkout(
 ):
     python = tree_python(checkout / "src",
                          run.parent / f"{run.name}-{checkout.name}-python")
-    assert_tree_imports(python, checkout / "src", run.parent)
+    # TMPDIR may be inside the source checkout. Keep the import probe outside it.
+    assert_tree_imports(python, checkout / "src", Path(checkout.anchor))
     document = json.loads((CURRENT / "examples/discount_bug.script.json").read_text())
     if slots is not None:
         document["slots"] = slots
@@ -482,7 +505,8 @@ def test_no_hooks_raw_requests_and_journal_match_release(tmp_path, baseline_chec
     _assert_only_wire_ids_moved(baseline[0], current[0], run, tmp_path / "baseline_run")
     _assert_journal_kinds_match_release(baseline[1], current[1])
     assert current[2] == baseline[2]
-    _assert_spec_keys_match_release(baseline[3], current[3])
+    _assert_run_spec_matches_release(baseline[3], current[3], run)
+    _assert_finished_diff_matches_release(tmp_path / "baseline_run", run)
     _assert_proven_fixture_capabilities(run)
     assert current[5], "fixture did not exercise request-diet journal payloads"
     _assert_diet_payloads_match_release(baseline[5], current[5], baseline[0], current[0])
@@ -524,9 +548,12 @@ def test_no_hooks_regular_stateframe_file_matches_release(tmp_path, baseline_che
     _assert_only_wire_ids_moved(baseline[0], current[0], run, tmp_path / "baseline_run")
     _assert_journal_kinds_match_release(baseline[1], current[1])
     assert current[2] == baseline[2]
-    _assert_spec_keys_match_release(baseline[3], current[3])
+    _assert_run_spec_matches_release(baseline[3], current[3], run)
+    _assert_finished_diff_matches_release(tmp_path / "baseline_run", run)
     _assert_proven_fixture_capabilities(run)
     _assert_diet_payloads_match_release(baseline[5], current[5], baseline[0], current[0])
+    for compared_run in (tmp_path / "baseline_run", run):
+        assert (compared_run / "workspace" / ".stateframe").read_bytes() == b"ordinary repository data"
     must_run_witness.record_parity(
         baseline_trace=baseline[4],
         candidate_trace=current[4],
@@ -561,6 +588,8 @@ def test_no_hooks_real_shaped_llama_keeps_automatic_pin_and_release_bytes(
     _assert_only_wire_ids_moved(baseline[0], current[0], run, tmp_path / "baseline_run")
     _assert_journal_kinds_match_release(baseline[1], current[1])
     assert "provider_feature_degraded" not in current[1]
+    _assert_run_spec_matches_release(baseline[3], current[3], run)
+    _assert_finished_diff_matches_release(tmp_path / "baseline_run", run)
     _assert_diet_payloads_match_release(baseline[5], current[5], baseline[0], current[0])
 
 
@@ -570,7 +599,7 @@ def _resume_checkout(checkout: Path, repo: Path, run: Path, launcher: Path,
                      final_cache_layout: str | None) -> tuple[list[bytes], list[bytes], list[str]]:
     python = tree_python(checkout / "src",
                          run.parent / f"{run.name}-{checkout.name}-python")
-    assert_tree_imports(python, checkout / "src", run.parent)
+    assert_tree_imports(python, checkout / "src", Path(checkout.anchor))
     class InterruptAfterTwoActions(Script):
         def __init__(self):
             super().__init__({"model": "scripted", "steps": [
@@ -674,7 +703,18 @@ def test_no_hooks_resume_rebuilt_requests_match_release(tmp_path, baseline_check
     # current/baseline are (original, rebuilt) request lists; resume parity inside one
     # version stays byte-exact (asserted in _resume_checkout), across versions only IDs move.
     _assert_only_wire_ids_moved(baseline[0], current[0])
-    _assert_only_wire_ids_moved(baseline[1], current[1], run, tmp_path / "baseline_run")
+    baseline_run = tmp_path / "baseline_run"
+    _assert_only_wire_ids_moved(baseline[1], current[1], run, baseline_run)
+    _assert_journal_kinds_match_release(
+        [event["kind"] for event in measurement_events(baseline_run)],
+        [event["kind"] for event in measurement_events(run)],
+    )
+    _assert_run_spec_matches_release(
+        set(json.loads((baseline_run / "spec.json").read_text())),
+        set(json.loads((run / "spec.json").read_text())),
+        run,
+    )
+    _assert_finished_diff_matches_release(baseline_run, run)
     must_run_witness.record_parity(
         baseline_trace=baseline[2],
         candidate_trace=current[2],

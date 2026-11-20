@@ -72,8 +72,11 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
+import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import Future, wait
 from dataclasses import dataclass
 from pathlib import Path
@@ -172,7 +175,7 @@ def _positive_env(name: str, default: float) -> float:
     except (TypeError, ValueError):
         logger.debug("lsp_resolve: bad %s=%r — using default", name, raw)
         return default
-    return val if val > 0 else default
+    return val if math.isfinite(val) and val > 0 else default
 
 
 def total_budget_seconds() -> float:
@@ -255,9 +258,10 @@ def _cache_key(ref: CallSiteRef) -> str:
     return f"{ref.line}:{ref.col}"
 
 
-def load_cache(repo_root: Path) -> dict:
+def load_cache(repo_root: Path, *, path: Path | None = None) -> dict:
     """Load the persisted per-file LSP cache. Never raises; {} on any problem."""
-    path = _repo_cache_file(repo_root, CACHE_FILENAME)
+    if path is None:
+        path = _repo_cache_file(repo_root, CACHE_FILENAME)
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, RecursionError, UnicodeError, ValueError):
@@ -269,9 +273,10 @@ def load_cache(repo_root: Path) -> dict:
     return files if isinstance(files, dict) else {}
 
 
-def save_cache(repo_root: Path, files: dict) -> None:
+def save_cache(repo_root: Path, files: dict, *, path: Path | None = None) -> None:
     """Persist the per-file LSP cache. Never raises — the cache is an optimization."""
-    path = _repo_cache_file(repo_root, CACHE_FILENAME)
+    if path is None:
+        path = _repo_cache_file(repo_root, CACHE_FILENAME)
     try:
         from .call_graph import _atomic_write_text
         _atomic_write_text(path, json.dumps({
@@ -452,6 +457,7 @@ def resolve_file_full(
     sites: Iterable[CallSiteRef],
     *,
     timeout: Optional[float] = None,
+    deadline: float | None = None,
 ) -> dict[tuple[int, int], Optional[ResolvedTarget]]:
     """Like :func:`resolve_file` but keeps explicit MISSes (value ``None``).
 
@@ -474,6 +480,9 @@ def resolve_file_full(
     except OSError as exc:
         logger.debug("lsp_resolve: unreadable %s: %s", abs_path, exc)
         return {}
+
+    if deadline is not None:
+        return _resolve_sites_blocking(root, abs_path, source, site_list, deadline)
 
     budget = _timeout_seconds() if timeout is None else timeout
     started = time.monotonic()
@@ -555,6 +564,8 @@ def resolve_repo(
     file_hashes: Optional[dict[str, str]] = None,
     cache: Optional[dict] = None,
     timeout: Optional[float] = None,
+    deadline: float | None = None,
+    progress: Callable[[str, dict, dict | None, bool], None] | None = None,
 ) -> tuple[dict[str, dict[tuple[int, int], ResolvedTarget]], dict]:
     """Resolve many files, reusing a content-hash cache. NEVER raises.
 
@@ -574,7 +585,9 @@ def resolve_repo(
     file_hashes = file_hashes or {}
     extractor_version = _extractor_version()
     per_file = _timeout_seconds() if timeout is None else timeout
-    total_deadline = time.monotonic() + total_budget_seconds()
+    total_deadline = (
+        time.monotonic() + total_budget_seconds() if deadline is None else deadline
+    )
 
     skipped_files = 0
     for relpath, sites in sites_by_file.items():
@@ -608,6 +621,8 @@ def resolve_repo(
                 # re-resolve the same prefix on every future build instead of
                 # converging.
                 skipped_files += 1
+            elif deadline is not None:
+                results.update(resolve_file_full(repo_root, relpath, missing, deadline=deadline))
             else:
                 results.update(resolve_file_full(
                     repo_root, relpath, missing, timeout=min(per_file, remaining)))
@@ -630,8 +645,10 @@ def resolve_repo(
         file_hits = {pos: t for pos, t in results.items() if t is not None}
         if file_hits:
             hits[relpath] = file_hits
+        if progress is not None:
+            progress(relpath, file_hits, new_cache.get(relpath), len(results) == len(sites))
 
-    if skipped_files:
+    if skipped_files and deadline is None:
         # ONE honest line — never per file. The pass is a bounded bonus; saying
         # so out loud is what keeps a silently-degraded layer from looking
         # healthy (rule).
@@ -641,3 +658,60 @@ def resolve_repo(
             total_budget_seconds(), skipped_files,
         )
     return hits, new_cache
+
+
+# A hung goto holds this slot even after its budget has expired. Any later
+# builds can still publish static graphs without accumulating resolver threads.
+_background_slot = threading.BoundedSemaphore(2)
+
+
+def resolve_repo_background(
+    repo_root: Path, sites_by_file: dict[str, list[CallSiteRef]],
+    *, file_hashes: dict[str, str] | None, cache: dict | None,
+) -> tuple[dict, dict, bool]:
+    """Use a single deadline for all files and keep completed file results."""
+    if not _background_slot.acquire(blocking=False):
+        hits, carried = resolve_repo(repo_root, sites_by_file, file_hashes=file_hashes,
+                                     cache=cache, deadline=0)
+        return hits, carried, False
+    done = threading.Event()
+    lock = threading.Lock()
+    hits: dict = {}
+    carried = dict(cache or {})
+    deadline = time.monotonic() + total_budget_seconds()
+    finished = False
+    complete = True
+
+    def progress(path: str, file_hits: dict, row: dict | None, file_complete: bool) -> None:
+        nonlocal complete
+        with lock:
+            if time.monotonic() >= deadline:
+                return
+            complete = complete and file_complete
+            if file_hits:
+                hits[path] = file_hits
+            if row is not None:
+                carried[path] = row
+
+    def resolve() -> None:
+        nonlocal finished
+        try:
+            resolve_repo(
+                repo_root, sites_by_file, file_hashes=file_hashes, cache=cache,
+                deadline=deadline, progress=progress,
+            )
+            finished = time.monotonic() < deadline
+        except Exception as error:  # keep progress on optional backend failure
+            logger.debug("Background type resolution failed: %s", type(error).__name__)
+        finally:
+            _background_slot.release()
+            done.set()
+
+    try:
+        threading.Thread(target=resolve, name="repo-index-lsp", daemon=True).start()
+    except RuntimeError:
+        _background_slot.release()
+        return {}, carried, False
+    done.wait(max(0.0, deadline - time.monotonic()))
+    with lock:
+        return dict(hits), dict(carried), finished and complete

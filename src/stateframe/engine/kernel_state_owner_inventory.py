@@ -26,9 +26,20 @@ import ast
 import hashlib
 import os
 import re
+import stat
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field as dc_field
+from contextvars import ContextVar
+from dataclasses import dataclass
+from dataclasses import field as dc_field
 from pathlib import Path
+from typing import TYPE_CHECKING
+from weakref import WeakKeyDictionary
+
+import kernel_parse_cache as _parse_cache
+
+if TYPE_CHECKING:
+    from kernel_workspace_state import WorkspaceState
+    from kernel_workspace_tree import Directory, File
 
 ENV = "STATEFRAME_STATE_OWNER_INVENTORY"
 HEADER = "[STATE OWNER INVENTORY"
@@ -223,9 +234,20 @@ def product_files(root: Path, *, limit: int = _MAX_FILES) -> list[str]:
     return list(scan_product_files(root, limit=limit).paths)
 
 
-def _read(root: Path, relative: str) -> str | None:
+def _read(root: Path, relative: str, *, observed: File | None = None) -> str | None:
     path = Path(root) / relative
     try:
+        if observed is not None:
+            if observed.size > _MAX_FILE_BYTES:
+                return None
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd, "rb") as stream:
+                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                    return None
+                data = stream.read(observed.size + 1)
+            if len(data) != observed.size or hashlib.sha256(data).digest() != observed.sha256:
+                return None
+            return data.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
         if path.stat().st_size > _MAX_FILE_BYTES:
             return None
         return path.read_text(encoding="utf-8")
@@ -233,16 +255,26 @@ def _read(root: Path, relative: str) -> str | None:
         return None
 
 
-def _outline(path: str, source: str) -> Mapping[str, object]:
+def _outline(path: str, source: str, *, policy: str | None = None) -> Mapping[str, object]:
     try:
-        from kernel_request_source_window import _outline_for
-        return _outline_for(path, source)
+        from mc_repo_intel_vendor.ts_dispatch import (
+            outline_capability_key,
+            outline_source,
+            report_outline_parser_capability,
+        )
+        if policy is None:
+            policy = outline_capability_key(path, source)
+        outline = _parse_cache.derived_source(
+            ("owner_inventory.definitions", policy), source, path,
+            lambda text: outline_source(text, path, definitions_only=True),
+        )
+        report_outline_parser_capability(outline)
+        return outline
     except (ImportError, OSError, TypeError, ValueError):
         return {}
 
 
-def _parser_capability(path: str, source: str) -> str:
-    outline = _outline(path, source)
+def _capability(outline: Mapping[str, object]) -> str:
     if not outline:
         return "UNAVAILABLE"
     return "DEGRADED" if outline.get("degraded") else "AVAILABLE"
@@ -269,32 +301,6 @@ def _source_revision_vector(
                                     terminator=False), identities
 
 
-def _runtime_cache_key(
-        root: Path, candidates: Sequence[str], parent_sources: Mapping[str, str],
-) -> tuple[object, ...]:
-    """Fingerprint current files, parser capability, and parent identity."""
-
-    scan = scan_product_files(root)
-    sources: dict[str, str] = {}
-    capabilities: dict[str, str] = {}
-    for path in scan.paths:
-        source = _read(root, path)
-        if source is None:
-            capabilities[path] = "UNAVAILABLE"
-            continue
-        sources[path] = source
-        capabilities[path] = _parser_capability(path, source)
-    dependency_revision, _identities = _source_revision_vector(sources, parent_sources)
-    parent_revision = tuple(
-        (path, "sha256:" + hashlib.sha256(source.encode("utf-8", "surrogatepass")).hexdigest())
-        for path, source in sorted(parent_sources.items())
-    )
-    return (
-        tuple(candidates), dependency_revision, tuple(sorted(capabilities.items())),
-        tuple(scan.paths), tuple(scan.skipped_files), scan.complete, parent_revision,
-    )
-
-
 def _declared_name(line: str, kind: str) -> str | None:
     stripped = line.strip()
     if not stripped or stripped.startswith(("#", "//", "/*", "*", "@", "def ", "return ")):
@@ -312,37 +318,58 @@ def _correlation_key(name: str) -> str:
     return "_".join(parts[:2]) if len(parts) >= 2 else (parts[0] if parts else name)
 
 
-def declared_fields(path: str, source: str, candidates: Sequence[str]) -> list[OwnerField]:
+_DefinitionSpans = tuple[tuple[str, int, int], ...]
+
+
+def _python_definition_spans(tree: ast.Module) -> tuple[_DefinitionSpans, _DefinitionSpans]:
+    classes: list[tuple[str, int, int]] = []
+    functions: list[tuple[str, int, int]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            classes.append((node.name, node.lineno, node.end_lineno or node.lineno))
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            functions.append((node.name, node.lineno, node.end_lineno or node.lineno))
+    return tuple(classes), tuple(functions)
+
+
+def _python_spans(source: str) -> tuple[_DefinitionSpans, _DefinitionSpans]:
+    return _parse_cache.derived("owner_inventory.python_spans", source, "<unknown>",
+                                _python_definition_spans)
+
+
+def declared_fields(path: str, source: str, candidates: Sequence[str], *,
+                    outline: Mapping[str, object] | None = None) -> list[OwnerField]:
     """Resolve a named field plus its bounded correlated declaration group."""
-    outline = _outline(path, source)
+    if outline is None:
+        outline = _outline(path, source)
     lines = source.splitlines()
-    method_rows = [row for row in outline.get("functions", ()) or () if isinstance(row, Mapping)]
-    type_rows = [row for row in outline.get("types", ()) or () if isinstance(row, Mapping)]
-    if not type_rows:
-        for number, line in enumerate(lines, 1):
-            match = _TYPE_LINE.match(line)
-            if match:
-                name = next((value for value in match.groups() if value), "")
-                kind = "struct" if match.group("struct") else "interface" if match.group("interface") else "class"
-                type_rows.append({"line": number, "end_line": number,
-                                  "name": name, "kind": kind})
+    spans = None
     if path.casefold().endswith(".py"):
         try:
-            tree = ast.parse(source)
-            method_rows = [
-                {"line": node.lineno, "end_line": node.end_lineno or node.lineno}
-                for node in ast.walk(tree)
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            ]
-            type_rows = [
-                {"line": node.lineno, "end_line": node.end_lineno or node.lineno,
-                 "name": node.name, "kind": "class"}
-                for node in ast.walk(tree) if isinstance(node, ast.ClassDef)
-            ]
+            spans = _python_spans(source)
         except (SyntaxError, ValueError):
             pass
+    if spans is not None:
+        classes, functions = spans
+        methods = [(start, end) for _, start, end in functions]
+        type_rows = [
+            {"line": start, "end_line": end, "name": name, "kind": "class"}
+            for name, start, end in classes
+        ]
+    else:
+        methods = [(int(row.get("line", 0) or 0), int(row.get("end_line", 0) or 0))
+                   for row in outline.get("functions", ()) or () if isinstance(row, Mapping)]
+        type_rows = [row for row in outline.get("types", ()) or () if isinstance(row, Mapping)]
+        if not type_rows:
+            for number, line in enumerate(lines, 1):
+                match = _TYPE_LINE.match(line)
+                if match:
+                    name = next((value for value in match.groups() if value), "")
+                    kind = ("struct" if match.group("struct") else
+                            "interface" if match.group("interface") else "class")
+                    type_rows.append({"line": number, "end_line": number, "name": name, "kind": kind})
     expanded_types: list[Mapping[str, object]] = []
-    source_lines = source.splitlines()
+    source_lines = lines
     for row in type_rows:
         start = int(row.get("line", 0) or 0)
         end = int(row.get("end_line", start) or start)
@@ -355,8 +382,6 @@ def declared_fields(path: str, source: str, candidates: Sequence[str]) -> list[O
             end = cursor
         expanded_types.append({**dict(row), "line": start, "end_line": end})
     type_rows = expanded_types
-    methods = [(int(row.get("line", 0) or 0), int(row.get("end_line", 0) or 0))
-               for row in method_rows]
     candidate_keys = {_correlation_key(str(item)) for item in candidates if str(item)}
     found: list[OwnerField] = []
     for row in type_rows:
@@ -387,21 +412,21 @@ def _site_patterns(name: str) -> tuple[re.Pattern[str], re.Pattern[str]]:
     return read, write
 
 
-def _field_contexts(path: str, source: str, sites: Sequence[Site]) -> list[Site]:
+def _field_contexts(path: str, source: str, sites: Sequence[Site], *,
+                    outline: Mapping[str, object] | None = None) -> list[Site]:
     """Attach bounded enclosing effect/commit/catch context to field sites."""
-    outline = _outline(path, source)
+    if outline is None:
+        outline = _outline(path, source)
     lines = source.splitlines()
     contexts: list[Site] = []
     functions = [row for row in outline.get("functions", ()) or ()
                  if isinstance(row, Mapping)]
     if path.casefold().endswith(".py"):
         try:
-            tree = ast.parse(source)
+            _, spans = _python_spans(source)
             functions = [
-                {"line": node.lineno, "end_line": node.end_lineno or node.lineno,
-                 "name": node.name}
-                for node in ast.walk(tree)
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                {"line": start, "end_line": end, "name": name}
+                for name, start, end in spans
             ]
         except (SyntaxError, ValueError):
             pass
@@ -430,8 +455,90 @@ def _field_contexts(path: str, source: str, sites: Sequence[Site]) -> list[Site]
     return unique[:_MAX_CONTEXT_SITES]
 
 
-def _helpers(root: Path, files: Sequence[str], sources: Mapping[str, str],
-             fields: Sequence[OwnerField], candidates: Sequence[str]) -> list[Helper]:
+def _field_sites(path: str, lines: Sequence[str], name: str) -> tuple[list[Site], list[Site]]:
+    read, write = _site_patterns(name)
+    readers: list[Site] = []
+    writers: list[Site] = []
+    for number, line in enumerate(lines, 1):
+        text = line.strip()
+        if text.startswith(("#", "//")):
+            continue
+        if write.search(line):
+            writers.append(Site(path, number, text))
+        elif read.search(line):
+            readers.append(Site(path, number, text))
+    return readers, writers
+
+
+@dataclass
+class _FileFacts:
+    path: str
+    source: str
+    outline: Mapping[str, object]
+    blob: bytes | None = None
+    language: str = ""
+    policy: str = ""
+    _candidates: tuple[str, ...] = ()
+    _declarations: list[OwnerField] = dc_field(default_factory=list)
+    _sites: dict[str, tuple[list[Site], list[Site]]] = dc_field(default_factory=dict)
+    _contexts: dict[tuple[Site, ...], list[Site]] = dc_field(default_factory=dict)
+    _lines: list[str] | None = None
+    _content: bytes | None = None
+    _revision: str | None = None
+
+    @property
+    def lines(self) -> list[str]:
+        if self._lines is None:
+            self._lines = self.source.splitlines()
+        return self._lines
+
+    @property
+    def content(self) -> bytes:
+        if self._content is None:
+            self._content = self.source.encode("utf-8")
+        return self._content
+
+    @property
+    def revision(self) -> str:
+        if self._revision is None:
+            self._revision = "sha256:" + hashlib.sha256(self.content).hexdigest()
+        return self._revision
+
+    def _load_declarations(self, candidates: tuple[str, ...], needles: Sequence[str]) -> None:
+        if candidates != self._candidates:
+            folded = self.source.casefold()
+            self._declarations = (declared_fields(self.path, self.source, candidates,
+                                                   outline=self.outline)
+                                  if any(needle in folded for needle in needles) else [])
+            self._candidates = candidates
+
+    def declarations(self, candidates: tuple[str, ...],
+                     needles: Sequence[str]) -> list[OwnerField]:
+        self._load_declarations(candidates, needles)
+        return [OwnerField(row.name, row.path, row.line, row.text, row.owner)
+                for row in self._declarations]
+
+    def sites(self, name: str) -> tuple[list[Site], list[Site]]:
+        if name not in self._sites:
+            if len(self._sites) >= 2 * _MAX_FIELDS:
+                self._sites.clear()
+            self._sites[name] = (_field_sites(self.path, self.lines, name)
+                                 if name in self.source else ([], []))
+        return self._sites[name]
+
+    def contexts(self, sites: Sequence[Site]) -> list[Site]:
+        key = tuple(sites)
+        if key not in self._contexts:
+            if len(self._contexts) >= 2 * _MAX_FIELDS:
+                self._contexts.clear()
+            self._contexts[key] = _field_contexts(self.path, self.source, sites,
+                                                   outline=self.outline)
+        return self._contexts[key]
+
+
+def _helpers(files: Sequence[str], sources: Mapping[str, str],
+             fields: Sequence[OwnerField], candidates: Sequence[str],
+             facts: Mapping[str, _FileFacts] | None) -> list[Helper]:
     stems = {word for item in [*(f.name for f in fields), *candidates]
              for word in item.lower().split("_") if len(word) >= 4}
     explicit = {str(item).rsplit(".", 1)[-1].casefold() for item in candidates}
@@ -441,8 +548,9 @@ def _helpers(root: Path, files: Sequence[str], sources: Mapping[str, str],
         source = sources.get(path)
         if source is None:
             continue
-        lines = source.splitlines()
-        for row in _outline(path, source).get("functions", ()) or ():
+        fact = facts[path] if facts is not None else None
+        outline = fact.outline if fact is not None else _outline(path, source)
+        for row in outline.get("functions", ()) or ():
             if not isinstance(row, Mapping):
                 continue
             name = str(row.get("name") or "")
@@ -455,6 +563,7 @@ def _helpers(root: Path, files: Sequence[str], sources: Mapping[str, str],
             # Other fuzzy matches still require two shared tokens.
             hash_match = bool(words & stems & _HASH_HELPER_WORDS)
             if exact or prefix or shared >= 2 or hash_match:
+                lines = fact.lines if fact is not None else source.splitlines()
                 line = int(row.get("line", 0) or 0)
                 text = lines[line - 1].strip() if 0 < line <= len(lines) else name
                 score = (exact * 100 + prefix * 25 + shared,
@@ -467,9 +576,10 @@ def _helpers(root: Path, files: Sequence[str], sources: Mapping[str, str],
         imported = re.compile(rf"\bimport\b.*\b{re.escape(helper.name)}\b")
         for path in files:
             source = sources.get(path)
-            if source is None:
+            if source is None or helper.name not in source:
                 continue
-            for number, line in enumerate(source.splitlines(), 1):
+            lines = facts[path].lines if facts is not None else source.splitlines()
+            for number, line in enumerate(lines, 1):
                 if path == helper.path and number == helper.line:
                     continue
                 if _DEF_LINE.match(line):
@@ -484,7 +594,10 @@ def _helpers(root: Path, files: Sequence[str], sources: Mapping[str, str],
 def build_inventory(root: Path, candidates: Sequence[str], *,
                     files: Sequence[str] | None = None,
                     parent_sources: Mapping[str, str] | None = None,
-                    scan: ProductFileScan | None = None) -> Inventory | None:
+                    scan: ProductFileScan | None = None,
+                    _facts: Mapping[str, _FileFacts] | None = None,
+                    _parent_digests: Mapping[str, str] | None = None,
+                    _include_contexts: bool = True) -> Inventory | None:
     """Host inventory with explicit scan completeness and parent identities."""
     base = Path(root).resolve()
     candidates = tuple(candidates)
@@ -498,52 +611,56 @@ def build_inventory(root: Path, candidates: Sequence[str], *,
     sources: dict[str, str] = {}
     parser_capabilities: dict[str, str] = {}
     fields: list[OwnerField] = []
+    needles = tuple(cand.casefold() for cand in candidates)
     for path in files:
-        source = _read(base, path)
+        fact = _facts.get(path) if _facts is not None else None
+        source = (_read(base, path) if _facts is None else
+                  fact.source if fact is not None else None)
         if source is None:
             parser_capabilities[path] = "UNAVAILABLE"
             skipped.append({"path": path, "status": "UNKNOWN",
                             "reason": "file is unreadable or exceeds bounded size"})
             continue
         sources[path] = source
-        parser_capabilities[path] = _parser_capability(path, source)
-        if any(cand.casefold() in source.casefold() for cand in candidates):
-            fields.extend(declared_fields(path, source, candidates))
-    if not fields:
-        if (file_scan.complete and not skipped
-                and all(value == "AVAILABLE" for value in parser_capabilities.values())):
-            return None
-        parent_sources = parent_sources or {}
-        dependency_revision, identities = _source_revision_vector(sources, parent_sources)
-        return Inventory(candidates, [], _helpers(base, files, sources, [], candidates),
-                         dependency_revision[:12], len(sources), complete=False,
-                         skipped_files=tuple(skipped),
-                         dependency_revision=dependency_revision, identities=identities,
-                         parser_capabilities=parser_capabilities)
-    fields = fields[:_MAX_FIELDS]
-    declarations = {(item.path, item.line) for item in fields}
-    for item in fields:
-        read, write = _site_patterns(item.name)
-        for path, source in sources.items():
-            if item.name not in source:
-                continue
-            for number, line in enumerate(source.splitlines(), 1):
-                if (path, number) in declarations or line.strip().startswith(("#", "//")):
-                    continue
-                if write.search(line):
-                    item.writers.append(Site(path, number, line.strip()))
-                elif read.search(line):
-                    item.readers.append(Site(path, number, line.strip()))
-        for context_path, context_source in sources.items():
-            sites = [site for site in [*item.readers, *item.writers]
-                     if site.path == context_path]
-            if sites:
-                item.contexts.extend(_field_contexts(context_path, context_source, sites))
-    parent_sources = parent_sources or {}
-    dependency_revision, identities = _source_revision_vector(sources, parent_sources)
+        outline = fact.outline if fact is not None else _outline(path, source)
+        parser_capabilities[path] = _capability(outline)
+        if fact is not None:
+            fields.extend(fact.declarations(candidates, needles))
+        else:
+            folded = source.casefold()
+            if any(needle in folded for needle in needles):
+                fields.extend(declared_fields(path, source, candidates, outline=outline))
     complete = (file_scan.complete and not skipped
                 and all(value == "AVAILABLE" for value in parser_capabilities.values()))
-    return Inventory(candidates, fields, _helpers(base, files, sources, fields, candidates),
+    if not fields and complete:
+        return None
+    fields = fields[:_MAX_FIELDS]
+    declarations: dict[str, set[int]] = {}
+    for item in fields:
+        declarations.setdefault(item.path, set()).add(item.line)
+    for item in fields:
+        for path, source in sources.items():
+            fact = _facts[path] if _facts is not None else None
+            if fact is None and item.name not in source:
+                continue
+            readers, writers = (fact.sites(item.name) if fact is not None else
+                                _field_sites(path, source.splitlines(), item.name))
+            excluded = declarations.get(path, ())
+            readers = [site for site in readers if site.line not in excluded]
+            writers = [site for site in writers if site.line not in excluded]
+            item.readers.extend(readers)
+            item.writers.extend(writers)
+            if _include_contexts and (readers or writers):
+                sites = readers + writers
+                item.contexts.extend(fact.contexts(sites) if fact is not None
+                                     else _field_contexts(path, source, sites))
+    parent_sources = parent_sources or {}
+    if _facts is None or _parent_digests is None:
+        dependency_revision, identities = _source_revision_vector(sources, parent_sources)
+    else:
+        dependency_revision, identities = _pinned_revision(_facts, parent_sources, _parent_digests)
+    helpers = _helpers(files, sources, fields, candidates, _facts)
+    return Inventory(candidates, fields, helpers,
                      dependency_revision[:12], len(sources), complete=complete,
                      skipped_files=tuple(skipped), dependency_revision=dependency_revision,
                      identities=identities, parser_capabilities=parser_capabilities)
@@ -603,6 +720,209 @@ def render(inventory: Inventory) -> str:
 
 # ------------------------------------------------------------------ runtime seam
 
+def _legacy_inventory(runtime: object, root: Path, candidates: tuple[str, ...],
+                      parent: Mapping[str, str], *,
+                      include_contexts: bool) -> tuple[Inventory | None, tuple[object, ...]]:
+    from mc_repo_intel_vendor.ts_dispatch import detect_language
+
+    scan = scan_product_files(root)
+    policy = _parser_policy()
+    facts: dict[str, _FileFacts] = {}
+    needles = tuple(candidate.casefold() for candidate in candidates)
+    with _parse_cache.gc_paused():
+        for path in scan.paths:
+            source = _read(root, path)
+            if source is None:
+                continue
+            effective = policy[detect_language(path, source)]
+            fact = _FileFacts(path, source, _outline(path, source, policy=effective))
+            # Collect declaration spans while the outline's AST is still resident.
+            fact._load_declarations(candidates, needles)
+            facts[path] = fact
+        revisions = tuple((path, fact.revision, _capability(fact.outline))
+                          for path, fact in facts.items())
+        parent_digests = {
+            path: "sha256:" + _parse_cache.source_digest(source)
+            for path, source in sorted(parent.items())
+        }
+        key = (candidates, include_contexts, tuple(policy.items()), revisions,
+               scan.paths, scan.skipped_files, scan.complete, tuple(parent_digests.items()))
+        cached = getattr(runtime, "_state_owner_inventory", False)
+        if cached is not False and getattr(runtime, "_state_owner_inventory_cache_key", None) == key:
+            return cached, key
+        inventory = build_inventory(root, candidates, scan=scan, parent_sources=parent,
+                                    _facts=facts, _parent_digests=parent_digests,
+                                    _include_contexts=include_contexts)
+    return inventory, key
+
+
+def _pinned_files(tree: Directory) -> tuple[ProductFileScan, dict[str, File]]:
+    from kernel_request_source_window import _FORBIDDEN_PARTS, _TEST_PATH
+    from kernel_workspace_tree import Directory, File, children
+
+    paths: list[str] = []
+    files: dict[str, File] = {}
+    pending = [("", tree)]
+    while pending:
+        prefix, directory = pending.pop()
+        subdirs: list[tuple[str, Directory]] = []
+        for name, entry in sorted(((os.fsdecode(name), entry) for name, entry in children(directory)),
+                                  key=lambda row: row[0]):
+            path = prefix + name
+            if isinstance(entry, Directory):
+                if (not name.startswith(".") and name not in _SKIP_DIRS
+                        and name.casefold() not in _FORBIDDEN_PARTS):
+                    subdirs.append((path + "/", entry))
+                continue
+            if Path(name).suffix not in SOURCE_SUFFIXES or _TEST_PATH.search(path):
+                continue
+            if len(paths) >= _MAX_FILES:
+                skipped = {"path": path, "status": "PARTIAL",
+                           "reason": "product file scan limit reached"}
+                return ProductFileScan(tuple(paths), (skipped,), False), files
+            paths.append(path)
+            # A link target or a special file is outside the pinned text scope.
+            if isinstance(entry, File) and entry.size <= _MAX_FILE_BYTES:
+                files[path] = entry
+        pending.extend(reversed(subdirs))
+    return ProductFileScan(tuple(paths), (), True), files
+
+
+def _parser_policy() -> dict[str, str]:
+    from mc_repo_intel_vendor.ts_dispatch import detect_language, outline_capability_key
+
+    # One capability probe per language. The extra suffix covers shebang detection
+    # on extensions the dispatcher does not recognize, such as .kt.
+    samples = {detect_language(path): path for path in
+               (f"source{suffix}" for suffix in sorted(SOURCE_SUFFIXES))}
+    policy = {language: outline_capability_key(path) for language, path in samples.items()}
+    policy["vue"] = "|".join(policy[language] for language in
+                             ("vue", "typescript", "tsx", "javascript"))
+    return policy
+
+
+def _pinned_revision(facts: Mapping[str, _FileFacts], parent: Mapping[str, str],
+                     parent_digests: Mapping[str, str]) -> tuple[str, dict[str, dict[str, object]]]:
+    from kernel_tree_digest import compatible_revision
+
+    rows = []
+    identities: dict[str, dict[str, object]] = {}
+    for path in sorted(facts):
+        fact = facts[path]
+        parent_revision = parent_digests.get(path)
+        identities[path] = {
+            "current_revision": fact.revision,
+            "parent_revision": parent_revision,
+            "status": ("UNKNOWN" if parent_revision is None else
+                       "UNCHANGED" if fact.source == parent[path] else "CHANGED"),
+        }
+        rows.append((path, fact.content, "file"))
+    return compatible_revision("stateframe.owner_sources/2", rows), identities
+
+
+@dataclass
+class _InventoryProjection:
+    tree: bytes
+    scan: ProductFileScan
+    files: dict[str, File]
+    key: tuple[object, ...]
+    parent: dict[str, str]
+    parent_digests: dict[str, str]
+    facts: dict[str, _FileFacts]
+    inventory: Inventory | None
+
+
+# Keep derived source payloads out of checkpoint state. The shared default is
+# process-local, and the weak keys retire each projection with its fence.
+_PROJECTIONS: ContextVar[WeakKeyDictionary[WorkspaceState, _InventoryProjection]] = ContextVar(
+    "state_owner_projections", default=WeakKeyDictionary())
+
+
+def _project_inventory(root: Path, tree: Directory, candidates: tuple[str, ...],
+                       parent: dict[str, str],
+                       previous: _InventoryProjection | None, *,
+                       include_contexts: bool) -> _InventoryProjection:
+    from mc_repo_intel_vendor.ts_dispatch import detect_language
+
+    policy = _parser_policy()
+    key = (candidates, include_contexts, tuple(policy.items()))
+    same_parent = previous is not None and parent == previous.parent
+    if previous is not None and tree.digest == previous.tree:
+        if key == previous.key and same_parent and len(previous.facts) == len(previous.files):
+            return previous
+        scan, files = previous.scan, previous.files
+    else:
+        scan, files = _pinned_files(tree)
+
+    if same_parent and previous is not None:
+        parent_digests = previous.parent_digests
+    else:
+        parent_digests = {
+            path: (previous.parent_digests[path]
+                   if previous is not None and previous.parent.get(path) == source
+                   else "sha256:" + hashlib.sha256(source.encode("utf-8", "surrogatepass")).hexdigest())
+            for path, source in parent.items()
+        }
+
+    facts: dict[str, _FileFacts] = {}
+    needles = tuple(candidate.casefold() for candidate in candidates)
+    for path, entry in files.items():
+        old = previous.facts.get(path) if previous is not None else None
+        if old is not None and old.blob == entry.sha256:
+            if old.policy == policy[old.language]:
+                facts[path] = old
+                continue
+            source, language = old.source, old.language
+        else:
+            source = _read(root, path, observed=entry)
+            if source is None:
+                continue
+            language = detect_language(path, source)
+        effective = policy[language]
+        fact = _FileFacts(path, source, _outline(path, source, policy=effective),
+                          blob=entry.sha256, language=language, policy=effective)
+        fact._load_declarations(candidates, needles)
+        facts[path] = fact
+    inventory = build_inventory(root, candidates, scan=scan, parent_sources=parent,
+                                _facts=facts, _parent_digests=parent_digests,
+                                _include_contexts=include_contexts)
+    return _InventoryProjection(tree.digest, scan, files, key, parent, parent_digests,
+                                facts, inventory)
+
+
+def _pinned_state(root: Path) -> WorkspaceState | None:
+    if os.environ.get("STATEFRAME_WORKSPACE_OBJECTS") != "on":
+        return None
+    from kernel_workspace_consumers import consumers_for
+
+    consumers = consumers_for(root)
+    return consumers.state if consumers is not None else None
+
+
+def _pinned_inventory(root: Path, state: WorkspaceState,
+                      candidates: tuple[str, ...], parent: dict[str, str], *,
+                      include_contexts: bool) -> Inventory | None:
+    from kernel_workspace_state import WorkspaceUnavailable
+
+    boundary = "state-owner-inventory"
+    try:
+        with state.pin(boundary) as snapshot:
+            projections = _PROJECTIONS.get()
+            with _parse_cache.gc_paused():
+                projection = _project_inventory(root, snapshot.tree, candidates, parent,
+                                                projections.get(state), include_contexts=include_contexts)
+            if not snapshot.validate_for_use(boundary):
+                raise WorkspaceUnavailable("state owner observation changed")
+            projections[state] = projection
+            return projection.inventory
+    except WorkspaceUnavailable:
+        if not candidates:
+            return None
+        return Inventory(candidates, [], [], "", 0, complete=False, skipped_files=(
+            {"path": "", "status": "UNKNOWN", "reason": "workspace observation unavailable"},
+        ))
+
+
 def _entry_absent(runtime: object) -> bool:
     entry = getattr(runtime, "_site_facts_entry", None)
     if not isinstance(entry, Mapping):
@@ -626,6 +946,9 @@ def runtime_inventory(runtime: object) -> Inventory | None:
     root = getattr(getattr(runtime, "owner", None), "root", None)
     current_key: tuple[object, ...] = ("disabled",)
     if root is not None and mode() == "on":
+        # The first request uses the declarations and sites, but neither its
+        # owner panel nor its other consumers read enclosing context.
+        include_contexts = getattr(runtime, "_frame_budget_request_count", None) != 0
         from kernel_request_source_window import _ticket_text, entry_symbol
         ticket = _ticket_text(runtime)
         absent = _entry_absent(runtime)
@@ -634,12 +957,16 @@ def runtime_inventory(runtime: object) -> Inventory | None:
                            if item != symbol and item != symbol.rsplit(".", 1)[-1])
         from kernel_request_source_window import _parent_sources
         parent_sources = _parent_sources(runtime)
-        current_key = _runtime_cache_key(Path(root), candidates, parent_sources)
-        cached = getattr(runtime, "_state_owner_inventory", False)
-        if (cached is not False
-                and getattr(runtime, "_state_owner_inventory_cache_key", None) == current_key):
-            return cached
-        inventory = build_inventory(Path(root), candidates, parent_sources=parent_sources)
+        root = Path(root)
+        state = _pinned_state(root)
+        # Both source paths report parser capability even for an empty inventory.
+        if state is not None:
+            current_key = ("pinned",)
+            inventory = _pinned_inventory(root, state, candidates, parent_sources,
+                                          include_contexts=include_contexts)
+        else:
+            inventory, current_key = _legacy_inventory(
+                runtime, root, candidates, parent_sources, include_contexts=include_contexts)
     try:
         setattr(runtime, "_state_owner_inventory", inventory)
         setattr(runtime, "_state_owner_inventory_cache_key", current_key)
@@ -650,6 +977,8 @@ def runtime_inventory(runtime: object) -> Inventory | None:
 
 def owner_writer_count(runtime: object) -> int | None:
     inventory = getattr(runtime, "_state_owner_inventory", None)
+    if getattr(runtime, "_state_owner_inventory_cache_key", None) == ("pinned",):
+        inventory = runtime_inventory(runtime)
     return (inventory.writer_count if isinstance(inventory, Inventory) and inventory.complete
             else None)
 

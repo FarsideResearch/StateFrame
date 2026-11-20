@@ -92,7 +92,7 @@ def source_frozen(function):
             return function(snapshot, slot)
         key = (function, id(slot), snapshot.recovery_schema, snapshot.recovery_allowed,
                snapshot.recovery_owner_allowed, snapshot.current_revisions,
-               snapshot.protected_paths)
+               snapshot.protected_paths, snapshot.protected_ranges)
         if key not in cache.values:
             value = function(snapshot, slot)
             cache.references[id(slot)] = slot

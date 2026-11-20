@@ -301,7 +301,13 @@ def _graph_relations(
         return [], {"status": "UNAVAILABLE", "reason": "workspace_unavailable"}, [{"kind": "graph_unavailable", "reason": "workspace_unavailable"}]
     if time.monotonic() >= deadline:
         return [], {"status": "PARTIAL", "reason": "deadline"}, [{"kind": "graph_deadline"}]
-    bounded, file_count, total_bytes, bound_reason = _bounded_repo(root, deadline=deadline)
+    from mc_repo_intel_vendor.background import enabled as background_enabled
+
+    background = background_enabled()
+    if background:
+        bounded, file_count, total_bytes, bound_reason = True, 0, 0, ""
+    else:
+        bounded, file_count, total_bytes, bound_reason = _bounded_repo(root, deadline=deadline)
     scope_info: dict[str, object] = {"mode": "repository"}
     graph_root = root
     mirror = None
@@ -341,7 +347,14 @@ def _graph_relations(
     omissions: list[dict[str, object]] = []
     summary = graph.coverage_summary() if callable(getattr(graph, "coverage_summary", None)) else {}
     incomplete = sum(int(summary.get(key, 0)) for key in ("parse_partial", "skipped", "unknown"))
-    graph_status = "PARTIAL" if incomplete else "FOUND"
+    index_status = getattr(graph, "index_status", "ready")
+    if background:
+        file_count = len(graph.file_hashes)
+    if index_status == "pending":
+        return [], {"status": "PARTIAL", "reason": "graph_pending"}, [{"kind": "graph_pending"}]
+    graph_status = "PARTIAL" if incomplete or index_status == "partial" else "FOUND"
+    if index_status == "partial":
+        omissions.append({"kind": "graph_type_resolution_pending"})
     if incomplete:
         omissions.append({"kind": "graph_coverage", "incomplete_files": incomplete,
                           "coverage": dict(summary)})

@@ -14,10 +14,19 @@ import dataclasses
 import hashlib
 import os
 import re
-from collections.abc import Mapping, Sequence
+import stat
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
+from functools import cache
 from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING
 
 import kernel_parse_cache as _parse_cache
+
+if TYPE_CHECKING:
+    from kernel_workspace_state import WorkspaceState
+    from kernel_workspace_tree import Directory
 
 
 MODE_ENV = "STATEFRAME_LAYER_COVERAGE"
@@ -188,8 +197,7 @@ def _safe_relative(value: object) -> str | None:
     return path.as_posix()
 
 
-def _is_test_path(relative: str) -> bool:
-    path = PurePosixPath(relative)
+def _is_test_path(path: PurePosixPath) -> bool:
     suffix = path.suffix.lower().lstrip(".")
     stem = path.stem.lower()
     conventional_test_name = (
@@ -203,9 +211,8 @@ def _is_test_path(relative: str) -> bool:
     )
 
 
-def _is_product_path(relative: str) -> bool:
-    path = PurePosixPath(relative)
-    return not _is_test_path(relative) and not any(part in _FORBIDDEN_PARTS for part in path.parts)
+def _is_product_path(path: PurePosixPath) -> bool:
+    return not _is_test_path(path) and not any(part in _FORBIDDEN_PARTS for part in path.parts)
 
 
 def _file_stem_alias(relative: str) -> str:
@@ -223,26 +230,23 @@ def _relative(root: Path, path: Path) -> str | None:
         relative = path.resolve().relative_to(root.resolve()).as_posix()
     except (OSError, ValueError):
         return None
-    return relative if _is_product_path(relative) else None
+    return relative if _is_product_path(PurePosixPath(relative)) else None
 
 
-def product_files(root: Path) -> tuple[Path, ...]:
+def _file_lookup(root: Path) -> _FileLookup:
     root = Path(root).resolve()
-    result: list[Path] = []
-    if not root.is_dir():
-        return ()
-    for directory, dirs, names in os.walk(root):
-        dirs[:] = sorted(
-            name for name in dirs
-            if name not in _FORBIDDEN_PARTS and not name.startswith(".")
-            and name not in _TEST_DIRS
-        )
-        for name in sorted(names):
-            path = Path(directory) / name
-            relative = _relative(root, path)
-            if relative is not None and path.is_file():
-                result.append(path)
-    return tuple(result)
+    projection = _active_projection(root)
+    if projection is not None:
+        return projection.files
+    scoped = _COVERAGE_FILES.get()
+    if scoped is not None and scoped[0] == root:
+        return scoped[1]()
+    return CoverageFileCache().lookup(root)
+
+
+def product_files(root: Path) -> Iterable[Path]:
+    files = _file_lookup(root)
+    return files.values() if files.paths is None else files.paths
 
 
 def snapshot_workspace(root: Path) -> dict[str, str | None]:
@@ -252,12 +256,12 @@ def snapshot_workspace(root: Path) -> dict[str, str | None]:
     same as an absent key, and neither state can be treated as an unchanged
     product file.
     """
+    return _snapshot_files(_file_lookup(root))
+
+
+def _snapshot_files(files: Mapping[str, Path]) -> dict[str, str | None]:
     result: dict[str, str | None] = {}
-    root = Path(root).resolve()
-    for path in product_files(root):
-        relative = _relative(root, path)
-        if relative is None:
-            continue
+    for relative, path in files.items():
         try:
             result[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
         except (OSError, UnicodeError):
@@ -334,14 +338,6 @@ def extract_named_layers(ticket: str) -> tuple[str, ...]:
     return tuple(layer for layer, _ in sorted(labels.items(), key=lambda item: (item[1][0], item[0])))
 
 
-def _path_lookup(root: Path, files: Sequence[Path]) -> dict[str, Path]:
-    return {
-        relative: path
-        for path in files
-        if (relative := _relative(root, path)) is not None
-    }
-
-
 def _explicit_file_matches(root: Path, lookup: Mapping[str, Path], names: Sequence[str]) -> list[str]:
     del root
     matches: list[str] = []
@@ -357,12 +353,17 @@ def _explicit_file_matches(root: Path, lookup: Mapping[str, Path], names: Sequen
         if len(PurePosixPath(relative).parts) > 1:
             continue
         basename = PurePosixPath(relative).name
-        matches.extend(path for path in lookup if PurePosixPath(path).name == basename)
+        if isinstance(lookup, _FileLookup):
+            matches.extend(lookup.basenames.get(basename, ()))
+        else:
+            matches.extend(path for path in lookup if PurePosixPath(path).name == basename)
     return list(dict.fromkeys(matches))
 
 
 def _layer_file_matches(layer: str, lookup: Mapping[str, Path]) -> list[str]:
     aliases = _LAYER_ALIASES.get(layer, frozenset())
+    if isinstance(lookup, _FileLookup):
+        return list({path for alias in aliases for path in lookup.aliases.get(alias, ())})
     result: list[str] = []
     for relative in lookup:
         path = PurePosixPath(relative)
@@ -402,6 +403,8 @@ def _symbol_binding(lookup: Mapping[str, Path], symbol: str) -> tuple[list[str],
     parts = symbol.split(".")
     leaf = parts[-1]
     module = "/".join(parts[:-1])
+    if isinstance(lookup, _ProjectedFiles):
+        return lookup.projection.symbol_binding(module, leaf)
     files: list[str] = []
     read_failed = False
     for relative, path in lookup.items():
@@ -415,6 +418,337 @@ def _symbol_binding(lookup: Mapping[str, Path], symbol: str) -> tuple[list[str],
         elif found:
             files.append(relative)
     return files, read_failed
+
+
+# A declaration can span lines in the legacy matcher. Look ahead so that a
+# second declaration beginning on a consumed line still gets its own match.
+_DECLARATION = re.compile(
+    r"^(?=[^\S\n]*(?:async\s+)?(?:def|class)\s+([A-Za-z_]\w*)\b)", re.MULTILINE)
+_ASSIGNMENT = re.compile(r"^(?=[^\S\n]*([A-Za-z_]\w*)\s*[:=])", re.MULTILINE)
+
+
+def _blob_definitions(data: bytes) -> frozenset[str] | None:
+    """Collect the same textual definitions as the per-name legacy matcher."""
+    try:
+        source = data.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+    except UnicodeDecodeError:
+        return None
+    return frozenset(match.group(1) for pattern in (_DECLARATION, _ASSIGNMENT)
+                     for match in pattern.finditer(source))
+
+
+def _set_posting(postings: dict[str, set[str]], key: str, path: str, present: bool) -> None:
+    if present:
+        postings.setdefault(key, set()).add(path)
+    elif key in postings:
+        postings[key].discard(path)
+        if not postings[key]:
+            del postings[key]
+
+
+class _DefinitionScope:
+    def __init__(self) -> None:
+        self.names: dict[str, set[str]] = {}
+        self.unreadable: set[str] = set()
+
+    def update(self, path: str, definitions: frozenset[str] | None, present: bool) -> None:
+        if definitions is None:
+            (self.unreadable.add if present else self.unreadable.discard)(path)
+        else:
+            for name in definitions:
+                _set_posting(self.names, name, path, present)
+
+
+class _FileLookup(dict[str, Path]):
+    def __init__(self) -> None:
+        super().__init__()
+        self.paths: tuple[Path, ...] | None = None
+        self.basenames: dict[str, set[str]] = {}
+        self.aliases: dict[str, set[str]] = {}
+
+    def update_postings(self, relative: str, path: PurePosixPath, *, present: bool) -> None:
+        aliases = {path.stem.lower(), *(part.lower() for part in path.parts[:-1])}
+        _set_posting(self.basenames, path.name, relative, present)
+        for alias in aliases.intersection(_ALL_LAYER_ALIASES):
+            _set_posting(self.aliases, alias, relative, present)
+
+
+class _ProjectedFiles(_FileLookup):
+    def __init__(self, projection: CoverageProjection) -> None:
+        super().__init__()
+        self.projection = projection
+        self.modules: dict[str, set[str]] = {}
+
+
+def _directory_stamp(path: Path) -> tuple[int, int, int, int] | None:
+    try:
+        info = path.stat(follow_symlinks=False)
+    except OSError:
+        return None
+    if stat.S_ISDIR(info.st_mode):
+        return info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns
+    return None
+
+
+class CoverageFileCache:
+    """Reuse path membership while the scanned directories are unchanged."""
+
+    def __init__(self) -> None:
+        self._saved: tuple[Path, _FileLookup, dict[Path, tuple[int, int, int, int]]] | None = None
+
+    def __getstate__(self) -> dict[str, object]:
+        return {"_saved": None}
+
+    def lookup(self, root: Path) -> _FileLookup:
+        if self._saved is not None:
+            saved_root, files, stamps = self._saved
+            if root == saved_root and all(_directory_stamp(path) == stamp
+                                          for path, stamp in stamps.items()):
+                return files
+        files, stamps = self._scan(root)
+        self._saved = (root, files, stamps) if stamps else None
+        return files
+
+    @staticmethod
+    def _scan(root: Path) -> tuple[_FileLookup, dict[Path, tuple[int, int, int, int]]]:
+        files = _FileLookup()
+        paths: list[Path] = []
+        stamps = {}
+        reusable = True
+        pending = [(root, "")]
+        while pending:
+            directory, prefix = pending.pop()
+            stamp = _directory_stamp(directory)
+            if stamp is None:
+                reusable = False
+                continue
+            try:
+                with os.scandir(directory) as entries:
+                    ordered = sorted(entries, key=lambda entry: entry.name)
+            except OSError:
+                reusable = False
+                continue
+            stamps[directory] = stamp
+            subdirectories = []
+            for entry in ordered:
+                name = entry.name
+                relative = prefix + name
+                if entry.is_dir(follow_symlinks=False):
+                    if (name not in _FORBIDDEN_PARTS and name not in _TEST_DIRS
+                            and not name.startswith(".")):
+                        subdirectories.append((directory / name, relative + "/"))
+                    continue
+                if entry.is_symlink():
+                    # A link can change meaning without changing the scanned directories.
+                    reusable = False
+                    relative = _relative(root, directory / name)
+                    if relative is None or not entry.is_file():
+                        continue
+                elif not entry.is_file(follow_symlinks=False):
+                    continue
+                relative_path = PurePosixPath(relative)
+                if not _is_product_path(relative_path):
+                    continue
+                path = directory / name
+                paths.append(path)
+                files[relative] = path
+                files.update_postings(relative, relative_path, present=True)
+            pending.extend(reversed(subdirectories))
+        files.paths = tuple(paths)
+        return files, stamps if reusable else {}
+
+
+class CoverageProjection:
+    """Coverage facts derived from successive pins of one protected workspace."""
+
+    def __init__(self, root: Path, state: WorkspaceState) -> None:
+        self.root = root
+        self.state = state
+        self._tree: Directory | None = None
+        self._links: set[str] = set()
+        self._unsupported: set[str] = set()
+        self.hashes: dict[str, str | None] = {}
+        self.files = _ProjectedFiles(self)
+        self.revision = object()
+        self._definitions: dict[str, frozenset[str] | None] = {}
+        self._blob_users: dict[str, int] = {}
+        self._scopes: dict[str, _DefinitionScope] = {}
+        self._starts: dict[int, tuple[Mapping[str, object], dict[str, str | None]]] = {}
+        self._rows: dict[tuple[int, str, str],
+                         tuple[Mapping[str, str | None], tuple[LayerRow, ...]]] = {}
+
+    def _read_definitions(self, relative: str, digest: str) -> frozenset[str] | None:
+        from kernel_workspace_state import WorkspaceUnavailable
+
+        if digest not in self._definitions:
+            try:
+                data = self.files[relative].read_bytes()
+            except OSError as error:
+                raise WorkspaceUnavailable("coverage source is no longer readable") from error
+            if hashlib.sha256(data).hexdigest() != digest:
+                raise WorkspaceUnavailable("coverage source changed during observation")
+            self._definitions[digest] = _blob_definitions(data)
+        return self._definitions[digest]
+
+    def symbol_binding(self, module: str, leaf: str) -> tuple[list[str], bool]:
+        if module not in self._scopes:
+            scope = _DefinitionScope()
+            candidates = self.files.modules.get(module, ()) if module else self.files
+            for relative in candidates:
+                digest = self.hashes[relative]
+                assert digest is not None
+                scope.update(relative, self._read_definitions(relative, digest), True)
+            self._scopes[module] = scope
+        scope = self._scopes[module]
+        return list(scope.names.get(leaf, ())), bool(scope.unreadable)
+
+    def _update_file(self, relative: str, digest: str, *, present: bool) -> None:
+        module = relative.rsplit(".", 1)[0]
+        modules = [module]
+        while "/" in module:
+            module = module.split("/", 1)[1]
+            modules.append(module)
+        if present:
+            self.files[relative] = self.root / relative
+            self.hashes[relative] = digest
+            self._blob_users[digest] = self._blob_users.get(digest, 0) + 1
+        self.files.update_postings(relative, PurePosixPath(relative), present=present)
+        for module in modules:
+            _set_posting(self.files.modules, module, relative, present)
+        for module in ("", *modules):
+            scope = self._scopes.get(module)
+            if scope is not None:
+                scope.update(relative, self._read_definitions(relative, digest), present)
+        if not present:
+            del self.files[relative]
+            del self.hashes[relative]
+            self._blob_users[digest] -= 1
+            if not self._blob_users[digest]:
+                del self._blob_users[digest]
+                self._definitions.pop(digest, None)
+
+    def refresh(self, tree: Directory) -> bool:
+        from kernel_workspace_tree import File, Symlink, diff, directory
+
+        if self._tree is not None and self._tree.digest == tree.digest:
+            return self._supports_legacy_scope()
+        previous = self._tree if self._tree is not None else directory(tree.mode, ())
+        changes = []
+        for change in diff(previous, tree):
+            parts = tuple(map(os.fsdecode, change.path))
+            if not parts or any(part.startswith(".") or part in _FORBIDDEN_PARTS
+                                or part in _TEST_DIRS for part in parts[:-1]):
+                continue
+            relative = "/".join(parts)
+            if isinstance(change.after, Symlink):
+                self._links.add(relative)
+            else:
+                self._links.discard(relative)
+            if isinstance(change.after, File) and "\\" in relative:
+                self._unsupported.add(relative)
+            else:
+                self._unsupported.discard(relative)
+            old = self.hashes.get(relative)
+            new = (change.after.sha256.hex() if isinstance(change.after, File)
+                   and _is_product_path(PurePosixPath(relative)) else None)
+            if old != new:
+                changes.append((relative, old, new))
+        # Remove every old posting first. A blob moved between paths can then
+        # retain its definitions without reading through any old path.
+        if changes:
+            moved = {new: self._definitions[new] for _, _, new in changes
+                     if new is not None and new in self._definitions}
+            for relative, old, _ in changes:
+                if old is not None:
+                    self._update_file(relative, old, present=False)
+            self._definitions.update(moved)
+            for relative, _, new in changes:
+                if new is not None:
+                    self._update_file(relative, new, present=True)
+            self.revision = object()
+            self._rows.clear()
+        self._tree = tree
+        return self._supports_legacy_scope()
+
+    def _supports_legacy_scope(self) -> bool:
+        if self._unsupported:
+            return False
+        # Legacy ignores escaped links and does not descend through directory
+        # aliases. An in-tree file alias can expose a path outside our scope.
+        for relative in self._links:
+            try:
+                target = (self.root / relative).resolve()
+                if target.is_relative_to(self.root) and target.is_file():
+                    return False
+            except (OSError, RuntimeError):
+                return False
+        return True
+
+    def initial_snapshot(self) -> dict[str, str | None]:
+        # Match the legacy sorted os.walk order for the two journal payloads.
+        ordered = sorted(self.hashes, key=lambda path: (path.split("/")[:-1], path))
+        return {path: self.hashes[path] for path in ordered}
+
+    def normalized_start(self, snapshot: Mapping[str, object]) -> dict[str, str | None]:
+        key = id(snapshot)
+        if key not in self._starts:
+            if len(self._starts) >= 2:
+                self._starts.clear()
+            self._starts[key] = snapshot, normalise_snapshot(snapshot)
+        return self._starts[key][1]
+
+    def rows(self, layer: str, ticket: str,
+             start: Mapping[str, str | None]) -> tuple[LayerRow, ...]:
+        key = (id(start), layer, ticket)
+        cached = self._rows.get(key)
+        if cached is None:
+            rows = _compute_layer_rows(layer, ticket, self.root, self.files, start, self.hashes)
+            if len(self._rows) >= 256:
+                self._rows.clear()
+            self._rows[key] = start, rows
+            return rows
+        return cached[1]
+
+
+_ALL_LAYER_ALIASES = frozenset().union(*_LAYER_ALIASES.values())
+_COVERAGE_PROJECTION: ContextVar[CoverageProjection | None] = ContextVar(
+    "coverage_workspace_projection", default=None)
+_COVERAGE_FILES: ContextVar[tuple[Path, Callable[[], _FileLookup]] | None] = ContextVar(
+    "coverage_file_lookup", default=None)
+
+
+@contextmanager
+def use_file_cache(root: Path, file_cache: CoverageFileCache) -> Iterator[None]:
+    """Share a single lookup within a coverage operation."""
+    @cache
+    def lookup() -> _FileLookup:
+        return file_cache.lookup(root)
+
+    token = _COVERAGE_FILES.set((root, lookup))
+    try:
+        yield
+    finally:
+        _COVERAGE_FILES.reset(token)
+
+
+def _active_projection(root: Path) -> CoverageProjection | None:
+    projection = _COVERAGE_PROJECTION.get()
+    return projection if projection is not None and root == projection.root else None
+
+
+def projection_for_snapshot(root: Path, snapshot: object) -> CoverageProjection | None:
+    projection = _active_projection(root)
+    return projection if projection is not None and snapshot is projection.hashes else None
+
+
+@contextmanager
+def use_projection(projection: CoverageProjection) -> Iterator[None]:
+    """Keep named-layer and reminder lookups on the same pinned workspace."""
+    token = _COVERAGE_PROJECTION.set(projection)
+    try:
+        yield
+    finally:
+        _COVERAGE_PROJECTION.reset(token)
 
 
 def _layer_evidence(layer: str, ticket: str) -> tuple[str, ...]:
@@ -463,6 +797,14 @@ def _bound_row(layer: str, target: str | None, files: Sequence[str], evidence: t
 def _rows_for_layer(layer: str, ticket: str, root: Path,
                     lookup: Mapping[str, Path], start: Mapping[str, str | None],
                     current: Mapping[str, str | None]) -> tuple[LayerRow, ...]:
+    if isinstance(lookup, _ProjectedFiles) and current is lookup.projection.hashes:
+        return lookup.projection.rows(layer, ticket, start)
+    return _compute_layer_rows(layer, ticket, root, lookup, start, current)
+
+
+def _compute_layer_rows(layer: str, ticket: str, root: Path,
+                        lookup: Mapping[str, Path], start: Mapping[str, str | None],
+                        current: Mapping[str, str | None]) -> tuple[LayerRow, ...]:
     """Every explicit target keeps its own binding result, including UNKNOWN."""
     evidence = _layer_evidence(layer, ticket)
     if layer.startswith("file:"):
@@ -637,11 +979,17 @@ def build_report(ticket: object, root: Path, *,
                  public_tests: object = None) -> dict[str, object]:
     text = public_ticket(ticket)
     root = Path(root).resolve()
-    start = normalise_snapshot(
-        snapshot_workspace(root) if start_snapshot is None else start_snapshot)
-    current = normalise_snapshot(
-        snapshot_workspace(root) if current_snapshot is None else current_snapshot)
-    lookup = _path_lookup(root, product_files(root))
+    projection = projection_for_snapshot(root, current_snapshot)
+    if projection is not None and start_snapshot is not None:
+        start = projection.normalized_start(start_snapshot)
+        current = projection.hashes
+        lookup = projection.files
+    else:
+        lookup = _file_lookup(root)
+        start = normalise_snapshot(
+            _snapshot_files(lookup) if start_snapshot is None else start_snapshot)
+        current = normalise_snapshot(
+            _snapshot_files(lookup) if current_snapshot is None else current_snapshot)
     # review8 #1: rows (the only completion evidence) come from affirmative clauses only.
     scoped = affirmative_ticket(text)
     rows = tuple(row for layer in extract_named_layers(scoped)

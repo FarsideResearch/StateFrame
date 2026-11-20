@@ -2,9 +2,9 @@
 
 Live steps were re-parsing the same public sources tens of thousands of times
 (41M ``ast.walk`` calls over three steps).  This module memoizes
-``ast.parse`` and analyzer-derived maps keyed by ``(filename, sha256(source))``
-so an unchanged file can reuse its retained tree, while ANY content change is
-a different key (a stale entry can never hide an edit).
+``ast.parse`` by source digest and analyzer-derived maps by filename and source
+digest. A valid tree can be reused by analyzers that identify the same source
+with different paths. Content changes always get a different key.
 
 Contract for callers:
   * Trees returned by :func:`parse` are SHARED.  Treat them as read-only; a
@@ -30,6 +30,11 @@ from collections.abc import Callable, Hashable
 from pathlib import Path
 from typing import TypeVar
 
+if __package__:
+    from .kernel_turn_work_counters import count_work
+else:
+    from kernel_turn_work_counters import count_work
+
 # Tracemalloc on three engine modules measured 33-51 AST bytes per source byte.
 # 24 MiB of source targets about 1.2 GiB of retained ASTs, not a hard heap bound.
 MAX_TREE_SOURCE_BYTES = 24 * 1024 * 1024
@@ -38,7 +43,9 @@ MAX_DERIVED = 4096  # several analyzers x ~1k-file repos must not thrash each ot
 
 _T = TypeVar("_T")
 _LOCK = threading.RLock()
-_TREES: OrderedDict[tuple[str, str], tuple[ast.Module, int]] = OrderedDict()
+_GC_USERS = 0
+_GC_WAS_ENABLED = False
+_TREES: OrderedDict[str, tuple[ast.Module, int]] = OrderedDict()
 _TREE_SOURCE_BYTES = 0
 _DERIVED: "OrderedDict[tuple[Hashable, str, str], object]" = OrderedDict()
 _STATS = {"tree_hits": 0, "tree_misses": 0, "derived_hits": 0, "derived_misses": 0}
@@ -56,20 +63,27 @@ def _remember(store: OrderedDict, key: object, value: object, limit: int) -> Non
         store.popitem(last=False)
 
 
-def parse(source: str, filename: str = "<unknown>") -> ast.Module:
+def parse(source: str, filename: str = "<unknown>", *,
+          on_miss: Callable[[], None] | None = None) -> ast.Module:
     """``ast.parse(source, filename=filename)``, shared per content (read-only tree)."""
     global _TREE_SOURCE_BYTES
     if not isinstance(source, str):
+        if on_miss is not None:
+            on_miss()
+        count_work("parses")
         return ast.parse(source, filename=filename)
     data = source.encode("utf-8", "surrogatepass")
     source_bytes = len(data)
-    key = (str(filename), source_digest(data))
+    key = source_digest(data)
     with _LOCK:
         entry = _TREES.get(key)
         if entry is not None:
             _TREES.move_to_end(key)
             _STATS["tree_hits"] += 1
             return entry[0]
+    if on_miss is not None:
+        on_miss()
+    count_work("parses")
     tree = ast.parse(source, filename=filename)  # SyntaxError propagates, never cached
     with _LOCK:
         _STATS["tree_misses"] += 1
@@ -121,7 +135,7 @@ def derived_source(kind: Hashable, source: str, filename: str,
 
 
 def parse_file(path: str | Path, *, encoding: str = "utf-8") -> tuple[str, ast.Module]:
-    """Read ``path`` and parse it; the key is the absolute path plus content hash."""
+    """Read ``path`` and parse it, using the absolute path for diagnostics."""
     absolute = Path(path).absolute()
     source = absolute.read_text(encoding=encoding)
     return source, parse(source, str(absolute))
@@ -137,13 +151,19 @@ def gc_paused():
     frees everything as usual; only cycle detection is deferred, and the prior
     state is restored on exit (nesting-safe).  No result can change.
     """
-    was_enabled = gc.isenabled()
-    gc.disable()
+    global _GC_USERS, _GC_WAS_ENABLED
+    with _LOCK:
+        if not _GC_USERS:
+            _GC_WAS_ENABLED = gc.isenabled()
+            gc.disable()
+        _GC_USERS += 1
     try:
         yield
     finally:
-        if was_enabled:
-            gc.enable()
+        with _LOCK:
+            _GC_USERS -= 1
+            if not _GC_USERS and _GC_WAS_ENABLED:
+                gc.enable()
 
 
 def clear() -> None:

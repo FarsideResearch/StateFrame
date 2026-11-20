@@ -167,6 +167,41 @@ def test_fallback_hardlink_is_read_only_and_run_replacement_is_private(tmp_path,
     assert (seed / relative).read_text() == "value = 1\n"
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="hardlink fallback is Linux specific")
+@pytest.mark.parametrize("workspace_objects", ["on", "off"])
+def test_provisioned_object_checkpoint_env_has_no_seed_hardlinks(tmp_path, monkeypatch, workspace_objects):
+    from stateframe import shell_host
+    from stateframe.engine.kernel_tool_settings import ToolSettings
+    from stateframe.runner import RunOptions
+
+    monkeypatch.setenv("STATEFRAME_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("STATEFRAME_ENV_SEED", "auto")
+    monkeypatch.setattr(kernel_env_seed, "_reflink", lambda *_args: False)
+    monkeypatch.setattr(kernel_run_env, "_run", lambda *_args, **_kwargs: "pip fixture")
+    monkeypatch.setattr(shell_host, "path_authority", lambda: ([], []))
+
+    source = _source(tmp_path)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    run = tmp_path / "run"
+    options = RunOptions(repo, "test", None, tool_settings=ToolSettings())
+    options._test_python = str(source / "bin/python")
+    spec = {"repo": str(repo), "capabilities": {}, "environment": {}}
+    if workspace_objects == "on":
+        spec["environment"]["STATEFRAME_WORKSPACE_OBJECTS"] = "on"
+
+    shell_host.provision(options, run, spec)
+
+    seed = Path(json.loads((run / "env-seed.json").read_text())["path"])
+    relative = "lib/python3.11/site-packages/demo.py"
+    package = run / "env" / relative
+    assert package.samefile(seed / relative) == (workspace_objects == "off")
+    if workspace_objects == "on":
+        assert package.stat().st_nlink == 1
+        package.write_text("value = 2\n")
+        assert (seed / relative).read_text() == "value = 1\n"
+
+
 @pytest.mark.host_sandbox
 def test_run_env_relocates_script_shebang_from_seed(tmp_path, monkeypatch):
     monkeypatch.setenv("STATEFRAME_HOME", str(tmp_path / "home"))

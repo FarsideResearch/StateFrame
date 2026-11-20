@@ -5,9 +5,11 @@ used to raise "unsafe public boundary path", which aborted the whole boundary bu
 """
 from __future__ import annotations
 
+import ast
+
 import pytest
 
-from kernel_boundary_checks import public_material_from_row
+from kernel_boundary_checks import _function_parameter_shapes, public_material_from_row
 
 PRODUCT = "def total(values):\n    return sum(values)\n"
 TEST = "from shop.cart import total\n\n\ndef test_total():\n    assert total([1, 2]) == 3\n"
@@ -36,3 +38,29 @@ def test_unsafe_paths_still_refuse(path):
     with pytest.raises(ValueError, match="unsafe public boundary path"):
         public_material_from_row(_row({path: {"parent_src": "x = 1\n"},
                                        "shop/cart.py": {"parent_src": PRODUCT}}))
+
+
+def test_large_module_parameter_shapes_index_class_owners_once(monkeypatch):
+    walk = ast.walk
+    walks = []
+
+    def counted_walk(tree):
+        walks.append(tree)
+        return walk(tree)
+
+    monkeypatch.setattr(ast, "walk", counted_walk)
+    source = "".join(f"def action_{index}(value): pass\n" for index in range(330))
+    source += ("class Cart:\n"
+               "    def __init__(self, item, /, *, count): pass\n"
+               "    async def save(self, value, *, flush): pass\n")
+    shapes = _function_parameter_shapes({"shop/cart.py": source})
+
+    assert len(walks) == 2
+    assert len(shapes) == 333
+    assert shapes["shop.cart.action_329"]["positional"] == ("value",)
+    assert shapes["shop.cart.Cart"] == shapes["shop.cart.Cart.__init__"] == {
+        "posonly": ("item",), "positional": (), "keyword_only": ("count",),
+    }
+    assert shapes["shop.cart.Cart.save"] == {
+        "posonly": (), "positional": ("value",), "keyword_only": ("flush",),
+    }

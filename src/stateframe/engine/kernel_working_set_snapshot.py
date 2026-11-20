@@ -131,6 +131,8 @@ class PreparationSnapshot:
     truth_message_indexes: tuple[int, ...] | None = None
     # Complete native grep pages have no continuation footer to carry this.
     grep_result_digests: tuple[tuple[str, str], ...] = field(default=(), repr=False)
+    # Fresh reads reserve overlapping source ranges during admission.
+    protected_ranges: tuple[tuple[str, int, int], ...] = field(default=(), repr=False)
 
     @property
     def slots(self) -> tuple[SourceSlot, ...]:
@@ -149,6 +151,15 @@ class PreparationSnapshot:
         if not isinstance(self.current_revisions, (list, tuple)):
             raise ValueError("current revisions must be finite")
         object.__setattr__(self, "current_revisions", tuple(tuple(row) for row in self.current_revisions))
+        if not isinstance(self.protected_ranges, (list, tuple)):
+            raise ValueError("protected ranges must be finite")
+        ranges = tuple(tuple(row) if isinstance(row, (list, tuple)) else ()
+                       for row in self.protected_ranges)
+        if any(len(row) != 3 or not isinstance(row[0], str) or not row[0]
+               or any(type(line) is not int or line < 1 for line in row[1:])
+               or row[1] > row[2] for row in ranges):
+            raise ValueError("invalid protected ranges")
+        object.__setattr__(self, "protected_ranges", ranges)
         if not isinstance(self.grep_result_digests, (list, tuple)):
             raise TypeError("grep result-set bindings must be a list or tuple")
         grep_digests = tuple(tuple(row) if isinstance(row, (list, tuple)) else ()
@@ -205,6 +216,8 @@ class PreparationSnapshot:
     @property
     def snapshot_digest(self) -> str:
         extra = f"grep_result_digests={self.grep_result_digests!r}" if self.grep_result_digests else ""
+        if self.protected_ranges:
+            extra += f"protected_ranges={self.protected_ranges!r}"
         return digest((repr(self) + extra).encode())
 
     @property

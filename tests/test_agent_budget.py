@@ -1,9 +1,11 @@
 """Schema admission and populated request size use the engine's request meter."""
+import builtins
 import json
 from pathlib import Path
+from threading import Event
+from types import SimpleNamespace
 
 import pytest
-
 from kernel_agent_schemas import BUILTIN_SCHEMAS, measure_schemas
 from kernel_custom_tools import load_tool_files
 from kernel_request_budget import ENDPOINT_PROMPT_TOKEN_BUDGET
@@ -21,6 +23,104 @@ def test_schema_fallback_admission_is_explicit():
     for name, row in report.items():
         assert row["tokens"] <= (1500 if name == "custom_total" else 1200)
         assert row["method"] == "calibrated_bytes"
+
+
+def test_schema_tokenization_overlaps_preparation_and_publishes_exact_report(tmp_path, monkeypatch):
+    import kernel_agent_tools
+    import kernel_request_diet
+    import kernel_skills
+    from kernel_custom_tools import CustomToolSet
+    from kernel_tool_settings import ToolSettings
+
+    started = Event()
+    release = Event()
+    inputs = []
+
+    def tokenize(content, *_args, **_kwargs):
+        inputs.append(content)
+        started.set()
+        assert release.wait(10), "workspace preparation could not run during tokenization"
+        return [0] * count(content)
+
+    def count(content):
+        return len(content) % 97 + 1
+
+    expected = measure_schemas(tokenizer=count)
+    monkeypatch.setattr(kernel_request_diet, "_http_tokenize", tokenize)
+    monkeypatch.setattr(kernel_agent_tools, "_active", None)
+    monkeypatch.setattr(kernel_skills, "_active", None)
+    shell = SimpleNamespace(spec={"chat_url": "http://127.0.0.1:9"},
+                            run_dir=tmp_path, settings=ToolSettings(web=True))
+    try:
+        kernel_agent_tools.configure(shell, CustomToolSet((), "empty"), defer_schema_budget=True)
+        assert started.wait(10)
+        assert len(inputs) == 1
+        assert not list(tmp_path.glob("tool-schema-budget-*.json"))
+        why = BUILTIN_SCHEMAS[-1]["function"]["parameters"]["properties"]["why"]
+        monkeypatch.setitem(why, "description", "Added by later menu setup.")
+        monkeypatch.setattr(RequestTokenMeter, "measure", lambda *_: (1, "tokenize"))
+    finally:
+        release.set()
+
+    tools = kernel_agent_tools.service()
+    tools.bind()
+    assert len(inputs) == len(BUILTIN_SCHEMAS) + 1
+    assert tools.schema_budget == expected
+    assert json.loads(tools.schema_budget_path.read_text()) == expected
+    assert kernel_agent_tools.project_menu([]) == [
+        item for item in BUILTIN_SCHEMAS if item["function"]["name"] == "web_fetch"
+    ]
+    assert len(inputs) == len(BUILTIN_SCHEMAS) + 1
+    assert list(tmp_path.glob("tool-schema-budget-*.json")) == [tools.schema_budget_path]
+
+
+def test_deferred_schema_budget_still_refuses_an_oversized_schema(tmp_path, monkeypatch):
+    import kernel_agent_tools
+    import kernel_request_diet
+    from kernel_custom_tools import CustomToolError, CustomToolSet
+    from kernel_tool_settings import ToolSettings
+
+    monkeypatch.setattr(kernel_request_diet, "_http_tokenize", lambda *_a, **_kw: [0] * 1201)
+    monkeypatch.setattr(kernel_agent_tools, "_active", None)
+    shell = SimpleNamespace(spec={"chat_url": "http://127.0.0.1:9"},
+                            run_dir=tmp_path, settings=ToolSettings())
+    kernel_agent_tools.configure(shell, CustomToolSet((), "empty"), defer_schema_budget=True)
+    with pytest.raises(CustomToolError, match="schema exceeds 1200 tokens: 1201"):
+        kernel_agent_tools.project_menu([])
+    assert not list(tmp_path.glob("tool-schema-budget-*.json"))
+
+
+def test_web_implementation_loads_on_first_dispatch(tmp_path, monkeypatch):
+    from kernel_agent_tools import AgentTools
+    from kernel_custom_tools import CustomToolSet
+    from kernel_tool_settings import ToolSettings
+
+    shell = SimpleNamespace(spec={}, run_dir=tmp_path, settings=ToolSettings(web=True))
+    imports = []
+    original_import = builtins.__import__
+
+    def import_module(name, *args, **kwargs):
+        if name == "kernel_web_fetch":
+            imports.append(name)
+            return SimpleNamespace(
+                WebPolicy=lambda *_args, **_kwargs: None,
+                fetch=lambda *_args: SimpleNamespace(ok=True, status=200, text="fetched text"),
+            )
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_module)
+    tools = AgentTools(shell, CustomToolSet((), "empty"))
+    tools.bind()
+    assert any(item["function"]["name"] == "web_fetch" for item in tools.schemas())
+    assert imports == []
+
+    def observe(name, args, call_id, operation, **kwargs):
+        return operation()
+
+    monkeypatch.setattr(tools, "observation", observe)
+    reply = tools.execute("web_fetch", {"url": "https://example.com"}, "fetch-1")
+    assert reply.observation == "fetched text"
+    assert imports == ["kernel_web_fetch"]
 
 
 def populated_body():

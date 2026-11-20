@@ -843,6 +843,15 @@ class LocalizeIndex:
 
     def refresh(self) -> None:
         inventory = build_inventory(self.root)
+        from mc_repo_intel_vendor.background import enabled as background_enabled
+
+        if background_enabled():
+            from mc_repo_intel_vendor.call_graph import build_graph
+
+            self.inventory = inventory
+            self._manifest_digest = inventory.manifest_digest
+            self.graph = build_graph(str(self.root), background_lsp=self.use_graph_lsp)
+            return
         if inventory.manifest_digest == self._manifest_digest and self.inventory is not None:
             return
         self.inventory = inventory
@@ -967,6 +976,11 @@ class LocalizeIndex:
             "coverage": self.inventory.coverage(),
             "source_receipt_ids": list(source_receipts[:64]),
         }
+        graph_status = getattr(graph, "index_status", "ready")
+        if graph_status != "ready":
+            payload["graph"]["pending"] = (
+                ["call_graph"] if graph_status == "pending" else ["type_resolution"]
+            )
         payload["tokens"] = _estimate_tokens(payload)
         payload["receipt"] = {
             "schema": RECEIPT_SCHEMA,

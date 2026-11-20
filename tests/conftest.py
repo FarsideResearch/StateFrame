@@ -41,6 +41,20 @@ def _isolated_stateframe_home(tmp_path_factory):
         os.environ.pop("STATEFRAME_HOME", None)
 
 
+@pytest.fixture
+def isolated_pilot_context():
+    """Scope tests that construct a runtime without running its terminal path."""
+    from kernel_pilot import ACTIVE_PARENT, ACTIVE_RUNTIME
+
+    parent_token = ACTIVE_PARENT.set(None)
+    runtime_token = ACTIVE_RUNTIME.set(None)
+    try:
+        yield
+    finally:
+        ACTIVE_RUNTIME.reset(runtime_token)
+        ACTIVE_PARENT.reset(parent_token)
+
+
 @pytest.fixture(autouse=True)
 def reject_retired_shared_parity_baseline(request):
     """Keep old Linux mounts from silently routing tests to the wrong source tree."""
@@ -308,6 +322,23 @@ def clean_test_environment(tmp_path):
         # the host's editable StateFrame .pth or grant its source tree authority.
         for name in ("pytest", "pluggy", "iniconfig", "packaging", "pygments"):
             distribution = importlib.metadata.distribution(name)
+            if distribution.files is None:
+                # Debian packages can omit RECORD. Copy only this distribution's
+                # import roots and metadata, never the whole system site path.
+                roots = (distribution.read_text("top_level.txt") or name).splitlines()
+                for top in roots:
+                    if not top.isidentifier():
+                        continue
+                    source = Path(distribution.locate_file(top))
+                    target = site / top
+                    if source.is_dir():
+                        shutil.copytree(source, target, dirs_exist_ok=True,
+                                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+                    elif source.with_suffix(".py").is_file():
+                        shutil.copy2(source.with_suffix(".py"), target.with_suffix(".py"))
+                metadata = Path(distribution._path)
+                shutil.copytree(metadata, site / metadata.name, dirs_exist_ok=True)
+                continue
             for relative in distribution.files:
                 if ".." in relative.parts or relative.suffix == ".pyc":
                     continue

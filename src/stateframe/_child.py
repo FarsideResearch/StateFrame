@@ -26,23 +26,16 @@ import threading
 import time
 import traceback
 import urllib.request
-from contextlib import suppress
+from contextlib import ExitStack, contextmanager, suppress
 from pathlib import Path
-from typing import TextIO
+from typing import TYPE_CHECKING, TextIO
 
 if __package__:
     from .cache_metrics import normalize
     from .engine import kernel_reason_log as _reason_log
     from .engine.kernel_safe_paths import safe_home
-    from .replay_tape import (
-        CheckpointUnfaithful,
-        Replayer,
-        ReplayUnfaithful,
-        mask_volatile,
-        wire_stem,
-    )
     from .skills import SkillError, skills_digest, verify_records
-    from .state_dirs import private_directory
+    from .state_dirs import private_directory, wire_stem
 else:  # Executed by path under the selected project interpreter.
     # The interpreter may also have another StateFrame installation. Package
     # imports used by subframes must belong to this child and its adjacent engine.
@@ -50,15 +43,11 @@ else:  # Executed by path under the selected project interpreter.
     from cache_metrics import normalize
     from engine import kernel_reason_log as _reason_log
     from engine.kernel_safe_paths import safe_home
-    from replay_tape import (
-        CheckpointUnfaithful,
-        Replayer,
-        ReplayUnfaithful,
-        mask_volatile,
-        wire_stem,
-    )
     from skills import SkillError, skills_digest, verify_records
-    from state_dirs import private_directory
+    from state_dirs import private_directory, wire_stem
+
+if TYPE_CHECKING:
+    from .replay_tape import Replayer
 
 # The wrappers' own state (send counters, the id stream position, ...). An engine checkpoint saves
 # these by value and a checkpoint restore refills them in place (kernel_checkpoint participants), so
@@ -67,6 +56,13 @@ HOST_STATE: dict[str, dict] = {}
 # A resumed run's time left at its last completed step ({"seconds": float, "started": bool}).
 _RESUMED_TIME: dict[str, object] = {}
 
+
+def _replay_tape_module():
+    if __package__:
+        from . import replay_tape
+    else:
+        import replay_tape
+    return replay_tape
 
 
 def recorded_stable_wire_decision(recorded: bytes | None) -> str | None:
@@ -355,7 +351,8 @@ class SubframeBudgetExhausted(BaseException):
 
 def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = None,
                           routed_endpoints: set[str] | None = None, hook_wiring=None,
-                          *, send_ledger=None, send_cap: int | None = None) -> None:
+                          *, send_ledger=None, send_cap: int | None = None,
+                          launch_started_ns: int | None = None) -> None:
     """Record every physical chat send: exact identity bytes, response bytes, usage.
 
     On ``stateframe resume`` a send the interrupted attempt already completed is answered from its
@@ -364,6 +361,9 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
     import kernel_bounded_http
 
     if replayer is not None:
+        replay_tape = _replay_tape_module()
+        CheckpointUnfaithful = replay_tape.CheckpointUnfaithful
+        ReplayUnfaithful = replay_tape.ReplayUnfaithful
         # Replay is the only path that needs these engine imports. The recorded
         # request bytes decide the old order; current meter and switch do not.
         from kernel_cache_layout_candidate import (
@@ -622,6 +622,8 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
                     emit("send_settlement_error", send=send, error=error_name)
 
         transport_attempts: list[dict[str, object]] = []
+        launch_handoff_ns = (time.monotonic_ns() - launch_started_ns
+                             if launch_started_ns is not None and index == 1 and replayed is None else None)
         try:
             response = (replayed if replayed is not None else original(
                 wire, endpoint, key, record_attempts=transport_attempts.extend,
@@ -677,6 +679,8 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
                   **final_layout_record(wire),
                   **stable_record,
                   "seconds": round(elapsed, 3), **usage, "actions": _actions(parsed)}
+        if launch_handoff_ns is not None:
+            record["prepare_to_first_transport_ns"] = launch_handoff_ns
         if identity is not None:
             record["endpoint_identity"] = identity
         if replayed is not None:
@@ -718,6 +722,47 @@ def install_token_count_warning() -> None:
     RequestTokenMeter.measure = measured
 
 
+def _turn_launch_binding(spec: dict, run: Path, *, restoring: bool):
+    from kernel_turn_contracts import Context, Unavailable
+    from kernel_turn_launch import HostLaunch, encode
+
+    if "baseline" not in spec.get("turn_launch", {}):
+        raise Unavailable("minimal launch requires completed runner preflight")
+    try:
+        from kernel_turn_host import open_run
+    except ModuleNotFoundError as error:
+        if error.name != "kernel_turn_host":
+            raise
+        raise Unavailable("minimal launch requires the composed turn host") from error
+
+    resume = spec.get("resume") or {}
+    ctx = Context(
+        principal=str(os.geteuid()), run=spec["run_identity_seed"],
+        attempt=str(resume.get("attempt", 0)), private_dir=run,
+        profile_digest=hashlib.sha256(encode([spec["profile"], spec["environment"]])).hexdigest(),
+    )
+    active = None
+
+    @contextmanager
+    def open_turn_launch(live):
+        nonlocal active
+        if active is not None:
+            raise Unavailable("turn host is already open for this attempt")
+        with ExitStack() as lifetime:
+            ports = lifetime.enter_context(open_run(ctx, live=live))
+            active = HostLaunch(ports, Path(spec["parent_snapshot"]), spec, lifetime)
+            try:
+                yield active
+            finally:
+                active = None
+
+    def require_admitted():
+        if active is None or (not restoring and not active.admitted):
+            raise Unavailable("minimal launch has no active admitted parent")
+
+    return open_turn_launch, require_admitted
+
+
 def install_checked_ask(rr, spec: dict, run: Path, hook_wiring=None, *,
                         live_slot: int | None = None,
                         replayer: Replayer | None = None,
@@ -730,6 +775,10 @@ def install_checked_ask(rr, spec: dict, run: Path, hook_wiring=None, *,
     HOST_STATE["requests"] = counter
     engine_spec = {"environment": spec["environment"], "public_row": spec["public_row"],
                    "presentation_arm": "frame"}
+    minimal_launch = "turn_launch" in spec and "unit_spec" not in spec
+    if minimal_launch and "baseline" not in spec["turn_launch"]:
+        from kernel_turn_contracts import Unavailable
+        raise Unavailable("minimal launch requires completed runner preflight")
 
     def checked_ask(messages, **kwargs):
         from kernel_pilot import ACTIVE_RUNTIME
@@ -832,6 +881,10 @@ def install_checked_ask(rr, spec: dict, run: Path, hook_wiring=None, *,
 
     checked_ask.prepare_request_host_text = prepare_request_host_text
     checked_ask.prepare_request_inputs = lambda messages: messages
+    if minimal_launch:
+        # The parent snapshot was admitted by the runner before baseline preflight.
+        # Use the regular workspace and sealed request boundary in this child.
+        checked_ask.minimal_launch = True
     rr.ask_tools = checked_ask
 
 
@@ -1008,6 +1061,12 @@ def install_compact_capture(parent: Path) -> None:
     import difflib
     import kernel_bridge_evidence as evidence
 
+    if os.environ.get("STATEFRAME_WORKSPACE_OBJECTS") == "on":
+        from kernel_workspace_candidate import ProposalCapture
+
+        evidence.capture_candidate = ProposalCapture(parent.parent, parent, compact=True)
+        return
+
     def parent_bytes(rel: str) -> bytes | None:
         path = parent / rel
         return path.read_bytes() if path.is_file() and not path.is_symlink() else None
@@ -1140,6 +1199,9 @@ def install_check_recorder(run: Path, replayer: Replayer | None, recorded_dir: P
     # the old value (false on the original run) would lose recorded check timings in the tail.
     substitution = {"enabled": recorded_dir is not None}
     HOST_STATE["checks"] = counter
+
+    if recorded_dir is not None:
+        mask_volatile = _replay_tape_module().mask_volatile
 
     def masked(text: str) -> str:
         return mask_volatile(text) if isinstance(text, str) else text
@@ -1550,16 +1612,19 @@ def main(argv: list[str], *, teardown: EngineTeardown | None = None) -> int:
     if (os.environ.get("STATEFRAME_CHECKPOINT", "").strip().lower() in {"off", "0"}
             or recorded_mode in {"off", "0"}):
         checkpoint = None
-    if checkpoint is not None:
+    if resume is None:
+        replayer = None
+    elif checkpoint is not None:
         # Checkpoint resume: the engine restores its state as of send ``sends``; only the recorded
         # exchanges after it are replayed, strictly (any difference refuses before sending).
         tail = [item for item in resume.get("tape") or [] if int(item["send"]) > int(checkpoint["sends"])]
-        replayer = Replayer(tail, resume.get("model_swap"), strict=True, pending=checkpoint.get("pending"),
-                            route_changes=resume.get("route_changes"))
+        replayer = _replay_tape_module().Replayer(
+            tail, resume.get("model_swap"), strict=True, pending=checkpoint.get("pending"),
+            route_changes=resume.get("route_changes"))
     else:
-        replayer = (Replayer(resume.get("tape") or [], resume.get("model_swap"),
-                             pending=resume.get("pending"), route_changes=resume.get("route_changes"))
-                    if resume is not None else None)
+        replayer = _replay_tape_module().Replayer(
+            resume.get("tape") or [], resume.get("model_swap"),
+            pending=resume.get("pending"), route_changes=resume.get("route_changes"))
     install_environment(spec)
     # Keep all engine urlopen calls direct, including those outside the primary transport.
     _install_direct_opener()
@@ -1693,7 +1758,6 @@ def main(argv: list[str], *, teardown: EngineTeardown | None = None) -> int:
     from kernel_provider_dialect import seed_run_capability_cache
     seed_run_capability_cache(spec.get("provider_capabilities"))
     from kernel_custom_tools import CustomToolError, load_tool_files
-    from kernel_mcp_tools import load_mcp_files
     from kernel_tool_settings import ToolSettingsError, load_tool_settings
     from kernel_tool_tape import ToolTapeError, configure_replay
     hook_wiring = None
@@ -1710,8 +1774,11 @@ def main(argv: list[str], *, teardown: EngineTeardown | None = None) -> int:
                                      builtin_names=builtin_names, shell_network=settings.shell_network)
             if custom.digest != spec.get("custom_tools_digest"):
                 raise CustomToolError("custom tool definition or executable changed since host validation")
-            mcp_servers = load_mcp_files([Path(item["path"]) for item in settings.mcp_files],
-                                         shell_network=settings.shell_network)
+            mcp_servers = ()
+            if settings.mcp_files:
+                from kernel_mcp_tools import load_mcp_files
+                mcp_servers = load_mcp_files([Path(item["path"]) for item in settings.mcp_files],
+                                             shell_network=settings.shell_network)
         if "hooks" in spec:
             from kernel_hooks import HookSet, verify_bundle
             from kernel_hook_wiring import HookWiring
@@ -1761,7 +1828,8 @@ def main(argv: list[str], *, teardown: EngineTeardown | None = None) -> int:
             from kernel_shell_tool import service as shell_service
             from kernel_agent_tools import configure as configure_agent_tools
             configure_agent_tools(shell_service(), custom, mcp_servers,
-                                  resume_active=resume is not None)
+                                  resume_active=resume is not None,
+                                  defer_schema_budget=True)
         from kernel_skills import configure as configure_skills
         configure_skills(skill_records, skill_digest, spec.get("chat_url"), auth_key=key or None)
         from kernel_project_instructions import configure as configure_project_instructions
@@ -1796,8 +1864,11 @@ def main(argv: list[str], *, teardown: EngineTeardown | None = None) -> int:
                 excluded_paths=excluded_paths,
             )
         install_compact_capture(Path(spec["parent_snapshot"]))
+        launch_record = spec.get("turn_launch") if resume is None and unit_spec is None else None
         install_wire_recorder(run, spec["chat_url"], replayer, routed_endpoints, hook_wiring,
-                              send_ledger=send_ledger, send_cap=send_cap)
+                              send_ledger=send_ledger, send_cap=send_cap,
+                              **({"launch_started_ns": launch_record["prepare_started_ns"]}
+                                 if launch_record is not None else {}))
         previous_checks = Path(resume["previous_attempt"]) / "checks" if resume is not None else None
         install_check_recorder(run, replayer, previous_checks)
         install_token_count_warning()

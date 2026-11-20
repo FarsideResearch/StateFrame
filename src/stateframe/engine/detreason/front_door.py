@@ -32,10 +32,13 @@ import pathlib
 import re
 import sys
 from dataclasses import dataclass, field
+from itertools import chain
 
 _ROOT = pathlib.Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
+
+from kernel_obligation_seed import DeclaredVocabulary, name_words  # noqa: E402
 
 CORPUS_PATH = pathlib.Path(__file__).resolve().parent / "frontdoor_eval.jsonl"
 
@@ -136,11 +139,10 @@ scheduler deploy deploys ui page pages
 _SNAKE = re.compile(r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b")
 _PATHY = re.compile(r"\b[\w./-]+\.(?:py|js|ts|vue|md|json|yaml|yml|sql)\b")
 _CAPS = re.compile(r"\b[A-Z][a-zA-Z0-9]*[a-z][a-zA-Z0-9]*\b")
-_WORD = re.compile(r"[a-z0-9]+")
 
 
 def _words(text: str) -> list:
-    return _WORD.findall((text or "").lower())
+    return name_words(text or "")
 
 
 # ---------------------------------------------------------------------------
@@ -317,12 +319,18 @@ class RepoState:
     def vocab(self) -> frozenset:
         """Every word that names something in this repo — the domain lexicon a
         bare noun in the utterance is checked against."""
-        bag = set()
-        for name in self.symbols:
-            bag.update(_words(name))
-        for path in self.files:
-            bag.update(_words(pathlib.PurePosixPath(path).stem))
-        return frozenset(w for w in bag if w not in _STOPWORDS and len(w) > 2)
+        return _ResolutionVocabulary(self).domain
+
+
+class _ResolutionVocabulary:
+    def __init__(self, state: RepoState, declared: DeclaredVocabulary | None = None):
+        self.symbols = {name: frozenset(_words(name)) for name in sorted(state.symbols)}
+        names = declared if declared is not None else DeclaredVocabulary(())
+        self.files = {path: frozenset(_words(names.name(path)[1])) for path in sorted(state.files)}
+        self.domain = frozenset(
+            word for words in chain(self.symbols.values(), self.files.values()) for word in words
+            if word not in _STOPWORDS and len(word) > 2
+        )
 
 
 def _symbols_via_func_index(files: dict) -> dict | None:
@@ -369,6 +377,69 @@ _SKIP_DIRS = frozenset({"__pycache__", ".git", "node_modules", ".venv", "venv",
 BUILD_FILE_CAP = 400
 
 
+def _resolution_facts(files: dict) -> tuple[dict, list]:
+    """Project names and seam evidence from the same source-bound parse."""
+    from chains import _FileScan, seam_violations
+    from kernel_parse_cache import parse
+
+    try:
+        import func_index  # noqa: F401 - preserve its optional availability
+        functions_available = True
+    except Exception:  # Keep the legacy Python function/class fallback.
+        functions_available = False
+
+    class FileScan(_FileScan):
+        def __init__(self, path: str):
+            super().__init__(path)
+            self.functions: set[str] = set()
+            self.classes: set[str] = set()
+
+        def visit_FunctionDef(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+            self.functions.add(node.name)
+            self.generic_visit(node)
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_ClassDef(self, node: ast.ClassDef) -> None:
+            self.classes.add(node.name)
+            self.generic_visit(node)
+
+    functions: dict[str, list[str]] = {}
+    python_names: dict[str, list[str]] = {}
+    manifest: dict = {
+        "definitions": [], "references": [], "parse_errors": {},
+        "classes": {}, "imports": {}, "instances": {},
+    }
+    for path, source in sorted(files.items()):
+        try:
+            tree = parse(source, path)
+        except SyntaxError as error:
+            manifest["parse_errors"][path] = f"{error.msg} (line {error.lineno})"
+            continue
+        scan = FileScan(path)
+        scan.visit(tree)
+        scan.finish()
+        for name in sorted(scan.functions):
+            functions.setdefault(name, []).append(path)
+        if path.endswith(".py"):
+            for name in sorted(scan.functions | scan.classes):
+                python_names.setdefault(name, []).append(path)
+        manifest["definitions"].extend(scan.definitions)
+        manifest["references"].extend(scan.references)
+        manifest["imports"][path] = scan.imports
+        manifest["instances"][path] = scan.instances
+
+    # The verifier consumes the definitions and references directly. Only
+    # chain planning needs a manifest that pairs every definition with its sites.
+    classes = {row["name"]: {} for row in manifest["definitions"] if row["kind"] == "class"}
+    for row in manifest["definitions"]:
+        if row["kind"] == "classattr":
+            classes.setdefault(row["owner"], {})[row["name"]] = row["how"]
+    manifest["classes"] = classes
+    return (functions if functions_available and functions else python_names,
+            seam_violations(manifest, files))
+
+
 def build_state(repo_root=None, files: dict | None = None,
                 activity: list | None = None,
                 file_cap: int = BUILD_FILE_CAP) -> RepoState:
@@ -395,12 +466,15 @@ def build_state(repo_root=None, files: dict | None = None,
     symbols = {}
     violations: list = []
     if src:
-        symbols = _symbols_via_func_index(src) or _symbols_via_ast(src)
         try:
-            import chains
-            violations = chains.seam_violations(chains.seam_manifest(src), src)
-        except Exception:                               # noqa: BLE001
-            violations = []
+            symbols, violations = _resolution_facts(src)
+        except Exception:  # Optional seam machinery may be unavailable.
+            symbols = _symbols_via_func_index(src) or _symbols_via_ast(src)
+            try:
+                import chains
+                violations = chains.seam_violations(chains.seam_manifest(src), src)
+            except Exception:                           # noqa: BLE001
+                violations = []
     return RepoState(files=src, symbols=symbols, violations=violations,
                      activity=list(activity or []))
 
@@ -412,7 +486,8 @@ def _violation_text(v: dict) -> str:
     return " ".join(str(v.get(k, "")) for k in ("kind", "file", "name", "detail"))
 
 
-def resolve_referent(phrase: str, state: RepoState) -> Referent:
+def resolve_referent(phrase: str, state: RepoState, *,
+                     vocabulary: _ResolutionVocabulary | None = None) -> Referent:
     """Score one surface phrase against state, in the committed priority order:
     seam violations, then repo symbols, then file paths, then recent activity.
 
@@ -424,6 +499,8 @@ def resolve_referent(phrase: str, state: RepoState) -> Referent:
     if not pw:
         return Referent(surface_phrase=phrase, note="no lexical content")
 
+    if vocabulary is None:
+        vocabulary = _ResolutionVocabulary(state)
     res: list = []
 
     for v in state.violations:
@@ -443,8 +520,7 @@ def resolve_referent(phrase: str, state: RepoState) -> Referent:
             score=score,
             detail=str(v.get("detail", ""))[:200]))
 
-    for name, paths in sorted(state.symbols.items()):
-        nw = set(_words(name))
+    for name, nw in vocabulary.symbols.items():
         if not nw:
             continue
         if pw == nw:
@@ -453,12 +529,11 @@ def resolve_referent(phrase: str, state: RepoState) -> Referent:
             score = 0.7
         else:
             continue
-        for p in paths:
+        for p in state.symbols[name]:
             res.append(Resolution(kind="repo_symbol", target=f"{p}::{name}",
                                   score=score, detail="symbol name match"))
 
-    for path in sorted(state.files):
-        stem_w = set(_words(pathlib.PurePosixPath(path).stem))
+    for path, stem_w in vocabulary.files.items():
         if phrase.strip() == path:
             res.append(Resolution("repo_file", path, 1.0, "exact path"))
         elif stem_w and pw == stem_w:
@@ -617,8 +692,9 @@ def interpret(utterance: str, repo_root=None, extra_context: dict | None = None
     if stated_type not in CONTRACT_TYPES:
         stated_type = ""
 
-    phrases = extract_referents(utterance, domain_vocab=state.vocab)
-    referents = [resolve_referent(p, state) for p in phrases]
+    vocabulary = _ResolutionVocabulary(state, ctx.get("declared_vocabulary"))
+    phrases = extract_referents(utterance, domain_vocab=vocabulary.domain)
+    referents = [resolve_referent(p, state, vocabulary=vocabulary) for p in phrases]
     resolved = tuple(r for r in referents if r.is_resolved)
     missing = tuple(r for r in referents if not r.is_resolved)
 

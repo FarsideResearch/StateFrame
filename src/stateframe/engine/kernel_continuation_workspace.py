@@ -193,8 +193,12 @@ class ContinuationWorkspace:
                 or bound_root.is_symlink() or original != bound_root.resolve()):
             raise WorkspaceError("grading source is not the bound execution workspace")
         target = self.directory / ("grading-" + uuid.uuid4().hex)
-        shutil.copytree(original, target, symlinks=True,
-                        ignore=shutil.ignore_patterns("__pycache__", ".pytest_cache", ".git"))
+        ignore = shutil.ignore_patterns("__pycache__", ".pytest_cache", ".git")
+        from sys import modules
+        workspace_consumers = modules.get("kernel_workspace_consumers")
+        if (workspace_consumers is None
+                or not workspace_consumers.copy_pinned_workspace(original, target, ignore=ignore)):
+            shutil.copytree(original, target, symlinks=True, ignore=ignore)
         self._write("grading.json", {"source": str(original), "copy": str(target),
                                     "purpose": "terminal_grading_only"})
         return target

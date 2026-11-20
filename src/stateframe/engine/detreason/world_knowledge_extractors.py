@@ -10,6 +10,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import PurePosixPath
@@ -133,10 +134,29 @@ def _span(node: ast.AST) -> tuple[int, int]:
     return (start, max(start, end))
 
 
-def _expression(node: ast.AST | None, source: str) -> str:
+class _SourcePositions:
+    """Index line starts once for the Python AST's UTF-8 byte coordinates."""
+
+    def __init__(self, source: str) -> None:
+        self.data = source.encode("utf-8")
+        self.line_starts = (0, *(match.end() for match in re.finditer(rb"\r\n?|\n", self.data)))
+
+    def segment(self, node: ast.AST) -> str:
+        line = getattr(node, "lineno", None)
+        end_line = getattr(node, "end_lineno", None)
+        column = getattr(node, "col_offset", None)
+        end_column = getattr(node, "end_col_offset", None)
+        if line is None or end_line is None or column is None or end_column is None:
+            return ""
+        start = self.line_starts[line - 1] + column
+        stop = self.line_starts[end_line - 1] + end_column
+        return self.data[start:stop].decode("utf-8")
+
+
+def _expression(node: ast.AST | None, source: _SourcePositions) -> str:
     if node is None:
         return ""
-    segment = ast.get_source_segment(source, node)
+    segment = source.segment(node)
     if segment:
         return segment.strip()
     try:
@@ -145,12 +165,12 @@ def _expression(node: ast.AST | None, source: str) -> str:
         return ""
 
 
-def _annotation(node: ast.AST | None, source: str) -> str:
+def _annotation(node: ast.AST | None, source: _SourcePositions) -> str:
     text = _expression(node, source)
     return f": {text}" if text else ""
 
 
-def _arg_text(arg: ast.arg, default: ast.AST | None, source: str) -> str:
+def _arg_text(arg: ast.arg, default: ast.AST | None, source: _SourcePositions) -> str:
     text = arg.arg + _annotation(arg.annotation, source)
     if default is not None:
         text += " = " + _expression(default, source)
@@ -159,7 +179,10 @@ def _arg_text(arg: ast.arg, default: ast.AST | None, source: str) -> str:
 
 def function_signature(node: ast.FunctionDef | ast.AsyncFunctionDef, source: str) -> str:
     """Render all argument markers, annotations, defaults, and return type."""
+    return _function_signature(node, _SourcePositions(source))
 
+
+def _function_signature(node: ast.FunctionDef | ast.AsyncFunctionDef, source: _SourcePositions) -> str:
     args = node.args
     positional = [*args.posonlyargs, *args.args]
     default_start = len(positional) - len(args.defaults)
@@ -189,7 +212,7 @@ def function_signature(node: ast.FunctionDef | ast.AsyncFunctionDef, source: str
     return result + (f" -> {return_annotation[2:]}" if return_annotation else "")
 
 
-def _class_signature(node: ast.ClassDef, source: str) -> str:
+def _class_signature(node: ast.ClassDef, source: _SourcePositions) -> str:
     bases = [_expression(base, source) for base in node.bases]
     keywords = [
         f"{keyword.arg}={_expression(keyword.value, source)}"
@@ -237,7 +260,7 @@ def _module_candidates(path: str, module: str, level: int = 0) -> tuple[str, ...
 class _PythonExtractor(ast.NodeVisitor):
     def __init__(self, path: str, source: str) -> None:
         self.path = path
-        self.source = source
+        self.source = _SourcePositions(source)
         self.facts: list[ExtractedFact] = []
         self.stack: list[str] = []
         self.function_nodes: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
@@ -297,7 +320,7 @@ class _PythonExtractor(ast.NodeVisitor):
     ) -> None:
         qualname = ".".join((*self.stack, node.name))
         kind = "method" if self.stack else "function"
-        signature = function_signature(node, self.source)
+        signature = _function_signature(node, self.source)
         self.function_nodes[qualname] = node
         self.function_calls.setdefault(qualname, set())
         self.add(

@@ -20,8 +20,15 @@ import copy
 import hashlib
 import json
 import os
-from collections.abc import Mapping
+from collections.abc import Iterable, Iterator, Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
+from weakref import WeakKeyDictionary
+
+if TYPE_CHECKING:
+    from kernel_workspace_consumers import WorkspaceConsumers
+    from kernel_workspace_tree import Directory, Entry
 
 
 MODE_ENV = "STATEFRAME_CHALLENGE_BUDGET"
@@ -121,7 +128,7 @@ def _root(runtime: object) -> Path | None:
     return path if path.is_dir() else None
 
 
-def _excluded_paths(runtime: object, root: Path) -> set[Path]:
+def _excluded_paths(runtime: object, root: Path) -> frozenset[Path]:
     excluded: set[Path] = set()
     journal = getattr(runtime, "journal", None)
     journal_path = getattr(journal, "path", None)
@@ -143,7 +150,13 @@ def _excluded_paths(runtime: object, root: Path) -> set[Path]:
             excluded.add(Path(output).resolve())
         except (OSError, TypeError, ValueError):
             pass
-    return {item for item in excluded if item == root or item.is_relative_to(root)}
+    return frozenset(item for item in excluded if item.is_relative_to(root))
+
+
+def _included(relative: Path, resolved: Path, excluded: frozenset[Path]) -> bool:
+    return (not _IGNORED_PARTS.intersection(relative.parts)
+            and relative.name not in _IGNORED_FILES
+            and not any(resolved.is_relative_to(path) for path in excluded))
 
 
 def _artifact_files(runtime: object, root: Path) -> dict[str, str]:
@@ -157,12 +170,7 @@ def _artifact_files(runtime: object, root: Path) -> dict[str, str]:
     for path in paths:
         try:
             relative = path.relative_to(root)
-            resolved = path.resolve()
-            if any(part in _IGNORED_PARTS for part in relative.parts):
-                continue
-            if relative.name in _IGNORED_FILES:
-                continue
-            if resolved in excluded or any(item in resolved.parents for item in excluded):
+            if not _included(relative, path.resolve(), excluded):
                 continue
             if path.is_symlink():
                 # Do not follow a link outside the task root.  Link identity is
@@ -175,6 +183,104 @@ def _artifact_files(runtime: object, root: Path) -> dict[str, str]:
         except (OSError, ValueError, UnicodeError):
             continue
     return result
+
+
+def _tree_leaves(tree: Directory, parent: tuple[bytes, ...] = ()) -> Iterator[
+    tuple[tuple[bytes, ...], Entry]
+]:
+    from kernel_workspace_tree import Directory, children
+
+    for name, entry in children(tree):
+        path = (*parent, name)
+        if isinstance(entry, Directory):
+            yield from _tree_leaves(entry, path)
+        else:
+            yield path, entry
+
+
+@dataclass(slots=True)
+class _ArtifactProjection:
+    tree: Directory
+    excluded: frozenset[Path]
+    files: dict[str, str] = field(default_factory=dict)
+    symlinks: dict[Path, str] = field(default_factory=dict)
+    included_links: dict[str, str] = field(default_factory=dict)
+    revision: str = ""
+
+    def update(self, root: Path, entries: Iterable[tuple[tuple[bytes, ...], Entry | None]]) -> bool:
+        from kernel_workspace_tree import File, Symlink
+
+        changed = False
+        for path, entry in entries:
+            relative = Path(*map(os.fsdecode, path))
+            key = relative.as_posix()
+            self.symlinks.pop(relative, None)
+            if isinstance(entry, Symlink):
+                self.symlinks[relative] = "symlink:" + str(Path(os.fsdecode(entry.target)))
+            if isinstance(entry, File) and _included(relative, root / relative, self.excluded):
+                digest = "sha256:" + entry.sha256.hex()
+                if self.files.get(key) != digest:
+                    self.files[key] = digest
+                    changed = True
+            elif self.files.pop(key, None) is not None:
+                changed = True
+        return changed
+
+    def refresh_revision(self, root: Path, *, files_changed: bool) -> str:
+        # A link can resolve through an external hop that is outside the fence.
+        # Recheck its inclusion, while taking the link text from the pinned leaf.
+        links = {}
+        for relative, identity in self.symlinks.items():
+            try:
+                if _included(relative, (root / relative).resolve(), self.excluded):
+                    links[relative.as_posix()] = identity
+            except (OSError, ValueError):
+                continue
+        if files_changed or links != self.included_links:
+            files = self.files | links
+            self.revision = _digest({"files": files}) if files else ""
+            self.included_links = links
+        return self.revision
+
+
+_artifact_projections: WeakKeyDictionary[WorkspaceConsumers, _ArtifactProjection] = WeakKeyDictionary()
+
+
+def _projected_artifact_revision(runtime: object, root: Path) -> str | None:
+    """Return the pinned revision, an empty string for an empty tree, or None on a miss."""
+    if os.environ.get("STATEFRAME_WORKSPACE_OBJECTS") != "on":
+        return None
+    from kernel_request_auth_identity import _installation_home
+    from kernel_workspace_consumers import consumers_for
+    from kernel_workspace_tree import diff
+
+    consumers = consumers_for(root)
+    if consumers is None or consumers.state.fence.root != root:
+        return None
+    boundary = "artifact-revision"
+    try:
+        # The shared index can intentionally omit the installation home.
+        if Path(os.path.realpath(_installation_home())).is_relative_to(root):
+            return None
+        with consumers.state.pin(boundary) as observation:
+            tree = observation.tree
+            excluded = _excluded_paths(runtime, root)
+            projection = _artifact_projections.pop(consumers, None)
+            changed = False
+            if projection is None or projection.excluded != excluded:
+                projection = _ArtifactProjection(tree, excluded)
+                changed = projection.update(root, _tree_leaves(tree))
+            elif projection.tree.digest != tree.digest:
+                changed = projection.update(root, ((row.path, row.after)
+                                                     for row in diff(projection.tree, tree) if row.path))
+            projection.tree = tree
+            revision = projection.refresh_revision(root, files_changed=changed)
+            if not observation.validate_for_use(boundary):
+                return None
+            _artifact_projections[consumers] = projection
+            return revision
+    except (OSError, ValueError, RuntimeError):
+        return None
 
 
 def _binding_fallback(runtime: object, basis: object = None) -> object:
@@ -206,9 +312,13 @@ def artifact_revision(runtime: object, *, basis: object = None,
     """Hash actual in-scope artifact bytes, never receipts or conversation text."""
     root = _root(runtime)
     if root is not None:
-        files = _artifact_files(runtime, root)
-        if files:
-            return _digest({"files": files})
+        revision = _projected_artifact_revision(runtime, root)
+        if revision is None:
+            files = _artifact_files(runtime, root)
+            if files:
+                return _digest({"files": files})
+        elif revision:
+            return revision
     target = getattr(runtime, "target", None)
     try:
         target_path = Path(target) if target not in (None, "") else None

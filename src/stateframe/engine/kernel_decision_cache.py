@@ -15,9 +15,13 @@ import importlib
 import json
 import os
 import re
+import stat
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections import OrderedDict
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 
 from kernel_measurement import profiled_function_span
 
@@ -98,6 +102,294 @@ def _plain_receipt_value(value: object) -> object:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return [_plain_receipt_value(item) for item in value]
     return value
+
+
+def _source_stamp(path: Path) -> tuple[int, ...] | None:
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    if not stat.S_ISREG(info.st_mode):
+        return None
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_size,
+            info.st_mtime_ns, info.st_ctime_ns)
+
+
+class DecisionInputs:
+    """Attempt-local point reads. File bodies are loaded only on demand."""
+
+    def __init__(self):
+        self._sources: OrderedDict[Path, tuple[tuple[int, ...], str | None]] = OrderedDict()
+        self._source_size = 0
+        self._callers: OrderedDict[tuple[Path, tuple[int, ...] | None, str], object] = OrderedDict()
+        self._history: Sequence[object] = ()
+        self._positions: dict[str, int] = {}
+        self._indexed = 0
+
+    def __getstate__(self) -> dict:
+        # The observation retains its basis. Point caches rebuild per attempt.
+        return {}
+
+    def __setstate__(self, state: dict) -> None:
+        self.__init__()
+
+    def read(self, path: Path, stamp: tuple[int, ...] | None) -> str | None:
+        if stamp is None:
+            return None
+        cached = self._sources.get(path)
+        if cached is not None and cached[0] == stamp:
+            self._sources.move_to_end(path)
+            return cached[1]
+        try:
+            source = path.read_text(encoding="utf-8")
+        except UnicodeError:
+            source = None
+        except OSError:
+            if _source_stamp(path) != stamp:
+                raise DecisionCacheError("decision source changed during lookup") from None
+            return None
+        if _source_stamp(path) != stamp:
+            raise DecisionCacheError("decision source changed during lookup")
+        if cached is not None:
+            self._source_size -= len(cached[1] or "")
+        self._sources[path] = (stamp, source)
+        self._sources.move_to_end(path)
+        self._source_size += len(source or "")
+        while self._source_size > 4 * 1024 * 1024 or len(self._sources) > 8_192:
+            _, (_, evicted) = self._sources.popitem(last=False)
+            self._source_size -= len(evicted or "")
+        return source
+
+    def receipt(self, rows: Sequence[object], ref: str) -> object:
+        if self._history is not rows or len(rows) < self._indexed:
+            self._history, self._indexed = rows, 0
+            self._positions.clear()
+        for index in range(self._indexed, len(rows)):
+            row = rows[index]
+            if isinstance(row, Mapping) and isinstance(row.get("receipt_id"), str):
+                self._positions[row["receipt_id"]] = index
+        self._indexed = len(rows)
+        position = self._positions.get(ref)
+        if position is not None:
+            row = rows[position]
+            if isinstance(row, Mapping) and row.get("receipt_id") == ref:
+                return _plain_receipt_value(row)
+            self._indexed = 0
+            self._positions.clear()
+            return self.receipt(rows, ref)
+        return {"receipt_id": ref}
+
+
+class DecisionSources(Mapping[str, str]):
+    """A scoped source view. Enumeration is reserved for whole-scope premises."""
+
+    def __init__(self, inputs: DecisionInputs, root: Path, row: Mapping[str, object],
+                 target: str, source: str | None):
+        self.inputs, self.root, self.row = inputs, root, row
+        self.target, self.source = target, source
+        self.observed: dict[str, tuple[int, ...] | None] = {}
+        self._declared: dict[str, tuple[int, ...]] | None = None
+        self._frozen_scope = None
+        self._scope_observation = None
+
+    def __deepcopy__(self, memo):
+        return self
+
+    def _inventory(self) -> dict[str, tuple[int, ...]]:
+        if self._declared is not None:
+            return self._declared
+        result = {}
+        for field in ("target_files", "files"):
+            values = self.row.get(field)
+            if not isinstance(values, (Mapping, Sequence)) or isinstance(values, (str, bytes)):
+                continue
+            for raw_path in values:
+                try:
+                    path = (self.root / str(raw_path)).resolve()
+                    relative = path.relative_to(self.root).as_posix()
+                    if relative == self.target or relative in result:
+                        continue
+                    stamp = _source_stamp(path)
+                    if stamp is not None:
+                        result[relative] = stamp
+                except (OSError, ValueError):
+                    continue
+        self._declared = result
+        return result
+
+    def scope_basis(self) -> object:
+        from kernel_workspace_consumers import consumers_for
+
+        consumers = consumers_for(self.root)
+        if consumers is not None:
+            boundary = "decision-source-scope"
+            with consumers.state.pin(boundary) as snapshot:
+                if not snapshot.validate_for_use(boundary):
+                    raise DecisionCacheError("decision workspace observation expired")
+                result = snapshot.tree.digest.hex(), snapshot.epoch.hex()
+                self._scope_observation = self._scope_observation or result
+                return result
+        return self._inventory()
+
+    @contextmanager
+    def observing(self) -> Iterator[tuple[str | None, int, Callable[[], bool]]]:
+        from kernel_workspace_consumers import consumers_for
+
+        if self._scope_observation is None:
+            yield None, 0, self.verify
+            return
+        consumers = consumers_for(self.root)
+        if consumers is None:
+            yield None, 0, lambda: False
+            return
+        boundary = "decision-panel"
+        with consumers.state.pin(boundary) as snapshot:
+            live, epoch = snapshot.tree.digest.hex(), snapshot.epoch.hex()
+
+            def verify():
+                return ((live, epoch) == self._scope_observation
+                        and snapshot.validate_for_use(boundary) and self.verify())
+
+            yield live, int(epoch, 16), verify
+
+    def freeze(self) -> None:
+        """Retain metadata authority for any later model-selected dependency."""
+        self._frozen_scope = self.scope_basis()
+        # The model's sidecar may choose an unobserved path, but not a new scope.
+        self.row = {field: tuple(self.row[field]) for field in ("target_files", "files")
+                    if isinstance(self.row.get(field), (Mapping, Sequence))
+                    and not isinstance(self.row[field], (str, bytes))}
+
+    def verify_frozen(self) -> bool:
+        if self._frozen_scope is None or not self.verify():
+            return False
+        if isinstance(self._frozen_scope, tuple):
+            current = self.scope_basis()
+            return isinstance(current, tuple) and current[0] == self._frozen_scope[0]
+        # Resolve declarations again to detect symlink retargets and new files.
+        current = DecisionSources(self.inputs, self.root, self.row, self.target, self.source)
+        return current._inventory() == self._frozen_scope
+
+    def callers(self, symbol: str) -> tuple[list[dict[str, object]], bool]:
+        rows = []
+        unknown = False
+        for path, stamp in self._inventory().items():
+            key = (self.root / path, stamp, symbol)
+            cached = self.inputs._callers.get(key)
+            if cached is None:
+                source = self.get(path)
+                cached = _caller_rows(path, source, symbol)
+                self.inputs._callers[key] = cached
+                if len(self.inputs._callers) > 16_384:
+                    self.inputs._callers.popitem(last=False)
+            else:
+                self.inputs._callers.move_to_end(key)
+                self.observed[path] = stamp
+            found, incomplete = cached
+            rows.extend(found)
+            unknown |= incomplete
+        if self.target:
+            found, incomplete = _caller_rows(self.target, self.get(self.target), symbol)
+            rows.extend(found)
+            unknown |= incomplete
+        return rows, unknown
+
+    def __getitem__(self, path: str) -> str:
+        absolute = self.root / path
+        if path and path == self.target:
+            stamp = _source_stamp(absolute)
+            self.observed.setdefault(path, stamp)
+            current = self.inputs.read(absolute, stamp) or ""
+            if self.source is not None and current != self.source:
+                raise DecisionCacheError("decision target changed since frame capture")
+            return self.source if self.source is not None else current
+        stamp = self._inventory().get(path)
+        self.observed[path] = stamp
+        result = self.inputs.read(absolute, stamp)
+        if result is None:
+            raise KeyError(path)
+        return result
+
+    def __iter__(self) -> Iterator[str]:
+        if self.target:
+            yield self.target
+        for path in self._inventory():
+            if self.get(path) is not None:
+                yield path
+
+    def __len__(self) -> int:
+        return sum(1 for _ in self)
+
+    def verify(self) -> bool:
+        return all(_source_stamp(self.root / path) == stamp
+                   for path, stamp in self.observed.items()
+                   if path == self.target or stamp is not None)
+
+
+class DecisionReceipts(Sequence[object]):
+    """Use an indexed point lookup for evidence refs and retain exact row order."""
+
+    def __init__(self, inputs: DecisionInputs, rows: Sequence[object]):
+        self.inputs, self.rows = inputs, rows
+        self.observed: dict[str, str] = {}
+        self._frozen = None
+
+    def freeze(self) -> None:
+        from kernel_history_spool import HistorySpool
+
+        # Indexed spool roots bind every row, including in-place amendments.
+        self._frozen = (self.rows._snapshot() if isinstance(self.rows, HistorySpool)
+                        else _digest(list(self)))
+
+    def verify_frozen(self) -> bool:
+        from kernel_history_spool import HistorySpool
+
+        current = (self.rows._snapshot() if isinstance(self.rows, HistorySpool)
+                   else _digest(list(self)))
+        return current == self._frozen
+
+    def verify(self) -> bool:
+        return all(_digest(self.inputs.receipt(self.rows, ref)) == digest
+                   for ref, digest in self.observed.items())
+
+    def __len__(self) -> int:
+        return len(self.rows)
+
+    def __getitem__(self, index):
+        return _plain_receipt_value(self.rows[index])
+
+    def __deepcopy__(self, memo):
+        return self
+
+    def lookup(self, ref: str) -> object:
+        row = self.inputs.receipt(self.rows, ref)
+        self.observed.setdefault(ref, _digest(row))
+        return row
+
+
+def _receipt_evidence(receipts: object, refs: Sequence[str]) -> list[object]:
+    if isinstance(receipts, DecisionReceipts):
+        return [receipts.lookup(ref) for ref in refs]
+    receipt_map = {}
+    if refs and isinstance(receipts, Sequence) and not isinstance(receipts, (str, bytes, bytearray)):
+        for receipt in receipts:
+            if isinstance(receipt, Mapping) and isinstance(receipt.get("receipt_id"), str):
+                receipt_map[receipt["receipt_id"]] = receipt
+    return [receipt_map.get(ref, {"receipt_id": ref}) for ref in refs]
+
+
+def _point_basis(draft: DecisionDraft, context: Mapping[str, object]) -> str | None:
+    sources = context.get("source_files")
+    if not isinstance(sources, DecisionSources):
+        return None
+    path = _target_path(draft.key["subject"], context)
+    scope = sources.get(path)
+    if draft.selected["type"] in {"CALL_REQUIREMENT", "COMPAT_ALIAS", "RESPONSIBILITY"}:
+        scope = [scope, sources.scope_basis()]
+    return _digest([scope, context.get("symbol"), context.get("target_path"),
+                    context.get("brief"), context.get("test_definition"),
+                    context.get("environment"), _ext(),
+                    _receipt_evidence(context.get("receipts"), draft.basis_refs)])
 
 
 def _basis_revision(context: Mapping[str, object]) -> str:
@@ -409,6 +701,26 @@ def _source_slice(source: str, start: int, end: int) -> str:
     return "".join(lines[max(0, start - 1):min(len(lines), end)])
 
 
+def _caller_rows(path: str, source: object, symbol: str) -> tuple[list[dict[str, object]], bool]:
+    if not isinstance(source, str):
+        # The legacy source map skips files it cannot read as UTF-8.
+        return [], False
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError, TypeError):
+        return [], True
+    rows = []
+    for call in ast.walk(tree):
+        if not isinstance(call, ast.Call):
+            continue
+        called = (call.func.id if isinstance(call.func, ast.Name)
+                  else call.func.attr if isinstance(call.func, ast.Attribute) else None)
+        if called == symbol:
+            rows.append({"path": path.replace("\\", "/"), "line": getattr(call, "lineno", 0),
+                         "text": ast.get_source_segment(source, call) or ""})
+    return rows, False
+
+
 def _dependency_rows(draft: DecisionDraft, context: Mapping[str, object]) -> list[dict[str, object]]:
     selected_type = str(draft.selected.get("type", ""))
     question = draft.key["question"]
@@ -465,29 +777,18 @@ def _dependency_rows(draft: DecisionDraft, context: Mapping[str, object]) -> lis
             add("signature", target, ast.dump(getattr(definition, "args", definition),
                                                include_attributes=False))
 
-        caller_rows: list[dict[str, object]] = []
-        caller_unknown = False
-        for raw_path, raw_source in source_files.items():
-            if not isinstance(raw_path, str) or not isinstance(raw_source, str):
-                caller_unknown = True
-                continue
-            try:
-                tree = ast.parse(raw_source)
-            except (SyntaxError, ValueError, TypeError):
-                caller_unknown = True
-                continue
-            for call in ast.walk(tree):
-                if not isinstance(call, ast.Call):
+        if isinstance(source_files, DecisionSources):
+            caller_rows, caller_unknown = source_files.callers(symbol)
+        else:
+            caller_rows = []
+            caller_unknown = False
+            for raw_path, raw_source in source_files.items():
+                if not isinstance(raw_path, str) or not isinstance(raw_source, str):
+                    caller_unknown = True
                     continue
-                called = (call.func.id if isinstance(call.func, ast.Name)
-                          else call.func.attr if isinstance(call.func, ast.Attribute) else None)
-                if called != symbol:
-                    continue
-                caller_rows.append({
-                    "path": raw_path.replace("\\", "/"),
-                    "line": getattr(call, "lineno", 0),
-                    "text": ast.get_source_segment(raw_source, call) or "",
-                })
+                found, incomplete = _caller_rows(raw_path, raw_source, symbol)
+                caller_rows.extend(found)
+                caller_unknown |= incomplete
         add("callers", target, sorted(caller_rows, key=lambda row: (
             row["path"], row["line"], row["text"])), unknown=caller_unknown)
 
@@ -498,14 +799,9 @@ def _dependency_rows(draft: DecisionDraft, context: Mapping[str, object]) -> lis
         add("ticket", "task", brief if isinstance(brief, str) and brief else None,
             unknown=not isinstance(brief, str) or not brief)
 
-    receipts = context.get("receipts")
-    receipt_map = {}
-    if isinstance(receipts, Sequence) and not isinstance(receipts, (str, bytes, bytearray)):
-        for receipt in receipts:
-            if isinstance(receipt, Mapping) and isinstance(receipt.get("receipt_id"), str):
-                receipt_map[receipt["receipt_id"]] = receipt
-    for ref in draft.basis_refs:
-        add("evidence", ref, receipt_map.get(ref, {"receipt_id": ref}))
+    evidence = _receipt_evidence(context.get("receipts"), draft.basis_refs)
+    for ref, value in zip(draft.basis_refs, evidence):
+        add("evidence", ref, value)
     return rows[:MAX_DEPENDENCIES]
 
 
@@ -571,17 +867,20 @@ class DecisionCacheStore:
         self._records: list[dict[str, object]] = []
         self._next_id = 0
         self._context: dict[str, object] = {
-            "source_files": copy.deepcopy(dict(source_files or {})),
+            "source_files": (source_files if isinstance(source_files, DecisionSources)
+                             else copy.deepcopy(dict(source_files or {}))),
             "target_path": target_path,
             "symbol": symbol,
             "brief": brief,
-            "receipts": copy.deepcopy(list(receipts)),
+            "receipts": (receipts if isinstance(receipts, DecisionReceipts)
+                         else copy.deepcopy(list(receipts))),
         }
         # earlier run host premises (only supplied when the conclusion-cache switch is on).
         self._context.update(copy.deepcopy(premises))
         self._input_receipt_refs: set[str] = set()
         self._last_delta: list[dict[str, object]] = []
         self._record_generation = 0
+        self._dependency_cache: dict[tuple[str, int], tuple[str, list[dict[str, object]]]] = {}
         self._active_records_cache: list[dict[str, object]] | None = None
         self._selected_rows_cache: dict[tuple[object, ...], list[dict[str, object]]] = {}
         self._record_text_cache: dict[tuple[object, ...], str] = {}
@@ -641,8 +940,13 @@ class DecisionCacheStore:
         if self._emit_callback is not None:
             self._emit_callback(kind, producer="stateframe_decision_cache", **fields)
 
-    def snapshot(self) -> dict[str, object]:
-        return {"schema": SCHEMA, "records": copy.deepcopy(self._records),
+    @property
+    def frame_revision(self) -> str:
+        return str(self._record_generation)
+
+    def snapshot(self, *, records: list[dict[str, object]] | None = None) -> dict[str, object]:
+        return {"schema": SCHEMA,
+                "records": self.all_records() if records is None else records,
                 "metrics": copy.deepcopy(self.metrics)}
 
     def all_records(self) -> list[dict[str, object]]:
@@ -676,6 +980,9 @@ class DecisionCacheStore:
     def _new_record(self, draft: DecisionDraft, context: Mapping[str, object], ident: str,
                     *, version: int = 1, lifecycle: str = "ADOPTED") -> dict[str, object]:
         dependencies = _dependency_rows(draft, context)
+        basis = _point_basis(draft, context)
+        if basis is not None:
+            self._dependency_cache[(ident, version)] = (basis, dependencies)
         if not _ext():
             return {
                 "id": ident,
@@ -734,6 +1041,14 @@ class DecisionCacheStore:
             use_context = dict(self._context)
             if context is not None:
                 use_context.update(copy.deepcopy(dict(context)))
+            sources = use_context.get("source_files")
+            receipts = use_context.get("receipts")
+            if (isinstance(sources, DecisionSources) and sources._frozen_scope is not None
+                    and not sources.verify_frozen()):
+                raise DecisionCacheError("decision source basis changed since the input frame")
+            if (isinstance(receipts, DecisionReceipts) and receipts._frozen is not None
+                    and not receipts.verify_frozen()):
+                raise DecisionCacheError("decision receipt basis changed since the input frame")
             self._context = use_context
             if op == "CHALLENGE":
                 target_id = str(extra["decision_id"])
@@ -809,6 +1124,9 @@ class DecisionCacheStore:
         latest = _latest(self._records)
         extension = _ext()
         contradicted = _contradiction_ids(receipt) if extension else set()
+        previous_cache = self._dependency_cache
+        dependency_cache = {}
+        facets_changed = False
         for row in self._records:
             if latest.get(row.get("id"), {}).get("version") != row.get("version"):
                 continue
@@ -816,7 +1134,15 @@ class DecisionCacheStore:
                 continue
             try:
                 draft = _draft_from_record(row)
-                dependencies = _dependency_rows(draft, self._context)
+                key = (row["id"], row["version"])
+                basis = _point_basis(draft, self._context)
+                cached = previous_cache.get(key)
+                if cached is not None and cached[0] == basis:
+                    dependencies = cached[1]
+                else:
+                    dependencies = _dependency_rows(draft, self._context)
+                if basis is not None:
+                    dependency_cache[key] = (basis, dependencies)
             except (DecisionCacheError, TypeError, ValueError):
                 dependencies = [{"target": "decision", "facet": "broad", "digest": "UNKNOWN"}]
             previous_binding = row.get("basis_binding")
@@ -825,6 +1151,8 @@ class DecisionCacheStore:
             row["basis_binding"] = new_binding
             facets = _changed_facets(previous_dependencies, dependencies)
             if extension:
+                facets_changed |= (isinstance(self._context.get("source_files"), DecisionSources)
+                                   and row.get("basis_changed_facets") != facets)
                 row["basis_changed_facets"] = list(facets)
             if previous_binding != new_binding:
                 row["redecision_required"] = True
@@ -839,9 +1167,10 @@ class DecisionCacheStore:
                 row["challenge_reason"] = "COUNTEREVIDENCE"
                 changes.append({"id": row["id"], "change": "CONTRADICTED",
                                 "from": previous_lifecycle, "reason": "COUNTEREVIDENCE"})
+        self._dependency_cache = dependency_cache
         if changes:
             self._last_delta.extend(copy.deepcopy(changes))
-        if changes:
+        if changes or facets_changed:
             self._record_changed()
         if context is not None or receipt is not None:
             self._emit("decision_cache_maintenance", receipt_id=(
@@ -887,6 +1216,41 @@ class DecisionCacheStore:
                                      receipt_generation=receipt_generation,
                                      receipt_cursor=receipt_cursor,
                                      emit=emit or self._emit)
+
+    def panel_revision(self, *, work_frontier, active_symbols, receipt_view) -> str:
+        extension = _ext()
+        receipt_lines = None
+        if extension:
+            receipt_lines = self._receipt_lines(
+                receipt_view.get("receipts", self._context.get("receipts", ())),
+                receipt_view.get("current_revision"), receipt_view.get("receipt_generation"),
+                receipt_view.get("receipt_cursor"))
+        model = os.environ.get("REACT_TOKENIZER_MODEL") or os.environ.get("REACT_MODEL")
+        return _digest([self._record_generation, self._last_delta, work_frontier,
+                        active_symbols, extension, receipt_lines, model, enabled()])
+
+    def project_panel(self, **kwargs: object) -> dict[str, object]:
+        """Capture render accounting for replay only after the panel is verified."""
+        metrics = self.metrics
+        self.metrics = metrics.copy()
+        events = []
+        try:
+            content = self.render(emit=lambda kind, **fields: events.append([kind, fields]), **kwargs)
+            return {"content": content, "events": events,
+                    "rendered": self.metrics["rendered"] - metrics["rendered"],
+                    "dropped": self.metrics["dropped_records"] - metrics["dropped_records"],
+                    "tokens": self.metrics["rendered_tokens"]}
+        finally:
+            self.metrics = metrics
+
+    def consume_panel(self, panel: Mapping[str, object], emit: Callable[..., object]) -> str:
+        if panel["rendered"]:
+            self.metrics["rendered"] += panel["rendered"]
+            self.metrics["dropped_records"] += panel["dropped"]
+            self.metrics["rendered_tokens"] = panel["tokens"]
+        for kind, fields in panel["events"]:
+            emit(kind, **fields)
+        return panel["content"]
 
     def _render_record(self, row: Mapping[str, object]) -> str:
         key = (self._record_generation, row.get("id"), row.get("version"))

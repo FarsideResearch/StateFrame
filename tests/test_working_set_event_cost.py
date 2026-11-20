@@ -1,4 +1,5 @@
 """Operation-count guards for allocator trials and ordinary durable events."""
+import ast
 from collections import Counter
 from types import SimpleNamespace
 
@@ -105,3 +106,117 @@ def test_ordinary_on_events_do_not_rebuild_or_prepare(tmp_path, monkeypatch):
         assert journal.publication_stats().get("observer_failures", 0) == 0
     finally:
         journal.close()
+
+
+def test_small_read_persists_one_journal_event_per_world_observation(tmp_path):
+    from detreason.world_knowledge import WorldKnowledgeStore
+    from kernel_continuation_journal import ContinuationJournal
+    from kernel_retained_context import _bind_world_journal_sink
+
+    world = WorldKnowledgeStore(sandbox_id="source")
+    with ContinuationJournal(tmp_path, "source", {}) as journal:
+        _bind_world_journal_sink(world, journal)
+        world.observe_source(
+            path="pricing.py", content="def price():\n    return 1\n",
+            revision=0, evidence_ref="read@1",
+        )
+        assert len(world.events) > 1
+        assert tuple(row["event"] for row in journal.records()
+                     if row["kind"] == "world_knowledge_event") == world.events
+
+
+def test_large_read_persists_complete_world_observations_in_durable_batches(tmp_path, monkeypatch):
+    import os
+
+    from detreason.world_knowledge import WorldKnowledgeStore
+    from kernel_continuation_journal import ContinuationJournal
+    from kernel_retained_context import _bind_world_journal_sink
+
+    monkeypatch.delenv("STATEFRAME_TURN_ATOMIC_PUBLICATION", raising=False)
+    content = "".join(f"def rule_{index}(value: int) -> int:\n    return value + {index}\n"
+                      for index in range(330))
+    arguments = {"path": "many_rules.py", "content": content, "revision": 0, "evidence_ref": "read@1"}
+    reference = WorldKnowledgeStore(sandbox_id="field")
+    reference.observe_source(**arguments)
+    live = WorldKnowledgeStore(sandbox_id="field")
+    journal_syncs = []
+    with ContinuationJournal(tmp_path, "field", {}) as journal:
+        fsync = os.fsync
+
+        def count_sync(fd):
+            if fd == journal._fd:
+                journal_syncs.append(fd)
+            fsync(fd)
+
+        monkeypatch.setattr(os, "fsync", count_sync)
+        _bind_world_journal_sink(live, journal)
+        published = []
+        journal.subscribe("source-observations", lambda row: published.append(row["event"]),
+                          kinds=("world_knowledge_event",))
+        live.observe_source(**arguments)
+        assert 1 < len(journal_syncs) < len(reference.events)
+        assert tuple(published) == reference.events
+        live.observe_source(**{**arguments, "evidence_ref": "read@2"})
+        written = tuple(row["event"] for row in journal.records() if row["kind"] == "world_knowledge_event")
+        assert written[-1]["event"] == "world_knowledge_reobserved"
+        assert written[:-1] == reference.events
+        assert written == live.events
+        path, head = journal.path, journal.head
+
+    replayed = WorldKnowledgeStore(sandbox_id="field")
+    with ContinuationJournal.resume(path, task_id="field", manifest={}, expected_head=head) as resumed:
+        replayed.replay(resumed.records())
+        assert replayed.facts == live.facts
+        replayed.replay(resumed.records())
+        assert replayed.facts == live.facts
+
+
+def test_interrupted_source_batch_recovers_without_turn_publication_switch(tmp_path, monkeypatch):
+    import os
+
+    from detreason.world_knowledge import WorldKnowledgeError, WorldKnowledgeStore
+    from kernel_continuation_journal import ContinuationJournal, JournalError
+    from kernel_retained_context import _bind_world_journal_sink
+
+    monkeypatch.delenv("STATEFRAME_TURN_ATOMIC_PUBLICATION", raising=False)
+    world = WorldKnowledgeStore(sandbox_id="field")
+    content = "".join(f"def rule_{index}():\n    return {index}\n" for index in range(40))
+    with ContinuationJournal(tmp_path, "field", {}) as journal:
+        path, head = journal.path, journal.head
+        before = path.read_bytes()
+        fsync = os.fsync
+
+        def interrupt_sync(fd):
+            if fd == journal._fd:
+                raise OSError("interrupted journal sync")
+            fsync(fd)
+
+        _bind_world_journal_sink(world, journal)
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "fsync", interrupt_sync)
+            with pytest.raises(WorldKnowledgeError, match="event sink failed"):
+                world.observe_source(path="many_rules.py", content=content,
+                                     revision=0, evidence_ref="read@1")
+        assert len(path.read_bytes()) > len(before)
+        with pytest.raises(JournalError, match="poison"):
+            journal.emit("unreachable")
+
+    with ContinuationJournal.resume(path, task_id="field", manifest={}, expected_head=head) as resumed:
+        records = list(resumed.records())
+        assert records[-2]["record_hash"] == head
+        assert records[-1]["kind"] == "continuation_writer_resumed"
+        assert records[-1]["previous_head"] == head
+        assert path.read_bytes().splitlines(keepends=True)[:-1] == before.splitlines(keepends=True)
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n", "\r"])
+def test_python_fact_coordinates_preserve_unicode_and_multiline_expressions(newline):
+    from detreason.world_knowledge_extractors import _SourcePositions
+
+    source = newline.join(("def handle(é: str = 'λ', value=(", "    'one\u2028two',", ")):", "    pass"))
+    tree = ast.parse(source)
+    positions = _SourcePositions(source)
+    defaults = tree.body[0].args.defaults
+    assert [positions.segment(node) for node in defaults] == [
+        ast.get_source_segment(source, node) for node in defaults
+    ]

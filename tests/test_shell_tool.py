@@ -2,7 +2,7 @@
 
 import pytest
 from _timeouts import scaled
-
+from kernel_effects import BaselineStore
 from kernel_exec_session import CleanupReport, ExecResult
 from kernel_shell_tool import ShellTool, request_confirmation
 from kernel_tool_settings import ToolSettings
@@ -311,19 +311,69 @@ def test_shell_replay_detects_poststate_divergence(setup_tool):
     assert (root / "app.py").read_text() == "VALUE = 9\n"
 
 
-def test_shell_uses_immutable_baseline_for_protected_restoration(setup_tool):
+def test_shell_captures_immutable_baseline_once_before_first_command(setup_tool, monkeypatch):
     import shutil
-    make, root, run = setup_tool
+    _, root, run = setup_tool
     parent = run / "parent"
     shutil.copytree(root, parent)
     (root / "test_app.py").write_text("already corrupted\n")
-    process = ProcessBoundary(lambda cwd: (cwd / "test_app.py").write_text("corrupted again\n"))
+    captures = []
+    capture = BaselineStore.publish
+
+    def record_capture(store, workspace):
+        captures.append(workspace)
+        return capture(store, workspace)
+
+    def change(cwd):
+        assert captures.count(parent) == 1
+        (cwd / "test_app.py").write_text("corrupted again\n")
+
+    monkeypatch.setattr(BaselineStore, "publish", record_capture)
+    process = ProcessBoundary(change)
     tool = ShellTool(run, ToolSettings(run_env=False), {"parent_snapshot": str(parent)}, process)
     tool.bind(root, {"files": {"app.py": ""}, "scoped_edits": False,
                      "allowed_product_paths": ["app.py"]}, {str(root / "test_app.py")})
+    assert captures == []
     configure_replay(run, active=False)
+    # Deferred capture leaves no persisted rollback baseline before the first command.
+    assert not (run / "shell-baseline").exists()
+    for call_id in ("call-1", "call-2"):
+        reply = tool.execute({"command": "python change.py"}, call_id)
+        assert "restored (not allowed): test_app.py" in reply.observation
+        assert (root / "test_app.py").read_bytes() == b"assert True\n"
+    assert captures.count(parent) == 1
+
+
+def test_shell_without_parent_keeps_bind_time_bytes(setup_tool):
+    make, root, _ = setup_tool
+    tool, _ = make(lambda cwd: (cwd / "test_app.py").write_bytes(b"changed by shell\n"))
+    (root / "test_app.py").write_bytes(b"changed before shell\n")
     tool.execute({"command": "python change.py"}, "call-1")
-    assert (root / "test_app.py").read_text() == "assert True\n"
+    assert (root / "test_app.py").read_bytes() == b"assert True\n"
+
+
+def test_unsandboxed_shell_keeps_bind_time_parent_bytes(setup_tool, monkeypatch):
+    import shutil
+
+    _, root, run = setup_tool
+    monkeypatch.delenv("STATEFRAME_WORKSPACE_OBJECTS", raising=False)
+    parent = run / "parent"
+    shutil.copytree(root, parent)
+    settings = ToolSettings(shell="unrestricted", run_env=False, host_authorization={
+        "granted_at": "test", "flags": ["--shell unrestricted", "--shell-sandbox off"],
+    })
+    process = ProcessBoundary(lambda cwd: (cwd / "test_app.py").write_bytes(b"changed by shell\n"))
+    tool = ShellTool(run, settings, {"parent_snapshot": str(parent)}, process)
+    tool.bind(root, {"files": {"app.py": "VALUE = 1\n"}, "allowed_product_paths": ["app.py"]},
+              {str(root / "test_app.py")})
+    configure_replay(run, active=False)
+
+    assert not tool.capability.sandboxed
+    assert any((run / "shell-baseline").glob("*/objects.pack"))
+    (parent / "test_app.py").write_bytes(b"changed after bind\n")
+    reply = tool.execute({"command": "python change.py"}, "call-1")
+    assert "restored (not allowed): test_app.py" in reply.observation
+    assert (root / "test_app.py").read_bytes() == b"assert True\n"
 
 
 def test_shell_off_never_launches(setup_tool):
@@ -431,6 +481,124 @@ def test_environment_only_change_invalidates_checks(setup_tool):
     assert runtime.journal.manifest["environment_revision"] == reply.environment_identity
     assert receipts[0][0][0] == "shell_effect"
     assert receipts[0][0][3] == "APPLIED"
+
+
+def _attach_run_environment(tool, run):
+    import json
+    from kernel_run_env import RunEnv
+
+    root = run / "env"
+    site = root / "lib/python3.11/site-packages"
+    site.mkdir(parents=True)
+    (root / "bin").mkdir()
+    metadata = site / "example-1.dist-info" / "METADATA"
+    metadata.parent.mkdir()
+    metadata.write_text("Name: example\nVersion: 1\n")
+    (run / "env-sites.json").write_text(json.dumps([str(site)]))
+    tool.environment = RunEnv(
+        root, root / "bin/python", root / "bin",
+        {key: str(root / "cache" / key)
+         for key in ("npm_config_cache", "CARGO_HOME", "GOPATH", "GOMODCACHE")},
+        "clone",
+    )
+    return metadata
+
+
+def test_noop_shell_calls_compute_environment_identity_once(setup_tool, monkeypatch):
+    import kernel_shell_tool
+
+    monkeypatch.setenv("STATEFRAME_SHELL_ENV_IDENTITY_EPOCH", "on")
+    make, _, _ = setup_tool
+    tool, _ = make()
+    _attach_run_environment(tool, tool.run_dir)
+    original = kernel_shell_tool.env_identity
+    calls = []
+
+    def counted(environment):
+        calls.append(environment)
+        return original(environment)
+
+    monkeypatch.setattr(kernel_shell_tool, "env_identity", counted)
+    for index in range(5):
+        tool.execute({"command": "true"}, f"identity-noop-{index}")
+
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("mutation", ["pip install example", "file write"])
+def test_environment_mutations_refresh_cached_identity(setup_tool, monkeypatch, mutation):
+    import kernel_shell_tool
+
+    monkeypatch.setenv("STATEFRAME_SHELL_ENV_IDENTITY_EPOCH", "on")
+    make, _, _ = setup_tool
+    tool, process = make()
+    metadata = _attach_run_environment(tool, tool.run_dir)
+    original = kernel_shell_tool.env_identity
+    calls = []
+
+    def counted(environment):
+        calls.append(environment)
+        return original(environment)
+
+    monkeypatch.setattr(kernel_shell_tool, "env_identity", counted)
+    before = tool.execute({"command": "true"}, "identity-prime").environment_identity
+    process.action = lambda _cwd: metadata.write_text("Name: example\nVersion: 2\n")
+    command = (mutation if mutation.startswith("pip ") else
+               f"printf package-change > {metadata}")
+    reply = tool.execute({"command": command}, "identity-mutation")
+
+    assert reply.environment_identity != before
+    assert len(calls) == 2
+
+
+def test_checkpoint_resume_recomputes_environment_identity(setup_tool, monkeypatch):
+    import sys
+    import kernel_checkpoint
+    import kernel_shell_tool
+
+    monkeypatch.setenv("STATEFRAME_SHELL_ENV_IDENTITY_EPOCH", "on")
+    make, _, run = setup_tool
+    tool, _ = make()
+    metadata = _attach_run_environment(tool, run)
+    original = kernel_shell_tool.env_identity
+    calls = []
+
+    def counted(environment):
+        calls.append(environment)
+        return original(environment)
+
+    monkeypatch.setattr(kernel_shell_tool, "env_identity", counted)
+    before = tool.identity()
+    metadata.write_text("Name: example\nVersion: 2\n")
+    monkeypatch.setattr(kernel_shell_tool, "_active", tool)
+    monkeypatch.setattr(kernel_checkpoint, "_STATE", {})
+    monkeypatch.setattr(kernel_checkpoint, "restore", lambda *_args: {"step": 1, "sends": 1})
+    monkeypatch.setattr(kernel_checkpoint, "_record", lambda *_args, **_kwargs: None)
+    monkeypatch.setenv(kernel_checkpoint.RESTORE_ENV, str(run / "checkpoint"))
+
+    assert kernel_checkpoint.restore_point(sys._getframe(), run / "poc")
+    assert tool.identity() != before
+    assert len(calls) == 2
+
+
+def test_environment_path_effects_cover_interpreter_and_site_packages(tmp_path):
+    from types import SimpleNamespace
+
+    from kernel_run_env import RunEnv
+    from kernel_shell_tool import _effects_touch_environment
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    root = workspace / ".run-env"
+    site = root / "lib/python3.11/site-packages"
+    site.mkdir(parents=True)
+    environment = RunEnv(root, root / "bin/python", root / "bin", {}, "clone")
+
+    for path in (".run-env/bin/python", ".run-env/lib/python3.11/site-packages/pkg/METADATA"):
+        effect = SimpleNamespace(path=path)
+        assert _effects_touch_environment(SimpleNamespace(applied=(effect,)), workspace, environment)
+    unrelated = SimpleNamespace(applied=(SimpleNamespace(path="app.py"),))
+    assert not _effects_touch_environment(unrelated, workspace, environment)
 
 
 def test_effect_summary_is_bounded_and_names_omission():

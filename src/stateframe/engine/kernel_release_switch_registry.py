@@ -2,14 +2,16 @@
 from __future__ import annotations
 
 import ast
-from functools import lru_cache
 import fnmatch
 import hashlib
 import json
 import os
+import stat
+import sys
+import tempfile
+from functools import lru_cache
 from pathlib import Path
 from typing import Mapping
-
 
 SCHEMA = "stateframe-switch-registry/1"
 # Host setup and retention switches are read before engine creation and are never
@@ -179,11 +181,10 @@ def _declared_python_files(root: Path) -> tuple[Path, ...]:
     return tuple(sorted(files))
 
 
-# Parsing every declared source took 22-24 s on a loaded host and ran in both the host and the
-# engine child, so the release ships the result: switch-registry.json records the switches, their
-# digest and a fingerprint of the exact source bytes they were derived from. Hashing the sources
-# takes a fraction of a second; any mismatch falls back to the full parse below.
+# The shipped and cached registries both carry a fingerprint of the exact source
+# bytes. Checking it is much cheaper than parsing all the declared modules.
 REGISTRY_FILE = "switch-registry.json"
+_MAX_REGISTRY_BYTES = 1024 * 1024
 
 
 def _sources_fingerprint(root: Path, files: tuple[Path, ...]) -> str:
@@ -212,21 +213,76 @@ def _scan(files: tuple[Path, ...]) -> frozenset[str]:
     return frozenset(switches - HOST_ONLY_SWITCHES - DEPRECATED_SWITCH_ALIASES)
 
 
-def _shipped_registry(root: Path, fingerprint: str) -> tuple[frozenset[str], str] | None:
-    """The shipped result when it is well formed and derived from exactly these sources."""
+def _report_registry_fallback(cause: str, why: str) -> None:
     try:
-        document = json.loads((root / REGISTRY_FILE).read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, ValueError):
+        from kernel_reason_log import emit_reason
+    except ImportError:
+        from .kernel_reason_log import emit_reason
+    emit_reason("fallback", cause, "switch_registry", "could not reuse the switch registry", why,
+                level="DEBUG", journal=False)
+
+
+def _read_registry(path: Path, fingerprint: str) -> tuple[frozenset[str], str] | None:
+    """Read one bounded, regular registry file. A missing cache entry is normal."""
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+    try:
+        fd = os.open(path, flags)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise ValueError("registry is not a regular file")
+            with os.fdopen(fd, "rb", closefd=False) as stream:
+                data = stream.read(_MAX_REGISTRY_BYTES + 1)
+        finally:
+            os.close(fd)
+        if len(data) > _MAX_REGISTRY_BYTES:
+            raise ValueError("registry is too large")
+        document = json.loads(data.decode("utf-8"))
+    except FileNotFoundError:
         return None
-    if not isinstance(document, dict) or document.get("schema") != SCHEMA:
+    except (OSError, ValueError, RecursionError) as error:
+        _report_registry_fallback("switch_registry_read_failed", type(error).__name__)
         return None
-    listed = document.get("switches")
-    if (document.get("sources_sha256") != fingerprint or not isinstance(listed, list)
+    listed = document.get("switches") if isinstance(document, dict) else None
+    if (not isinstance(listed, list)
             or not all(isinstance(name, str) and name.startswith("STATEFRAME_") for name in listed)):
+        _report_registry_fallback("switch_registry_invalid", "invalid switch rows")
         return None
     switches = frozenset(listed)
     digest = _switch_digest(switches)
-    return (switches, digest) if document.get("digest") == digest else None
+    if document.get("schema") != SCHEMA or document.get("digest") != digest:
+        _report_registry_fallback("switch_registry_invalid", "schema or digest mismatch")
+        return None
+    return (switches, digest) if document.get("sources_sha256") == fingerprint else None
+
+
+def _registry_cache_path(root: Path) -> Path | None:
+    # The host and child inherit the same HOME, even with a run-specific state directory.
+    home = Path(os.environ.get("HOME", ""))
+    if not home.is_absolute():
+        return None
+    # Keep one entry per checkout and Python parser, replacing it on source edits.
+    identity = json.dumps([str(root), sys.implementation.name, sys.version_info[:3]])
+    key = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    return home / ".cache" / "stateframe" / "engine" / f"switch-registry-v1-{key}.json"
+
+
+def _write_cached_registry(path: Path, fingerprint: str, switches: frozenset[str], digest: str) -> None:
+    temporary = None
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=path.parent, mode="w", encoding="utf-8",
+                                         delete=False) as stream:
+            temporary = Path(stream.name)
+            json.dump({"schema": SCHEMA, "sources_sha256": fingerprint,
+                       "switches": sorted(switches), "digest": digest}, stream)
+        temporary.replace(path)
+    except OSError as error:
+        _report_registry_fallback("switch_registry_write_failed", type(error).__name__)
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError as cleanup_error:
+                _report_registry_fallback("switch_registry_cleanup_failed", type(cleanup_error).__name__)
 
 
 def build_registry_document(root: Path) -> dict[str, object]:
@@ -249,11 +305,34 @@ def write_registry(root: Path) -> Path:
 def _release_registry(root_text: str) -> tuple[frozenset[str], str]:
     root = Path(root_text).resolve()
     files = _declared_python_files(root)
-    shipped = _shipped_registry(root, _sources_fingerprint(root, files))
-    if shipped is not None:
-        return shipped
+    try:
+        fingerprint = _sources_fingerprint(root, files)
+    except OSError as error:
+        _report_registry_fallback("switch_registry_fingerprint_failed", type(error).__name__)
+        fingerprint = None
+    cache = _registry_cache_path(root) if fingerprint is not None else None
+    if fingerprint is not None:
+        shipped = _read_registry(root / REGISTRY_FILE, fingerprint)
+        if shipped is not None:
+            return shipped
+        if cache is not None:
+            cached = _read_registry(cache, fingerprint)
+            if cached is not None:
+                return cached
     frozen = _scan(files)
-    return frozen, _switch_digest(frozen)
+    digest = _switch_digest(frozen)
+    if cache is not None:
+        # Publish only when the declared sources still match the pre-scan fingerprint.
+        try:
+            unchanged = _sources_fingerprint(root, _declared_python_files(root)) == fingerprint
+        except (OSError, ValueError) as error:
+            _report_registry_fallback("switch_registry_fingerprint_failed", type(error).__name__)
+            unchanged = False
+        if unchanged:
+            _write_cached_registry(cache, fingerprint, frozen, digest)
+        else:
+            _report_registry_fallback("switch_registry_publish_skipped", "could not verify scanned sources")
+    return frozen, digest
 
 
 def release_stateframe_switches(root: Path | None = None) -> tuple[frozenset[str], str]:
@@ -322,8 +401,6 @@ __all__ = [
 
 
 if __name__ == "__main__":
-    import sys
-
     root = Path(__file__).resolve().parent
     if sys.argv[1:] == ["--write"]:
         print(f"wrote {write_registry(root)}")

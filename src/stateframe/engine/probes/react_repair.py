@@ -831,6 +831,19 @@ def _source_snapshot(root: pathlib.Path, paths: Sequence[str]) -> dict[str, str 
     return snapshot
 
 
+def _initial_source_snapshot(root: pathlib.Path, paths: Sequence[str]) -> dict[str, str | None]:
+    consumers = sys.modules.get("kernel_workspace_consumers")
+    binding = consumers.consumers_for(root) if consumers is not None else None
+    if binding is not None and (len(paths) > _SNAPSHOT_STAT_LIMIT or binding.state._epoch is not None):
+        try:
+            snapshot = binding.source_snapshot(paths)
+            if snapshot is not None:
+                return snapshot
+        except OSError:
+            pass
+    return _source_snapshot(root, paths)
+
+
 def _seal_sources_preserving_binary(root: pathlib.Path,
                                     sources: Mapping[str, str | None]) -> dict[str, str | bytes | None]:
     """Preserve exact on-disk bytes, including UTF-8 files with CR/CRLF."""
@@ -5244,18 +5257,29 @@ def _effect_application(operation: str, snapshot: object, dispatch, *,
     return result.executed, result.value, result.rendered
 
 
+def _workspace_write_scope(path: pathlib.Path):
+    from contextlib import nullcontext
+    shell_tool = sys.modules.get("kernel_shell_tool")
+    shell = shell_tool.service() if shell_tool is not None else None
+    if shell is not None:
+        shell.invalidate_manifest_cache()
+    consumers = sys.modules.get("kernel_workspace_consumers")
+    return consumers.write_scope(path) if consumers is not None else nullcontext()
+
+
 def _effect_write(path: pathlib.Path, source: str, *, operation: str = "edit",
                   encoding: str | None = None, prepare=None) -> tuple[bool, str | None]:
     """Publish a candidate source, returning ``(applied, shadow_observation)``."""
     def write():
-        if prepare is not None:
-            prepare()
-        from kernel_scope_widen_guard import admitted, write as guarded_write
-        if admitted(path):
-            return guarded_write(path, source.encode(encoding or "utf-8"))
-        if encoding is None:
-            return path.write_text(source)
-        return path.write_text(source, encoding=encoding)
+        with _workspace_write_scope(path):
+            if prepare is not None:
+                prepare()
+            from kernel_scope_widen_guard import admitted, write as guarded_write
+            if admitted(path):
+                return guarded_write(path, source.encode(encoding or "utf-8"))
+            if encoding is None:
+                return path.write_text(source)
+            return path.write_text(source, encoding=encoding)
 
     if not _effect_boundary_enabled():
         write()
@@ -5280,10 +5304,11 @@ def _effect_write_bytes(path: pathlib.Path, source: bytes, *, operation: str = "
                         prepare=None) -> tuple[bool, str | None]:
     """Publish an opaque candidate without newline or encoding normalization."""
     def write():
-        if prepare is not None:
-            prepare()
-        from kernel_scope_widen_guard import write as guarded_write
-        return guarded_write(path, source)
+        with _workspace_write_scope(path):
+            if prepare is not None:
+                prepare()
+            from kernel_scope_widen_guard import write as guarded_write
+            return guarded_write(path, source)
 
     if not _effect_boundary_enabled():
         write()
@@ -7130,6 +7155,9 @@ def work(d, *, resume=None):
     action_schema_mode = action_schema_enabled()
     native_tool_batches = validate_configuration()
     native_batch = NativeToolBatch() if native_tool_batches else None
+    _minimal_launch = (getattr(ask_tools, "minimal_launch", False)
+                       and os.environ.get("STATEFRAME_MUTATIONS", "off") == "off"
+                       and (os.environ.get("REACT_TOOLCALL", "1") == "1" or action_schema_mode))
 
     def finish_native_batch_transcript(messages=None):
         if native_batch is None:
@@ -7729,17 +7757,21 @@ def work(d, *, resume=None):
         _wiring_journal = _PendingWiringJournal()
         _intake_step = "import"
         try:
-            from kernel_nav_basics import append_intake_orientation
-            from kernel_repo_intel import intake_orientation
+            from kernel_nav_basics import append_intake_orientation, render_intake_orientation
+            if not _minimal_launch:
+                from kernel_repo_intel import intake_orientation
             _intake_step = "selectors"
             _nav_selectors = tuple(_public_check_ids(d, fn))
             _intake_step = "target_path"
             _target_relative = (target.relative_to(root).as_posix()
                                 if target is not None else str(d.get("rel", "")))
             _intake_step = "intake_orientation"
-            _intake_orientation = intake_orientation(
-                root, target_path=_target_relative, symbol=fn, selectors=_nav_selectors,
-                journal=_wiring_journal)
+            if _minimal_launch:
+                _intake_orientation = render_intake_orientation(root, _nav_selectors)
+            else:
+                _intake_orientation = intake_orientation(
+                    root, target_path=_target_relative, symbol=fn, selectors=_nav_selectors,
+                    journal=_wiring_journal)
         except (ImportError, OSError, TypeError, ValueError) as _error:
             _intake_orientation = ""
             _record_intake_orientation_failure(_error, _intake_step, _wiring_journal)
@@ -7942,8 +7974,9 @@ def work(d, *, resume=None):
         # chooses a fix, picks a file, or writes code — that is the multiply-not-replace line.
         # Baseline to diff against (v8, same six tasks, bolt-on ABSENT): 1/6, with
         # steps/edits/tests recorded per task.
-        from kernel_bolt import KernelBolt
-        bolt = KernelBolt(root, fn, d["sha"][:8])
+        from kernel_bolt import KernelBolt, indexed_grep_symbols_enabled
+        _indexed_grep_symbols = indexed_grep_symbols_enabled()
+        bolt = KernelBolt(root, fn, d["sha"][:8], defer_symbols=_minimal_launch)
         bolt._selector_error_fallback_files = set()
         _green_nag_runtime = SimpleNamespace(
             owner=SimpleNamespace(root=root, task_row=d),
@@ -8452,7 +8485,7 @@ def work(d, *, resume=None):
                 else:
                     _initial_paths = ()
                 if _initial_paths:
-                    _initial_product_sources = _source_snapshot(root, _initial_paths)
+                    _initial_product_sources = _initial_source_snapshot(root, _initial_paths)
             except (OSError, TypeError, ValueError):
                 _initial_product_sources = None
         measurement = StateFrameRuntime(
@@ -8461,6 +8494,8 @@ def work(d, *, resume=None):
             temperature=TEMPERATURE, source_resolver=fn_src,
             step_limit=_budget.tool_attempt_limit,
             multi_file=multifile, edit_contract=_edit_contract, workspace=continuation_workspace, resume=resume)
+        if _minimal_launch:
+            measurement._minimal_launch = True
         measurement.run_limitations = run_limitations
         from kernel_edit_request_map import bind_run as _bind_edit_map_run
         if _edit_protocol_handles():
@@ -9553,7 +9588,7 @@ def work(d, *, resume=None):
                 _finish_edit_nturn()
             _edit_nturn_request_active = False
             plain_observation = None
-            if d.get("_bridge_capture"):
+            if d.get("_bridge_capture") and not (_minimal_launch and step == 0):
                 from kernel_bridge_evidence import capture_candidate
                 capture_candidate(d["_bridge_capture"], root, d, step)
             bolt.current_step = step        # E331: turn-stamps every kernel trace event
@@ -10058,6 +10093,8 @@ def work(d, *, resume=None):
                                             raise RouteEscalation(_route_target, _route_withheld)
                                         _route_split_holder["withheld"] = (_route_target, _route_withheld)
                                         return _route_kept
+                                if _minimal_launch and step == 0:
+                                    measurement._minimal_launch_request_id = _prepared.capture.request_id
                                 response = native_batch.next(
                                     ask_tools, list(_prepared.messages), temp=run_temp,
                                     tools=_request_tools, known_refs=_action_known_refs,
@@ -10518,7 +10555,17 @@ def work(d, *, resume=None):
                         _active_menu_capture = getattr(measurement, "_active_capture", None)
                         _menu_request_id = getattr(_active_menu_capture, "request_id", None)
                         from kernel_completion_owner import request_menu_action_admissible
-                        if not request_menu_action_admissible(
+                        _bootstrap_action = _minimal_launch and (
+                            step == 0 or (
+                                native_batch is not None and native_batch.origin is not None
+                                and native_batch.origin == getattr(measurement, "_minimal_launch_request_id", None)
+                            )
+                        )
+                        _bootstrap_refusal = False
+                        if _bootstrap_action:
+                            from kernel_turn_launch import allows_navigation
+                            _bootstrap_refusal = not allows_navigation(_name)
+                        if _bootstrap_refusal or not request_menu_action_admissible(
                                 measurement, _name, _menu_request_id):
                             _menu_refusal = (
                                 "[kernel-menu] This action is not available in the "
@@ -13694,38 +13741,44 @@ def work(d, *, resume=None):
                     if _grep_error is not None:
                         obs = f"Search failed: {_grep_error}. Correct the query or scope and retry."
                     elif _grep_page is not None:
-                        _grep_symbol_fact = None
-                        if (_grep_total == 0 and interventions
-                                and getattr(measurement, "_unit_policy", None) is None):
-                            # Definitions help localize a failed scoped search; registry
-                            # misses cannot establish symbol absence. The symbol registry
-                            # stays a Python-only aid and never defines repository search
-                            # completeness or suppresses pages in a subframe.
-                            try:
-                                token = re.sub(r"^(def|class|async def)\s+", "", pat).strip()
-                                token = re.split(r"[^\w]", token)[0] if token else ""
-                                if token:
-                                    reg = _registry_for(root)
-                                    _grep_symbol_fact = (token, reg.where(token))
-                            except Exception:                            # noqa: BLE001
-                                pass
-                        from kernel_owner_first import coordinates_enabled
-                        if ((coordinates_enabled() or _workspace_truth.enabled())
-                                and getattr(measurement, "_unit_policy", None) is None):
-                            from kernel_navigation_pages import render_grep_result
-                            obs = render_grep_result(
-                                _grep_page,
-                                symbol=_grep_symbol_fact[0] if _grep_symbol_fact else None,
-                                symbol_definitions=_grep_symbol_fact[1] if _grep_symbol_fact else (),
-                                workspace_root=root,
-                                journal=measurement.journal,
-                            )
-                        else:
+                        if _indexed_grep_symbols:
                             obs = _grep_page.text
-                            if _grep_symbol_fact and _grep_symbol_fact[1]:
-                                obs += "\n(no grep matches)\n" + _workspace_truth.render_legacy_symbol_answer(
-                                    _grep_symbol_fact[0], _grep_symbol_fact[1], (), 0, 0, 0,
+                            if (_grep_total == 0 and _grep_complete and interventions
+                                    and getattr(measurement, "_unit_policy", None) is None):
+                                obs += bolt.grep_symbol_advisory(pat, page=True)
+                        else:
+                            _grep_symbol_fact = None
+                            if (_grep_total == 0 and interventions
+                                    and getattr(measurement, "_unit_policy", None) is None):
+                                # Definitions help localize a failed scoped search; registry
+                                # misses cannot establish symbol absence. The symbol registry
+                                # stays a Python-only aid and never defines repository search
+                                # completeness or suppresses pages in a subframe.
+                                try:
+                                    token = re.sub(r"^(def|class|async def)\s+", "", pat).strip()
+                                    token = re.split(r"[^\w]", token)[0] if token else ""
+                                    if token:
+                                        reg = _registry_for(root)
+                                        _grep_symbol_fact = (token, reg.where(token))
+                                except Exception:                            # noqa: BLE001
+                                    pass
+                            from kernel_owner_first import coordinates_enabled
+                            if ((coordinates_enabled() or _workspace_truth.enabled())
+                                    and getattr(measurement, "_unit_policy", None) is None):
+                                from kernel_navigation_pages import render_grep_result
+                                obs = render_grep_result(
+                                    _grep_page,
+                                    symbol=_grep_symbol_fact[0] if _grep_symbol_fact else None,
+                                    symbol_definitions=_grep_symbol_fact[1] if _grep_symbol_fact else (),
+                                    workspace_root=root,
+                                    journal=measurement.journal,
                                 )
+                            else:
+                                obs = _grep_page.text
+                                if _grep_symbol_fact and _grep_symbol_fact[1]:
+                                    obs += "\n(no grep matches)\n" + _workspace_truth.render_legacy_symbol_answer(
+                                        _grep_symbol_fact[0], _grep_symbol_fact[1], (), 0, 0, 0,
+                                    )
                         # Q6: the second identical zero grep at one revision changes the route.
                         from kernel_repeated_zero import observe as _rz_observe
                         obs = _rz_observe(
@@ -15102,7 +15155,10 @@ def work(d, *, resume=None):
                                 break
                 except Exception:                                    # noqa: BLE001
                     pass
-            obs = bolt.observe(line, obs, step=step)
+            if _indexed_grep_symbols and line.startswith("grep "):
+                obs = bolt.observe(line, obs, step=step, grep_page=True)
+            else:
+                obs = bolt.observe(line, obs, step=step)
             # E415: a dossier opened by this turn's receipt reaches the model NOW.
             _clp = getattr(bolt, "_closelook_pending", None)
             if _clp:

@@ -30,18 +30,32 @@ from __future__ import annotations
 import ast
 import json
 import os
-import tempfile
-import sys
 import re
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+import sys
+import tempfile
+from collections import OrderedDict
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from concurrent.futures import Future
+from dataclasses import dataclass, field, replace
+from functools import cache
+from hashlib import sha256
 from pathlib import Path
-from typing import Final
+from threading import Thread
+from typing import TYPE_CHECKING, Final
 
 from kernel_non_product_paths import is_non_product
 from kernel_test_python import selected_test_python
 from kernel_safe_probe import ProbeCleanupError, probe_evidence, retry_probe, run_probe_session
 from kernel_tree_digest import path_entry, tree_digest as canonical_tree_digest
+if __package__:
+    from .kernel_turn_work_counters import count_work
+else:
+    from kernel_turn_work_counters import count_work
+
+if TYPE_CHECKING:
+    from kernel_workspace_consumers import WorkspaceConsumers
+    from kernel_workspace_state import WorkspaceSnapshot
+    from kernel_workspace_tree import Directory
 
 
 MODE_ENV: Final = "STATEFRAME_SHIP_TREE_SMOKE"
@@ -67,7 +81,7 @@ def mode(environ: Mapping[str, str] | None = None) -> str:
 
 @dataclass(frozen=True)
 class ShipTreeSmokeResult:
-    status: str                      # PASS | FAIL | ENGINE_ERROR | ENVIRONMENT | UNKNOWN
+    status: str
     checked: tuple[str, ...]
     failures: tuple[tuple[str, str], ...]   # (path, error)
     tree_digest: str = ""
@@ -80,6 +94,7 @@ class ShipTreeSmokeResult:
     resolver_identity: str = ""
     digest_format: str = ""
     probe_evidence: dict[str, object] | None = None
+    probe_complete: bool = field(default=False, repr=False, compare=False)
 
     @property
     def blocking(self) -> bool:
@@ -107,9 +122,12 @@ class ShipTreeSmokeResult:
 _CHILD = r'''
 import importlib, importlib.util, json, pathlib, sys
 root = pathlib.Path(sys.argv[1]).resolve()
-items = json.loads(sys.argv[2])
-roots = [pathlib.Path(value).resolve() for value in
-         (json.loads(sys.argv[3]) if len(sys.argv) > 3 else [str(root)])]
+if sys.argv[2] == "--inputs":
+    items, raw_roots = json.loads(pathlib.Path(sys.argv[3]).read_text(encoding="utf-8"))
+else:
+    items = json.loads(sys.argv[2])
+    raw_roots = json.loads(sys.argv[3]) if len(sys.argv) > 3 else [str(root)]
+roots = [pathlib.Path(value).resolve() for value in raw_roots]
 sys.path[:0] = [str(value) for value in roots]
 rows = []
 def module_name(path):
@@ -181,19 +199,55 @@ def _execute_smoke_once(root: Path, checked: Sequence[str], roots: Sequence[str]
             workspace=root, run_env_dir=env, scratch_home=home,
             network="none", writable=False,
             extra_read_roots=(selected, *map(Path, _interpreter_roots(selected))))
-        cap = replace(cap, purpose="probe", limits=replace(cap.limits, wall_seconds=timeout))
+        arguments = [json.dumps(list(checked)), json.dumps(list(roots))]
+        limits = replace(cap.limits, wall_seconds=timeout)
+        if projection_enabled() and sum(map(len, arguments)) > 32 << 10:
+            # Large scopes can exceed exec's per-argument limit and the
+            # usual output tail. Keep both bounds explicit.
+            inputs = home / "smoke-inputs.json"
+            inputs.write_text("[" + ",".join(arguments) + "]", encoding="utf-8")
+            limits = replace(limits, output_bytes=min(
+                4 << 20, max(limits.output_bytes, len(arguments[0]) + 320 * len(checked))))
+            arguments = ["--inputs", str(inputs)]
+        cap = replace(cap, purpose="probe", limits=limits)
         (scratch / "session").mkdir()
         session = ExecSession(scratch / "session")
         return run_probe_session(
             session, lambda: session.run(
-                [str(selected), "-I", "-B", "-c", _CHILD, str(root),
-                 json.dumps(list(checked)), json.dumps(list(roots))], cap),
+                [str(selected), "-I", "-B", "-c", _CHILD, str(root), *arguments], cap),
             cleanup_error=ImportSmokeCleanupError)
 
 
 def python_paths(root: Path, values: Sequence[object]) -> tuple[str, ...]:
     """Existing workspace-relative ``.py`` files among ``values`` (deduplicated)."""
     root = Path(root).resolve()
+    consumers = _workspace_consumers(root)
+    if consumers is None:
+        return _python_paths(root, values)
+    paths = tuple(str(value or "").strip() for value in values)
+    return consumers.smoke_projection(
+        "ship-tree-checked-paths", (paths,),
+        lambda: (_python_paths(root, paths), _internal_paths(root, paths)),
+    )
+
+
+def _workspace_consumers(root: Path):
+    from sys import modules
+    module = modules.get("kernel_workspace_consumers")
+    return module.consumers_for(root) if module is not None else None
+
+
+def projection_enabled() -> bool:
+    return (os.environ.get("STATEFRAME_WORKSPACE_OBJECTS") == "on"
+            and os.environ.get("STATEFRAME_TURN_DELIVERY_PROOFS", "off").strip().lower() == "on")
+
+
+def _internal_paths(root: Path, values: Sequence[str]) -> bool:
+    return all((root / value).is_relative_to(root) and ".." not in Path(value).parts
+               for value in values)
+
+
+def _python_paths(root: Path, values: Sequence[object]) -> tuple[str, ...]:
     result: list[str] = []
     for value in values:
         raw = str(value or "").strip()
@@ -218,6 +272,7 @@ _INI_SECTIONS: Final = {"pytest.ini": ("pytest",), "tox.ini": ("pytest",),
 def _top_level_import_names(source: str) -> tuple[str, ...]:
     """Top package names of the file's absolute module-level imports."""
     try:
+        count_work("parses")
         tree = ast.parse(source)
     except (SyntaxError, ValueError):
         return ()
@@ -242,13 +297,24 @@ def _top_level_import_names(source: str) -> tuple[str, ...]:
                                if name and name not in stdlib and name != "__future__"))
 
 
+def _counted_is_file(path: Path) -> bool:
+    count_work("files_statted")
+    return path.is_file()
+
+
+def _counted_is_dir(path: Path) -> bool:
+    count_work("files_statted")
+    return path.is_dir()
+
+
 def _provides(directory: Path, name: str) -> bool:
     """``directory`` makes ``name`` importable (module file or package dir)."""
-    if (directory / f"{name}.py").is_file():
+    if _counted_is_file(directory / f"{name}.py"):
         return True
     package = directory / name
-    return package.is_dir() and ((package / "__init__.py").is_file()
-                                 or any(package.glob("*.py")))
+    if not _counted_is_dir(package):
+        return False
+    return _counted_is_file(package / "__init__.py") or any(package.glob("*.py"))
 
 
 def _ini_pythonpath(directory: Path) -> tuple[Path, ...]:
@@ -257,11 +323,12 @@ def _ini_pythonpath(directory: Path) -> tuple[Path, ...]:
     found: list[Path] = []
     for name, sections in _INI_SECTIONS.items():
         ini = directory / name
-        if not ini.is_file():
+        if not _counted_is_file(ini):
             continue
         parser = configparser.ConfigParser(interpolation=None)
         try:
-            parser.read(ini, encoding="utf-8")
+            loaded = parser.read(ini, encoding="utf-8")
+            count_work("files_read", len(loaded))
         except (configparser.Error, OSError, UnicodeError):
             continue
         for section in sections:
@@ -269,10 +336,11 @@ def _ini_pythonpath(directory: Path) -> tuple[Path, ...]:
                 found.extend(directory / item
                              for item in parser.get(section, "pythonpath").split())
     pyproject = directory / "pyproject.toml"
-    if pyproject.is_file():
+    if _counted_is_file(pyproject):
         try:
             import tomllib
             data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+            count_work("files_read")
         except (ImportError, OSError, UnicodeError, ValueError):
             data = {}
         tool = data.get("tool", {}) if isinstance(data, Mapping) else {}
@@ -301,163 +369,181 @@ def source_roots(root: Path, paths: Sequence[str]) -> tuple[str, ...]:
     only Python, and other languages never consult a module search path.
     """
     root = Path(root).resolve()
-    checked_files: list[tuple[Path, tuple[str, ...]]] = []
+    pythonpath = os.environ.get("PYTHONPATH", "")
+    consumers = _workspace_consumers(root)
+    if consumers is None:
+        return _source_roots(root, paths, pythonpath)[0]
+    return consumers.smoke_projection(
+        "ship-tree-roots",
+        (tuple(paths), pythonpath, selected_test_python(), tuple(sys.version_info),
+         _defer_source_providers()),
+        lambda: _source_roots(root, paths, pythonpath),
+    )
+
+
+def _defer_source_providers() -> bool:
+    if "STATEFRAME_TURN_DELIVERY_PROOFS" not in os.environ:
+        return False
+    from kernel_turn_proofs import enabled
+
+    return enabled()
+
+
+def _source_roots(
+    root: Path, paths: Sequence[str], pythonpath: str, *,
+    imports_for: Callable[[str], tuple[str, ...]] | None = None,
+) -> tuple[tuple[str, ...], bool]:
+    defer_providers = _defer_source_providers()
+
+    internal_only = True
+
+    def resolve(candidate: Path) -> Path:
+        nonlocal internal_only
+        # External prefixes can change without any change below the workspace.
+        if not candidate.is_relative_to(root) or ".." in candidate.parts:
+            internal_only = False
+        return candidate.resolve()
+
+    def checked_imports() -> Iterable[tuple[Path, tuple[str, ...]]]:
+        for raw in paths:
+            if imports_for is not None:
+                yield Path(raw), imports_for(raw)
+                continue
+            value = str(raw or "").strip()
+            if not value.endswith(".py"):
+                continue
+            file = resolve(root / value)
+            try:
+                relative = file.relative_to(root)
+            except ValueError:
+                continue
+            try:
+                source = file.read_text(encoding="utf-8")
+                count_work("files_read")
+                tops = _top_level_import_names(source)
+            except (OSError, UnicodeError):
+                tops = ()
+            yield relative, tops
+
+    checked_files = checked_imports()
     import_names: set[str] = set()
-    for raw in paths:
-        value = str(raw or "").strip()
-        if not value.endswith(".py"):
-            continue
-        file = (Path(value) if Path(value).is_absolute() else root / value).resolve()
-        try:
-            relative = file.relative_to(root)
-        except ValueError:
-            continue
-        try:
-            tops = _top_level_import_names(file.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError):
-            tops = ()
-        checked_files.append((relative, tops))
-        import_names.update(tops)
+    if not defer_providers:
+        checked_files = tuple(checked_files)
+        import_names = {top for _, tops in checked_files for top in tops}
 
-    result: list[Path] = [root]
-    result_paths = {root}
-    provider_names_cache: dict[Path, frozenset[str]] = {}
-    incomplete_provider_dirs: set[Path] = set()
-    provider_fallback_cache: dict[tuple[Path, str], bool] = {}
-    result_provider_names: set[str] = set()
-    result_provider_cache: dict[str, bool] = {}
-    unindexed_result_roots: list[Path] = []
-    first_level_provider_index: dict[str, tuple[Path, ...]] | None = None
-    first_level_unindexed_dirs: tuple[Path, ...] = ()
-    sibling_provider_cache: dict[str, tuple[Path, ...]] = {}
+    # These observations live for one traversal. Warm workspace reuse is
+    # handled by the generation-fenced projection around this resolver.
+    probe = cache(_provides)
+    config_paths = cache(_ini_pythonpath)
 
-    def directory_providers(directory: Path) -> frozenset[str]:
-        cached = provider_names_cache.get(directory)
-        if cached is not None:
-            return cached
+    @cache
+    def provider_names(directory: Path) -> frozenset[str] | None:
+        if defer_providers:
+            return None
         if not import_names:
-            provider_names_cache[directory] = frozenset()
-            return provider_names_cache[directory]
-        candidates: set[str] = set()
+            return frozenset()
         try:
             with os.scandir(directory) as entries:
-                for entry in entries:
-                    try:
-                        if entry.name in import_names and entry.is_dir(follow_symlinks=True):
-                            candidates.add(entry.name)
-                        if entry.name.endswith(".py"):
-                            name = entry.name[:-3]
-                            if name in import_names and entry.is_file(follow_symlinks=True):
-                                candidates.add(name)
-                    except OSError:
-                        incomplete_provider_dirs.add(directory)
+                names = {entry.name for entry in entries}
         except OSError:
-            incomplete_provider_dirs.add(directory)
-            provider_names_cache[directory] = frozenset()
-            return provider_names_cache[directory]
-        names = frozenset(name for name in candidates if _provides(directory, name))
-        provider_names_cache[directory] = names
-        return names
+            return None
+        candidates = (names | {name[:-3] for name in names if name.endswith(".py")})
+        return frozenset(name for name in import_names.intersection(candidates)
+                         if probe(directory, name))
 
     def provides(directory: Path, name: str) -> bool:
-        if name in directory_providers(directory):
-            return True
-        if directory not in incomplete_provider_dirs:
-            return False
-        key = (directory, name)
-        if key not in provider_fallback_cache:
-            provider_fallback_cache[key] = _provides(directory, name)
-        return provider_fallback_cache[key]
+        names = provider_names(directory)
+        return name in names if names is not None else probe(directory, name)
+
+    @cache
+    def sibling_index() -> tuple[dict[str, list[Path]], list[Path]]:
+        count_work("index_builds")
+        found: dict[str, list[Path]] = {}
+        unindexed: list[Path] = []
+        for child in _first_level_dirs(root):
+            names = provider_names(child)
+            if names is None:
+                unindexed.append(child)
+            else:
+                for name in names:
+                    found.setdefault(name, []).append(child)
+        return found, unindexed
+
+    @cache
+    def sibling_providers(name: str) -> tuple[Path, ...]:
+        found, unindexed = sibling_index()
+        return (*found.get(name, ()), *(child for child in unindexed if probe(child, name)))
+
+    result: dict[Path, None] = {}
+    result_names: set[str] = set()
+    unindexed_result: list[Path] = []
+    observed_result: dict[str, tuple[int, bool]] = {}
 
     def add_root(directory: Path) -> None:
-        if directory in result_paths:
+        if directory in result:
             return
-        result_paths.add(directory)
-        result.append(directory)
-        result_provider_names.update(directory_providers(directory))
-        if directory in incomplete_provider_dirs:
-            unindexed_result_roots.append(directory)
-            for name in tuple(result_provider_cache):
-                if not result_provider_cache[name] and provides(directory, name):
-                    result_provider_cache[name] = True
+        result[directory] = None
+        names = provider_names(directory)
+        if names is None:
+            unindexed_result.append(directory)
+        else:
+            result_names.update(names)
 
-    def result_provides(name: str) -> bool:
-        if name in result_provider_names:
+    def selected_root_provides(top: str) -> bool:
+        if top in result_names:
             return True
-        if name not in result_provider_cache:
-            result_provider_cache[name] = any(
-                provides(directory, name) for directory in unindexed_result_roots
-            )
-        return result_provider_cache[name]
+        # A negative observation only needs to check roots added since then.
+        start, found = observed_result.get(top, (0, False))
+        if not found:
+            found = any(probe(unindexed_result[index], top)
+                        for index in range(start, len(unindexed_result)))
+            observed_result[top] = len(unindexed_result), found
+        return found
 
-    def sibling_providers(name: str) -> tuple[Path, ...]:
-        nonlocal first_level_provider_index, first_level_unindexed_dirs
-        if first_level_provider_index is None:
-            providers: dict[str, list[Path]] = {}
-            unindexed: list[Path] = []
-            for child in _first_level_dirs(root):
-                for provided_name in directory_providers(child):
-                    providers.setdefault(provided_name, []).append(child)
-                if child in incomplete_provider_dirs:
-                    unindexed.append(child)
-            first_level_provider_index = {
-                provided_name: tuple(directories)
-                for provided_name, directories in providers.items()
-            }
-            first_level_unindexed_dirs = tuple(unindexed)
-        if name not in sibling_provider_cache:
-            providers = list(first_level_provider_index.get(name, ()))
-            for child in first_level_unindexed_dirs:
-                if name not in directory_providers(child) and provides(child, name):
-                    providers.append(child)
-            sibling_provider_cache[name] = tuple(providers)
-        return sibling_provider_cache[name]
-
-    result_provider_names.update(directory_providers(root))
-    if root in incomplete_provider_dirs:
-        unindexed_result_roots.append(root)
-
-    for relative, tops in checked_files:
-        ancestors = [root.joinpath(*relative.parts[:index])
-                     for index in range(0, len(relative.parts))]
-        resolved_tops: set[str] = set()
-        for directory in ancestors:
-            provided = {top for top in tops if provides(directory, top)}
-            if provided:
-                add_root(directory)
-                resolved_tops.update(provided)
-            for entry in _ini_pythonpath(directory):
+    @cache
+    def ancestor_roots(parent: tuple[str, ...], tops: tuple[str, ...]) -> tuple[Path, ...]:
+        roots: list[Path] = []
+        for index in range(len(parent) + 1):
+            directory = root.joinpath(*parent[:index])
+            if any(provides(directory, top) for top in tops):
+                roots.append(directory)
+            for entry in config_paths(directory):
                 try:
-                    resolved = entry.resolve()
+                    resolved = resolve(entry)
                     resolved.relative_to(root)
                 except (OSError, ValueError):
-                    continue        # never import from outside the checkout
-                if resolved.is_dir():
-                    add_root(resolved)
+                    continue
+                if _counted_is_dir(resolved):
+                    roots.append(resolved)
+        return tuple(roots)
+
+    add_root(root)
+    for relative, tops in checked_files:
+        for directory in ancestor_roots(relative.parts[:-1], tops):
+            add_root(directory)
         for top in tops:
-            if top in resolved_tops or result_provides(top):
+            if selected_root_provides(top):
                 continue
             providers = sibling_providers(top)
-            if len(providers) == 1:                 # unambiguous sibling project only
+            if len(providers) == 1:
                 add_root(providers[0])
-    for entry in os.environ.get("PYTHONPATH", "").split(os.pathsep):
+    for entry in pythonpath.split(os.pathsep):
         if not entry.strip():
             continue
-        candidate = Path(entry) if Path(entry).is_absolute() else root / entry
         try:
-            resolved = candidate.resolve()
+            resolved = resolve(root / entry)
             resolved.relative_to(root)
         except (OSError, ValueError):
             continue
-        if resolved.is_dir():
-            add_root(resolved)
-    return tuple(str(item) for item in result)
+        if _counted_is_dir(resolved):
+            result[resolved] = None
+    return tuple(str(item) for item in result), internal_only
 
 
 def _first_level_dirs(root: Path) -> tuple[Path, ...]:
     try:
         return tuple(sorted(child for child in root.iterdir()
-                            if child.is_dir() and not child.name.startswith(".")))
+                            if _counted_is_dir(child) and not child.name.startswith(".")))
     except OSError:
         return ()
 
@@ -517,17 +603,34 @@ def apply_baseline(result: "ShipTreeSmokeResult",
                    digest_format=TREE_DIGEST_FORMAT)
 
 
+def _digest_identities(dependencies: object, environment: object,
+                       resolver: object) -> list[list[str]]:
+    return [
+        ["identity", label, json.dumps(value, sort_keys=True, default=str,
+                                      separators=(",", ":"), ensure_ascii=True)]
+        for label, value in (("dependencies", dependencies), ("environment", environment),
+                             ("resolver", resolver))
+    ]
+
+
 def tree_digest(root: Path, paths: Sequence[str], *, dependency_identity: object = "",
                 environment_identity: object = "", resolver_identity: object = "") -> str:
-    entries: list[list[object]] = []
-    for label, value in (("dependencies", dependency_identity),
-                         ("environment", environment_identity),
-                         ("resolver", resolver_identity)):
-        entries.append(["identity", label, json.dumps(value, sort_keys=True, default=str,
-                                                      separators=(",", ":"), ensure_ascii=True)])
-    for path in sorted(str(item) for item in paths if not is_non_product(str(item))):
-        entries.append(path_entry(Path(root) / path, path))
-    return "sha256:" + canonical_tree_digest(TREE_DIGEST_FORMAT, entries)
+    entries = _digest_identities(dependency_identity, environment_identity, resolver_identity)
+    def calculate() -> str:
+        rows = [*entries]
+        for path in sorted(str(item) for item in paths if not is_non_product(str(item))):
+            rows.append(path_entry(Path(root) / path, path))
+        return "sha256:" + canonical_tree_digest(TREE_DIGEST_FORMAT, rows)
+
+    resolved = Path(root).absolute()
+    consumers = _workspace_consumers(resolved)
+    if consumers is None:
+        return calculate()
+    return consumers.smoke_projection(
+        "ship-tree-wire-digest", (tuple(paths), tuple(tuple(row) for row in entries)),
+        lambda: (calculate(), _internal_paths(resolved, paths)),
+    )
+
 
 
 def local_import_shadows(source: str) -> tuple[str, ...]:
@@ -599,11 +702,26 @@ def run_smoke(root: Path, paths: Sequence[str], *, timeout_s: float = 20.0,
     the resolver (``source_roots``) -- tests pass ``(root,)`` to disable it.
     """
     root = Path(root).resolve()
+    from contextlib import nullcontext
+    consumers = _workspace_consumers(root)
+    pin = consumers.state.pin("ship-tree-execution") if consumers is not None else nullcontext()
+    with pin:
+        return _run_smoke(
+            root, paths, timeout_s=timeout_s, baseline=baseline, roots=roots,
+            dependency_identity=dependency_identity, environment_identity=environment_identity,
+            declared_scope=declared_scope, resolver_identity=resolver_identity,
+        )
+
+
+def _run_smoke(root: Path, paths: Sequence[str], *, timeout_s: float,
+               baseline: ShipTreeSmokeResult | None, roots: Sequence[str] | None,
+               dependency_identity: object, environment_identity: object,
+               declared_scope: Sequence[str] | None, resolver_identity: object) -> ShipTreeSmokeResult:
     checked = python_paths(root, paths)
     scope = python_paths(root, declared_scope if declared_scope is not None else paths)
     if not checked:
         return ShipTreeSmokeResult("UNKNOWN", (), (), "", declared_scope=scope,
-                                   digest_format=TREE_DIGEST_FORMAT)
+                                   digest_format=TREE_DIGEST_FORMAT, probe_complete=True)
     if roots is not None:
         import_roots = tuple(str(Path(item).resolve()) for item in roots)
     else:
@@ -621,6 +739,28 @@ def run_smoke(root: Path, paths: Sequence[str], *, timeout_s: float = 20.0,
     dependency_key = json.dumps(effective_dependencies, sort_keys=True, default=str)
     environment_key = json.dumps(effective_environment, sort_keys=True, default=str)
     resolver_key = json.dumps(effective_resolver, sort_keys=True, default=str)
+    return _probe_smoke(root, checked, import_roots, timeout_s, baseline, scope,
+                        digest, dependency_key, environment_key, resolver_key,
+                        lambda: _static_findings(root, checked))
+
+
+def _static_findings(root: Path, checked: Sequence[str]) -> tuple[tuple[str, str], ...]:
+    findings: list[tuple[str, str]] = []
+    for path in checked:
+        try:
+            source = (root / path).read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+        findings.extend((path, finding) for finding in local_import_shadows(source))
+    return tuple(findings)
+
+
+def _probe_smoke(root: Path, checked: tuple[str, ...], import_roots: tuple[str, ...],
+                 timeout_s: float, baseline: ShipTreeSmokeResult | None,
+                 scope: tuple[str, ...], digest: str, dependency_key: str,
+                 environment_key: str, resolver_key: str,
+                 static_findings: Callable[[], Sequence[tuple[str, str]]] |
+                 Sequence[tuple[str, str]]) -> ShipTreeSmokeResult:
     failures: list[tuple[str, str]] = []
     host_failures: list[tuple[str, str]] = []
     runner_failed = False
@@ -654,13 +794,7 @@ def run_smoke(root: Path, paths: Sequence[str], *, timeout_s: float = 20.0,
     if not runner_failed:
         host_failures.extend((path, "fresh interpreter produced no result") for path in checked
                               if path not in seen)
-    static_findings: list[tuple[str, str]] = []
-    for path in checked:
-        try:
-            source = (root / path).read_text(encoding="utf-8")
-        except (OSError, UnicodeError):
-            continue
-        static_findings.extend((path, finding) for finding in local_import_shadows(source))
+    static_findings = static_findings() if callable(static_findings) else static_findings
     if runner_failed:
         # A timeout, malformed JSON, or failed runner is a host outcome. Keep
         # static observations visible as deferred diagnostics, but never turn
@@ -676,8 +810,295 @@ def run_smoke(root: Path, paths: Sequence[str], *, timeout_s: float = 20.0,
     raw = ShipTreeSmokeResult(status, checked, tuple(failures), digest,
                               tuple(host_failures), import_roots,
                               dependency_key, environment_key, scope, resolver_key,
-                              TREE_DIGEST_FORMAT, probe_evidence=evidence)
+                              TREE_DIGEST_FORMAT, probe_evidence=evidence,
+                              probe_complete=not runner_failed and not host_failures)
     return apply_baseline(raw, baseline)
+
+
+@dataclass(frozen=True)
+class SmokeScope:
+    paths: tuple[str, ...]
+    dependencies: tuple[str, ...]
+    parent: str
+    untouched: bool
+
+
+def _interpreter_stamp() -> tuple[str, tuple[object, ...]]:
+    executable = selected_test_python()
+
+    def signature(path: Path) -> tuple[object, ...]:
+        try:
+            info = path.stat()
+        except FileNotFoundError:
+            return (str(path),)
+        return (str(path), info.st_dev, info.st_ino, info.st_mode, info.st_size,
+                info.st_mtime_ns, info.st_ctime_ns)
+
+    try:
+        selected = Path(executable)
+        resolved = selected.resolve(strict=True)
+        prefixes = dict.fromkeys((selected.parent.parent, resolved.parent.parent))
+        settings = (path for prefix in prefixes for path in
+                    (prefix / "pyvenv.cfg", prefix / "lib"))
+        return executable, (signature(resolved), *map(signature, settings))
+    except (OSError, RuntimeError):
+        return executable, ()
+
+
+def _parser_policy() -> tuple[object, ...]:
+    return (sys.implementation.name, tuple(sys.version_info),
+            getattr(sys, "stdlib_module_names", frozenset()))
+
+
+@dataclass(frozen=True)
+class SmokeBasis:
+    tree: bytes
+    epoch: bytes
+    scope: SmokeScope
+    admitted_parent: str | None
+    interpreter: tuple[str, tuple[object, ...]]
+    pythonpath: str
+    parser: tuple[object, ...]
+
+    @property
+    def baseline_context(self) -> tuple[object, ...]:
+        return (self.scope.parent, self.admitted_parent, self.interpreter,
+                self.pythonpath, self.parser)
+
+
+@dataclass(frozen=True)
+class _SmokePlan:
+    checked: tuple[str, ...]
+    roots: tuple[str, ...]
+    digest: str
+    dependencies: str
+    environment: str
+    resolver: str
+    findings: tuple[tuple[str, str], ...]
+    reusable: bool
+
+    def run(self, root: Path) -> ShipTreeSmokeResult:
+        if not self.checked:
+            return ShipTreeSmokeResult("UNKNOWN", (), (), digest_format=TREE_DIGEST_FORMAT,
+                                       probe_complete=True)
+        return _probe_smoke(root, self.checked, self.roots, 20.0, None, self.checked,
+                            self.digest, self.dependencies, self.environment,
+                            self.resolver, self.findings)
+
+
+def _tree_parts(root: Path, path: str) -> tuple[bytes, ...] | None:
+    candidate = Path(path)
+    if candidate.is_absolute():
+        if not candidate.is_relative_to(root):
+            return None
+        candidate = candidate.relative_to(root)
+    if ".." in candidate.parts:
+        return None
+    return tuple(map(os.fsencode, candidate.parts))
+
+
+class SmokeProjection:
+    """Attempt-local static facts and interpreter results for fenced smoke inputs."""
+
+    def __init__(self, consumers: WorkspaceConsumers):
+        self._consumers = consumers
+        self._root = consumers.state.fence.root
+        self._facts: OrderedDict[
+            tuple[tuple[object, ...], bytes], tuple[tuple[str, ...], tuple[str, ...]]
+        ] = OrderedDict()
+        self._tree: Directory | None = None
+        self._links = 0
+        self._current: tuple[SmokeBasis, ShipTreeSmokeResult] | None = None
+        self._launch: Future[tuple[SmokeBasis, ShipTreeSmokeResult | None] | None] | None = None
+        self.launch_attempted = False
+
+    def _basis(self, view: WorkspaceSnapshot, scope: SmokeScope) -> SmokeBasis:
+        return SmokeBasis(view.tree.digest, view.epoch, scope, self._consumers.admitted_parent,
+                          _interpreter_stamp(), os.environ.get("PYTHONPATH", ""),
+                          _parser_policy())
+
+    def _has_links(self, tree: Directory) -> bool:
+        from kernel_workspace_tree import Directory, Symlink, children, diff
+
+        if self._tree is None:
+            pending = [tree]
+            while pending:
+                for _, entry in children(pending.pop()):
+                    if isinstance(entry, Directory):
+                        pending.append(entry)
+                    elif isinstance(entry, Symlink):
+                        self._links += 1
+        elif self._tree.digest != tree.digest:
+            for change in diff(self._tree, tree):
+                self._links += isinstance(change.after, Symlink) - isinstance(
+                    change.before, Symlink)
+        self._tree = tree
+        return bool(self._links)
+
+    def _blob(self, path: str, digest: bytes, policy: tuple[object, ...]
+              ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        from kernel_workspace_state import WorkspaceUnavailable
+
+        key = policy, digest
+        if key not in self._facts:
+            try:
+                payload = (self._root / path).read_bytes()
+            except OSError as error:
+                raise WorkspaceUnavailable("smoke source unavailable") from error
+            if sha256(payload).digest() != digest:
+                raise WorkspaceUnavailable("smoke source changed during projection")
+            try:
+                source = payload.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+            except UnicodeError:
+                facts = (), ()
+            else:
+                facts = _top_level_import_names(source), local_import_shadows(source)
+            self._facts[key] = facts
+            if len(self._facts) > 16_384:
+                self._facts.popitem(last=False)
+        self._facts.move_to_end(key)
+        return self._facts[key]
+
+    def _plan(self, tree: Directory, basis: SmokeBasis) -> _SmokePlan:
+        from kernel_workspace_tree import File, lookup
+
+        root, scope = self._root, basis.scope
+        paths = tuple(path for path in scope.paths if path.endswith(".py"))
+        parts = tuple(_tree_parts(root, path) for path in paths)
+        files: dict[str, File] = {}
+        reusable = not self._has_links(tree) and None not in parts
+        static: list[tuple[str, str]] = []
+        if reusable:
+            for item in parts:
+                assert item is not None
+                path = os.fsdecode(b"/".join(item))
+                if not is_non_product(path) and isinstance(entry := lookup(tree, item), File):
+                    files[path] = entry
+            checked = tuple(files)
+        else:
+            checked = _python_paths(root, paths)
+            for path in checked:
+                entry = lookup(tree, tuple(map(os.fsencode, Path(path).parts)))
+                if isinstance(entry, File):
+                    files[path] = entry
+
+        def imports_for(path: str) -> tuple[str, ...]:
+            entry = files.get(path)
+            if entry is not None:
+                names, findings = self._blob(path, entry.sha256, basis.parser)
+            else:
+                try:
+                    source = (root / path).read_text(encoding="utf-8")
+                except (OSError, UnicodeError):
+                    return ()
+                names, findings = _top_level_import_names(source), local_import_shadows(source)
+            static.extend((path, finding) for finding in findings)
+            return names
+
+        roots, internal = _source_roots(root, checked, basis.pythonpath, imports_for=imports_for)
+
+        dependency_parts = tuple(_tree_parts(root, path) for path in scope.dependencies)
+        reusable = reusable and internal and None not in dependency_parts
+        dependency_rows = _digest_identities("", "", "")
+        for path in sorted(path for path in scope.dependencies if not is_non_product(path)):
+            item = _tree_parts(root, path)
+            entry = lookup(tree, item) if reusable and item is not None else None
+            if isinstance(entry, File):
+                dependency_rows.append(["file", path, entry.sha256.hex()])
+            else:
+                dependency_rows.append(path_entry(root / path, path))
+        dependencies = {
+            "parent": json.loads(scope.parent),
+            "checked_dependencies": scope.dependencies,
+            "dependency_content_digest": (
+                "sha256:" + canonical_tree_digest(TREE_DIGEST_FORMAT, dependency_rows)),
+        }
+        environment = {"python": tuple(sys.version_info[:3]),
+                       "executable": basis.interpreter[0], "source_roots": roots}
+        resolver = {"source_roots": roots, "pythonpath": basis.pythonpath, "checked": checked}
+        entries = _digest_identities(dependencies, environment, resolver)
+        for path in sorted(checked):
+            if path in files:
+                entries.append(["file", path, files[path].sha256.hex()])
+            else:
+                entries.append(path_entry(root / path, path))
+        keys = (json.dumps(item, sort_keys=True, default=str)
+                for item in (dependencies, environment, resolver))
+        return _SmokePlan(checked, roots, "sha256:" + canonical_tree_digest(TREE_DIGEST_FORMAT, entries),
+                          *keys, tuple(static), reusable and bool(basis.interpreter[1]))
+
+    def offer(self, scope: SmokeScope) -> None:
+        """Stage optional bootstrap work without retaining runtime or journal state."""
+        from kernel_workspace_state import WorkspaceUnavailable
+
+        if self.launch_attempted:
+            return
+        self.launch_attempted = True
+        try:
+            epoch = self._consumers.smoke_epoch()
+        except WorkspaceUnavailable:
+            return
+        future: Future[tuple[SmokeBasis, ShipTreeSmokeResult | None] | None] = Future()
+        self._launch = future
+
+        def build() -> None:
+            try:
+                with self._consumers.smoke_read(background=True) as view:
+                    basis = self._basis(view, scope)
+                    plan = self._plan(view.tree, basis) if view.epoch == epoch else None
+                result = None
+                # The import sandbox owns cleanup. Do not hold a live writer
+                # fence during execution, and qualify the outcome at take().
+                if plan is not None and plan.reusable and self._basis(view, scope) == basis:
+                    result = plan.run(self._root)
+                    if self._basis(view, scope) != basis:
+                        result = None
+                future.set_result((basis, result) if plan is not None else None)
+            except BaseException as error:
+                # Fatal cleanup errors must reach the owner even when this
+                # staged result no longer qualifies for the live scope.
+                future.set_exception(error)
+
+        Thread(target=build, name="ship-tree-smoke", daemon=True).start()
+
+    def take(self, scope: SmokeScope,
+             publish: Callable[[SmokeBasis, ShipTreeSmokeResult, bool, bool], ShipTreeSmokeResult]
+             ) -> ShipTreeSmokeResult:
+        """Qualify staged evidence or run the required check against the current pin."""
+        from kernel_workspace_state import WorkspaceUnavailable
+
+        staged = None
+        if self._launch is not None:
+            try:
+                staged = self._launch.result()
+            except Exception:
+                pass
+            finally:
+                self._launch = None
+        try:
+            with self._consumers.smoke_read() as view:
+                basis = self._basis(view, scope)
+                same_launch_tree = (staged is not None
+                                    and staged[0].tree == basis.tree
+                                    and staged[0].epoch == basis.epoch
+                                    and staged[0].scope.parent == scope.parent
+                                    and staged[0].admitted_parent == basis.admitted_parent)
+                may_record_parent = not self.launch_attempted or same_launch_tree
+                if self._current is not None and self._current[0] == basis:
+                    return publish(basis, self._current[1], True, may_record_parent)
+                if staged is not None and staged[0] == basis and staged[1] is not None:
+                    raw, reusable = staged[1], True
+                else:
+                    plan = self._plan(view.tree, basis)
+                    raw, reusable = plan.run(self._root), plan.reusable
+                if (self._basis(view, scope) != basis
+                        or not view.validate_for_use("ship-tree-proof")):
+                    raise WorkspaceUnavailable("smoke proof inputs changed during execution")
+                self._current = (basis, raw) if reusable and raw.probe_complete else None
+                return publish(basis, raw, False, may_record_parent)
+        except WorkspaceUnavailable:
+            self._current = None
+            return ShipTreeSmokeResult("ENGINE_ERROR", (), ())
 
 
 def render_smoke(result: ShipTreeSmokeResult) -> str:
@@ -687,6 +1108,8 @@ def render_smoke(result: ShipTreeSmokeResult) -> str:
     if result.status == "ENGINE_ERROR":
         return (f"{BLOCK_HEADER} ENGINE_ERROR: fresh interpreter unavailable."
                 + recovery)
+    if result.status == "PENDING":
+        return f"{BLOCK_HEADER} PENDING: fresh interpreter smoke is in progress."
     if result.status == "PASS":
         return (f"{BLOCK_HEADER} PASS: {len(result.checked)} touched module(s) import in a fresh interpreter."
                 + recovery)

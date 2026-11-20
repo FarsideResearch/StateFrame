@@ -16,6 +16,8 @@ from kernel_request_evidence_closure import (
     build_source_closure,
     omission_blocks_delivery,
     record_final_source_delivery,
+    record_source_delivery,
+    render_closure_receipt,
 )
 
 TARGET = "pkg0/mod0.py"
@@ -64,6 +66,16 @@ def test_walk_marks_unopened_files_as_scan_limit(tmp_path):
 
 def test_scan_limit_alone_keeps_final_delivery_complete(tmp_path):
     plan = _plan(tmp_path)
+    receipt = record_final_source_delivery(plan, _delivered(plan), wire_proof_verified=True)
+    assert receipt["status"] == "COMPLETE"
+
+
+def test_acquisition_receipt_does_not_claim_partial_final_delivery(tmp_path):
+    plan = _plan(tmp_path)
+    record_source_delivery(plan, TARGET, ((1, 1),), provisional=True)
+    assert plan["coverage"]["acquired_span"]["acquired"] == 1
+    assert "delivered_span=UNVERIFIED" in render_closure_receipt(plan)
+
     receipt = record_final_source_delivery(plan, _delivered(plan), wire_proof_verified=True)
     assert receipt["status"] == "COMPLETE"
 

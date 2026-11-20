@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 
 from kernel_request_diet import _source_identity
+from kernel_request_source_window import WorkspacePathFacts, path_inputs, project_workspace_paths
 
 
 MODE_ENV = "STATEFRAME_EDITREADY"
@@ -57,18 +58,35 @@ def _path_values(value: object) -> tuple[object, ...]:
     return ()
 
 
-def _normalize_repo_path(value: object, root: Path) -> str | None:
-    raw = str(value or "").strip().replace("\\", "/").removeprefix("./")
+def _normalize_repo_path(value: object, root: Path, *, facts: WorkspacePathFacts | None = None
+                         ) -> str | None:
+    text = str(value or "")
+    raw = (facts.text(text) if facts is not None else text.strip().replace("\\", "/")).removeprefix("./")
     if not raw:
         return None
     candidate = Path(raw)
     try:
         if candidate.is_absolute():
-            relative = candidate.resolve().relative_to(root).as_posix()
+            relative = (facts.contained_path(candidate) if facts is not None
+                        else candidate.resolve().relative_to(root).as_posix())
         else:
             relative = PurePosixPath(raw).as_posix()
-    except (OSError, ValueError):
+    except (OSError, RuntimeError, ValueError):
         return None
+    normalized = _editable_read_name(relative)
+    if normalized is None:
+        return None
+    try:
+        if facts is not None:
+            facts.contained_path(Path(normalized))
+        else:
+            (root / normalized).resolve().relative_to(root)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return normalized
+
+
+def _editable_read_name(relative: str) -> str | None:
     parts = PurePosixPath(relative).parts
     if not parts or any(part in {"", ".", ".."} for part in parts):
         return None
@@ -76,23 +94,11 @@ def _normalize_repo_path(value: object, root: Path) -> str | None:
         return None
     if PurePosixPath(parts[-1]).name.casefold().startswith("test_"):
         return None
-    try:
-        (root / Path(*parts)).resolve().relative_to(root)
-    except (OSError, ValueError):
-        return None
     return PurePosixPath(*parts).as_posix()
 
 
-def _editable_paths(runtime: object) -> frozenset[str]:
+def _editable_values(runtime: object) -> list[object]:
     owner = getattr(runtime, "owner", None)
-    root_value = getattr(owner, "root", None)
-    if root_value is None:
-        return frozenset()
-    try:
-        root = Path(root_value).resolve()
-    except (OSError, TypeError, ValueError):
-        return frozenset()
-
     values: list[object] = [getattr(runtime, "target", None)]
     holders: list[object] = [
         getattr(runtime, "edit_contract", None),
@@ -108,8 +114,39 @@ def _editable_paths(runtime: object) -> frozenset[str]:
         authority = holder.get("edit_authority")
         if isinstance(authority, Mapping):
             values.extend(_path_values(authority.get("editable_paths", ())))
-    paths = (_normalize_repo_path(value, root) for value in values)
+    return values
+
+
+def _editable_paths(runtime: object) -> frozenset[str]:
+    owner = getattr(runtime, "owner", None)
+    root_value = getattr(owner, "root", None)
+    if root_value is None:
+        return frozenset()
+    try:
+        root = Path(root_value).resolve()
+    except (OSError, TypeError, ValueError):
+        return frozenset()
+    paths = (_normalize_repo_path(value, root) for value in _editable_values(runtime))
     return frozenset(path for path in paths if path is not None)
+
+
+def _read_scope(values: Sequence[str], facts: WorkspacePathFacts,
+                ) -> tuple[frozenset[str], tuple[str, ...]]:
+    relative: set[str] = set()
+    absolute: set[str] = set()
+    for value in values:
+        raw = facts.text(value).removeprefix("./")
+        if raw.startswith("/"):
+            candidate = Path(raw)
+            indexed = (facts.indexed_path(candidate.relative_to(facts.root))
+                       if candidate.is_relative_to(facts.root) else None)
+            if indexed is None:
+                absolute.add(value)
+                continue
+            raw = indexed[0].as_posix()
+        if path := _editable_read_name(raw):
+            relative.add(path)
+    return frozenset(relative), tuple(sorted(absolute))
 
 
 def _read_call_ids(messages: Sequence[Mapping[str, object]]) -> frozenset[str]:
@@ -162,6 +199,12 @@ def editable_source_ranges(
     messages: Sequence[Mapping[str, object]], runtime: object,
 ) -> dict[str, tuple[tuple[int, int], ...]]:
     """Return merged ranges from source-bearing results of bound read calls."""
+    bound = _bound_read_results(messages)
+    if not bound:
+        return {}
+    projected = project_workspace_paths(runtime, lambda facts: _projected_ranges(bound, runtime, facts))
+    if projected is not None:
+        return projected
     editable = _editable_paths(runtime)
     if not editable:
         return {}
@@ -170,18 +213,41 @@ def editable_source_ranges(
         root = Path(getattr(owner, "root")).resolve()
     except (OSError, TypeError, ValueError):
         return {}
+    return _ranges(bound, root, editable)
+
+
+def _projected_ranges(bound: Sequence[Mapping[str, object]], runtime: object,
+                      facts: WorkspacePathFacts) -> dict[str, tuple[tuple[int, int], ...]]:
+    values = path_inputs(_editable_values(runtime))
+    relative, absolute = facts.scope("read", values, lambda: _read_scope(values, facts))
+    return _ranges(bound, facts.root, relative, absolute=absolute, facts=facts)
+
+
+def _ranges(bound: Sequence[Mapping[str, object]], root: Path, editable: frozenset[str], *,
+            absolute: Sequence[str] = (), facts: WorkspacePathFacts | None = None,
+            ) -> dict[str, tuple[tuple[int, int], ...]]:
     collected: dict[str, list[tuple[int, int]]] = {}
-    for message in _bound_read_results(messages):
+    absolute_paths: frozenset[str | None] | None = None
+    for message in bound:
         identity = _source_identity(message)
         if identity is None or identity[0] != "read":
             continue
-        path = _normalize_repo_path(identity[1], root)
         source_range = identity[3]
-        if path not in editable or not isinstance(source_range, tuple) or len(source_range) != 2:
+        if not isinstance(source_range, tuple) or len(source_range) != 2:
             continue
         start, end = source_range
         if type(start) is not int or type(end) is not int or start < 1 or end < start:
             continue
+        path = (_normalize_repo_path(identity[1], root, facts=facts) if facts is not None
+                else _normalize_repo_path(identity[1], root))
+        if path is None:
+            continue
+        if path not in editable:
+            if absolute_paths is None:
+                absolute_paths = frozenset(_normalize_repo_path(value, root, facts=facts)
+                                           for value in absolute)
+            if path not in absolute_paths:
+                continue
         collected.setdefault(path, []).append((start, end))
     return {
         path: _merge_ranges(collected[path])

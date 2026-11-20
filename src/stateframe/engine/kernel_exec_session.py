@@ -26,6 +26,7 @@ if __package__:
                                       process_cmdline_digest, recorded_launch_identity)
     from .kernel_reason_log import emit_timeout
     from .kernel_test_isolation import sandbox_executable
+    from .kernel_turn_work_counters import count_work
     from .sf_launch import _current_cgroup
 else:
     from kernel_exec_capability import ExecCapability
@@ -33,6 +34,7 @@ else:
                                      process_cmdline_digest, recorded_launch_identity)
     from kernel_reason_log import emit_timeout
     from kernel_test_isolation import sandbox_executable
+    from kernel_turn_work_counters import count_work
     from sf_launch import _current_cgroup
 
 
@@ -503,6 +505,7 @@ class ExecSession:
                                              stderr=self._log, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
                                              close_fds=True, start_new_session=True,
                                              pass_fds=(owner_read_fd,))
+            count_work("subprocess_launches")
             self._process_role = "launcher (bwrap)" if bwrap_executable is not None else "supervisor"
             capture_launch_identity(self._process, session_leader=True)
             if getattr(cap, "purpose", None) == "probe":

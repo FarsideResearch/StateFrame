@@ -38,8 +38,10 @@ from __future__ import annotations
 
 import ast
 import difflib
+import hashlib
 import json
 import logging
+import os
 import pathlib
 import sys
 from collections import deque
@@ -114,6 +116,8 @@ class SymbolRegistry:
     def build(self, root: pathlib.Path, skip=("__pycache__", ".git", "node_modules",
                                                ".venv", "site-packages")) -> "SymbolRegistry":
         self.root = pathlib.Path(root).resolve()
+        if os.environ.get("STATEFRAME_TURN_REPO_INTEL", "off") == "on":
+            return self._build_cached(root, tuple(skip))
         with python_index.open_index(self.root) as index:
             for p, src in _sources(root, skip):
                 if src is None:
@@ -138,6 +142,58 @@ class SymbolRegistry:
                     continue
                 self.files_scanned += 1
         return self
+
+    def _build_cached(self, root: pathlib.Path, skip: tuple[str, ...]) -> "SymbolRegistry":
+        from kernel_symbol_cache import cache_path, load, publish, reusable, signature
+
+        try:
+            path, policy = cache_path(self.root, skip)
+            prior = load(path, policy)
+        except (OSError, ValueError):
+            # Optional storage can be unavailable; preserve the ordinary build.
+            path = None
+            prior = {}
+            policy = ""
+        fresh: dict[str, dict] = {}
+        for source in root.rglob("*.py"):
+            if any(part in source.parts for part in skip):
+                continue
+            relative = str(source.relative_to(root))
+            before = signature(source)
+            cached = prior.get(relative)
+            if before is not None and reusable(cached, before[0], before[1], relative):
+                definitions = cached["defs"]
+                digest = cached["digest"]
+            else:
+                try:
+                    text = source.read_text(errors="strict")
+                    tree = ast.parse(text)
+                except (SyntaxError, UnicodeDecodeError, OSError):
+                    self.files_failed += 1
+                    continue
+                item = SymbolRegistry()
+                item._walk(tree, relative, None)
+                definitions = item.defs
+                digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+            self.files_scanned += 1
+            for name, rows in definitions.items():
+                self.defs.setdefault(name, []).extend(rows)
+            after = signature(source)
+            if before is not None and after is not None and before[0] == after[0]:
+                fresh[relative] = {
+                    "signature": before[0], "verified_at": before[1],
+                    "digest": digest, "defs": definitions,
+                }
+        if path is not None:
+            publish(path, policy, fresh)
+        return self
+
+    @classmethod
+    def definitions_in_source(cls, path: str, source: bytes) -> dict[str, list[dict]]:
+        """Extract the same ordered definition rows from one admitted file."""
+        registry = cls()
+        registry._walk(ast.parse(source.decode("utf-8")), path, None)
+        return registry.defs
 
     def _walk(self, node, rel: str, cls: str | None) -> None:
         for child in ast.iter_child_nodes(node):

@@ -288,6 +288,14 @@ def _undo_edits(receipts: list[_BoundEdit]) -> None:
         raise _CompensationConflict("mutation edit rollback is indeterminate") from failure
 
 
+def _invalidate_shell_manifest_cache() -> None:
+    from kernel_shell_tool import service
+
+    shell = service()
+    if shell is not None:
+        shell.invalidate_manifest_cache()
+
+
 def _write_bound(root_fd: int, parts: tuple[str, ...], identity: tuple[int, int],
                  parent_fd: int, data: bytes | None, mode: int, expected: bytes | None,
                  pending: list[_BoundEdit]) -> None:
@@ -301,6 +309,7 @@ def _write_bound(root_fd: int, parts: tuple[str, ...], identity: tuple[int, int]
     before = _entry_state(parent_fd, name)
     if (before[2] if before is not None else None) != expected:
         raise _WriteTimeConflict("edit target bytes changed")
+    _invalidate_shell_manifest_cache()
     temporary = ".sf-mutate-" + uuid.uuid4().hex
     receipt = _BoundEdit(os.dup(parent_fd), identity, name, temporary, before, None)
     pending.append(receipt)

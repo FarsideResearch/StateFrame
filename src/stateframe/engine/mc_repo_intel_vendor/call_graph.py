@@ -33,6 +33,7 @@ Python-first by design; JS/TS/Vue call-site extraction is a planned extension
 from __future__ import annotations
 
 import ast
+import copy
 import hashlib
 import json
 import math
@@ -40,19 +41,25 @@ import os
 import logging
 import re
 import shutil
+import sys
 import tempfile
 import threading
 import time
 from collections import OrderedDict, deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 from typing import Iterable, Optional
 
 if __package__ and __package__.endswith("engine.mc_repo_intel_vendor"):
+    from .. import kernel_parse_cache as _parse_cache
     from ..kernel_safe_paths import safe_expanduser, safe_home
+    from ..kernel_turn_work_counters import count_work
 else:
+    import kernel_parse_cache as _parse_cache
     from kernel_safe_paths import safe_expanduser, safe_home
+    from kernel_turn_work_counters import count_work
 
 logger = logging.getLogger(__name__)
 
@@ -207,7 +214,7 @@ def repo_cache_file(repo_path, filename: str = _CACHE_FILENAME) -> Path:
     return target / requested_name.name
 # v7 requires complete, extractor-versioned per-file entries; malformed rows miss.
 _CACHE_VERSION = 7
-_EXTRACTOR_VERSION = "call-graph-extract/1"
+_EXTRACTOR_VERSION = "call-graph-extract/2"
 # v6: _FileExtract carries `variables` (module-level assignments) — see
 #     _FileVisitor.visit_Assign/visit_AnnAssign. A v5 cache entry lacks the key,
 #     so it MUST miss rather than deserialize into a constant-less extract.
@@ -768,9 +775,8 @@ def _is_entrypoint(node: ast.AST, short_name: str) -> bool:
 class _FileVisitor(ast.NodeVisitor):
     """Single-pass walk collecting defs + call sites with enclosing scope."""
 
-    def __init__(self, relpath: str, import_table: dict[str, str]):
+    def __init__(self, relpath: str):
         self.relpath = relpath
-        self.import_table = import_table
         self.defs: list[SymbolDef] = []
         # Module-level assignments (constants/variables) — non-callable symbols
         # kept OUT of `defs` so they never enter call resolution (see VALUE_KINDS).
@@ -950,66 +956,76 @@ def _valid_import_records(records):
         for row in records)
 
 
-def _build_import_table(tree, repo_root: Path, file_dir: Path) -> dict[str, str]:
-    """Map local module aliases to the relpath of the imported source file (if local)."""
+# Level None denotes a plain import. Keep breadth-first AST order so repeated
+# local bindings resolve in the same order as the original import walk.
+_ImportRow = tuple[int | None, str, str, str]
+
+
+def _python_imports(tree: ast.AST) -> list[_ImportRow]:
+    rows: list[_ImportRow] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            rows.extend((None, "", alias.name, alias.asname or "") for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            rows.extend((node.level, node.module or "", alias.name, alias.asname or "")
+                        for alias in node.names)
+    return rows
+
+
+def _resolve_import_rows(
+    imports: Iterable[_ImportRow], repo_root: Path, file_dir: Path,
+    resolved_modules: dict[tuple[str, ...], str | None],
+) -> dict[str, str]:
+    """Resolve cached import declarations against this checkout."""
     table: dict[str, str] = {}
 
-    def _resolve(parts: list[str]) -> Optional[str]:
+    def _resolve(parts: tuple[str, ...]) -> Optional[str]:
         if not parts:
             return None
-        candidate = repo_root / Path(*parts)
-        for c in (candidate.with_suffix(".py"), candidate / "__init__.py"):
-            if c.exists():
-                try:
-                    return str(c.relative_to(repo_root))
-                except ValueError:
-                    return None
-        return None
+        if parts not in resolved_modules:
+            candidate = repo_root / Path(*parts)
+            resolved_modules[parts] = next(
+                (str(c.relative_to(repo_root))
+                 for c in (candidate.with_suffix(".py"), candidate / "__init__.py")
+                 if c.exists()), None)
+        return resolved_modules[parts]
 
-    for module, level, aliases in _import_records(tree):
+    for level, module, name, asname in imports:
         if level is None:
-            for name, asname in aliases:
-                rel = _resolve(name.split("."))
-                if rel:
-                    table[asname or name.split(".")[0]] = rel
-        else:
-            # `from pkg.mod import thing` — alias `thing` may itself be a submodule file.
-            base_parts: Optional[list[str]] = None
-            if level == 0 and module:
-                base_parts = module.split(".")
-            elif level and level > 0:
-                parent = file_dir
-                for _ in range(level - 1):
-                    if parent == parent.parent:
-                        break
-                    parent = parent.parent
-                try:
-                    rel_parent = parent.relative_to(repo_root)
-                    base_parts = list(rel_parent.parts) + (module.split(".") if module else [])
-                except ValueError:
-                    base_parts = None
-            if base_parts is not None:
-                base_file = _resolve(base_parts)
-                for name, asname in aliases:
-                    local = asname or name
-                    # Case A: the imported name is itself a submodule/file
-                    # (`from pkg import submod as m` then `m.func()`).
-                    rel = _resolve(base_parts + [name])
-                    if rel:
-                        table[local] = rel
-                    elif base_file:
-                        # Case B: a plain symbol imported from a module file —
-                        # encode the target file + the ORIGINAL declared name.
-                        # The def in that file is indexed under its own name
-                        # (`name`), not the local binding, so a bare
-                        # call using a RENAMED import (`import X as y; y()`)
-                        # needs the original name to find it
-                        # (see _resolve_callee step 2b / _decode_import_entry).
-                        table[local] = (
-                            base_file if local == name
-                            else f"{base_file}::{name}"
-                        )
+            parts = tuple(name.split("."))
+            if rel := _resolve(parts):
+                table[asname or parts[0]] = rel
+            continue
+        base_parts = tuple(module.split(".")) if module else ()
+        if level:
+            parent = file_dir
+            if level > 1:
+                depth = min(level - 2, len(file_dir.parents) - 1)
+                if depth >= 0:
+                    parent = file_dir.parents[depth]
+            if not parent.is_relative_to(repo_root):
+                continue
+            base_parts = parent.relative_to(repo_root).parts + base_parts
+        base_file = _resolve(base_parts)
+        local = asname or name
+        if rel := _resolve((*base_parts, name)):
+            table[local] = rel
+        elif base_file:
+            # A renamed symbol is indexed under its original declared name.
+            table[local] = base_file if local == name else f"{base_file}::{name}"
     return table
+
+
+def _build_import_table(
+    tree_or_records, repo_root: Path, file_dir: Path,
+    resolved_modules: dict[tuple[str, ...], str | None] | None = None,
+) -> dict[str, str]:
+    rows = ((level, module or "", name, asname or "")
+            for module, level, aliases in _import_records(tree_or_records)
+            for name, asname in aliases)
+    return _resolve_import_rows(
+        rows, repo_root, file_dir, {} if resolved_modules is None else resolved_modules,
+    )
 
 
 def _extract_source(source: str, relpath: str) -> list[SymbolDef]:
@@ -1020,10 +1036,11 @@ def _extract_source(source: str, relpath: str) -> list[SymbolDef]:
     Never raises → returns [] on a parse error.
     """
     try:
+        count_work("parses")
         tree = ast.parse(source, filename=relpath)
     except (SyntaxError, ValueError, MemoryError, RecursionError):
         return []
-    visitor = _FileVisitor(relpath, {})
+    visitor = _FileVisitor(relpath)
     try:
         visitor.visit(tree)
     except RecursionError:
@@ -1031,7 +1048,11 @@ def _extract_source(source: str, relpath: str) -> list[SymbolDef]:
     return visitor.defs
 
 
-def _extract_file(file_path: Path, repo_root: Path, *, source=None, index=None) -> _FileExtract:
+def _extract_file(
+    file_path: Path, repo_root: Path, *, source: str | None = None, index=None,
+    cache_entry: tuple[Path, str] | None = None,
+    resolved_modules: dict[tuple[str, ...], str | None] | None = None,
+) -> _FileExtract:
     """Build fresh graph records, resolving imports against the current workspace.
 
     The shared rows describe syntax only. Resolution can change when a sibling
@@ -1043,33 +1064,73 @@ def _extract_file(file_path: Path, repo_root: Path, *, source=None, index=None) 
 
     try:
         if source is None:
-            source = file_path.read_text(encoding="utf-8", errors="replace")
+            source = file_path.read_text(encoding="utf-8-sig", errors="replace")
+            count_work("files_read")
         relpath = file_path.relative_to(repo_root).as_posix()
     except (OSError, ValueError) as exc:
         return _FileExtract(defs=[], calls=[], import_table={},
                             status=COVERAGE_SKIPPED,
                             status_reason=f"unreadable: {type(exc).__name__}")
+    if cache_entry is None:
+        try:
+            if index is None:
+                with python_index.open_index(repo_root) as cache:
+                    record, imports = cache.get(source, relpath, "graph")
+            else:
+                record, imports = index.get(source, relpath, "graph")
+            extract = _FileExtract.from_dict(record)
+            extract.import_records = imports
+            extract.import_table = _build_import_table(
+                imports, repo_root, file_path.parent, resolved_modules,
+            )
+            return extract
+        except python_index.TraversalDepthError:
+            return _deep_file(source, relpath, repo_root, file_path)
+        except SyntaxError as exc:
+            return _FileExtract(defs=[], calls=[], import_table={},
+                                status=COVERAGE_SKIPPED,
+                                status_reason=f"syntax error: {exc.msg}")
+        except (ValueError, MemoryError, RecursionError) as exc:
+            return _FileExtract(defs=[], calls=[], import_table={},
+                                status=COVERAGE_SKIPPED,
+                                status_reason=f"parse failed: {type(exc).__name__}")
+    cached = _load_python_facts(*cache_entry)
+    if cached is None:
+        extract, imports = _extract_python_facts(source, relpath, str(file_path))
+        if extract.status == COVERAGE_INDEXED:
+            _save_python_facts(*cache_entry, extract, imports)
+    else:
+        extract, imports = cached
+    extract.import_table = _resolve_import_rows(
+        imports, repo_root, file_path.parent, {} if resolved_modules is None else resolved_modules,
+    )
+    return extract
+
+
+def _extract_python_facts(source: str, relpath: str, filename: str) -> tuple[_FileExtract, list[_ImportRow]]:
     try:
-        if index is None:
-            with python_index.open_index(repo_root) as cache:
-                record, imports = cache.get(source, relpath, "graph")
-        else:
-            record, imports = index.get(source, relpath, "graph")
-        extract = _FileExtract.from_dict(record)
-        extract.import_records = imports
-        extract.import_table = _build_import_table(imports, repo_root, file_path.parent)
-        return extract
-    except python_index.TraversalDepthError:
-        # Preserve the original visitor's partial-coverage boundary for deep modules.
-        return _deep_file(source, relpath, repo_root, file_path)
+        tree = _parse_cache.parse(source, filename)
     except SyntaxError as exc:
         return _FileExtract(defs=[], calls=[], import_table={},
                             status=COVERAGE_SKIPPED,
-                            status_reason=f"syntax error at line {exc.lineno or '?'}")
+                            status_reason=f"syntax error at line {exc.lineno or '?'}"), []
     except (ValueError, MemoryError, RecursionError) as exc:
         return _FileExtract(defs=[], calls=[], import_table={},
                             status=COVERAGE_SKIPPED,
-                            status_reason=f"parse failed: {type(exc).__name__}")
+                            status_reason=f"parse failed: {type(exc).__name__}"), []
+
+    imports = _python_imports(tree)
+    visitor = _FileVisitor(relpath)
+    try:
+        visitor.visit(tree)
+    except RecursionError:
+        return _FileExtract(defs=visitor.defs, calls=visitor.calls,
+                            variables=visitor.variables, import_table={},
+                            status=COVERAGE_PARSE_PARTIAL,
+                            status_reason="walk hit the recursion limit"), imports
+    return _FileExtract(defs=visitor.defs, calls=visitor.calls,
+                        variables=visitor.variables, import_table={}), imports
+
 
 # ── Content-hash cache ───────────────────────────────────────────────────────
 
@@ -1126,6 +1187,83 @@ def _save_cache(cache_path: Path, files: dict) -> None:
         logger.debug("call_graph: could not persist cache to %s: %s", cache_path, exc)
 
 
+def _python_facts_dir(root: Path, fallback: Path) -> Path:
+    """Use the installation cache across runs, when it is outside the checkout."""
+    home = os.environ.get("STATEFRAME_HOME")
+    base = fallback
+    if home:
+        try:
+            candidate = (Path(home) / "repo-intel" / "python-call-facts").resolve()
+            if candidate.is_relative_to(root.resolve()):
+                _facts_cache_diagnostic("directory_fallback", "inside_checkout")
+            else:
+                base = candidate
+        except (OSError, RuntimeError, ValueError) as exc:
+            _facts_cache_diagnostic("directory_fallback", type(exc).__name__)
+    directory = base / f"{_EXTRACTOR_VERSION.replace('/', '-')}-{sys.implementation.cache_tag}"
+    enforce_repo_cache_cap(directory)
+    return directory
+
+
+def _facts_cache_diagnostic(event: str, reason: str) -> None:
+    logger.debug(
+        "Python facts cache %s (%s)", event.replace("_", " "), reason,
+        extra={"cache_event": f"python_facts_{event}", "cache_reason": reason},
+    )
+
+
+def _decode_python_fact_imports(imports: object) -> list[_ImportRow] | None:
+    if not isinstance(imports, list):
+        return None
+    rows = []
+    for row in imports:
+        if not isinstance(row, list) or len(row) != 4:
+            return None
+        level, module, name, asname = row
+        if level is not None and (type(level) is not int or level < 0):
+            return None
+        if not all(type(value) is str for value in (module, name, asname)):
+            return None
+        if (module and not all(part.isidentifier() for part in module.split("."))
+                or name != "*" and not all(part.isidentifier() for part in name.split("."))
+                or asname and not asname.isidentifier()):
+            return None
+        rows.append((level, module, name, asname))
+    return rows
+
+
+def _load_python_facts(path: Path, digest: str) -> tuple[_FileExtract, list[_ImportRow]] | None:
+    try:
+        entry = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, RecursionError, ValueError) as exc:
+        _facts_cache_diagnostic("read_failure", type(exc).__name__)
+        return None
+    extract = _cached_extract(entry, digest)
+    if extract is None:
+        _facts_cache_diagnostic("read_failure", "invalid_extract")
+        return None
+    imports = _decode_python_fact_imports(entry.get("imports"))
+    if imports is None:
+        _facts_cache_diagnostic("read_failure", "invalid_imports")
+        return None
+    return extract, imports
+
+
+def _save_python_facts(path: Path, digest: str, extract: _FileExtract,
+                       imports: list[_ImportRow]) -> None:
+    try:
+        _atomic_write_text(path, json.dumps({
+            "hash": digest,
+            "extractor_version": _EXTRACTOR_VERSION,
+            "extract": extract.to_dict(),
+            "imports": imports,
+        }))
+    except (OSError, RecursionError, TypeError, ValueError) as exc:
+        _facts_cache_diagnostic("write_failure", type(exc).__name__)
+
+
 # ── The graph ────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -1153,6 +1291,9 @@ class FileCoverage:
         return self.__dict__.copy()
 
 
+_EDGE_RESOLUTION_LOCK = threading.Lock()
+
+
 class CodeGraph:
     """Immutable-ish view over a repo's symbols + call edges.
 
@@ -1163,6 +1304,9 @@ class CodeGraph:
     def __init__(self) -> None:
         self.defs: dict[str, SymbolDef] = {}          # symbol id -> def
         self._by_short: dict[str, list[str]] = {}     # short name -> [symbol ids]
+        if os.environ.get("STATEFRAME_TURN_INDEXED_READS") == "on":
+            self._by_file: dict[str, dict[str, None]] = {}
+            self._by_file_short: dict[tuple[str, str], list[str]] = {}
         # Module-level constants/variables (VALUE_KINDS). A SEPARATE namespace
         # from `defs`/`_by_short` on purpose: these are findable by name but are
         # never call-resolution candidates, never rank in pagerank/god_functions,
@@ -1181,11 +1325,12 @@ class CodeGraph:
         # Python call sites were asked, and how many got a definitive answer.
         # A layer that silently resolves nothing is the failure mode this makes
         # visible (rule).
-        self.lsp_stats: dict[str, object] = {
+        self._lsp_stats: dict[str, object] = {
             "enabled": False, "backend": "none", "consulted": 0,
             "resolved": 0, "overridden": 0, "files": 0,
         }
-        self.calls: list[CallSite] = []               # every recorded call site
+        self._calls: list[CallSite] = []
+        self._deferred_edges: tuple[Path, dict[str, dict[str, str]], str] | None = None
         self._nx: Optional["nx.DiGraph"] = None
         # relpath -> content sha the graph was built from (for the explore
         # verbatim contract's staleness check — see code_graph_tools.explore).
@@ -1243,6 +1388,25 @@ class CodeGraph:
     def _index_def(self, d: SymbolDef) -> None:
         self.defs[d.symbol] = d
         self._by_short.setdefault(d.short_name, []).append(d.symbol)
+        if hasattr(self, "_by_file"):
+            # Match the path normalization used by LedgerIndex.dependencies_for.
+            ledger_path = d.file.strip().replace("\\", "/").lstrip("./").rstrip(":")
+            self._by_file.setdefault(ledger_path, {})[d.symbol] = None
+            self._by_file_short.setdefault((d.file, d.short_name), []).append(d.symbol)
+
+    def symbols_in_file(self, file: str) -> Iterable[str] | None:
+        """Return scoped IDs if this graph was constructed with the index."""
+        by_file = getattr(self, "_by_file", None)
+        return by_file.get(file, ()) if by_file is not None else None
+
+    def _symbols_named_in_file(self, file: str, name: str) -> Iterable[str]:
+        by_file_short = getattr(self, "_by_file_short", None)
+        if by_file_short is not None:
+            return by_file_short.get((file, name), ())
+        return (
+            sym for sym in self._by_short.get(name, ())
+            if self.defs[sym].file == file
+        )
 
     def _index_variable(self, d: SymbolDef) -> None:
         """Index a module-level constant/variable in the non-callable namespace.
@@ -1273,6 +1437,7 @@ class CodeGraph:
 
     def edge_confidence(self, caller: str, callee: str) -> float:
         """Confidence [0.0-1.0] that `caller` really calls `callee`. 0.0 if no such edge."""
+        self._ensure_edges()
         return self._edge_confidence.get((caller, callee), 0.0)
 
     def edge_strategy(self, caller: str, callee: str) -> str:
@@ -1281,6 +1446,7 @@ class CodeGraph:
         Defaults to STRATEGY_NAME_MATCH for an unknown edge — the honest answer
         for anything this graph did not type-resolve.
         """
+        self._ensure_edges()
         return self._edge_strategy.get((caller, callee), STRATEGY_NAME_MATCH)
 
     def _resolve_callee(
@@ -1294,9 +1460,8 @@ class CodeGraph:
             caller_qual = call.caller.split("::", 1)[1] if "::" in call.caller else ""
             # enclosing class = qual minus the trailing method component
             targets = [
-                sym for sym in self._by_short.get(call.callee_short, [])
-                if self.defs[sym].file == caller_file
-                and self.defs[sym].kind == "method"
+                sym for sym in self._symbols_named_in_file(caller_file, call.callee_short)
+                if self.defs[sym].kind == "method"
                 and self.defs[sym].qualname.rsplit(".", 1)[0]
                 == caller_qual.rsplit(".", 1)[0]
             ]
@@ -1309,10 +1474,7 @@ class CodeGraph:
             entry = file_import_tables.get(caller_file, {}).get(call.hint_module)
             if entry:
                 target_file, _ = _decode_import_entry(entry)
-                targets = [
-                    sym for sym in self._by_short.get(call.callee_short, [])
-                    if self.defs[sym].file == target_file
-                ]
+                targets = list(self._symbols_named_in_file(target_file, call.callee_short))
                 if targets:
                     return [(t, _CONF_MODULE_FUNC) for t in targets]
 
@@ -1330,10 +1492,7 @@ class CodeGraph:
             if entry:
                 target_file, orig_name = _decode_import_entry(entry)
                 lookup_name = orig_name or call.callee_short
-                targets = [
-                    sym for sym in self._by_short.get(lookup_name, [])
-                    if self.defs[sym].file == target_file
-                ]
+                targets = list(self._symbols_named_in_file(target_file, lookup_name))
                 if targets:
                     return [(t, _CONF_MODULE_FUNC) for t in targets]
 
@@ -1357,16 +1516,8 @@ class CodeGraph:
         tweak) degrades to a still-correct file-scoped match instead of dropping
         the answer on the floor.
         """
-        exact = [
-            sym for sym in self._by_short.get(name, [])
-            if self.defs[sym].file == file and self.defs[sym].lineno == lineno
-        ]
-        if exact:
-            return exact
-        return [
-            sym for sym in self._by_short.get(name, [])
-            if self.defs[sym].file == file
-        ]
+        scoped = list(self._symbols_named_in_file(file, name))
+        return [sym for sym in scoped if self.defs[sym].lineno == lineno] or scoped
 
     def _worth_asking(
         self, call: "CallSite", file_import_tables: dict[str, dict[str, str]]
@@ -1403,6 +1554,9 @@ class CodeGraph:
         repo_root: Optional[Path],
         file_hashes: Optional[dict[str, str]],
         lsp_cache: Optional[dict],
+        *,
+        background: bool = False,
+        basis: str | None = None,
     ) -> dict:
         """Second resolution pass: re-ask a real type engine about LOW-confidence
         Python call sites and override the winners. NEVER raises.
@@ -1417,9 +1571,12 @@ class CodeGraph:
             logger.debug("call_graph: lsp_resolve unavailable: %s", exc)
             return {}
 
-        self.lsp_stats["enabled"] = lsp_resolve.is_enabled()
-        self.lsp_stats["backend"] = lsp_resolve.backend_name()
+        self._lsp_stats["enabled"] = lsp_resolve.is_enabled()
+        self._lsp_stats["backend"] = lsp_resolve.backend_name()
         if not lsp_resolve.is_enabled():
+            return {}
+        if basis is not None and basis != _tree_fingerprint(repo_root):
+            logger.debug("call_graph: workspace changed before deferred type resolution")
             return {}
 
         # Group by file so each file pays exactly one type-engine setup, and
@@ -1442,14 +1599,23 @@ class CodeGraph:
             # def can duplicate a position — keep every CallSite for the key.
             by_key.setdefault(key, []).append(call)
 
-        self.lsp_stats["consulted"] = sum(len(v) for v in sites_by_file.values())
-        self.lsp_stats["files"] = len(sites_by_file)
+        self._lsp_stats["consulted"] = sum(len(v) for v in sites_by_file.values())
+        self._lsp_stats["files"] = len(sites_by_file)
 
         try:
-            hits, new_cache = lsp_resolve.resolve_repo(
-                repo_root, sites_by_file, file_hashes=file_hashes, cache=lsp_cache)
+            if background:
+                hits, new_cache, complete = lsp_resolve.resolve_repo_background(
+                    repo_root, sites_by_file, file_hashes=file_hashes, cache=lsp_cache)
+                if not complete:
+                    self.index_status = "partial"
+            else:
+                hits, new_cache = lsp_resolve.resolve_repo(
+                    repo_root, sites_by_file, file_hashes=file_hashes, cache=lsp_cache)
         except Exception as exc:  # the layer promises not to raise; log unexpected errors
             logger.debug("call_graph: lsp resolution pass failed: %s", exc)
+            return {}
+        if basis is not None and basis != _tree_fingerprint(repo_root):
+            logger.debug("call_graph: workspace changed during deferred type resolution")
             return {}
 
         resolved = overridden = 0
@@ -1467,14 +1633,14 @@ class CodeGraph:
                     for sym in targets:
                         self._add_edge(call.caller, sym, _CONF_LSP, STRATEGY_LSP)
                     overridden += 1
-        self.lsp_stats["resolved"] = resolved
-        self.lsp_stats["overridden"] = overridden
+        self._lsp_stats["resolved"] = resolved
+        self._lsp_stats["overridden"] = overridden
         if overridden:
             logger.debug(
                 "call_graph: lsp pass — %d/%d low-confidence site(s) type-resolved "
                 "across %d file(s) via %s",
-                overridden, self.lsp_stats["consulted"], self.lsp_stats["files"],
-                self.lsp_stats["backend"],
+                overridden, self._lsp_stats["consulted"], self._lsp_stats["files"],
+                self._lsp_stats["backend"],
             )
         return new_cache
 
@@ -1485,6 +1651,8 @@ class CodeGraph:
         repo_root: Optional[Path] = None,
         file_hashes: Optional[dict[str, str]] = None,
         lsp_cache: Optional[dict] = None,
+        publish_static: Callable[[CodeGraph], None] | None = None,
+        basis: str | None = None,
     ) -> dict:
         """Resolve every call site into edges. Returns the new LSP cache dict.
 
@@ -1498,7 +1666,7 @@ class CodeGraph:
         # (rule) and a type engine that is wrong about a dynamic
         # receiver must not be able to delete a real edge.
         pending: list[tuple[CallSite, float]] = []
-        for call in self.calls:
+        for call in self._calls:
             resolved = self._resolve_callee(call, file_import_tables)
             call.confidence = max((c for _, c in resolved), default=0.0)
             call.strategy = STRATEGY_NAME_MATCH
@@ -1516,8 +1684,16 @@ class CodeGraph:
                 pending.append((call, call.confidence))
 
         # PASS 2 — real type resolution for what name matching could not pin down.
+        if publish_static is not None and repo_root is not None and pending:
+            from . import lsp_resolve
+            if lsp_resolve.is_enabled():
+                static = copy.deepcopy(self)
+                static.index_status = "partial"
+                publish_static(static)
         new_lsp_cache = self._apply_lsp_resolution(
-            pending, repo_root, file_hashes, lsp_cache)
+            pending, repo_root, file_hashes, lsp_cache,
+            background=publish_static is not None, basis=basis,
+        )
 
         if _NX_AVAILABLE:
             g = nx.DiGraph()
@@ -1527,6 +1703,31 @@ class CodeGraph:
                     g.add_edge(caller, callee)
             self._nx = g
         return new_lsp_cache
+
+    def _ensure_edges(self) -> None:
+        if self._deferred_edges is None:
+            return
+        with _EDGE_RESOLUTION_LOCK:
+            if self._deferred_edges is None:
+                return
+            root, imports, fingerprint = self._deferred_edges
+            self._finalize(imports, repo_root=root, file_hashes=self.file_hashes,
+                           basis=fingerprint)
+            self._deferred_edges = None
+
+    @property
+    def calls(self) -> list[CallSite]:
+        self._ensure_edges()
+        return self._calls
+
+    @calls.setter
+    def calls(self, calls: list[CallSite]) -> None:
+        self._calls = calls
+
+    @property
+    def lsp_stats(self) -> dict[str, object]:
+        self._ensure_edges()
+        return self._lsp_stats
 
     # ---- public query API ----
 
@@ -1734,6 +1935,7 @@ class CodeGraph:
             max_edges: int = DEFAULT_TRAVERSAL_MAX_EDGES,
     ) -> tuple[list[SymbolRef], dict[str, object]]:
         """Find transitive callers while bounding traversal before row slicing."""
+        self._ensure_edges()
         targets = self._ids_for(symbol)
         if not targets:
             return [], {"visited": 0, "examined_edges": 0, "max_depth": max_depth,
@@ -1744,6 +1946,7 @@ class CodeGraph:
         return self._as_refs(found - set(targets)), work
 
     def find_callers(self, symbol: str, *, transitive: bool = False) -> list[SymbolRef]:
+        self._ensure_edges()
         targets = self._ids_for(symbol)
         if not targets:
             return []
@@ -1756,6 +1959,7 @@ class CodeGraph:
         return self._as_refs(found - set(targets))
 
     def find_callees(self, symbol: str, *, transitive: bool = False) -> list[SymbolRef]:
+        self._ensure_edges()
         targets = self._ids_for(symbol)
         if not targets:
             return []
@@ -1798,6 +2002,7 @@ class CodeGraph:
         ``top_n=None`` returns the FULL ranking so a caller can report an exact
         pre-truncation total alongside the rows it chooses to show.
         """
+        self._ensure_edges()
         if not _NX_AVAILABLE or self._nx is None or self._nx.number_of_nodes() == 0:
             # degree fallback: rank by number of callers
             ranked = sorted(
@@ -1882,6 +2087,7 @@ class CodeGraph:
         "impacted by" itself); classes still expand to their methods so a class
         edit reaches every caller of every method (the impact_radius rule (b)).
         """
+        self._ensure_edges()
         seed_ids: set[str] = set()
         for s in seeds:
             seed_ids.update(self._ids_for(s))
@@ -1915,6 +2121,7 @@ class CodeGraph:
 
     def god_functions(self, min_callers: int = 8, top_n: Optional[int] = 20) -> list[SymbolRef]:
         """Highest fan-in symbols (many callers) — architectural hotspots to change carefully."""
+        self._ensure_edges()
         scored = [
             (d, len(self._rev.get(d.symbol, ())))
             for d in self.defs.values() if d.kind != "class"
@@ -1926,6 +2133,7 @@ class CodeGraph:
 
     def orphans(self) -> list[SymbolRef]:
         """Defs with zero callers that are not entrypoints (dead-code candidates)."""
+        self._ensure_edges()
         out = []
         for d in self.defs.values():
             if d.kind == "class" or d.is_entrypoint:
@@ -1975,6 +2183,7 @@ class CodeGraph:
         (rule): a too-wide radius is safe to review; a missed caller is
         the silent break we exist to catch.
         """
+        self._ensure_edges()
         seeds = set(self._ids_for(symbol))
         if not seeds:
             return []
@@ -2114,6 +2323,7 @@ def dispatch_boundaries_in_file(source: str, relpath: str) -> list[DispatchBound
         except Exception as exc:  # noqa: BLE001 - typed UNKNOWN marker, never an empty scan
             return [_scan_failed_boundary(relpath, type(exc).__name__)]
     try:
+        count_work("parses")
         tree = ast.parse(source, filename=relpath)
     except (SyntaxError, ValueError):
         return []  # source that does not parse has no runtime dispatch to follow
@@ -2235,6 +2445,7 @@ def _scan_source_files(root: Path) -> tuple[list[Path], list[tuple[str, str]]]:
     files: list[Path] = []
     excluded: list[tuple[str, str]] = []
     for f in sorted(root.rglob("*")):
+        count_work("files_statted")
         if not f.is_file():
             continue
         if f.suffix.lower() not in _GRAPH_EXTENSIONS:
@@ -2252,7 +2463,10 @@ def _scan_source_files(root: Path) -> tuple[list[Path], list[tuple[str, str]]]:
 
 
 def _extract_any_file(file_path: Path, repo_root: Path,
-                      repo_files: Optional[set[str]] = None) -> "_FileExtract":
+                      repo_files: Optional[set[str]] = None, *,
+                      source: str | None = None, facts_dir: Path | None = None,
+                      digest: str | None = None,
+                      resolved_modules: dict[tuple[str, ...], str | None] | None = None) -> "_FileExtract":
     """Dispatch a file to its language extractor by extension. Never raises.
 
     Python → the stdlib-ast path in this module (unchanged, default for .py).
@@ -2261,6 +2475,7 @@ def _extract_any_file(file_path: Path, repo_root: Path,
     """
     ext = file_path.suffix.lower()
     try:
+        count_work("files_statted")
         if file_path.stat().st_size > _MAX_PARSE_BYTES:
             return _FileExtract(defs=[], calls=[], import_table={},
                                 status=COVERAGE_SKIPPED,
@@ -2268,11 +2483,19 @@ def _extract_any_file(file_path: Path, repo_root: Path,
     except OSError:
         pass  # the extractor below will record the real read failure
     if ext == ".py":
-        return _extract_file(file_path, repo_root)
+        cache_entry = None
+        if facts_dir is not None and digest is not None:
+            relative = os.fsencode(file_path.relative_to(repo_root))
+            key = _hash_bytes(relative + b"\0" + digest.encode("ascii"))
+            cache_entry = (facts_dir / key[:2] / (key[2:] + ".json"), digest)
+        return _extract_file(file_path, repo_root, source=source, cache_entry=cache_entry,
+                             resolved_modules=resolved_modules)
     try:
         from . import ts_extract  # noqa: PLC0415
         relpath = str(file_path.relative_to(repo_root))
-        source = file_path.read_text(encoding="utf-8", errors="replace")
+        if source is None:
+            source = file_path.read_text(encoding="utf-8", errors="replace")
+            count_work("files_read")
     except (OSError, ValueError) as exc:
         return _FileExtract(defs=[], calls=[], import_table={},
                             status=COVERAGE_SKIPPED,
@@ -2443,11 +2666,12 @@ def _tree_fingerprint(root: Path) -> str:
     for f in sorted(source_files):
         try:
             st = f.stat()
+            count_work("files_statted")
         except OSError:
             # A file that vanished mid-scan still perturbs the fingerprint.
             parts.append(f"{f}:gone")
             continue
-        parts.append(f"{f}:{st.st_size}:{st.st_mtime_ns}")
+        parts.append(f"{f}:{st.st_dev}:{st.st_ino}:{st.st_size}:{st.st_mtime_ns}:{st.st_ctime_ns}")
     if not parts:
         return ""
     return _hash_bytes("\n".join(parts).encode())
@@ -2481,23 +2705,27 @@ def clear_build_memo() -> None:
 
 
 def build_graph(
-    repo_path: str, *, use_cache: bool = True, use_memo: bool = False
+    repo_path: str, *, use_cache: bool = True, use_memo: bool = False,
+    background_lsp: bool = True,
 ) -> CodeGraph:
     """Build the code graph for a repo. Cache-aware; never raises.
 
-    On a warm build only files whose content hash changed are re-parsed — the
-    chiasmus 60× trick. The cache lives at <repo>/.mc_codegraph_cache.json.
+    The graph cache lives outside the checkout. Unchanged files can reuse
+    extracted facts by content hash.
 
     ``use_memo=True`` additionally reuses the in-process graph object when the
     tree's stat fingerprint is unchanged, so repeated tool calls inside ONE task
     do not re-index at all. Off by default: a caller that mutates files and
     rebuilds in the same process (tests, the impact/diff paths) must always see
-    a genuine rebuild.
+    a genuine rebuild. Memoized builds without a whole-graph cache load or
+    collect Python file facts first and resolve call edges on the first edge query.
     """
+    if os.environ.get("STATEFRAME_TURN_REPO_INTEL", "off") == "on":
+        return _background_graph(Path(repo_path).absolute(), background_lsp)
     if not use_memo:
         return _build_graph_uncached(repo_path, use_cache=use_cache)
 
-    root = Path(repo_path)
+    root = Path(repo_path).absolute()
     key = str(root.resolve()) if root.exists() else str(root)
     fingerprint = _tree_fingerprint(root)
     if not fingerprint:  # unknowable tree — never memoize a guess
@@ -2517,7 +2745,11 @@ def build_graph(
             if hit is not None and hit[0] == fingerprint:
                 _memo.move_to_end(key)
                 return _memo_hit(hit[1])
-        graph = _build_graph_uncached(repo_path, use_cache=use_cache)
+        if use_cache:
+            graph = _build_graph_uncached(repo_path)
+        else:
+            with _parse_cache.gc_paused():
+                graph = _build_graph_uncached(str(root), use_cache=False, deferred_basis=fingerprint)
         with _memo_lock:
             _memo[key] = (fingerprint, graph)
             _memo.move_to_end(key)
@@ -2541,7 +2773,7 @@ def _deep_file(source, relpath, repo_root, file_path):
     tree = parse(source, filename=relpath)
     imports = list(_import_records(tree))
     import_table = _build_import_table(imports, repo_root, file_path.parent)
-    visitor = _FileVisitor(relpath, import_table)
+    visitor = _FileVisitor(relpath)
     try:
         visitor.visit(tree)
     except RecursionError:
@@ -2555,24 +2787,75 @@ def _deep_file(source, relpath, repo_root, file_path):
                         variables=visitor.variables, import_table=import_table, import_records=imports)
 
 
-def _build_graph_uncached(repo_path: str, *, use_cache: bool = True) -> CodeGraph:
+def _background_graph(root: Path, use_lsp: bool) -> CodeGraph:
+    from . import background
+
+    def work(publish, current):
+        basis = _tree_fingerprint(root)
+
+        def consistent():
+            return current() and basis == _tree_fingerprint(root)
+
+        def publish_static(graph):
+            if consistent():
+                publish(graph)
+
+        graph = _build_graph_uncached(
+            str(root), publish=publish_static, current=current, consistent=consistent, use_lsp=use_lsp,
+        )
+        if consistent():
+            publish(graph)
+
+    graph = background.request(root, "graph" if use_lsp else "static-graph", work)
+    if graph is not None:
+        return graph
+    pending = CodeGraph()
+    pending.index_status = "pending"
+    return pending
+
+
+def _build_graph_uncached(
+    repo_path: str, *, use_cache: bool = True,
+    publish: Callable[[CodeGraph], None] | None = None,
+    current: Callable[[], bool] | None = None,
+    consistent: Callable[[], bool] | None = None,
+    use_lsp: bool = True,
+    deferred_basis: str | None = None,
+) -> CodeGraph:
     """The real build (no in-process memo). See build_graph."""
     graph = CodeGraph()
     root = Path(repo_path)
     if not root.exists():
         logger.warning("call_graph: repo path does not exist: %s", repo_path)
         return graph
+    count_work("index_builds")
 
-    cache_path = repo_cache_file(root)
+    if publish is not None:
+        from . import background
+        cache_path = background.cache_file(root, "graph.json")
+        lsp_path = background.cache_file(root, "lsp.json")
+    else:
+        cache_path = repo_cache_file(root)
+        lsp_path = None
     cache = _load_cache(cache_path) if use_cache else {}
+    facts_dir = _python_facts_dir(root, cache_path.parent / "python-call-facts") if deferred_basis else None
     new_cache: dict = {}
     file_import_tables: dict[str, dict[str, str]] = {}
+    resolved_modules: dict[tuple[str, ...], str | None] = {}
 
     # Precompute the repo-wide source relpath set so non-Python extractors can
     # resolve local relative imports (./x → the concrete file). Python's import
     # resolution is filesystem-based and does not need this.
     source_files, excluded = _scan_source_files(root)
+    if publish is not None:
+        source_files = [f for f in source_files if not f.is_symlink()]
     repo_files: set[str] = {str(f.relative_to(root)) for f in source_files}
+    indexed = background.indexed_hashes(root, repo_files) if publish is not None else {}
+    if publish is not None:
+        membership = _hash_bytes(json.dumps(sorted(repo_files), ensure_ascii=True).encode("ascii"))
+        if cache.get("") != membership:
+            cache = {}
+        new_cache[""] = membership
     for rel, reason in excluded:
         graph.coverage[rel] = FileCoverage(
             file=rel, status=COVERAGE_EXCLUDED, reason=reason)
@@ -2584,47 +2867,79 @@ def _build_graph_uncached(repo_path: str, *, use_cache: bool = True) -> CodeGrap
             relpath = str(src_file.relative_to(root))
             if relpath == _CACHE_FILENAME:
                 continue
-            try:
-                raw = src_file.read_bytes()
-            except OSError as exc:
-                graph.coverage[relpath] = FileCoverage(
-                    file=relpath, status=COVERAGE_SKIPPED,
-                    reason=f"unreadable: {type(exc).__name__}")
-                continue
-            digest = _hash_bytes(raw)
+            if current is not None and not current():
+                return graph
+            raw = None
+            digest = indexed.get(relpath) if publish is not None else None
+            if digest is None:
+                try:
+                    raw = src_file.read_bytes()
+                    count_work("files_read")
+                except OSError as exc:
+                    graph.coverage[relpath] = FileCoverage(
+                        file=relpath, status=COVERAGE_SKIPPED,
+                        reason=f"unreadable: {type(exc).__name__}")
+                    continue
+                digest = _hash_bytes(raw)
+                count_work("files_hashed")
+                count_work("bytes_hashed", len(raw))
 
             entry = cache.get(relpath)
             extract = _cached_extract(entry, digest)
             stale = entry is not None and extract is None
-            python_file = src_file.suffix.lower() == ".py" and len(raw) <= _MAX_PARSE_BYTES
+            if raw is not None:
+                source_size = len(raw)
+            else:
+                try:
+                    source_size = src_file.stat().st_size
+                except OSError as exc:
+                    graph.coverage[relpath] = FileCoverage(
+                        file=relpath, status=COVERAGE_SKIPPED,
+                        reason=f"unreadable: {type(exc).__name__}")
+                    continue
+            python_file = src_file.suffix.lower() == ".py" and source_size <= _MAX_PARSE_BYTES
             if python_file and extract is not None and extract.status != COVERAGE_SKIPPED:
                 records = entry.get("python_imports")
                 if _valid_import_records(records):
                     extract.import_records = records
-                    extract.import_table = _build_import_table(records, root, src_file.parent)
+                    extract.import_table = _build_import_table(records, root, src_file.parent, resolved_modules)
                 else:
                     # An otherwise valid legacy entry lacks import descriptions.
                     # Upgrading its metadata does not make the file stale.
                     stale = "python_imports" in entry
                     extract = None
             if extract is None:
-                if python_file:
-                    # Match read_text's universal newlines, using the bytes already hashed.
-                    source = raw.decode("utf-8", "replace").replace("\r\n", "\n").replace("\r", "\n")
-                    extract = _extract_file(src_file, root, source=source, index=index)
+                if facts_dir is not None:
+                    encoding = "utf-8-sig" if src_file.suffix.lower() == ".py" else "utf-8"
+                    source = (raw.decode(encoding, errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+                              if raw is not None and len(raw) <= _MAX_PARSE_BYTES else None)
+                    extract = _extract_any_file(src_file, root, repo_files, source=source, facts_dir=facts_dir,
+                                                digest=digest, resolved_modules=resolved_modules)
+                elif python_file:
+                    if raw is None:
+                        extract = _extract_file(src_file, root, index=index, resolved_modules=resolved_modules)
+                    else:
+                        # Match read_text's universal newline handling, using the bytes already hashed.
+                        source = raw.decode("utf-8-sig", "replace").replace("\r\n", "\n").replace("\r", "\n")
+                        extract = _extract_file(src_file, root, source=source, index=index, resolved_modules=resolved_modules)
+                elif publish is not None and raw is not None:
+                    # The background path reuses hashed bytes instead of reading the file twice.
+                    source = raw.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+                    extract = _extract_any_file(src_file, root, repo_files, source=source)
                 else:
                     extract = _extract_any_file(src_file, root, repo_files)
                 # Any invalid persisted row is a miss; rebuilding it restores the
                 # complete, current shape without making cache damage fatal.
                 if stale:
                     graph.rebuilt_files.add(relpath)
-            new_cache[relpath] = {
-                "hash": digest,
-                "extractor_version": _EXTRACTOR_VERSION,
-                "extract": extract.to_dict(),
-            }
-            if extract.import_records is not None:
-                new_cache[relpath]["python_imports"] = extract.import_records
+            if use_cache:
+                new_cache[relpath] = {
+                    "hash": digest,
+                    "extractor_version": _EXTRACTOR_VERSION,
+                    "extract": extract.to_dict(),
+                }
+                if extract.import_records is not None:
+                    new_cache[relpath]["python_imports"] = extract.import_records
             graph.file_hashes[relpath] = digest
 
             graph.coverage[relpath] = FileCoverage(
@@ -2637,26 +2952,37 @@ def _build_graph_uncached(repo_path: str, *, use_cache: bool = True) -> CodeGrap
                 graph._index_def(d)
             for v in extract.variables:
                 graph._index_variable(v)
-            graph.calls.extend(extract.calls)
+            graph._calls.extend(extract.calls)
+
+    if deferred_basis is not None:
+        graph._deferred_edges = (root, file_import_tables, deferred_basis)
+        return graph
 
     # The type-resolution layer keeps its OWN content-hash cache (a separate
     # file, its own version) so a warm build re-asks nothing — and so a change
     # to either cache's shape can never invalidate the other's.
     from . import lsp_resolve  # local import: optional dep, keeps import cost off cold paths
-    lsp_cache = lsp_resolve.load_cache(root) if use_cache else {}
+    lsp_cache = {}
+    if use_cache:
+        lsp_cache = (lsp_resolve.load_cache(root) if lsp_path is None
+                     else lsp_resolve.load_cache(root, path=lsp_path))
     new_lsp_cache = graph._finalize(
         file_import_tables,
-        repo_root=root,
+        repo_root=root if use_lsp else None,
         file_hashes=graph.file_hashes,
         lsp_cache=lsp_cache,
+        publish_static=publish,
     )
 
-    if use_cache:
+    if use_cache and (consistent is None or consistent()):
         _save_cache(cache_path, new_cache)
         if new_lsp_cache:
-            lsp_resolve.save_cache(root, new_lsp_cache)
+            if lsp_path is None:
+                lsp_resolve.save_cache(root, new_lsp_cache)
+            else:
+                lsp_resolve.save_cache(root, new_lsp_cache, path=lsp_path)
     logger.debug(
-        "call_graph: built — %d symbols, %d call sites", len(graph.defs), len(graph.calls)
+        "call_graph: built %d symbols and %d call sites", len(graph.defs), len(graph._calls)
     )
     return graph
 

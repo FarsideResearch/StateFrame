@@ -6,6 +6,13 @@ import stat
 from pathlib import Path
 
 
+def wire_stem(wire_dir: Path, send: int) -> Path:
+    """The recorder's canonical stem, with four digits as a minimum width."""
+    if type(send) is not int or send < 1:
+        raise ValueError("wire send number must be a positive integer")
+    return wire_dir / f"{send:04d}"
+
+
 def _create_missing_parents(parent: Path) -> None:
     missing = []
     current = parent

@@ -2,7 +2,6 @@ import json
 import os
 import stat
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -15,7 +14,9 @@ from kernel_effects import (
     reconcile,
     scan,
 )
-from kernel_shell_tool import ShellTool, ToolSettings
+from kernel_shell_tool import ShellExecutionFailed, ShellTool, ToolSettings
+from kernel_tool_tape import configure_replay
+from test_shell_tool import ProcessBoundary
 
 
 def _manifest(root):
@@ -43,8 +44,9 @@ def _mixed_tree(root):
 def _bind(run, workspace, parent):
     run.mkdir(exist_ok=True)
     tool = ShellTool(run, ToolSettings(run_env=False), {"parent_snapshot": str(parent)},
-                     SimpleNamespace(configure=lambda _: None))
+                     ProcessBoundary())
     tool.bind(workspace, {"files": {}}, set())
+    configure_replay(run, active=False)
     return tool
 
 
@@ -96,6 +98,7 @@ def test_shell_rollback_matches_per_object_store(tmp_path):
     tool = _bind(run, packed_tree, parent)
 
     assert tool.baseline == original
+    tool.execute({"command": "echo ready"}, "pack-baseline")
     assert _rollback(packed_tree, original, tool.baseline_store, tool.store) == _rollback(
         legacy_tree, original, legacy, ContentStore(tmp_path / "per-call"))
     assert _tree_bytes_and_modes(packed_tree) == _tree_bytes_and_modes(parent)
@@ -129,6 +132,7 @@ def test_baseline_publication_survives_interrupted_write(tmp_path, monkeypatch, 
     real_dump = json.dump
     real_fsync = os.fsync
     real_replace = os.replace
+    tool = _bind(run, workspace, parent)
     injected = False
 
     def observe(name, action, *args, **kwargs):
@@ -170,9 +174,10 @@ def test_baseline_publication_survives_interrupted_write(tmp_path, monkeypatch, 
                       observe("index write", real_dump, *args, **kwargs))
         patch.setattr(os, "fsync", sync)
         patch.setattr(os, "replace", replace)
-        with pytest.raises(OSError, match="injected write failure"):
-            _bind(run, workspace, parent)
+        with pytest.raises(ShellExecutionFailed, match="injected write failure"):
+            tool.execute({"command": "echo ready"}, "pack-baseline")
     assert injected
+    assert not tool.session.calls
     published = operation in {"store directory fsync", "run directory fsync"} or (
         operation == "publish" and when == "after"
     )
@@ -183,8 +188,9 @@ def test_baseline_publication_survives_interrupted_write(tmp_path, monkeypatch, 
             if entry.kind == "file":
                 assert reopened.get(entry.digest) == (parent / name).read_bytes()
 
-    # A fresh binding can finish after any interruption, including after the rename.
+    # A fresh command can finish publication after any interruption, including after the rename.
     tool = _bind(run, workspace, parent)
+    tool.execute({"command": "echo ready"}, "pack-baseline")
     for name, entry in manifest.items():
         if entry.kind == "file":
             assert tool.baseline_store.get(entry.digest) == (parent / name).read_bytes()

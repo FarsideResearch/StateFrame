@@ -381,6 +381,14 @@ def _editable_product_paths(runtime: object) -> tuple[str, ...]:
     return (target,) if target and is_product_path(target) else ()
 
 
+def _workspace_consumers(root: Path):
+    # The host imports and registers the consumer only for a fenced attempt.
+    import sys
+    module = sys.modules.get("kernel_workspace_consumers")
+    consumers = module.consumers_for(root) if module is not None else None
+    return consumers
+
+
 def _workspace_product_file_digests(runtime: object,
                                     paths: Sequence[str]) -> dict[str, object] | None:
     """Hash editable files from the attempt workspace, without reading oracle state."""
@@ -391,6 +399,13 @@ def _workspace_product_file_digests(runtime: object,
         root = Path(root_value).resolve()
     except (OSError, RuntimeError, TypeError, ValueError):
         return None
+
+    consumers = _workspace_consumers(root)
+    if consumers is not None:
+        try:
+            return consumers.digests(paths)
+        except (OSError, ValueError):
+            return None
 
     files: dict[str, object] = {}
     for relative in paths:
@@ -642,9 +657,12 @@ def product_parent_proven_unchanged(runtime: object) -> bool:
     return (not changed) and comparison in PROVEN_PARENT_UNCHANGED
 
 
-def note_unchanged_parent_green_suppressed(runtime: object, *, reason: str) -> None:
+def note_unchanged_parent_green_suppressed(
+        runtime: object, *, reason: str, comparison: tuple[bool, str, str] | None = None) -> None:
     """Journal the first suppressed post-green start for each unchanged revision."""
-    _changed, revision, comparison = product_revision_change_from_parent(runtime)
+    if comparison is None:
+        comparison = product_revision_change_from_parent(runtime)
+    _changed, revision, method = comparison
     seen = getattr(runtime, "_postgreen_unchanged_parent_suppression_revisions", None)
     if not isinstance(seen, set):
         seen = set()
@@ -657,7 +675,7 @@ def note_unchanged_parent_green_suppressed(runtime: object, *, reason: str) -> N
         try:
             emit("postgreen_suppressed_unchanged_parent",
                  producer="kernel_green_lock", dispatch=False,
-                 revision=revision, reason=f"{reason}: {comparison}")
+                 revision=revision, reason=f"{reason}: {method}")
         except Exception:  # noqa: BLE001 - telemetry never changes the gate
             return
 

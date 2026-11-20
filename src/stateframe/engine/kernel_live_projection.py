@@ -13,14 +13,20 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING
 
 import kernel_file_digest_memo
 from kernel_measurement import digest
 from kernel_read_working_set import evictfix_enabled
 from kernel_non_product_paths import NON_PRODUCT_PARTS, is_non_product  # noqa: F401 (re-export)
 from probes.stateframe_shadow import Turn, _refresh_derived, fold_turn, initial_frame
-from kernel_test_artifact_policy import discover_test_artifact_policy
+from kernel_test_artifact_policy import TestArtifactPolicy, discover_test_artifact_policy
 from kernel_verdict import NO_HOST_CHECKS, SATISFIED, UNRESOLVED, Verdict, evaluate_required_tests
+
+if TYPE_CHECKING:
+    from kernel_workspace_index import EntryFilter
+    from kernel_workspace_state import WorkspaceState
+    from kernel_workspace_tree import Directory
 
 
 _READ_PAGE_IDENTITY = re.compile(
@@ -220,6 +226,36 @@ def _freeze_files(value: dict[str, str]) -> MappingProxyType:
     return MappingProxyType(dict(value))
 
 
+def _tree_binding(tree: Directory, environment: str) -> dict:
+    """Project a scoped tree in the legacy relative-path and digest formats."""
+    from kernel_workspace_tree import Directory, File, Symlink, children
+
+    product: dict[str, str] = {}
+    harness: dict[str, str] = {}
+
+    def visit(node: Directory, prefix: tuple[str, ...]) -> None:
+        entries = sorted(children(node), key=lambda row: os.fsdecode(row[0]))
+        for name, child in entries:
+            parts = (*prefix, os.fsdecode(name))
+            if isinstance(child, Directory):
+                visit(child, parts)
+                continue
+            if isinstance(child, File):
+                value = "sha256:" + child.sha256.hex()
+            elif isinstance(child, Symlink):
+                value = "symlink:" + os.fsdecode(child.target)
+            else:
+                continue
+            key = "/".join(parts)
+            _, is_test = _path_roles(key, parts)
+            (harness if is_test else product)[key] = value
+
+    visit(tree, ())
+    return {"product_revision": digest(product), "test_harness_revision": digest(harness),
+            "environment_revision": environment, "product_files": product,
+            "harness_files": harness}
+
+
 @dataclass(frozen=True, slots=True)
 class WorkspaceView:
     """Runtime-owned immutable binding for one mutation epoch."""
@@ -276,8 +312,14 @@ class WorkspaceViewStore:
 
     def __init__(self, root: Path, environment: str, *, scope_identity: str = "",
                  policy_identity: str = "", authorization_scope: str = "",
-                 tenant_identity: str = "") -> None:
+                 tenant_identity: str = "", workspace_state: WorkspaceState | None = None) -> None:
         self.root = Path(root).resolve()
+        if workspace_state is not None:
+            if workspace_state.fence.root != self.root:
+                raise ValueError("workspace state belongs to a different root")
+            self._workspace_state = workspace_state
+            self._fenced_epoch: bytes | None = None
+            self._fenced_revision: bytes | None = None
         self.environment = str(environment)
         self.scope_identity = str(scope_identity)
         self.policy_identity = str(policy_identity or "UNKNOWN_POLICY")
@@ -330,8 +372,15 @@ class WorkspaceViewStore:
         """Invalidate all derived views after a host-visible mutation."""
         has_paths = bool(changed_paths)
         if has_paths or outcome is not None:
+            if os.environ.get("STATEFRAME_TURN_REPO_INTEL", "off") == "on":
+                from mc_repo_intel_vendor.background import invalidate
+
+                invalidate(self.root)
             self.mutation_epoch += 1
             self._dirty = True
+            state = getattr(self, "_workspace_state", None)
+            if state is not None:
+                state.invalidate()
         return self.mutation_epoch
 
     @staticmethod
@@ -351,6 +400,8 @@ class WorkspaceViewStore:
                      run_write_set: object = ()) -> WorkspaceView:
         boundary_name = str(boundary or "ordinary")
         context = self._context(command, run_write_set)
+        if getattr(self, "_workspace_state", None) is not None:
+            return self._fenced_view(boundary_name, context)
         if context != self._last_context:
             self._dirty = True
         reconcile_entries: list[tuple[tuple[str, ...], str, bool]] | None = None
@@ -373,18 +424,7 @@ class WorkspaceViewStore:
             after_signatures = self._entry_signature(_workspace_entries(self.root))
             if before_signatures != after_signatures:
                 raise OSError("workspace changed while building binding")
-            self._view = WorkspaceView(
-                root=str(self.root), scope_identity=self.scope_identity,
-                mutation_epoch=self.mutation_epoch, boundary=boundary_name,
-                product_revision=str(binding["product_revision"]),
-                test_harness_revision=str(binding["test_harness_revision"]),
-                environment_revision=str(binding["environment_revision"]),
-                policy_identity=self.policy_identity,
-                authorization_scope=self.authorization_scope,
-                tenant_identity=self.tenant_identity,
-                product_files=_freeze_files(binding["product_files"]),
-                harness_files=_freeze_files(binding["harness_files"]),
-            )
+            self._view = self._new_view(binding, boundary_name)
             self._entry_signatures = after_signatures
             self._dirty = False
             self._last_context = context
@@ -393,6 +433,63 @@ class WorkspaceViewStore:
         self._last_boundary = boundary_name
         self._last_boundary_epoch = self.mutation_epoch
         return self._view
+
+    def _new_view(self, binding: dict, boundary: str, *, epoch: int | None = None) -> WorkspaceView:
+        return WorkspaceView(
+            root=str(self.root), scope_identity=self.scope_identity,
+            mutation_epoch=self.mutation_epoch if epoch is None else epoch, boundary=boundary,
+            product_revision=str(binding["product_revision"]),
+            test_harness_revision=str(binding["test_harness_revision"]),
+            environment_revision=str(binding["environment_revision"]),
+            policy_identity=self.policy_identity,
+            authorization_scope=self.authorization_scope,
+            tenant_identity=self.tenant_identity,
+            product_files=_freeze_files(binding["product_files"]),
+            harness_files=_freeze_files(binding["harness_files"]),
+        )
+
+    def _fenced_view(self, boundary: str, context: tuple[tuple[str, ...], tuple[str, ...]]) -> WorkspaceView:
+        from kernel_workspace_state import WorkspaceUnavailable
+
+        def coverage() -> tuple[TestArtifactPolicy, EntryFilter]:
+            # Effective config can include an external path or environment
+            # inputs. Resolve the policy at use even on a clean tree.
+            policy = discover_test_artifact_policy(self.root, command=context[0])
+
+            def select(raw_parts: tuple[bytes, ...], is_directory: bool) -> bool:
+                parts = tuple(os.fsdecode(name) for name in raw_parts)
+                key = "/".join(parts)
+                if is_directory:
+                    return not _prunable_directory(parts) and not any(
+                        (declaration.recursive or declaration.prefix) and declaration.matches(key)
+                        for declaration in policy.declarations
+                    )
+                non_product, _ = _path_roles(key, parts)
+                return not non_product and not _policy_matches(policy, policy, key)
+
+            return policy, select
+
+        state = self._workspace_state
+        with state.pin(boundary, coverage=coverage) as snapshot:
+            epoch_changed = self._fenced_epoch is not None and self._fenced_epoch != snapshot.epoch
+            epoch = self.mutation_epoch
+            view = self._view
+            if epoch_changed and view is not None and view.mutation_epoch == epoch:
+                epoch += 1
+            if (view is None or self._dirty or epoch_changed or context != self._last_context
+                    or self._fenced_revision != snapshot.tree.digest):
+                view = self._new_view(_tree_binding(snapshot.tree, self.environment), boundary, epoch=epoch)
+            if not snapshot.validate_for_use(boundary):
+                state.invalidate()
+                self._dirty = True
+                raise WorkspaceUnavailable("workspace view became unavailable")
+            self._view = view
+            self.mutation_epoch = epoch
+            self._fenced_epoch = snapshot.epoch
+            self._fenced_revision = snapshot.tree.digest
+            self._last_context = context
+            self._dirty = False
+            return view
 
 
 class LiveProjection:

@@ -1,5 +1,8 @@
 """Frozen schemas for host-authorized execution and observation tools."""
 
+from copy import deepcopy
+from functools import partial
+
 try:
     from kernel_reason_log import emit_reason
 except ImportError:
@@ -47,29 +50,46 @@ BUILTIN_SCHEMAS = (
 def measure_schemas(custom_schemas=(), *, mcp_schemas=(), endpoint=None, tokenizer=None,
                     auth_key=None, generation_endpoint=None):
     """Use the request meter's tokenizer transport, recording fallback explicitly."""
+    return prepare_schema_measurement(
+        custom_schemas, mcp_schemas=mcp_schemas, endpoint=endpoint, tokenizer=tokenizer,
+        auth_key=auth_key, generation_endpoint=generation_endpoint,
+    )()
+
+
+def prepare_schema_measurement(custom_schemas=(), *, mcp_schemas=(), endpoint=None, tokenizer=None,
+                               auth_key=None, generation_endpoint=None):
+    """Capture the schema inputs and bound meter before startup configures the live menu."""
     from kernel_request_diet import RequestTokenMeter
     from kernel_shell_tool import SHELL_SCHEMA
-    from kernel_custom_tools import CustomToolError
 
     meter = RequestTokenMeter(
         tokenizer, endpoint=endpoint, template_overhead_tokens=0,
         auth_key=auth_key, generation_endpoint=generation_endpoint,
     )
+    builtin_schemas = deepcopy((SHELL_SCHEMA, *BUILTIN_SCHEMAS))
+    additional_schemas = deepcopy([*custom_schemas, *mcp_schemas])
+    return partial(_measure_schemas, builtin_schemas, additional_schemas, meter.measure,
+                   configured=endpoint is not None or tokenizer is not None)
+
+
+def _measure_schemas(builtin_schemas, additional_schemas, measure, *, configured):
+    from kernel_custom_tools import CustomToolError
+
     result = {}
-    for item in (SHELL_SCHEMA, *BUILTIN_SCHEMAS):
-        count, method = meter.measure({"messages": [], "tools": [item]})
+    for item in builtin_schemas:
+        count, method = measure({"messages": [], "tools": [item]})
         result[item["function"]["name"]] = {"tokens": count, "method": method}
         if method != "tokenize":
             _log_schema_fallback(f"schema {item['function']['name']} measured without tokenizer",
-                                 method, count, configured=endpoint is not None or tokenizer is not None)
+                                 method, count, configured=configured)
         if count > 1200:
             raise CustomToolError(f"built-in {item['function']['name']} schema exceeds 1200 tokens: {count}")
-    if custom_schemas or mcp_schemas:
-        count, method = meter.measure({"messages": [], "tools": [*custom_schemas, *mcp_schemas]})
+    if additional_schemas:
+        count, method = measure({"messages": [], "tools": additional_schemas})
         result["custom_total"] = {"tokens": count, "method": method}
         if method != "tokenize":
             _log_schema_fallback("custom tool schemas measured without tokenizer", method, count,
-                                 configured=endpoint is not None or tokenizer is not None)
+                                 configured=configured)
         if count > 1500:
             raise CustomToolError(f"custom tool schemas: {count} tokens exceeds 1500")
     return result

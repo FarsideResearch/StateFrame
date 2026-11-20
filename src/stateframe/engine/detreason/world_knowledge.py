@@ -144,6 +144,9 @@ class _SourceFactSetMember:
 
 
 _SOURCE_CACHE_LIMIT = 64
+# Read compatibility for journals written with bundled source records.
+SOURCE_OBSERVATION_BATCH_SCHEMA = "world.knowledge.source-observations/1"
+_MIN_SOURCE_BATCH_OBSERVATIONS = 32
 
 
 def _canonical(value: object) -> str:
@@ -835,7 +838,8 @@ class WorldKnowledgeStore:
     def _emit_observation(self, fact: WorldFact, ordinal: int, *, fact_set_id: str | None = None,
                           settled_fact: WorldFact | None = None,
                           previous_freshness: str | None = None,
-                          source_fact_set: bool = False) -> None:
+                          source_fact_set: bool = False,
+                          pending: list[dict[str, object]] | None = None) -> None:
         from kernel_observation_delta import ObservationDelta
         observed = settled_fact or fact
         existing = self._facts.get(observed.fact_id)
@@ -887,7 +891,10 @@ class WorldKnowledgeStore:
                 "ordinal": sequence,
             }
         )
-        self._emit(event)
+        if pending is None:
+            self._emit(event)
+        else:
+            pending.append(event)
         if source_fact_set:
             if fact_set_id is None:
                 raise WorldKnowledgeError("source observation has no fact-set identity")
@@ -1257,6 +1264,10 @@ class WorldKnowledgeStore:
                     self._emit(event)
                 result.extend(self._apply_source_reobserved(event))
             else:
+                persist_batch = getattr(self.event_sink, "persist_source_observations", None)
+                pending: list[dict[str, object]] | None = (
+                    [] if callable(persist_batch) and len(drafts) >= _MIN_SOURCE_BATCH_OBSERVATIONS else None
+                )
                 for ordinal, draft in enumerate(drafts, start=1):
                     fact = self._source_fact(draft, revision, evidence_ref, content_digest)
                     previous = self._facts.get(fact.fact_id)
@@ -1269,8 +1280,19 @@ class WorldKnowledgeStore:
                             settled_fact=settled,
                             previous_freshness=previous.freshness if previous else None,
                             source_fact_set=True,
+                            pending=pending,
                         )
                     result.append(self._ingest_fact(fact))
+                if pending:
+                    with self.cost_meter.measure("journaling", count=0):
+                        try:
+                            persist_batch(pending)
+                        except Exception as exc:  # noqa: BLE001 - durable adapter failure is explicit
+                            raise WorldKnowledgeError(
+                                f"world-knowledge event sink failed: {type(exc).__name__}"
+                            ) from exc
+                    self._events.extend(pending)
+                    self._seen_event_ids.update(str(event["event_id"]) for event in pending)
                 self._mark_source_fact_set_durable(fact_set_id, len(drafts))
         parser_status = (
             UNKNOWN if any(fact.predicate in {"parse_error", "parser_unsupported"} for fact in drafts)
@@ -1501,6 +1523,17 @@ class WorldKnowledgeStore:
                 inner = event.get('event')
                 if not isinstance(inner, Mapping):
                     raise WorldKnowledgeError('invalid wrapped world knowledge event')
+                if inner.get("schema") == SOURCE_OBSERVATION_BATCH_SCHEMA:
+                    observations = inner.get("observations")
+                    if (not isinstance(observations, list) or not observations
+                            or any(not isinstance(item, Mapping)
+                                   or item.get("schema") != EVENT_SCHEMA
+                                   or item.get("kind") != "observation_fact"
+                                   or item.get("source_fact_set") is not True
+                                   for item in observations)):
+                        raise WorldKnowledgeError("invalid world knowledge source observation batch")
+                    self.replay(observations)
+                    continue
                 if inner.get('schema') == 'retained-source/1' and (
                         self.source_archive is None or event.get('run_id') != self.source_archive.scope):
                     continue

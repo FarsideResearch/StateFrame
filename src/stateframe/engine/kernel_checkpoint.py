@@ -55,6 +55,8 @@ MODE_ENV = "STATEFRAME_CHECKPOINT"
 RESTORE_ENV = "STATEFRAME_CHECKPOINT_RESTORE"
 EVERY_ENV = "STATEFRAME_CHECKPOINT_EVERY"
 KEEP_ENV = "STATEFRAME_CHECKPOINT_KEEP"
+_PUBLICATION_SWITCH = "STATEFRAME_TURN_ATOMIC_PUBLICATION"
+_PUBLICATION_INDEX = ".turn-checkpoint-index.json"
 MIN_FREE_ENV = "STATEFRAME_CHECKPOINT_MIN_FREE_BYTES"
 STATE_FILE = "state.pkl"
 META_FILE = "checkpoint.json"
@@ -74,7 +76,7 @@ SKIP_RUN_ENTRIES = frozenset({"checkpoints", "attempts", "parent", ".engine.lock
                               "spec.json", "child-traceback.txt", "engine-result.json", "summary.json",
                               "engine.log", "checkpoint-refused.json", "tool-tape.jsonl",
                               "hook-tape.jsonl", "hook-bundle", "hooks", "hook-scratch", "parallel",
-                              "mutations"})
+                              "mutations", ".workspace-objects.json", ".turn-publication"})
 
 # Keep writer diagnostics independent of the mutable errno.errorcode table and exception text.
 _OS_ERROR_NAMES = types.MappingProxyType({
@@ -109,6 +111,20 @@ class CheckpointError(RuntimeError):
 
 class _StateFileSecretError(CheckpointError):
     """Marker for secret bytes rejected while scanning captured files."""
+
+
+_OBJECT_CAPTURE_STAGES = frozenset({
+    "admission", "workspace", "run_tail", "semantic_state", "objects", "publication",
+})
+
+
+class ObjectCaptureError(CheckpointError):
+    """A failed object checkpoint with a fixed stage and a redacted reason."""
+
+    def __init__(self, stage: str, reason: str):
+        super().__init__(reason)
+        self.stage = stage
+        self.reason = reason
 
 
 class RestoreRefused(BaseException):
@@ -185,6 +201,10 @@ def _is_engine_module(module: object) -> bool:
 
 
 def _is_state_module(name: str, module: object) -> bool:
+    short_name = name.rsplit(".", 1)[-1]
+    if (_workspace_objects_on() and short_name.startswith("kernel_workspace_")
+            and short_name != "kernel_workspace_truth"):
+        return False
     # __main__ (the product child script) is the HOST: it re-installs its own wrappers in the
     # new process and hands their counters over as participants (register_participant).
     return name != "__main__" and _is_engine_module(module)
@@ -767,6 +787,17 @@ def _module_state(name: str, module: types.ModuleType) -> dict[str, object]:
         return out
     for key, value in list(vars(module).items()):
         if key.startswith("__") and key.endswith("__"):
+            continue
+        if (_workspace_objects_on() and name == "kernel_bridge_evidence"
+                and key == "capture_candidate"):
+            continue
+        if (_workspace_objects_on() and (name, key) in {
+                ("kernel_shell_tool", "_active"),
+                ("kernel_agent_tools", "_active"),
+                ("kernel_workspace_consumers", "_bindings"),
+        }):
+            # These live bindings are rebuilt before restore_point. The feed
+            # contains an inotify callback backed by a native pointer.
             continue
         if (name, key) in DROP_GLOBALS or (name, key) in HOST_GLOBALS:
             continue
@@ -1698,6 +1729,35 @@ class _Pickler(pickle.Pickler):
         ctx = self.ctx
         if isinstance(obj, types.ModuleType):
             return ("mod", obj.__name__)
+        if (_workspace_objects_on() and (type(obj).__module__, type(obj).__qualname__)
+                == ("kernel_shell_tool", "ShellTool")):
+            from kernel_shell_tool import service
+
+            root = getattr(obj, "root", None)
+            if not isinstance(root, Path) or service() is not obj:
+                raise pickle.PicklingError("shell checkpoint has no current host binding")
+            return ("host-shell-tool", os.fspath(root))
+        if (_workspace_objects_on() and (type(obj).__module__, type(obj).__qualname__)
+                == ("kernel_agent_tools", "AgentTools")):
+            from kernel_agent_tools import service
+
+            root = getattr(getattr(obj, "shell", None), "root", None)
+            if not isinstance(root, Path) or service() is not obj:
+                raise pickle.PicklingError("agent tools checkpoint has no current host binding")
+            return ("host-agent-tools", os.fspath(root))
+        if (_workspace_objects_on() and (type(obj).__module__, type(obj).__qualname__)
+                in {("kernel_workspace_consumers", "WorkspaceConsumers"),
+                    ("kernel_workspace_state", "WorkspaceState")}):
+            from kernel_workspace_consumers import consumers_for
+
+            state = obj.state if type(obj).__qualname__ == "WorkspaceConsumers" else obj
+            root = getattr(getattr(state, "fence", None), "root", None)
+            consumers = consumers_for(root) if isinstance(root, Path) else None
+            if consumers is None or consumers.state is not state or (
+                    type(obj).__qualname__ == "WorkspaceConsumers" and consumers is not obj):
+                raise pickle.PicklingError("workspace checkpoint has no current host binding")
+            return ("host-workspace-consumers" if consumers is obj else "host-workspace-state",
+                    os.fspath(root))
         ident = id(obj)
         element = _SAVE.get("ids", {}).get(ident)
         if element is not None:
@@ -1824,6 +1884,34 @@ class _Unpickler(pickle.Unpickler):
 
     def persistent_load(self, pid):
         kind = pid[0]
+        if kind == "host-shell-tool":
+            if len(pid) != 2 or not isinstance(pid[1], str):
+                raise CheckpointError("invalid shell checkpoint binding")
+            from kernel_shell_tool import service
+
+            shell = service()
+            if shell is None or getattr(shell, "root", None) != Path(pid[1]):
+                raise CheckpointError("restored shell workspace binding is unavailable")
+            return shell
+        if kind == "host-agent-tools":
+            if len(pid) != 2 or not isinstance(pid[1], str):
+                raise CheckpointError("invalid agent tools checkpoint binding")
+            from kernel_agent_tools import service
+
+            agent_tools = service()
+            if (agent_tools is None
+                    or getattr(getattr(agent_tools, "shell", None), "root", None) != Path(pid[1])):
+                raise CheckpointError("restored agent tools workspace binding is unavailable")
+            return agent_tools
+        if kind in {"host-workspace-consumers", "host-workspace-state"}:
+            if len(pid) != 2 or not isinstance(pid[1], str):
+                raise CheckpointError("invalid workspace checkpoint binding")
+            from kernel_workspace_consumers import consumers_for
+
+            consumers = consumers_for(Path(pid[1]))
+            if consumers is None or consumers.state.fence.root != Path(pid[1]):
+                raise CheckpointError("restored workspace binding is unavailable")
+            return consumers if kind == "host-workspace-consumers" else consumers.state
         if kind == "elem":
             item = _table(pid[1])[pid[2]]
             return item[pid[3]] if len(pid) > 3 else item
@@ -1882,6 +1970,10 @@ def _frame_maps(frame, setup: dict | None = None) -> tuple[dict[str, object], di
 def _frame_state(frame) -> dict[str, object]:
     out = {}
     for name, value in list(frame.f_locals.items()):
+        if _workspace_objects_on() and name == "capture_candidate":
+            # The bridge callable is re-imported when used. Saving its bound
+            # ProposalCapture would serialize the workspace secret policy.
+            continue
         if _is_static(value):
             continue
         out[name] = value
@@ -1990,6 +2082,9 @@ def _process_bound_path(root) -> str:
 def _failure_reason(error: BaseException) -> str:
     """Return an allowlisted writer code without exposing exception-controlled text."""
     try:
+        if (type(error) is ObjectCaptureError and type(error.reason) is str
+                and error.reason in _WRITER_FAILURE_REASONS):
+            return error.reason
         if type(error) is _StateFileSecretError:
             return "checkpoint refused: registered secret in state"
         if type(error) is CheckpointError:
@@ -2014,6 +2109,14 @@ def _failure_reason(error: BaseException) -> str:
     except BaseException:
         pass
     return "unexpected writer error"
+
+
+def _capture_stage(error: BaseException) -> dict[str, str]:
+    if type(error) is ObjectCaptureError:
+        stage = getattr(error, "stage", None)
+        if type(stage) is str and stage in _OBJECT_CAPTURE_STAGES:
+            return {"failure_stage": stage}
+    return {}
 
 
 class _StateWriter:
@@ -3081,6 +3184,13 @@ def _sends(run_dir: Path) -> int:
 
 
 def _fsync_dir(path: Path) -> None:
+    if _atomic_checkpoints():
+        if __package__:
+            from .kernel_turn_publication import sync_directory
+        else:
+            from kernel_turn_publication import sync_directory
+        sync_directory(path)
+        return
     try:
         fd = os.open(str(path), os.O_RDONLY)
     except OSError:
@@ -3401,6 +3511,31 @@ def _async_enabled() -> bool:
     return value == "on" and hasattr(os, "fork")
 
 
+_OBJECT_CHECKPOINT_SCHEMA = "stateframe-engine-checkpoint/2"
+
+
+def _workspace_objects_on() -> bool:
+    return os.environ.get("STATEFRAME_WORKSPACE_OBJECTS") == "on"
+
+
+def _workspace_checkpoint_codec():
+    if __package__:
+        from . import kernel_workspace_checkpoint
+    else:
+        import kernel_workspace_checkpoint
+    return kernel_workspace_checkpoint
+
+
+def _object_checkpoint(directory: Path) -> bool:
+    try:
+        with (directory / META_FILE).open("rb") as stream:
+            prefix = stream.read(16 << 10)
+        value = json.loads(prefix)
+    except (OSError, ValueError, RecursionError):
+        return False
+    return isinstance(value, dict) and value.get("schema") == _OBJECT_CHECKPOINT_SCHEMA
+
+
 def save(frame, step: int, run_dir: Path, *, background: bool = False) -> Path:
     """Write checkpoint ``<run>/checkpoints/<step>-<pid>`` atomically; returns its directory.
 
@@ -3410,6 +3545,15 @@ def save(frame, step: int, run_dir: Path, *, background: bool = False) -> Path:
     child (``background``): it pickles its own copy-on-write image of the memory captured at this
     instant while the engine continues, and makes the checkpoint visible (LATEST) only when complete.
     """
+    if _workspace_objects_on():
+        codec = _workspace_checkpoint_codec()
+        try:
+            return codec.capture(frame, step, run_dir)
+        except (OSError, ValueError, pickle.PickleError) as error:
+            raise CheckpointError("workspace checkpoint could not be saved") from error
+        finally:
+            _SAVE.clear()
+            _STATE.pop("protected_home_identity", None)
     _STATE["protected_home_identity"] = _verify_stateframe_home_identity(run_dir)
     cache_run = os.path.realpath(run_dir)
     if _STATE.get("verified_pool_cache_run") != cache_run:
@@ -3461,10 +3605,127 @@ def _seed_for_run(run_dir: Path) -> Path | None:
     return None
 
 
+def _atomic_checkpoints() -> bool:
+    return os.environ.get(_PUBLICATION_SWITCH, "").strip().lower() == "on"
+
+
+def _read_publication_index(root: Path, *, names: bool = True) -> tuple[int, tuple[str, ...]] | None:
+    try:
+        with os.fdopen(os.open(root / _PUBLICATION_INDEX, os.O_RDONLY | os.O_NOFOLLOW
+                               | os.O_NONBLOCK), "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise ValueError("invalid index file type")
+            header = stream.readline(512)
+            if not header.endswith(b"\n"):
+                raise ValueError("invalid index header")
+            document = json.loads(header)
+            payload = stream.read() if names else None
+        if not isinstance(document, dict):
+            raise ValueError("invalid checkpoint publication index")
+        seq, latest = document.get("seq"), document.get("latest")
+        if (document.get("format") != 1 or type(seq) is not int or seq < -1
+                or (latest is not None and not _valid_checkpoint_name(latest))):
+            raise ValueError("invalid checkpoint publication index header")
+        if payload is None:
+            return seq, (latest,) if latest is not None else ()
+        if hashlib.sha256(payload).hexdigest() != document.get("sha256"):
+            raise ValueError("checkpoint publication index checksum mismatch")
+        listed = json.loads(payload)
+        if (not isinstance(listed, list) or any(not _valid_checkpoint_name(item) for item in listed)
+                or len(set(listed)) != len(listed) or (listed[-1] if listed else None) != latest):
+            raise ValueError("invalid checkpoint publication index")
+        return seq, tuple(listed)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, RecursionError) as error:
+        raise CheckpointError("checkpoint publication index cannot be read") from error
+
+
+def _valid_checkpoint_name(name: object) -> bool:
+    return (isinstance(name, str) and bool(name) and not name.startswith(".")
+            and Path(name).name == name)
+
+
+def _write_publication_index(root: Path, seq: int, names: tuple[str, ...]) -> None:
+    if __package__:
+        from .kernel_turn_publication import atomic_file
+    else:
+        from kernel_turn_publication import atomic_file
+
+    payload = json.dumps(names, separators=(",", ":")).encode()
+    data = json.dumps({"format": 1, "seq": seq, "latest": names[-1] if names else None,
+                       "sha256": hashlib.sha256(payload).hexdigest()},
+                      sort_keys=True, separators=(",", ":")).encode()
+    atomic_file(root / _PUBLICATION_INDEX, data + b"\n" + payload)
+
+
+def publication_candidates(root: Path) -> tuple[Path, ...] | None:
+    """Expose committed checkpoint candidates to the legacy selector on resume."""
+    index = _read_publication_index(root)
+    return None if index is None else tuple(root / name for name in index[1])
+
+
+def recover_publication_latest(root: Path) -> None:
+    """Recover the legacy pointer from the durably indexed checkpoint list."""
+    candidates = publication_candidates(root)
+    if not candidates:
+        return
+    name = candidates[-1].name
+    try:
+        mirrored = (root / "LATEST").read_text().strip()
+    except FileNotFoundError:
+        mirrored = None
+    if mirrored != name:
+        _mirror_checkpoint(root, name)
+
+
+def _mirror_checkpoint(root: Path, name: str) -> None:
+    if __package__:
+        from .kernel_turn_publication import atomic_file
+    else:
+        from kernel_turn_publication import atomic_file
+    atomic_file(root / "LATEST", (name + "\n").encode())
+
+
+def _publish_indexed_checkpoint(root: Path, tmp: Path, final: Path, run_dir: Path) -> None:
+    if __package__:
+        from .kernel_turn_publication import sync_directory
+    else:
+        from kernel_turn_publication import sync_directory
+    index = _read_publication_index(root)
+    if index is None:
+        raise CheckpointError("checkpoint publication index was not initialized")
+    seq, previous = index
+    new_seq = json.loads((tmp / META_FILE).read_bytes())["seq"]
+    if type(new_seq) is not int or new_seq <= seq:
+        raise CheckpointError("checkpoint publication sequence did not advance")
+    # The directory and every referenced file are durable before the index may name it.
+    os.rename(tmp, final)
+    sync_directory(root)
+    names = (*previous, final.name)[-_keep():]
+    _write_publication_index(root, new_seq, names)
+    _mirror_checkpoint(root, final.name)
+    retained = tuple(root / name for name in names)
+    keep = set(names)
+    for name in previous:
+        if name not in keep:
+            shutil.rmtree(root / name, ignore_errors=True)
+    _prune_chunks(root, retained)
+    _prune_pool(root, run_dir, retained)
+    _prune_objects(root)
+    marker = final / ARTIFACT_TRANSACTION_FILE
+    if marker.exists():
+        marker.unlink()
+        sync_directory(final)
+
+
 def _publish_checkpoint(root: Path, tmp: Path, final: Path, run_dir: Path) -> None:
     """Publish only complete snapshots; keep the pointer's target throughout pruning."""
     if final.exists():
         raise CheckpointError(f"checkpoint {final.name} already exists")
+    if _atomic_checkpoints():
+        _publish_indexed_checkpoint(root, tmp, final, run_dir)
+        return
     os.rename(tmp, final)
     _fsync_dir(root)
     checkpoints = _checkpoints(root)
@@ -3870,13 +4131,13 @@ def _fork_writer(run_dir: Path, step: int, final: Path, write, tmp: Path) -> Non
     _STATE["fork_seconds"] = round(time.perf_counter() - forked, 3)
 
 
-def _prune_chunks(root: Path) -> None:
+def _prune_chunks(root: Path, checkpoints: tuple[Path, ...] | None = None) -> None:
     """Remove journal cache chunks no remaining checkpoint references (only those of this run)."""
     folder = root / CACHE_DIR
     if not folder.is_dir():
         return
     referenced: set[str] = set()
-    for checkpoint in _checkpoints(root):
+    for checkpoint in _checkpoints(root) if checkpoints is None else checkpoints:
         try:
             referenced.update(json.loads((checkpoint / META_FILE).read_text()).get("chunks", ()))
         except (OSError, ValueError):
@@ -3905,6 +4166,19 @@ def _checkpoints(root: Path) -> list[Path]:
 
 def _next_seq(root: Path) -> int:
     """One more than the highest save sequence number among this run's checkpoints."""
+    if _atomic_checkpoints() and root.is_dir():
+        index = _read_publication_index(root, names=False)
+        if index is None:
+            paths = _checkpoints(root)
+            seq = json.loads((paths[-1] / META_FILE).read_bytes()).get("seq", -1) if paths else -1
+            seq = seq if type(seq) is int else -1
+            _write_publication_index(root, seq, tuple(path.name for path in paths))
+            # The index names this directory across a power loss, including on a
+            # run whose checkpoint root was created for this first transaction.
+            _fsync_dir(root.parent)
+        else:
+            seq = index[0]
+        return max(seq + 1, _STATE.get("next_seq", 0))
     highest = -1
     for path in root.iterdir() if root.is_dir() else ():
         if path.is_dir() and not path.name.startswith(".") and (path / META_FILE).is_file():
@@ -4012,7 +4286,7 @@ def _save_point(frame, step: int, poc, entered: float) -> None:
         if current == "probe":
             probe(frame, step, out / "checkpoint-probe")
             return
-        background = _async_enabled()
+        background = _async_enabled() and not _workspace_objects_on()
         if background and not _reap():
             _STATE["last_sends"] = previous_sends  # still writing the last one: try at the next boundary
             _record(run_dir, event="checkpoint_skipped", step=step, reason="previous writer still running")
@@ -4040,7 +4314,7 @@ def _save_point(frame, step: int, poc, entered: float) -> None:
                     _STATE["last_sends"] = previous_sends
                 reason = _failure_reason(error)
                 _record(run_dir, event="checkpoint_failed", step=step,
-                        error=reason, failure_reason=reason)
+                        error=reason, failure_reason=reason, **_capture_stage(error))
                 _note_failure(run_dir, reason)
                 return
         finally:
@@ -4065,13 +4339,23 @@ def _save_point(frame, step: int, poc, entered: float) -> None:
             _STATE["last_sends"] = previous_sends  # nothing was saved: the next boundary may retry
         reason = _failure_reason(error)
         _record(run_dir, event="checkpoint_failed", step=step,
-                error=reason, failure_reason=reason)
+                error=reason, failure_reason=reason, **_capture_stage(error))
         _note_failure(run_dir, reason)
 
 
 # --------------------------------------------------------------------------- restore
 
 def latest(run_dir: Path) -> Path | None:
+    if _atomic_checkpoints():
+        root = run_dir / "checkpoints"
+        index = _read_publication_index(root, names=False)
+        if index is not None:
+            if not index[1]:
+                return None
+            target = root / index[1][-1]
+            if not (target / META_FILE).is_file():
+                raise CheckpointError("committed checkpoint is missing")
+            return target
     pointer = run_dir / "checkpoints" / "LATEST"
     try:
         name = pointer.read_text().strip()
@@ -4134,11 +4418,13 @@ def _authenticate_state(checkpoint: Path) -> tuple[dict, bytes]:
 
 def authenticate(checkpoint: Path) -> dict:
     """Is this checkpoint provably ours? Verify both state representations before unpickling."""
+    if _object_checkpoint(checkpoint):
+        return _workspace_checkpoint_codec().validate_directory(checkpoint, compatible=False)
     meta, _raw = _authenticate_state(checkpoint)
     return meta
 
 
-def _prune_pool(root: Path, run_dir: Path) -> None:
+def _prune_pool(root: Path, run_dir: Path, checkpoints: tuple[Path, ...] | None = None) -> None:
     """Drop pooled files that no kept checkpoint lists and that the live run no longer has.
 
     A pooled file still present in the live directory is listed again by the next save, so it is
@@ -4149,7 +4435,7 @@ def _prune_pool(root: Path, run_dir: Path) -> None:
     if not pool.is_dir():
         return
     referenced: dict[str, set[str]] = {}
-    for checkpoint in root.iterdir():
+    for checkpoint in root.iterdir() if checkpoints is None else checkpoints:
         if (not checkpoint.is_dir() or checkpoint.is_symlink()
                 or checkpoint.name in {POOL_DIR, CACHE_DIR}):
             continue
@@ -4248,6 +4534,8 @@ def _validate(checkpoint: Path) -> tuple[dict, bytes]:
 
 def validate(checkpoint: Path) -> dict:
     """Authenticate plus compatibility with this process (Python, engine and host files)."""
+    if _object_checkpoint(checkpoint):
+        return _workspace_checkpoint_codec().validate_directory(checkpoint, compatible=True)
     meta, _raw = _validate(checkpoint)
     return meta
 
@@ -4400,6 +4688,8 @@ _ABSENT = object()
 
 
 def restore(frame, checkpoint: Path, run_dir: Path) -> dict:
+    if _object_checkpoint(checkpoint):
+        return _workspace_checkpoint_codec().restore_checkpoint(run_dir, checkpoint, frame)
     t0 = time.perf_counter()
     meta, whole = _validate(checkpoint)
     t1 = time.perf_counter()
@@ -4414,6 +4704,15 @@ def restore(frame, checkpoint: Path, run_dir: Path) -> dict:
         payload = _Unpickler(io.BytesIO(whole), ctx).load()
     finally:
         _SAVE.clear()
+    _apply_restored_state(frame, payload)
+    t3 = time.perf_counter()
+    install_continuous_clock(meta["clocks"])
+    meta["restore_phases"] = {"validate": round(t1 - t0, 3), "files": round(t2 - t1, 3),
+                              "load_and_apply": round(t3 - t2, 3)}
+    return meta
+
+
+def _apply_restored_state(frame, payload: dict) -> None:
     for name, state in payload["modules"].items():
         module = sys.modules.get(name)
         if module is None:
@@ -4476,12 +4775,6 @@ def restore(frame, checkpoint: Path, run_dir: Path) -> dict:
         sync_locals.argtypes = (ctypes.py_object, ctypes.c_int)
         sync_locals.restype = None
         sync_locals(frame, 0)
-    t3 = time.perf_counter()
-    install_continuous_clock(meta["clocks"])
-    meta["restore_phases"] = {"validate": round(t1 - t0, 3), "files": round(t2 - t1, 3),
-                              "load_and_apply": round(t3 - t2, 3)}
-    return meta
-
 
 _REAL_CLOCKS: dict[str, object] = {}
 _SHIFTED_CLOCKS: dict[str, object] = {}
@@ -4586,6 +4879,8 @@ def restore_point(frame, poc) -> bool:
         meta = restore(frame, Path(source), run_dir)
     except Exception as error:  # noqa: BLE001 - every failure is a refusal, never a partial state
         refuse_restored_setup(run_dir, error, source=source)
+    from kernel_shell_tool import invalidate_active_environment_identity
+    invalidate_active_environment_identity()
     _STATE["restored_step"] = meta["step"]
     _STATE["last_sends"] = meta["sends"]
     _record(run_dir, event="checkpoint_restored", step=meta["step"], sends=meta["sends"],

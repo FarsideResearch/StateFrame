@@ -87,6 +87,42 @@ def _bind_world_journal_sink(world, journal) -> None:
             if previous is not None:
                 previous(event) if callable(previous) else previous.append(event)
 
+    emit_batch = getattr(journal, "emit_batch", None)
+
+    def persist_source_observations(observations):
+        from kernel_measurement import canonical_bytes, profile_active_host_span
+
+        def flush(batch):
+            with profile_active_host_span("retained_context_subscribers"):
+                emit_batch(batch, atomic=True)
+
+        # Bound the amount staged for each durability barrier. A single large
+        # observation still follows the journal's ordinary record limits.
+        batch = []
+        size = 0
+        for observation in observations:
+            event_size = len(canonical_bytes(observation)) + 1
+            if batch and size + event_size > 512 * 1024:
+                flush(batch)
+                batch = []
+                size = 0
+            batch.append(("world_knowledge_event", {"event": observation}))
+            size += event_size
+        if batch:
+            flush(batch)
+
+    # Keep other sink subscribers on their original per-event contract.
+    if previous is None and callable(emit_batch):
+        def persist_source_observations_or_stop(observations):
+            try:
+                persist_source_observations(observations)
+            except Exception as error:
+                # The world projection is staged before append. Stop this run
+                # even if blob preparation failed before emit could poison it.
+                journal._poison(f"world knowledge batch append failed: {type(error).__name__}")
+                raise
+
+        setattr(persist, "persist_source_observations", persist_source_observations_or_stop)
     setattr(persist, _JOURNAL_SINK_MARKER, True)
     setattr(persist, "_stateframe_journal", journal)
     setattr(persist, "_stateframe_previous_sink", previous)

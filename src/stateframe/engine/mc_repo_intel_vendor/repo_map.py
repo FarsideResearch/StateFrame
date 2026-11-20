@@ -13,6 +13,7 @@ with a plain text fallback when neither is available.
 """
 
 import hashlib
+import json
 import logging
 import os
 import re
@@ -22,16 +23,19 @@ from pathlib import Path
 from kernel_obligation_assess import UnavailableEvidence
 
 from .ts_dispatch import outline_source
+from .ts_extract import is_tree_sitter_functional
 
 logger = logging.getLogger(__name__)
 
 # ── tree-sitter availability ──────────────────────────────────────────────────
 _TREE_SITTER_AVAILABLE = False
+_USES_LANGUAGE_PACK = False
 _get_parser = None
 
 try:
     from tree_sitter_language_pack import get_parser as _tslp_get_parser  # type: ignore[import]
     _get_parser = _tslp_get_parser
+    _USES_LANGUAGE_PACK = True
     _TREE_SITTER_AVAILABLE = True
     logger.debug("repo_map: using tree-sitter-language-pack")
 except ImportError:
@@ -183,15 +187,21 @@ _TEXT_SCAN = "text-scan fallback"
 _COMMIT_SHA_LOOKUP_FAILURE_REASON = "commit_sha_lookup_failed"
 
 
+def _parser_available() -> bool:
+    return _TREE_SITTER_AVAILABLE and (not _USES_LANGUAGE_PACK or is_tree_sitter_functional())
+
+
 def _outline_sigs(source: str, rel_path: str) -> tuple[list[str], str, str | None]:
     """Signatures for languages outside py/ts/js from the source outline, the mode it used, and why it degraded.
 
     ``ts_dispatch.outline_source`` parses with tree-sitter when a grammar is installed and falls back to its
     lexical scan otherwise; the reason is None unless a parser was available but failed."""
-    outline = outline_source(source, rel_path)
+    outline = outline_source(
+        source, rel_path, allow_tree_sitter=not _USES_LANGUAGE_PACK or _parser_available(),
+    )
     mode = "tree-sitter" if outline["parser"] == "tree-sitter" else _TEXT_SCAN
     reason = outline.get("degraded_reason")
-    failure = (str(reason) if _TREE_SITTER_AVAILABLE and mode != "tree-sitter"
+    failure = (str(reason) if _parser_available() and mode != "tree-sitter"
                and reason not in (None, "unsupported-language") else None)
     records = [(record, True) for record in outline["types"]]
     records.extend((record, False) for record in outline["functions"])
@@ -206,7 +216,9 @@ def _outline_sigs(source: str, rel_path: str) -> tuple[list[str], str, str | Non
     return sigs[:_MAX_SIGS_PER_FILE], mode, failure
 
 
-def _file_entry_with_mode(file_path: Path, repo_root: Path) -> tuple[str | None, str, str | None]:
+def _file_entry_with_mode(
+    file_path: Path, repo_root: Path, *, source_bytes: bytes | None = None,
+) -> tuple[str | None, str, str | None]:
     """Return a bounded entry, the mode that produced it, and the parser-failure reason (None if none).
 
     Python/TS/JS/Vue files keep their original rules exactly (files under 10 bytes and files with no
@@ -221,7 +233,8 @@ def _file_entry_with_mode(file_path: Path, repo_root: Path) -> tuple[str | None,
         stat = file_path.stat()
         if stat.st_size > _MAX_FILE_READ_BYTES or (scanned and stat.st_size < 10):
             return None, "", None
-        source_bytes = file_path.read_bytes()
+        if source_bytes is None:
+            source_bytes = file_path.read_bytes()
     except OSError:
         return None, "", None
 
@@ -236,8 +249,8 @@ def _file_entry_with_mode(file_path: Path, repo_root: Path) -> tuple[str | None,
             sigs, mode, failure = _outline_sigs(source, rel_path)
         except Exception as exc:  # noqa: BLE001 - the map is fail-open: list the file, record why
             sigs, mode = [], _TEXT_SCAN
-            failure = type(exc).__name__ if _TREE_SITTER_AVAILABLE else None
-    elif _TREE_SITTER_AVAILABLE and _get_parser is not None and ext != ".vue":
+            failure = type(exc).__name__ if _parser_available() else None
+    elif _TREE_SITTER_AVAILABLE and _get_parser is not None and ext != ".vue" and _parser_available():
         try:
             if ext == ".py":
                 sigs = _extract_python_sigs(source_bytes)
@@ -271,7 +284,9 @@ def _file_entry(file_path: Path, repo_root: Path) -> str | None:
 
 # ── Map generation ────────────────────────────────────────────────────────────
 
-def _generate_repo_map_with_stats(workspace_dir: str) -> tuple[str, dict]:
+def _generate_repo_map_with_stats(
+    workspace_dir: str, *, cache: dict | None = None, fresh: dict | None = None,
+) -> tuple[str, dict]:
     """Walk the workspace; return the map text and the modes actually used.
 
     The header names the mode only as it really happened: "tree-sitter" when every listed file was parsed,
@@ -298,7 +313,12 @@ def _generate_repo_map_with_stats(workspace_dir: str) -> tuple[str, dict]:
         if any(p in _SKIP_DIRS or p.endswith(".egg-info") for p in parts):
             continue
 
-        entry, mode, failure = _file_entry_with_mode(file_path, root)
+        if cache is not None and fresh is not None:
+            if file_path.is_symlink() or file_path.suffix.lower() not in _LANG_MAP:
+                continue
+            entry, mode, failure = _cached_map_entry(file_path, root, cache, fresh)
+        else:
+            entry, mode, failure = _file_entry_with_mode(file_path, root)
         if failure:
             reasons[failure] = reasons.get(failure, 0) + 1
         if entry:
@@ -329,6 +349,58 @@ def _generate_repo_map_with_stats(workspace_dir: str) -> tuple[str, dict]:
         mode += f", {stats['parse_failures']} parse failures"
     header = f"## Repository Map ({file_count} files, {mode})\n"
     return header + "\n".join(file_entries), stats
+
+
+def _cached_map_entry(file_path: Path, root: Path, cache: dict, fresh: dict) -> tuple:
+    from .call_graph import _hash_bytes
+
+    try:
+        with file_path.open("rb") as source:
+            data = source.read(_MAX_FILE_READ_BYTES + 1)
+    except OSError:
+        return None, "", None
+    if len(data) > _MAX_FILE_READ_BYTES:
+        return None, "", None
+    relative = file_path.relative_to(root).as_posix()
+    digest = _hash_bytes(data)
+    row = cache.get(relative)
+    if (isinstance(row, list) and len(row) == 4 and row[0] == digest
+            and all(item is None or isinstance(item, str) for item in row[1:])
+            and isinstance(row[2], str)):
+        entry = tuple(row[1:])
+    else:
+        entry = _file_entry_with_mode(file_path, root, source_bytes=data)
+    fresh[relative] = [digest, *entry]
+    return entry
+
+
+def background_map(root: Path) -> tuple[str, dict] | None:
+    """Get the current map or schedule blob-keyed extraction off-thread."""
+    from . import background
+    from .call_graph import _atomic_write_text
+
+    def work(publish, current):
+        cache_path = background.cache_file(root, "map.json")
+        parser = "tree-sitter" if _parser_available() else _TEXT_SCAN
+        try:
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+        except (OSError, RecursionError, UnicodeError, ValueError):
+            cached = {}
+        cache = {}
+        if isinstance(cached, dict) and cached.get("parser") == parser:
+            rows = cached.get("files")
+            if isinstance(rows, dict):
+                cache = rows
+        fresh: dict = {}
+        result = _generate_repo_map_with_stats(str(root), cache=cache, fresh=fresh)
+        if current():
+            try:
+                _atomic_write_text(cache_path, json.dumps({"parser": parser, "files": fresh}))
+            except OSError as error:
+                logger.debug("Background repository map cache write failed: %s", type(error).__name__)
+            publish(result)
+
+    return background.request(root.absolute(), "map", work)
 
 
 def _generate_repo_map(workspace_dir: str) -> str:

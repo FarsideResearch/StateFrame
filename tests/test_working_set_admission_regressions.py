@@ -181,8 +181,8 @@ def test_two_reads_reserve_complete_fixed_layout(tmp_path, monkeypatch, freeze_f
         baseline = live.read_admission_snapshot(rt,
             [{"role": "user", "content": "[StateFrame]\n{}"}], byte_cap=cap)
     assert "x" * 45_000 in json.loads(baseline.fixed_body)["messages"][0]["content"]
-    # Reading first.py can promote it to the next edit site, making its older
-    # resident range FULL-only too. Price that dependent protection before capture.
+    # The fresh read overlaps the older resident range, so admission still
+    # reserves the older range in this fixture.
     from dataclasses import replace
     baseline = replace(baseline, protected_paths=(), deferred_paths=("docs/context.md",))
     from kernel_working_set_allocator import DEFERRED
@@ -197,7 +197,11 @@ def test_two_reads_reserve_complete_fixed_layout(tmp_path, monkeypatch, freeze_f
     over_cap = read_admission_floor(baseline, proposals)
     assert len(over_cap.wire) > cap
     assert sum(slot.state == "DUE" for slot in over_cap.certificate.snapshot.sources) == 2
-    assert set(contents) <= set(over_cap.certificate.snapshot.protected_paths)
+    assert over_cap.certificate.snapshot.protected_paths == ()
+    assert set(over_cap.certificate.snapshot.protected_ranges) == {
+        (slot.identity.path, slot.identity.first_line, slot.identity.last_line)
+        for slot, _ in proposals
+    }
     revisions = dict(over_cap.certificate.snapshot.current_revisions)
     assert all(revisions.get(slot.identity.path) == slot.identity.revision for slot, _ in proposals)
     facts = "\n".join(row["content"] for row in json.loads(over_cap.wire)["messages"]

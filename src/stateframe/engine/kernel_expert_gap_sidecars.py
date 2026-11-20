@@ -619,7 +619,7 @@ def _timeline(runtime: object) -> str | None:
         return None
 
 
-def blocks(runtime: object) -> list[str]:
+def blocks(runtime: object, *, first_request: bool = False) -> list[str]:
     result: list[str] = []
     try:
         from kernel_lifecycle_table import runtime_table
@@ -627,7 +627,13 @@ def blocks(runtime: object) -> list[str]:
         from kernel_state_owner_inventory import render as render_inventory
         from kernel_state_owner_inventory import runtime_inventory
         first = not hasattr(runtime, "_state_owner_inventory")
-        inventory = runtime_inventory(runtime)
+        if first_request:
+            from kernel_parse_cache import gc_paused
+
+            with gc_paused():
+                inventory = runtime_inventory(runtime)
+        else:
+            inventory = runtime_inventory(runtime)
         if inventory is not None:
             result.append(render_inventory(inventory))
             if first:
@@ -638,7 +644,13 @@ def blocks(runtime: object) -> list[str]:
             if first:
                 _emit(runtime, "lifecycle_state_table", rendered=True)
         observe(runtime)
-        role = runtime_role(runtime)
+        if first_request:
+            # All three panels share the same validated inventory observation.
+            # In particular, the row role needs only its authoritative count.
+            writers = inventory.writer_count if inventory is not None and inventory.complete else None
+            role = runtime_role(runtime, owner_writers=writers)
+        else:
+            role = runtime_role(runtime)
         if role != getattr(runtime, "_row_role_last", None):
             try:
                 runtime._row_role_last = role

@@ -2005,6 +2005,20 @@ def _apply_budget_with_diet(
         tokenizer_endpoint: str | None = None,
 ) -> dict[str, object]:
     """Trim tools first, diet messages second, then validate the stage ceiling."""
+    fit_options = {}
+    if (runtime is not None and os.environ.get("STATEFRAME_WORKSPACE_OBJECTS") == "on"
+            and os.environ.get("STATEFRAME_TURN_INDEXED_READS") == "on"):
+        from kernel_request_source_window import SourceFit
+        fit_options["source_fit"] = SourceFit()
+
+    def bind_sources(max_request_bytes: int):
+        from capability_request_preflight import bound_runtime_sources
+
+        return bound_runtime_sources(
+            body["messages"], runtime, max_request_bytes=max_request_bytes,
+            tools=body["tools"], **fit_options,
+        )
+
     destination_body = body
     frame_candidate = _frame_only_runtime(runtime)
     if frame_candidate:
@@ -2038,12 +2052,7 @@ def _apply_budget_with_diet(
         # taking its immutable snapshot, rather than consuming the prior turn's
         # closure alongside freshly rendered source bytes. Recovery overrides
         # remain frozen and still fail the ordinary freshness checks.
-        from capability_request_preflight import bound_runtime_sources
-        source_result = bound_runtime_sources(
-            body["messages"], runtime,
-            max_request_bytes=stage_budget(stage).max_request_bytes,
-            tools=body["tools"],
-        )
+        source_result = bind_sources(stage_budget(stage).max_request_bytes)
         if isinstance(source_result, UnavailableEvidence):
             if capture is not None:
                 _mark_budget_unavailable(capture, source_result)
@@ -2158,12 +2167,7 @@ def _apply_budget_with_diet(
     owner_first_plan: dict[str, object] | None = None
     owner_requested_paths: tuple[str, ...] = ()
     if runtime is not None:
-        from capability_request_preflight import bound_runtime_sources
-        source_result = bound_runtime_sources(
-            body["messages"], runtime,
-            max_request_bytes=selected_budget.max_request_bytes,
-            tools=body["tools"],
-        )
+        source_result = bind_sources(selected_budget.max_request_bytes)
         if isinstance(source_result, UnavailableEvidence):
             if capture is not None:
                 _mark_budget_unavailable(capture, source_result)
@@ -2255,12 +2259,7 @@ def _apply_budget_with_diet(
             if capture is not None:
                 setattr(capture, "request_budget_owner_reexpanded", _reexpanded)
             if runtime is not None:
-                from capability_request_preflight import bound_runtime_sources
-                rebound = bound_runtime_sources(
-                    body["messages"], runtime,
-                    max_request_bytes=HARD_MAX_REQUEST_BYTES,
-                    tools=body["tools"],
-                )
+                rebound = bind_sources(HARD_MAX_REQUEST_BYTES)
                 if isinstance(rebound, UnavailableEvidence):
                     if capture is not None:
                         _mark_budget_unavailable(capture, rebound)
@@ -2293,15 +2292,8 @@ def _apply_budget_with_diet(
         if capture is not None:
             setattr(capture, "request_budget_owner_reexpanded", _reexpanded_owner_blocks)
         if runtime is not None:
-            from capability_request_preflight import bound_runtime_sources
-            # Menu/prose compaction changes available bytes.  Re-fit source
-            # windows from authoritative files so an old small page is not
-            # treated as complete merely because it fit an earlier budget.
-            rebound = bound_runtime_sources(
-                body["messages"], runtime,
-                max_request_bytes=selected_budget.max_request_bytes,
-                tools=body["tools"],
-            )
+            # The diet and menu can change the space available for each window.
+            rebound = bind_sources(selected_budget.max_request_bytes)
             if isinstance(rebound, UnavailableEvidence):
                 if capture is not None:
                     _mark_budget_unavailable(capture, rebound)
@@ -2365,12 +2357,7 @@ def _apply_budget_with_diet(
             max_request_bytes=HARD_MAX_REQUEST_BYTES,
         )
         if runtime is not None:
-            from capability_request_preflight import bound_runtime_sources
-            source_result = bound_runtime_sources(
-                body["messages"], runtime,
-                max_request_bytes=HARD_MAX_REQUEST_BYTES,
-                tools=body["tools"],
-            )
+            source_result = bind_sources(HARD_MAX_REQUEST_BYTES)
             if isinstance(source_result, UnavailableEvidence):
                 if capture is not None:
                     _mark_budget_unavailable(capture, source_result)

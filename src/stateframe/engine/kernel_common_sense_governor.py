@@ -8,6 +8,7 @@ effect, and unknown policy instead of becoming another prose advisor.
 """
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import os
@@ -15,6 +16,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 from kernel_done_acceptance import done_accepted
 from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 
@@ -292,20 +294,26 @@ def _binding(runtime: object) -> Mapping[str, object]:
     return value if isinstance(value, Mapping) else {}
 
 
-def _paths(value: object) -> tuple[str, ...]:
+def _path_items(value: object) -> tuple[object, ...]:
     if isinstance(value, str):
-        values = (value,)
-    elif isinstance(value, Mapping):
-        values = tuple(value)
-    elif isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
-        values = tuple(value)
-    else:
-        return ()
+        return (value,)
+    if isinstance(value, Mapping):
+        return tuple(value)
+    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+        return tuple(value)
+    return ()
+
+
+def _paths(value: object, text: Callable[[str], str] | None = None) -> tuple[str, ...]:
     result: list[str] = []
-    for item in values:
-        path = str(item).strip().replace("\\", "/")
-        if path and path not in result and not path.startswith("<"):
-            result.append(path.split(":", 1)[0])
+    seen: set[str] = set()
+    for item in _path_items(value):
+        raw = str(item)
+        path = text(raw) if text is not None else raw.strip().replace("\\", "/")
+        if path and path not in seen and not path.startswith("<"):
+            name = path.split(":", 1)[0]
+            seen.add(name)
+            result.append(name)
     return tuple(sorted(result))
 
 
@@ -460,14 +468,11 @@ def _scope_blockers(
     return tuple(blockers[:MAX_SCOPE_ITEMS])
 
 
+_BINDING_PATH_KEYS = ("product_files", "files", "source_files", "harness_files")
+
+
 def _binding_paths(binding: Mapping[str, object]) -> tuple[str, ...]:
-    values: list[str] = []
-    for key in ("product_files", "files", "source_files", "harness_files"):
-        candidate = binding.get(key)
-        for path in _paths(candidate):
-            if path not in values:
-                values.append(path)
-    return tuple(sorted(values))
+    return tuple(sorted({path for key in _BINDING_PATH_KEYS for path in _paths(binding.get(key))}))
 
 
 def _changed_from_bindings(record: Mapping[str, object]) -> tuple[str, ...]:
@@ -517,14 +522,36 @@ def _changed_paths(runtime: object) -> tuple[str, ...]:
 
 
 def _available_paths(runtime: object, binding: Mapping[str, object]) -> tuple[str, ...]:
-    values = list(_binding_paths(binding))
+    from kernel_request_source_window import project_workspace_paths
+
+    snapshot_paths = []
     snapshots = getattr(runtime, "source_snapshots", ())
     if isinstance(snapshots, Sequence) and not isinstance(snapshots, (str, bytes, bytearray)):
         for snapshot in snapshots:
             if isinstance(snapshot, Mapping):
                 path = str(snapshot.get("target", snapshot.get("path", ""))).strip()
-                if path and path not in values:
-                    values.append(path)
+                if path:
+                    snapshot_paths.append(path)
+    snapshot_key = tuple(snapshot_paths)
+
+    def project(facts):
+        inputs = tuple(
+            tuple(item if type(item) is str else str(item) for item in _path_items(binding.get(key)))
+            for key in _BINDING_PATH_KEYS
+        )
+
+        def build() -> tuple[str, ...]:
+            names = set(snapshot_key)
+            for group in inputs:
+                names.update(_paths(group, facts.text))
+            return tuple(sorted(names))
+
+        return facts.scope("governor", (inputs, snapshot_key), build)
+
+    projected = project_workspace_paths(runtime, project)
+    if projected:
+        return projected
+    values = set(_binding_paths(binding)).union(snapshot_key) if projected is None else set()
     owner = getattr(runtime, "owner", None)
     root_value = getattr(owner, "root", None)
     if not values and root_value is not None:
@@ -537,25 +564,30 @@ def _available_paths(runtime: object, binding: Mapping[str, object]) -> tuple[st
                     continue
                 relative = path.relative_to(root).as_posix()
                 if relative not in values and not relative.startswith("backups/"):
-                    values.append(relative)
+                    values.add(relative)
         except (OSError, RuntimeError, TypeError, ValueError):
             pass
     return tuple(sorted(values))
 
 
 def _named_paths(clause: str, available: Sequence[str]) -> tuple[str, ...]:
+    return _match_named_paths(clause, tuple(available))
+
+
+@functools.lru_cache(maxsize=16)
+def _match_named_paths(clause: str, available: tuple[str, ...]) -> tuple[str, ...]:
     text = clause.casefold()
-    matches: list[str] = []
+    matches: set[str] = set()
     for match in _PATH_RE.findall(clause):
         path = match.split(":", 1)[0]
-        if path in available and path not in matches:
-            matches.append(path)
+        if path in available:
+            matches.add(path)
     for path in available:
         name = Path(path).stem.casefold()
         if len(name) < 3:
             continue
-        if re.search(rf"(?<![a-z0-9]){re.escape(name)}(?![a-z0-9])", text) and path not in matches:
-            matches.append(path)
+        if re.search(rf"(?<![a-z0-9]){re.escape(name)}(?![a-z0-9])", text):
+            matches.add(path)
     return tuple(sorted(matches))
 
 

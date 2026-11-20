@@ -16,9 +16,19 @@ import difflib
 import hashlib
 import json
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING, TypeVar
+from weakref import WeakKeyDictionary
+
+if TYPE_CHECKING:
+    from kernel_verdict_identity import RunIdentity, RunIdentityProvider
+    from kernel_workspace_consumers import WorkspaceConsumers
+    from kernel_workspace_tree import File, Symlink
+
+
+_T = TypeVar("_T")
 
 
 MODE_ENV = "STATEFRAME_HOST_DONE_FACTS"
@@ -187,6 +197,123 @@ def _snapshot_revision(snapshot: Mapping[str, object]) -> str:
     rows = [(str(path), hashlib.sha256(_content_bytes(content)).hexdigest())
             for path, content in sorted(snapshot.items(), key=lambda item: str(item[0]))]
     return "workspace:" + _digest(rows)
+
+
+@dataclass
+class _PinnedCompletion:
+    tree_digest: bytes
+    files: tuple[tuple[str, File | Symlink], ...]
+    identities: dict[tuple[Path, ...], str] = field(default_factory=dict)
+    baseline: Mapping[str, object] | None = None
+    facts: tuple[tuple[FileDelta, ...], str | None] | None = None
+
+
+_PROJECTIONS: WeakKeyDictionary[WorkspaceConsumers, _PinnedCompletion] = WeakKeyDictionary()
+
+
+def _pin_completion(
+        root: Path, boundary: str, project: Callable[[_PinnedCompletion], _T],
+) -> _T | None:
+    """Project the full registered workspace under its live reader fence."""
+    from kernel_workspace_consumers import consumers_for
+    from kernel_workspace_state import WorkspaceUnavailable
+    from kernel_workspace_tree import Directory, File, Symlink, children
+
+    consumers = consumers_for(root)
+    if consumers is None:
+        return None
+    state = consumers.state
+    with state.pin(boundary) as observation:
+        # The fallback uses the original filesystem scope if the pinned tree
+        # excludes private storage or cannot attest to externally linked files.
+        if ((state._home is not None and state._home.is_relative_to(state.fence.root))
+                or state._blocked or state._external_links):
+            return None
+        projection = _PROJECTIONS.get(consumers)
+        if projection is None or projection.tree_digest != observation.tree.digest:
+            files = []
+            pending = [("", observation.tree)]
+            while pending:
+                prefix, directory = pending.pop()
+                for name, entry in children(directory):
+                    path = prefix + os.fsdecode(name)
+                    if isinstance(entry, Directory):
+                        pending.append((path + "/", entry))
+                    elif isinstance(entry, (File, Symlink)):
+                        files.append((path, entry))
+            projection = _PinnedCompletion(observation.tree.digest, tuple(sorted(files, key=lambda row: row[0])))
+            _PROJECTIONS[consumers] = projection
+        result = project(projection)
+        if not observation.validate_for_use(boundary):
+            raise WorkspaceUnavailable("completion workspace observation changed")
+        return result
+
+
+def completion_workspace_generation(root: Path) -> bytes | None:
+    return _pin_completion(root, "completion-verdict", lambda projection: projection.tree_digest)
+
+
+def pinned_run_identity(provider: RunIdentityProvider) -> tuple[bytes, RunIdentity] | None:
+    """Reproduce the legacy run identity from matching pinned file metadata."""
+    from kernel_verdict_identity import RunIdentity, _canonical as identity_bytes, _ignored, _sha256
+    from kernel_workspace_tree import File
+
+    def project(projection):
+        excluded = provider.excluded_paths
+        digest = projection.identities.get(excluded)
+        if digest is None:
+            rows = []
+            for path, entry in projection.files:
+                if _ignored(Path(path)):
+                    continue
+                if any((provider.root / path).is_relative_to(item) for item in excluded):
+                    continue
+                if isinstance(entry, File):
+                    rows.append({"path": path, "kind": "file", "mode": entry.mode,
+                                 "size": entry.size, "sha256": "sha256:" + entry.sha256.hex()})
+                else:
+                    rows.append({"path": path, "kind": "symlink",
+                                 "target": os.fsdecode(entry.target)})
+            digest = _sha256(identity_bytes({"schema": "stateframe-workspace-tree/1", "files": rows}))
+            if len(projection.identities) >= 4:
+                projection.identities.clear()
+            projection.identities[excluded] = digest
+        return projection.tree_digest, RunIdentity(
+            provider.run_id, digest, provider.release_id, provider.harness_version)
+
+    return _pin_completion(provider.root, "completion-identity", project)
+
+
+def _pinned_done_workspace(
+        root: Path, baseline: Mapping[str, object], *, needs_revision: bool,
+) -> tuple[tuple[FileDelta, ...], str | None] | None:
+    from kernel_workspace_state import WorkspaceUnavailable
+    from kernel_workspace_tree import File
+
+    def project(projection):
+        if (projection.baseline is baseline and projection.facts is not None
+                and (not needs_revision or projection.facts[1] is not None)):
+            return projection.facts
+        after = {path: entry.sha256.hex() for path, entry in projection.files
+                 if isinstance(entry, File) and not _path_is_ignored(Path(path))}
+        before = {str(path): _content_bytes(content) for path, content in baseline.items()}
+        changed = {path for path, content in before.items()
+                   if hashlib.sha256(content).hexdigest() != after.get(path)}
+        changed.update(after.keys() - before.keys())
+        current_changes = {}
+        for path in sorted(changed & after.keys()):
+            content = (root / path).read_bytes()
+            if hashlib.sha256(content).hexdigest() != after[path]:
+                raise WorkspaceUnavailable("completion file changed during pinned read")
+            current_changes[path] = content
+        deltas = diff_snapshots({path: before[path] for path in changed & before.keys()},
+                                current_changes)
+        revision = "workspace:" + _digest(sorted(after.items())) if needs_revision else None
+        projection.baseline = baseline
+        projection.facts = (deltas, revision)
+        return projection.facts
+
+    return _pin_completion(root, "completion-diff", project)
 
 
 def _revision(value: object) -> str | None:
@@ -612,6 +739,7 @@ def compute_done_facts(
     unresolved_gating_items: Sequence[object] = (),
     claims: object = None,
     runner_evidence: Mapping[str, object] | None = None,
+    pinned_baseline: bool = False,
 ) -> DoneFacts:
     """Build facts solely from a workspace snapshot and typed host receipts.
 
@@ -628,15 +756,27 @@ def compute_done_facts(
         unresolved_gating_items = _sequence(evidence.get("unresolved_gating_items"))
     if claims is None and "claims" in evidence:
         claims = evidence.get("claims")
-    after = workspace_snapshot(root)
     if baseline is None:
         before: Mapping[str, object] = {}
     elif isinstance(baseline, (str, os.PathLike)):
         before = workspace_snapshot(baseline)
     else:
         before = baseline
-    deltas = diff_snapshots(before, after)
-    revision = _revision(current_revision) or _snapshot_revision(after)
+    revision = _revision(current_revision)
+    pinned = None
+    if pinned_baseline:
+        try:
+            pinned = _pinned_done_workspace(Path(root), before, needs_revision=revision is None)
+        except (OSError, ValueError):
+            # Preserve legacy snapshot behavior for roots or paths the fence cannot admit.
+            pass
+    if pinned is None:
+        after = workspace_snapshot(root)
+        deltas = diff_snapshots(before, after)
+        revision = revision or _snapshot_revision(after)
+    else:
+        deltas, snapshot_revision = pinned
+        revision = revision or snapshot_revision
     required = _unique_text(required_public_tests)
     if not required:
         required = _unique_text(public_tests)

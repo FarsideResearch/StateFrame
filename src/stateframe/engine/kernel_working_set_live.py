@@ -474,10 +474,13 @@ def read_admission_floor(snapshot, pages=(), *, require_feasible=False, measure=
     body = json.loads(snapshot.fixed_body)
     sources = list(snapshot.sources)
     protected = set(snapshot.protected_paths)
+    protected_ranges = set(snapshot.protected_ranges)
     revisions = dict(snapshot.current_revisions)
     for slot, call_id in pages:
         sources.append(slot)
-        protected.add(slot.identity.path)
+        identity = slot.identity
+        if identity.path not in protected:
+            protected_ranges.add((identity.path, identity.first_line, identity.last_line))
         # The proposed page is a positive current-revision observation. Include
         # its host fact even for paths absent from the previous source plan.
         revisions[slot.identity.path] = slot.identity.revision
@@ -485,12 +488,10 @@ def read_admission_floor(snapshot, pages=(), *, require_feasible=False, measure=
                         if row.get("role") == "tool" and row.get("tool_call_id") == call_id), None)
         if carrier is not None:
             carrier["content"] = slot.page
-    # A successful read can become the next edit site. Preparation then pins
-    # every known range of that path, not just the fresh FULL-only page. Reserve
-    # all proposed paths together so a later read cannot spend that protection
-    # twice or activate older/closure ranges outside the measured floor.
+    # Price all promised ranges together. Pending edits retain the path-level
+    # protection already present on the snapshot.
     trial = replace(snapshot, fixed_body=json.dumps(body).encode(), sources=tuple(sources),
-                    protected_paths=tuple(sorted(protected)),
+                    protected_ranges=tuple(sorted(protected_ranges)),
                     current_revisions=tuple(sorted(revisions.items())))
     _, floor = _minimum_completion(trial, tuple(propose_slots(trial)))
     verify_certificate(floor.wire, floor.certificate)

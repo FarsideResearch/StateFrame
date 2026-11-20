@@ -16,7 +16,7 @@ import copy
 import hashlib
 import os
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 import kernel_named_layer_coverage as _layers
@@ -234,10 +234,13 @@ def coverage_report(ticket: object, root: Path, *,
                     behavior_witnesses: object = ()) -> dict[str, object]:
     text = _layers.public_ticket(ticket)
     root = Path(root).resolve()
-    start = (snapshot_workspace(root) if start_snapshot is None
-             else normalise_snapshot(start_snapshot))
-    current = (snapshot_workspace(root) if current_snapshot is None
-               else normalise_snapshot(current_snapshot))
+    if _layers.projection_for_snapshot(root, current_snapshot) is not None:
+        start, current = start_snapshot, current_snapshot
+    else:
+        start = (snapshot_workspace(root) if start_snapshot is None
+                 else normalise_snapshot(start_snapshot))
+        current = (snapshot_workspace(root) if current_snapshot is None
+                   else normalise_snapshot(current_snapshot))
     layer_report = _layers.build_report(
         text, root, start_snapshot=start, current_snapshot=current,
         public_tests=public_tests)
@@ -320,7 +323,8 @@ def _emit(runtime: object, kind: str, **fields: object) -> None:
         emit(kind, producer="kernel_false_completion", dispatch=False, **fields)
 
 
-def initialise(runtime: object, *, resume: object = None) -> None:
+def initialise(runtime: object, *, resume: object = None,
+               snapshot: Callable[[Path], dict[str, str | None]] | None = None) -> None:
     owner = getattr(runtime, "owner", None)
     root = Path(getattr(owner, "root", "."))
     restored = None
@@ -332,7 +336,7 @@ def initialise(runtime: object, *, resume: object = None) -> None:
                 restored = normalise_snapshot(event["start_snapshot"])
                 break
     if restored is None:
-        restored = snapshot_workspace(root)
+        restored = (snapshot or snapshot_workspace)(root)
         _emit(runtime, "false_completion_started",
               start_file_count=len(restored), start_snapshot=copy.deepcopy(restored))
     setattr(runtime, "_false_completion_start_snapshot", restored)

@@ -59,6 +59,19 @@ from kernel_launch_identity_cost import (
     reasoning_profile,
 )
 
+if __package__:
+    from .kernel_turn_work_counters import (
+        WorkCounters,
+        activate_work_counters,
+        deactivate_work_counters,
+    )
+else:
+    from kernel_turn_work_counters import (
+        WorkCounters,
+        activate_work_counters,
+        deactivate_work_counters,
+    )
+
 REQUEST_FINAL_WIRE_PREPARED_SCHEMA = "stateframe-request-final-wire-prepared/1"
 REQUEST_BODY_SCHEMA = "stateframe-request-body/1"
 _PROBE_DESTINATION_SCHEMA = "stateframe-probe-destination/1"
@@ -1346,7 +1359,9 @@ class TurnTimingRecorder:
             provider_ns = max(0, int(event.get("elapsed_ns", 0) or 0))
         except (TypeError, ValueError):
             provider_ns = 0
+        counters = WorkCounters()
         with self._lock:
+            previous = self._open
             self._open = {
                 "request_id": event.get("request_id"),
                 "step": event.get("step"),
@@ -1354,7 +1369,13 @@ class TurnTimingRecorder:
                 "started_ns": time.perf_counter_ns(),
                 "spans": [],
                 "manual": [],
+                "work_counters": counters,
             }
+        if previous is not None:
+            previous_counters = previous.get("work_counters")
+            if isinstance(previous_counters, WorkCounters):
+                deactivate_work_counters(previous_counters)
+        activate_work_counters(counters)
 
     @contextmanager
     def measure(self, name: str):
@@ -1388,6 +1409,9 @@ class TurnTimingRecorder:
         with self._lock:
             interval = self._open
             self._open = None
+        counters = interval.get("work_counters") if interval is not None else None
+        if isinstance(counters, WorkCounters):
+            deactivate_work_counters(counters)
         if interval is None:
             return None
         if not turn_timing_enabled():
@@ -1448,7 +1472,7 @@ class TurnTimingRecorder:
             breakdown[name] = breakdown.get(name, 0) + duration
         steps_sum_ns = sum(buckets.values())
         next_request_id = event.get("request_id") if isinstance(event, Mapping) else None
-        return {
+        result = {
             "producer": "kernel_measurement",
             "request_id": interval.get("request_id"),
             "next_request_id": next_request_id,
@@ -1465,6 +1489,9 @@ class TurnTimingRecorder:
                 abs(wall_gap_ns - steps_sum_ns) <= max(1, wall_gap_ns * 0.05)),
             "dispatch": False,
         }
+        if isinstance(counters, WorkCounters):
+            result["work_counters"] = counters.snapshot()
+        return result
 
 
 @contextmanager
@@ -3456,14 +3483,19 @@ class RequestCapture:
             guard_physical_send(self, getattr(self, "_wire_truth_runtime", None), body, wire,
                                 dialect=provider_dialect)
             sealed = self.qualified_request
+            # A seal forces primary classification. The adjacent guard has
+            # already checked its body, live authority and bound host gate.
+            bounded_seal = (sealed is not None
+                            and os.environ.get("STATEFRAME_TURN_BOUNDED_QUALIFICATION") == "on")
             if sealed is not None:
                 from kernel_request_seal import RequestSealError, log_seal_violation
-                sealed.validate(self, self._wire_truth_runtime, body)
+                if not bounded_seal:
+                    sealed.validate(self, self._wire_truth_runtime, body)
                 from kernel_request_kind import gate_required
                 if wire != sealed.wire or (gate_required(self) and not self._qualified_request_gate_passed):
                     log_seal_violation("transport retry lacks the exact qualified wire")
                     raise RequestSealError("transport retry lacks the exact qualified wire")
-            if json.dumps(body).encode() != wire:
+            if not bounded_seal and json.dumps(body).encode() != wire:
                 first_wire = getattr(self, "_one_snapshot_first_wire", None)
                 if _record_retry_disagreement(
                         "transport_body_wire", "BYTES_CHANGED", wire):

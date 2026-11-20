@@ -43,11 +43,14 @@ def provision(options, run_dir: Path, spec: dict) -> None:
                                          {str(Path(p).resolve(strict=True)) for p in settings.shell_read})
     if settings.run_env and settings.shell != "off":
         source = spec.setdefault("run_env_source_python", options._test_python)
+        workspace_objects = spec.get("environment", {}).get("STATEFRAME_WORKSPACE_OBJECTS") == "on"
         try:
             environment = create_run_env(
                 run_dir, Path(source), source_repo=Path(spec["repo"]),
                 authorized_read_roots=tuple(Path(path).resolve(strict=True) for path in settings.shell_read),
-                allow_source_tree=getattr(options, "allow_source_tree", False))
+                allow_source_tree=getattr(options, "allow_source_tree", False),
+                # Object checkpoint trees cannot retain hardlinks that reach outside the run.
+                allow_seed_hardlinks=not workspace_objects)
         except RunEnvError as error:
             print(f"run environment off: {error}; dependency installs will not persist for checks",
                   file=sys.stderr)

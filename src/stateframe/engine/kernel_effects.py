@@ -8,10 +8,10 @@ import json
 import os
 import stat
 import tempfile
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
-from typing import BinaryIO, Callable, Iterator, Literal, Mapping, Protocol, TextIO
+from typing import BinaryIO, Callable, Iterable, Iterator, Literal, Mapping, Protocol, TextIO
 
 
 MAX_FILE_BYTES = 16 << 20
@@ -420,24 +420,33 @@ class Effect:
     after: Entry | None
 
 
+def classify_effect(path: str, old: Entry | None, new: Entry | None) -> Effect | None:
+    if old == new:
+        return None
+    if old is None:
+        change = "created"
+    elif new is None:
+        change = "deleted"
+    elif old.kind != new.kind:
+        change = "type"
+    elif old.digest != new.digest or old.size != new.size:
+        change = "modified"
+    else:
+        change = "mode"
+    return Effect(path, change, old, new)
+
+
 def diff(before: Manifest, after: Manifest) -> list[Effect]:
     effects = []
     for path in sorted(before.keys() | after.keys()):
-        old, new = before.get(path), after.get(path)
-        if old == new:
-            continue
-        if old is None:
-            change = "created"
-        elif new is None:
-            change = "deleted"
-        elif old.kind != new.kind:
-            change = "type"
-        elif old.digest != new.digest or old.size != new.size:
-            change = "modified"
-        else:
-            change = "mode"
-        effects.append(Effect(path, change, old, new))
+        effect = classify_effect(path, before.get(path), after.get(path))
+        if effect is not None:
+            effects.append(effect)
     return effects
+
+
+class EffectReader(Protocol):
+    def get(self, digest: str) -> bytes: ...
 
 
 class EffectPolicy(Protocol):
@@ -680,8 +689,8 @@ def _restore(
     root: Path,
     relative: str,
     before: Manifest,
-    store: ContentStore,
-    baseline_store: ContentStore | BaselineStore | None,
+    store: EffectReader,
+    baseline_store: EffectReader | None,
     policy: EffectPolicy,
 ) -> None:
     target = _safe_path(root, relative)
@@ -761,9 +770,43 @@ def reconcile(
 ) -> Reconciliation:
     _validate_manifest_limits(before)
     _validate_manifest_limits(after)
-    effects = diff(before, after)
+
+    def observe_final() -> Manifest:
+        included = before.keys() | after.keys()
+        prefixes = {
+            str(parent)
+            for path in included
+            for parent in PurePosixPath(path).parents
+            if str(parent) != "."
+        }
+        return scan(
+            Path(workspace),
+            exclude=lambda path: path not in included and path not in prefixes,
+        )
+
+    result = reconcile_effects(
+        workspace, before, after, policy, store, baseline_store,
+        changes=diff(before, after), observe_final=observe_final,
+    )
+    store.capture(Path(workspace), result.manifest)
+    return result
+
+
+def reconcile_effects(
+    workspace: Path,
+    before: Manifest,
+    after: Manifest,
+    policy: EffectPolicy,
+    store: EffectReader,
+    baseline_store: EffectReader | None,
+    *,
+    changes: Iterable[Effect],
+    observe_final: Callable[[], Manifest],
+    restore_scope: Callable[[list[str]], AbstractContextManager[None]] = lambda _: nullcontext(),
+) -> Reconciliation:
+    """Apply legacy effect policy and verify compensation before publication."""
     decisions = []
-    for effect in effects:
+    for effect in changes:
         decision = policy.authorize(effect)
         if (decision[0] and isinstance(policy, WorkspaceEffectPolicy)
                 and policy.collection_guard is not None
@@ -818,25 +861,17 @@ def reconcile(
             roots.append(candidate)
     failures = []
     failure_details = []
-    for path in roots:
-        try:
-            _restore(Path(workspace), path, before, store, baseline_store, policy)
-        except (OSError, EffectError) as error:
-            failures.append(path)
-            failure_details.append(f"{path}: {error}")
+    if roots:
+        with restore_scope(roots):
+            for path in roots:
+                try:
+                    _restore(Path(workspace), path, before, store, baseline_store, policy)
+                except (OSError, EffectError) as error:
+                    failures.append(path)
+                    failure_details.append(f"{path}: {error}")
     if failures:
         raise EffectRestoreError(failures, failure_details)
-    included = before.keys() | after.keys()
-    prefixes = {
-        str(parent)
-        for path in included
-        for parent in PurePosixPath(path).parents
-        if str(parent) != "."
-    }
-    final = scan(
-        Path(workspace),
-        exclude=lambda path: path not in included and path not in prefixes,
-    )
+    final = observe_final()
     for effect, _ in denied:
         expected = before.get(effect.path)
         if (
@@ -849,7 +884,6 @@ def reconcile(
             failures.append(effect.path)
     if failures:
         raise EffectRestoreError(failures)
-    store.capture(Path(workspace), final)
     applied = []
     for effect, allowed, _ in decisions:
         if allowed:

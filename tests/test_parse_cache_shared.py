@@ -103,11 +103,11 @@ def test_count_backstop_and_clear_release_byte_accounting(
 ) -> None:
     monkeypatch.setattr(cache, "MAX_TREES", 2)
     for index in range(3):
-        cache.parse("", f"empty_{index}.py")
+        cache.parse("\n" * index, f"empty_{index}.py")
     assert cache.stats()["trees"] == 2
-    assert cache.stats()["tree_source_bytes"] == 0
+    assert cache.stats()["tree_source_bytes"] == 3
     cache.parse("x = 1\n", "nonempty.py")
-    assert cache.stats()["tree_source_bytes"] == 6
+    assert cache.stats()["tree_source_bytes"] == 8
     cache.clear()
     assert cache.stats()["trees"] == 0
     assert cache.stats()["tree_source_bytes"] == 0
@@ -162,10 +162,10 @@ def test_parse_failures_keep_error_details_and_byte_accounting(source: str) -> N
     assert cache.stats()["tree_source_bytes"] == 0
 
 
-def test_content_change_and_filename_remain_distinct_keys() -> None:
+def test_valid_trees_share_content_across_filenames() -> None:
     first = cache.parse("value = 1\n", "one.py")
     changed = cache.parse("value = 2\n", "one.py")
     other = cache.parse("value = 1\n", "two.py")
     assert changed is not first
-    assert other is not first
+    assert other is first
     assert cache.parse("value = 1\n", "one.py") is first

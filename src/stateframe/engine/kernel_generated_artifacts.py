@@ -4,11 +4,14 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 from pathlib import Path
-
 
 _MAX_DIGEST_DEPTH = 100_000
 _MAX_DIGEST_NODES = 1_000_000
+_NATIVE_DIGEST_DEPTH = 64
+_RECENT_EVENT_LIMIT = 256
+_RECENT_EVENT_BUDGET = 8 * 1024 * 1024
 
 
 def _digest(value: object) -> str:
@@ -70,6 +73,84 @@ def _digest(value: object) -> str:
     return hashlib.sha256("".join(output).encode()).hexdigest()
 
 
+def _native_digest_nodes(event: dict) -> int:
+    """Admit shallow, bounded builtin JSON to the native encoder."""
+    if type(event) is not dict:
+        return 0
+    nodes = 1
+    pending = [(event, 0)]
+    while pending:
+        container, depth = pending.pop()
+        if depth > _NATIVE_DIGEST_DEPTH or depth > _MAX_DIGEST_DEPTH:
+            return 0
+        if type(container) is dict:
+            if any(type(key) is not str for key in container):
+                return 0
+            children = container.values()
+        else:
+            children = container
+        nodes += len(children)
+        if nodes > _MAX_DIGEST_NODES or (children and depth == _MAX_DIGEST_DEPTH):
+            return 0
+        for child in children:
+            kind = type(child)
+            if kind in (dict, list, tuple):
+                pending.append((child, depth + 1))
+            elif kind not in (str, int, float, bool, type(None)):
+                return 0
+    return nodes
+
+
+def _hydrated_identity(event: dict, *, retain: bool) -> tuple[str, dict | None, int]:
+    nodes = _native_digest_nodes(event)
+    if not nodes:
+        # The stack encoder preserves deep-row support and the original validation errors.
+        return _digest(event), None, 0
+    try:
+        encoded = json.dumps(event, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    except RecursionError:
+        return _digest(event), None, 0
+    digest = hashlib.sha256(encoded).hexdigest()
+    # Charge for decoded objects as well as text. Keep large rows on the digest-only path.
+    weight = len(encoded) + 64 * nodes
+    if retain and weight <= _RECENT_EVENT_BUDGET:
+        try:
+            return digest, json.loads(encoded), weight
+        except RecursionError:
+            pass
+    return digest, None, 0
+
+
+def _matches_hydrated_event(event: dict, snapshot: dict) -> bool:
+    """Compare against a detached canonical snapshot without re-encoding it."""
+    pending = [(event, snapshot)]
+    while pending:
+        actual, expected = pending.pop()
+        kind = type(expected)
+        if kind is dict:
+            if type(actual) is not dict or len(actual) != len(expected):
+                return False
+            for key, item in actual.items():
+                if type(key) is not str or key not in expected:
+                    return False
+                pending.append((item, expected[key]))
+        elif kind is list:
+            if type(actual) not in (list, tuple) or len(actual) != len(expected):
+                return False
+            pending.extend(zip(actual, expected))
+        elif type(actual) is not kind:
+            return False
+        elif kind is float:
+            # Canonical JSON distinguishes signed zero and spells all NaNs alike.
+            if actual != expected and not (math.isnan(actual) and math.isnan(expected)):
+                return False
+            if actual == 0 and math.copysign(1, actual) != math.copysign(1, expected):
+                return False
+        elif actual != expected:
+            return False
+    return True
+
+
 class GeneratedArtifactIndex:
     """No filesystem source reads, execution authority, or cross-run implicit recall."""
 
@@ -93,6 +174,29 @@ class GeneratedArtifactIndex:
         self._first_unobserved: dict[str, object] | None = None
         self._last_unobserved: dict[str, object] | None = None
         self._last_unobserved_sequence: int | None = None
+        self._recent_events: dict[int, tuple[dict, int]] = {}
+        self._recent_event_weight = 0
+
+    def __getstate__(self) -> dict:
+        # Checkpoints retain the hydrated digests and rebuild this disposable cache.
+        state = self.__dict__.copy()
+        del state["_recent_events"], state["_recent_event_weight"]
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        self.__dict__.update(state)
+        self._recent_events = {}
+        self._recent_event_weight = 0
+
+    def _remember_event(self, sequence: int, snapshot: dict | None, weight: int) -> None:
+        if snapshot is None:
+            return
+        while (len(self._recent_events) >= _RECENT_EVENT_LIMIT
+               or self._recent_event_weight + weight > _RECENT_EVENT_BUDGET):
+            _, removed_weight = self._recent_events.pop(next(iter(self._recent_events)))
+            self._recent_event_weight -= removed_weight
+        self._recent_events[sequence] = (snapshot, weight)
+        self._recent_event_weight += weight
 
     @property
     def completeness(self) -> str:
@@ -121,11 +225,13 @@ class GeneratedArtifactIndex:
                 or event.get("event_id") != f"{self.run_id}:{sequence}"):
             raise ValueError("invalid unobserved journal identity or sequence")
         try:
-            event_digest = _digest(event)
+            event_digest, snapshot, weight = _hydrated_identity(event, retain=True)
         except (TypeError, ValueError, RecursionError):
             event_digest = "UNOBSERVED:" + str(error_type)[:80]
+            snapshot, weight = None, 0
         self._events[sequence] = event_digest
         self.sequence = sequence
+        self._remember_event(sequence, snapshot, weight)
         self._record_unobserved(
             sequence=sequence, kind=event.get("kind"), error_type=error_type)
 
@@ -145,11 +251,15 @@ class GeneratedArtifactIndex:
         if (event.get("schema") != "stateframe-audit/1" or event.get("run_id") != self.run_id
                 or type(seq) is not int or seq < 1 or event.get("event_id") != f"{self.run_id}:{seq}"):
             raise ValueError("invalid journal identity or scope")
-        digest = _digest(event)
         if seq <= self.sequence:
+            cached = self._recent_events.get(seq)
+            if cached is not None and _matches_hydrated_event(event, cached[0]):
+                return
+            digest, _, _ = _hydrated_identity(event, retain=False)
             if self._events.get(seq) != digest:
                 raise ValueError("conflicting replay event")
             return
+        digest, snapshot, weight = _hydrated_identity(event, retain=True)
         if seq != self.sequence + 1:
             raise ValueError("journal gap or out-of-order event")
         kind = event.get("kind")
@@ -183,6 +293,7 @@ class GeneratedArtifactIndex:
             self._lifecycle(event)
         self._events[seq] = digest
         self.sequence = seq
+        self._remember_event(seq, snapshot, weight)
 
     def _response(self, event: dict) -> None:
         self._responses[event["event_id"]] = event.get("request_id")

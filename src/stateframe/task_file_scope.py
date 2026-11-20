@@ -19,7 +19,7 @@ _ONLY_RULE = re.compile(
     r"\b(?:only\s+(?:edit|change|modify|touch|write)"
     r"|(?:edit|change|modify)\s+only)\b", re.IGNORECASE)
 _WRITE_VERB = re.compile(
-    r"(?<![\w./\\-])(?:write|create|edit|change|modify|update|save|put|set|fix|add|touch|alter)"
+    r"(?<![\w./\\-])(?:write|creat(?:e|ing)|edit|change|modify|update|save|put|set|fix|add|touch|alter)"
     r"(?![\w./\\-])", re.IGNORECASE)
 _NEGATION = re.compile(
     r"\b(?:do\s+not|don't|never|not|without)\s+"
@@ -157,7 +157,7 @@ def parse_task_file_scope(task: str, *, strict: bool = False) -> tuple[str, ...]
     Only unconditional rules count. Targets must be governed by an affirmative write
     verb; examples, qualifiers and negated clauses cannot grant write permission. A recognized
     rule with an unsupported or ambiguous target raises ``TaskFileScopeError``. Row builders
-    pass ``strict=True`` so a bare "change no other file" rule cannot leave the run unscoped.
+    pass ``strict=True`` to detect missing targets and degrade with a visible warning.
     """
     if not isinstance(task, str) or not task.strip():
         return None
@@ -166,6 +166,10 @@ def parse_task_file_scope(task: str, *, strict: bool = False) -> tuple[str, ...]
     no_other = False
     for index, sentence in enumerate(sentences):
         if _CONDITIONAL.search(sentence):
+            if strict and (_ONLY_RULE.search(sentence) or _NO_OTHER_RULE.search(sentence)):
+                raise TaskFileScopeError(
+                    "task file-scope rule is conditional and cannot be safely scoped; "
+                    "use an unconditional repository-relative path")
             continue
         no_other = no_other or bool(_NO_OTHER_RULE.search(sentence))
         affirmative_starts = {verb.start() for verb in _affirmative_verbs(sentence)}

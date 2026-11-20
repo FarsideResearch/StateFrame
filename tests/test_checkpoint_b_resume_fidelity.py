@@ -211,8 +211,8 @@ def _write_profile(path: Path) -> Path:
 
 
 def _environment(home: Path, *, restore_hook: Path | None = None) -> dict[str, str]:
-    environment = {key: os.environ[key] for key in ("PATH", "LANG", "TMPDIR")
-                   if key in os.environ}
+    inherited = ("PATH", "LANG", "TMPDIR", "STATEFRAME_WORKSPACE_OBJECTS")
+    environment = {key: os.environ[key] for key in inherited if key in os.environ}
     paths = [str(ROOT / "src"), str(ROOT / "src/stateframe/engine")]
     if restore_hook is not None:
         paths.insert(0, str(restore_hook))

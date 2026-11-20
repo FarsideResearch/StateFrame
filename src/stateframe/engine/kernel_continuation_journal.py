@@ -598,6 +598,52 @@ def audit_serialized_requests(path: str | os.PathLike[str]) -> list[dict]:
 
 
 
+_PUBLICATION_INTENT = ".journal-publication"
+_PUBLICATION_SWITCH = "STATEFRAME_TURN_ATOMIC_PUBLICATION"
+
+
+def _recover_publication(path: Path, fd: int) -> None:
+    """Recover only an explicitly marked, unacknowledged batch under the writer lease."""
+    intent = path.parent / _PUBLICATION_INTENT
+    try:
+        with os.fdopen(os.open(intent, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise JournalError("journal publication intent is not a regular file")
+            raw = stream.read(1025)
+    except FileNotFoundError:
+        return
+    try:
+        size, start, tail_hash = json.loads(raw)
+        if (len(raw) > 1024 or type(size) is not int or type(start) is not int
+                or not 0 <= start < size <= os.fstat(fd).st_size
+                or size - start > MAX_RECORD_BYTES or not isinstance(tail_hash, str)):
+            raise ValueError("invalid rollback span")
+        tail = os.pread(fd, size - start, start)
+        if (len(tail) != size - start
+                or hashlib.sha256(tail).hexdigest() != tail_hash):
+            raise ValueError("journal rollback prefix does not match")
+    except (ValueError, TypeError) as error:
+        raise JournalError("invalid journal publication intent") from error
+    os.ftruncate(fd, size)
+    os.fsync(fd)
+    intent.unlink()
+    _sync_directory(path.parent)
+
+
+def recover_publication_mirror(path: Path) -> None:
+    """Repair a stopped continuation journal before a legacy reader opens it."""
+    if not os.path.lexists(path.parent / _PUBLICATION_INTENT):
+        return
+    fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise JournalError("journal is not a regular file")
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _recover_publication(path, fd)
+    finally:
+        os.close(fd)
+
+
 def _sync_directory(path: Path) -> None:
     fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
     try:
@@ -794,6 +840,8 @@ class ContinuationJournal(AuditJournal):
         self._warm_host_span_pause_counts: dict[tuple[str, str], int] = {}
         self._warm_host_span_resume_counts: dict[str, int] = {}
         self._receipt_refs: list[tuple[int, str]] = []
+        # End offset after each durable sequence, including non-receipt rows.
+        self._receipt_ref_ends: list[int] = [0]
         self._receipt_ref_set: set[str] = set()
         self._response_request_ids: set[str] = set()
         self._request_sequences: dict[str, list[int]] = {}
@@ -1007,6 +1055,8 @@ class ContinuationJournal(AuditJournal):
             if not stat.S_ISREG(os.fstat(fd).st_mode):
                 raise JournalError("journal is not a regular file")
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if not create:
+                _recover_publication(self.path, fd)
             self._size = os.fstat(fd).st_size
             self._fd = fd
         except BaseException:
@@ -1255,14 +1305,13 @@ class ContinuationJournal(AuditJournal):
         if record.get("kind") == "response_received" and isinstance(request_id, str):
             self._response_request_ids.add(request_id)
         refs = _receipt_refs_from_record(record)
-        if not refs:
-            return
         sequence = int(record["sequence"])
         for ref in refs:
             if ref in self._receipt_ref_set:
                 continue
             self._receipt_ref_set.add(ref)
             self._receipt_refs.append((sequence, ref))
+        self._receipt_ref_ends.append(len(self._receipt_refs))
 
     @staticmethod
     def _framefit_scalar(value: object) -> str | int | bool | None:
@@ -1524,6 +1573,7 @@ class ContinuationJournal(AuditJournal):
 
     def _rebuild_receipt_index(self, records: Iterable[Mapping[str, object]]) -> None:
         self._receipt_refs.clear()
+        self._receipt_ref_ends = [0]
         self._receipt_ref_set.clear()
         self._response_request_ids.clear()
         self._request_sequences = {}
@@ -1657,6 +1707,13 @@ class ContinuationJournal(AuditJournal):
         with self._lock:
             if sequence > self._sequence:
                 raise JournalError("receipt cursor is beyond durable sequence")
+            # A cursor is a journal sequence, not a receipt ordinal. The dense
+            # offset table makes even long stretches without receipts O(1).
+            ends = getattr(self, "_receipt_ref_ends", ())
+            if sequence < len(ends):
+                return tuple(ref for _, ref in self._receipt_refs[ends[sequence]:])
+            # Preserve compatibility with a state restored before this index
+            # was introduced; a validated replay rebuilds the table.
             return tuple(ref for item_sequence, ref in self._receipt_refs
                          if item_sequence > sequence)
 
@@ -1734,7 +1791,8 @@ class ContinuationJournal(AuditJournal):
                     self._poison("journal replaced while opening reader")
                     raise JournalError("journal replaced while opening reader")
                 sequence, previous, task_id = 0, None, None
-                while True:
+                observed_through = self._sequence if getattr(self, "_observing_publication", False) else None
+                while observed_through is None or sequence < observed_through:
                     offset = handle.tell()
                     line = handle.readline(MAX_RECORD_BYTES + 1)
                     if not line:
@@ -1842,7 +1900,7 @@ class ContinuationJournal(AuditJournal):
                     else:
                         self._reset_framefit_receipt_projection()
                 else:
-                    for name in ("_receipt_refs", "_receipt_ref_set", "_response_request_ids",
+                    for name in ("_receipt_refs", "_receipt_ref_ends", "_receipt_ref_set", "_response_request_ids",
                                  "_request_sequences", "_tool_reconciliation_records",
                                  "_journal_applied_edit_rows", "_vacuity_latest_check",
                                  "_vacuity_last_edit", "_receipt_generation",
@@ -2242,6 +2300,12 @@ class ContinuationJournal(AuditJournal):
                         if count <= 0:
                             raise OSError("journal write made no progress")
                         view = view[count:]
+                    batch = getattr(self, "_publication_batch", None)
+                    if batch is not None:
+                        self._size += len(line)
+                        self._sequence, self._head = record["sequence"], record_hash
+                        batch.append((record, offset, len(encoded_record), identity_fire))
+                        return record
                     if kind == CHECKPOINT_KIND:
                         self._checkpoint_seen = True
                     if (getattr(self, "group_commit", False) and kind in BATCHABLE_TELEMETRY_KINDS
@@ -2252,63 +2316,70 @@ class ContinuationJournal(AuditJournal):
                         os.fsync(self._fd)
                         self._unsynced = False
                 self._size += len(line)
-                self._sequence, self._head = record["sequence"], record["record_hash"]
-                if len(getattr(self, "_record_offsets", ())) == record["sequence"] - 1:
-                    self._record_offsets.append(offset)
-                    self._record_hashes.append(record["record_hash"])
-                if self._record_cache_start + len(self._record_cache) == record["sequence"] - 1:
-                    # record_hash is added after the initial canonical encoding.
-                    record_bytes = len(encoded_record) + len(canonical_bytes({
-                        "record_hash": record["record_hash"]})) - 1
-                    cached_record = copy.deepcopy(record)
-                    self._record_cache.append(cached_record)
-                    self._record_cache_sizes.append(record_bytes)
-                    self._record_cache_bytes += record_bytes
-                    self._trim_record_cache()
-                    self._extend_records_since_cache(
-                        record["sequence"], cached_record, record_bytes,
-                    )
-                else:
-                    # This should only be reachable after an interrupted
-                    # validation pass; force the next indexed read to rebuild.
-                    self._record_cache = []
-                    self._record_cache_start = record["sequence"]
-                    self._record_cache_bytes = 0
-                    self._record_cache_sizes = []
-                    self._clear_records_since_cache()
-                # FRAMEFIT5 consumes the validated cache via its existing cursor
-                # API when requested; unrelated events need no receipt work.
-                self._index_receipt_record(record)
-                self._receipt_generation = record["sequence"]
-                self._notifying = True
-                generated = getattr(self, "generated_artifacts", None)
-                if generated is not None:
-                    self._notify_isolated(
-                        "generated_artifacts", generated.observe, record,
-                        on_unobserved=generated.mark_unobserved)
-                with self.host_spans.measure("subscriber_fanout", sequence=record["sequence"]):
-                    for name, observer in self._subscribers.items():
-                        if self._subscriber_cursors.get(name, 0) != record["sequence"] - 1:
-                            raise JournalError("subscriber sequence gap")
-                        self._subscriber_cursors[name] = record["sequence"]
-                        selected = self._subscriber_kinds.get(name)
-                        if selected is None or record.get("kind") in selected:
-                            self._publication_stats["published"] += 1
-                            self._publication_stats["deep_copies"] += 1
-                            self._notify_isolated(name, observer, record)
-                        else:
-                            self._publication_stats["filtered"] += 1
+                self._publish_record(record, offset, len(encoded_record))
             except BaseException as error:
                 self._poison(f"{type(error).__name__} appending {kind!r} after seq "
                              f"{self._sequence}: {str(error)[:160]}")
                 raise
-            finally:
-                self._notifying = False
             self._report_observer_failures()
             if identity_fire:
                 from kernel_verdict_identity import journal_identity_fired
                 journal_identity_fired(self, kind)
             return record
+
+    def _publish_record(self, record: dict, offset: int, encoded_size: int) -> None:
+        """Advance live projections and notify subscribers for one persisted row."""
+        self._sequence, self._head = record["sequence"], record["record_hash"]
+        if record["kind"] == CHECKPOINT_KIND:
+            self._checkpoint_seen = True
+        try:
+            if len(getattr(self, "_record_offsets", ())) == record["sequence"] - 1:
+                self._record_offsets.append(offset)
+                self._record_hashes.append(record["record_hash"])
+            if self._record_cache_start + len(self._record_cache) == record["sequence"] - 1:
+                # record_hash is added after the initial canonical encoding.
+                record_bytes = encoded_size + len(canonical_bytes({
+                    "record_hash": record["record_hash"]})) - 1
+                cached_record = copy.deepcopy(record)
+                self._record_cache.append(cached_record)
+                self._record_cache_sizes.append(record_bytes)
+                self._record_cache_bytes += record_bytes
+                self._trim_record_cache()
+                self._extend_records_since_cache(
+                    record["sequence"], cached_record, record_bytes,
+                )
+            else:
+                # This should only be reachable after an interrupted
+                # validation pass; force the next indexed read to rebuild.
+                self._record_cache = []
+                self._record_cache_start = record["sequence"]
+                self._record_cache_bytes = 0
+                self._record_cache_sizes = []
+                self._clear_records_since_cache()
+            # FRAMEFIT5 consumes the validated cache via its existing cursor
+            # API when requested; unrelated events need no receipt work.
+            self._index_receipt_record(record)
+            self._receipt_generation = record["sequence"]
+            self._notifying = True
+            generated = getattr(self, "generated_artifacts", None)
+            if generated is not None:
+                self._notify_isolated(
+                    "generated_artifacts", generated.observe, record,
+                    on_unobserved=generated.mark_unobserved)
+            with self.host_spans.measure("subscriber_fanout", sequence=record["sequence"]):
+                for name, observer in self._subscribers.items():
+                    if self._subscriber_cursors.get(name, 0) != record["sequence"] - 1:
+                        raise JournalError("subscriber sequence gap")
+                    self._subscriber_cursors[name] = record["sequence"]
+                    selected = self._subscriber_kinds.get(name)
+                    if selected is None or record.get("kind") in selected:
+                        self._publication_stats["published"] += 1
+                        self._publication_stats["deep_copies"] += 1
+                        self._notify_isolated(name, observer, record)
+                    else:
+                        self._publication_stats["filtered"] += 1
+        finally:
+            self._notifying = False
 
     def _poison(self, cause: str) -> None:
         """Poison the writer and remember WHY (first cause wins; every later assert quotes it)."""
@@ -2363,12 +2434,13 @@ class ContinuationJournal(AuditJournal):
     def host_span_snapshot(self) -> tuple[dict[str, object], ...]:
         return self.host_spans.snapshot()
 
-    def emit_batch(self, events: Sequence[tuple[str, Mapping[str, object]]]) -> list[dict[str, object]]:
-        """Append a paired durable batch under one writer lease.
+    def emit_batch(self, events: Sequence[tuple[str, Mapping[str, object]]], *,
+                   atomic: bool = False) -> list[dict[str, object]]:
+        """Append a batch of ordinary records under one writer lease.
 
-        The journal remains the serialization boundary: observers cannot see an
-        interleaved assignment/replay pair from another writer.  Each record is
-        still fsynced by ``emit`` so a torn tail is rejected on resume.
+        The atomic path acknowledges a batch after its shared durability barrier.
+        Source observation batches request it directly. Other callers follow the
+        turn publication switch unless they explicitly request it.
         """
         if not isinstance(events, Sequence) or isinstance(events, (str, bytes, bytearray)):
             raise JournalError("journal batch must be a sequence")
@@ -2381,7 +2453,67 @@ class ContinuationJournal(AuditJournal):
             normalized.append((event[0], dict(event[1])))
         with self._lock:
             self.assert_owner()
-            return [self.emit(kind, **fields) for kind, fields in normalized]
+            if (len(normalized) < 2 or self._sequence == 0
+                    or getattr(self, "_verdict_identity_provider", None) is not None
+                    or not (atomic or os.environ.get(_PUBLICATION_SWITCH, "").strip().lower() == "on")):
+                return [self.emit(kind, **fields) for kind, fields in normalized]
+            return self._emit_atomic_batch(normalized)
+
+    def _emit_atomic_batch(self, events: list[tuple[str, dict]]) -> list[dict]:
+        if __package__:
+            from .kernel_turn_publication import atomic_file
+        else:
+            from kernel_turn_publication import atomic_file
+
+        if self._replaying or self._notifying or hasattr(self, "_publication_batch"):
+            raise JournalError("cannot batch while replaying or publishing")
+        intent = self.path.parent / _PUBLICATION_INTENT
+        if os.path.lexists(intent):
+            self._poison("unfinished journal publication")
+            raise JournalError("unfinished journal publication")
+        before = self._sequence, self._head
+        size = self._size
+        self._ensure_record_index()
+        start = self._record_offsets[-1]
+        tail = os.pread(self._fd, size - start, start)
+        if len(tail) != size - start or not tail.endswith(b"\n"):
+            self._poison("cannot verify journal publication base")
+            raise JournalError("cannot verify journal publication base")
+        # A legacy telemetry-only suffix can precede this boundary. Flush it before
+        # pointing the rollback intent at it so recovery always has a durable base.
+        self.sync()
+        self._publication_batch = []
+        try:
+            with self.host_spans.measure("append_fsync", sequence=before[0] + 1):
+                atomic_file(intent, canonical_bytes([size, start, hashlib.sha256(tail).hexdigest()]))
+                rows = [self.emit(kind, **fields) for kind, fields in events]
+                os.fsync(self._fd)
+                intent.unlink()
+                _sync_directory(self.path.parent)
+            pending = self._publication_batch
+        except BaseException:
+            self._poison("journal publication outcome requires recovery")
+            raise
+        finally:
+            del self._publication_batch
+        self._sequence, self._head = before
+        try:
+            self._observing_publication = True
+            try:
+                for record, offset, encoded_size, _ in pending:
+                    self._publish_record(record, offset, encoded_size)
+            finally:
+                del self._observing_publication
+            self._report_observer_failures()
+            if any(fire for _, _, _, fire in pending):
+                from kernel_verdict_identity import journal_identity_fired
+                for record, _, _, fire in pending:
+                    if fire:
+                        journal_identity_fired(self, record["kind"])
+        except BaseException:
+            self._poison("durable journal publication requires observer replay")
+            raise
+        return rows
 
     def sync(self) -> None:
         """Make every written row durable now (boundary hook; no-op when nothing is pending)."""

@@ -106,7 +106,7 @@ def _source_matches(path: str, source: str, pattern: re.Pattern[str]) -> list[st
     matches: list[str] = []
     for number, line in enumerate(lines, 1):
         if (pattern.search(line)
-                and source_window._site_role(path, source, number, docstring_lines) == "executable"):
+                and source_window._site_role(line, number, docstring_lines) == "executable"):
             matches.append(line)
     return matches
 
