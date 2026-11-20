@@ -366,6 +366,72 @@ def test_interrupted_audit_cursor_preserves_prior_replay_failures_on_resume(tmp_
         assert journal.cached_records()[-1]["previous_hash"] == overflow["record_hash"]
 
 
+_STOP_DURING_OBSERVER_FANOUT = """
+import os
+import signal
+import sys
+from pathlib import Path
+
+from kernel_continuation_journal import ContinuationJournal
+
+def reject(_row):
+    raise RuntimeError("observer rejected row")
+
+def stop(_row):
+    os.kill(os.getpid(), signal.SIGKILL)
+
+def reject_then_stop(row):
+    if row["index"] == 22:
+        stop(row)
+    reject(row)
+
+journal = ContinuationJournal(Path(sys.argv[1]), "interrupted-fanout", {})
+print(journal.path, flush=True)
+source = sys.argv[2]
+events = [("observer_probe", {"index": index}) for index in range(24)]
+if source == "batch":
+    journal.subscribe("rejecting", reject_then_stop, kinds=("observer_probe",))
+    journal.emit_batch(events, atomic=True)
+elif source == "replay":
+    journal.emit_batch(events, atomic=True)
+    journal.subscribe("rejecting", reject_then_stop, kinds=("observer_probe",))
+else:
+    for index in range(22):
+        journal.subscribe(f"rejecting-{index}", reject, kinds=("observer_probe",))
+    journal.subscribe("interrupting", stop, kinds=("observer_probe",))
+    journal.emit("observer_probe")
+"""
+
+
+@pytest.mark.parametrize("source", ["batch", "replay", "single"])
+def test_resume_keeps_failures_recorded_before_fanout_is_killed(tmp_path, source):
+    crashed = subprocess.run(
+        [sys.executable, "-c", _STOP_DURING_OBSERVER_FANOUT, str(tmp_path), source],
+        capture_output=True, text=True, timeout=45, check=False,
+    )
+    assert crashed.returncode == -signal.SIGKILL, crashed.stderr
+    path = Path(crashed.stdout.strip())
+    prefix = path.read_bytes()
+    rows = [json.loads(line) for line in prefix.splitlines()]
+    probes = [row["sequence"] for row in rows if row["kind"] == _EVENT]
+    assert len(probes) == (1 if source == "single" else 24)
+    failed = probes * 22 if source == "single" else probes[:22]
+    assert not any(row["kind"] == _FAILURE for row in rows)
+
+    with ContinuationJournal.resume(path, task_id="interrupted-fanout", manifest={},
+                                    expected_head=rows[-1]["record_hash"]) as journal:
+        assert path.read_bytes().startswith(prefix)
+        *details, summary = _failures_on_disk(journal)
+        assert [row["event_sequence"] for row in details] == failed[:20]
+        assert summary["dropped_count"] == 2
+        assert summary["first_event_sequence"] == failed[20]
+        assert summary["last_event_sequence"] == failed[21]
+        assert journal.cached_records()[-1]["previous_hash"] == summary["record_hash"]
+        appended = journal.emit("after_recovery")
+        assert appended["sequence"] == summary["sequence"] + 2
+        assert _failures_on_disk(journal) == [*details, summary]
+
+
 def test_no_failure_batch_and_single_append_are_byte_identical_after_replay_and_resume(tmp_path, monkeypatch):
     monkeypatch.setattr(journal_module, "uuid", SimpleNamespace(
         uuid4=lambda: SimpleNamespace(hex="a" * 32)))
