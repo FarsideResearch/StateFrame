@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -9,7 +10,11 @@ import tempfile
 from pathlib import Path
 
 import pytest
-from tools.sandbox_temp import sandbox_visible_temp_dir, shadowed_by_bwrap_dev, timeout_scale
+from tools.sandbox_temp import (
+    sandbox_visible_temp_dir,
+    shadowed_by_bwrap_dev,
+    timeout_scale,
+)
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 _COMMIT_PATTERN = re.compile(r"[0-9a-fA-F]{7,40}\Z")
@@ -44,6 +49,8 @@ def pinned_tree(commit: str, tmp_path_factory) -> Path:
     if not _COMMIT_PATTERN.fullmatch(commit):
         raise ValueError(f"pinned commit must be a hexadecimal Git object id: {commit!r}")
     if shutil.which("git") is None:
+        if os.environ.get("PINNED_TREE_REQUIRED") == "1":
+            pytest.fail(f"gate copy lacks pinned commit {commit}: git is unavailable", pytrace=False)
         pytest.skip(f"git is unavailable, so pinned commit {commit} cannot be materialized")
 
     resolved = _run_local(
@@ -51,6 +58,11 @@ def pinned_tree(commit: str, tmp_path_factory) -> Path:
         text=True,
     )
     if resolved.returncode != 0:
+        if os.environ.get("PINNED_TREE_REQUIRED") == "1":
+            pytest.fail(
+                f"gate copy lacks pinned commit {commit}: absent from this repository's git objects",
+                pytrace=False,
+            )
         pytest.skip(f"pinned commit {commit} is not available in this repository's git objects")
     full_commit = resolved.stdout.strip()
     session_key = (str(Path(tmp_path_factory.getbasetemp()).resolve()), full_commit)

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.14 (2026-11-20)
+
+- Tests: required pinned-tree parity gates now fail clearly when a gate copy lacks the pinned commit or Git.
+
 ## 0.8.13 (2026-11-20)
 
 - Tests: the retention replay case uses a neutral test command.
