@@ -725,6 +725,16 @@ def test_routed_tape_damage_refused_before_archive(tmp_path, damage):
     assert not (run / "attempts").exists()
 
 
+def test_damaged_resume_metadata_is_refused_with_an_archive_present(tmp_path):
+    run, spec = _interrupted_routed_run(tmp_path)
+    (run / "attempts" / "1").mkdir(parents=True)
+    spec.update(run_identity_seed="original-attempt", resume=["invalid"])
+    (run / "spec.json").write_text(json.dumps(spec))
+
+    with pytest.raises(resume.ResumeRefused, match="resume metadata is damaged"):
+        resume.assess(run)
+
+
 def test_route_record_precedes_request_and_submission(tmp_path, monkeypatch):
     monkeypatch.syspath_prepend(str(Path(_child.__file__).parent / "engine"))
     import kernel_bounded_http
