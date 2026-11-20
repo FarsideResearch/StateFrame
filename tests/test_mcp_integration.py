@@ -149,7 +149,8 @@ def test_resume_refuses_changed_mcp_tool_list(tmp_path):
         resume_run(run_dir)
 
 
-def test_resume_keeps_mcp_admission_when_tokenizer_counts_change(tmp_path, monkeypatch):
+@pytest.mark.parametrize("archive_boundary", [None, "workspace", "publish-spec"])
+def test_resume_keeps_mcp_admission_when_tokenizer_counts_change(tmp_path, monkeypatch, archive_boundary):
     from stateframe.engine import kernel_request_diet
 
     repo = tmp_path / "repo"
@@ -163,6 +164,26 @@ def test_resume_keeps_mcp_admission_when_tokenizer_counts_change(tmp_path, monke
     run_dir, _, spec = prepare(RunOptions(repo=repo, task="inspect sample", endpoint=endpoint,
                                          run_dir=tmp_path / "run", tool_settings=settings))
     assert "mcp_fixture__echo" in spec["mcp_tools"]
+    if archive_boundary is not None:
+        from stateframe import resume
+
+        (run_dir / "worker").mkdir(exist_ok=True)
+        real_replace = resume.os.replace
+        interrupted = []
+
+        def crash(source, target):
+            real_replace(source, target)
+            if ((archive_boundary == "workspace" and Path(source) == run_dir / "workspace")
+                    or (archive_boundary == "publish-spec" and Path(target) == run_dir / "spec.json")):
+                interrupted.append(archive_boundary)
+                raise KeyboardInterrupt(archive_boundary)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(resume.os, "replace", crash)
+            with pytest.raises(KeyboardInterrupt, match=archive_boundary):
+                resume.archive_attempt(resume.assess(run_dir), tmp_path, use_checkpoint=False)
+        assert interrupted == [archive_boundary]
+        assert not (run_dir / "workspace").exists()
 
     def changed_tokenizer(*_args, **_kwargs):
         return [0] * 1501
