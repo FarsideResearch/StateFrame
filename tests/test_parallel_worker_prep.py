@@ -1,10 +1,8 @@
 import hashlib
-import ipaddress
 import json
 import os
 from pathlib import Path
 import re
-import select
 import shutil
 import signal
 import stat
@@ -12,7 +10,7 @@ import subprocess
 import sys
 import tarfile
 from dataclasses import replace
-from urllib.parse import urlsplit, urlunsplit
+from unittest.mock import patch
 
 import pytest
 
@@ -28,13 +26,14 @@ from stateframe.engine.kernel_parallel_records import (CheckRecipe, ParallelLimi
 from stateframe.engine.kernel_unit_task import build_public_row
 from stateframe.engine.kernel_tool_settings import ToolSettings
 from stateframe.endpoint import Endpoint
-from stateframe import profiles, replay_tape, routes
+from stateframe import profiles, routes
 from stateframe.runner import RunOptions, _child_env, prepare, summarize
 from stateframe._child import install_repo_context
 from stateframe.parallel_worker import WorkerLaunchError, WorkerPreparationError, launch_worker, prepare_worker
 
 
 _DEFAULT_ENGINE_TIMEOUT = 300
+_OFF_RELEASE_COMMIT = "39f73ee6960e582e079312afb5982fd07bf1c1b4"  # StateFrame 0.8.5
 
 
 def _engine_timeout_seconds() -> int:
@@ -148,167 +147,6 @@ def _unit_fixture(root: Path, *, include_symlink: bool = False,
     return snapshot, run_dir, spec_path, spec, parent_spec, parent_run
 
 
-_RUN_TIMESTAMP_FIELDS = frozenset({"created", "created_at", "started_at", "finished_at", "updated_at"})
-_RUN_DURATION_FIELDS = frozenset({"wall_seconds", "elapsed_seconds", "duration_seconds", "seconds"})
-# Fingerprints of the engine tree itself. On this lane the tree also holds the subframe modules, so these can
-# never equal main's; their shape is still compared, and regen_engine_source --check pins the values.
-_ENGINE_TREE_FIELDS = frozenset({"engine_source", "engine_shipped_hash"})
-_RUN_DELIVERY_HASH_FIELDS = frozenset({
-    "manifest_id", "prompt_hash", "payload_hash", "submitted_context_hash", "submitted_payload_hash",
-})
-_RUN_DELIVERY_EVENT_FIELDS = frozenset({"event_id", "response_event_id", "prepared_event_id", "journal_event_id"})
-_JOURNAL_EVENT_ID = re.compile(r"[0-9a-f]{32}:(?P<sequence>[0-9]+)\Z")
-_RUN_EDIT_RECEIPT = re.compile(r"[0-9a-f]{20}\Z")
-_RUN_SCOPED_SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
-
-
-def _normalize_run_text(value: str, run_dir: Path, endpoint: str) -> str:
-    value = value.replace(str(run_dir.resolve()), "<RUN_DIR>").replace(endpoint, "<ENDPOINT>")
-    return replay_tape.mask_volatile(value)
-
-
-def _normalize_provider_origin(value: object) -> object:
-    if not isinstance(value, str):
-        return value
-    try:
-        parts = urlsplit(value)
-        host = parts.hostname
-        port = parts.port
-    except ValueError:
-        return value
-    if (parts.scheme not in {"http", "https"} or host is None or port is None
-            or parts.username is not None or parts.password is not None):
-        return value
-    try:
-        loopback = ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        loopback = host.casefold() == "localhost"
-    if not loopback:
-        return value
-    normalized_host = f"[{host.casefold()}]" if ":" in host else host.casefold()
-    return urlunsplit((parts.scheme, f"{normalized_host}:<LOOPBACK_PORT>",
-                       parts.path, parts.query, parts.fragment))
-
-
-def _normalize_run_value(value: object, run_dir: Path, endpoint: str, *, key: str | None = None,
-                         in_delivery_manifest: bool = False) -> object:
-    if key in _RUN_TIMESTAMP_FIELDS:
-        return f"<RUN_TIMESTAMP:{type(value).__name__}>"
-    if key in _RUN_DURATION_FIELDS:
-        return f"<RUN_DURATION:{type(value).__name__}>"
-    if key in _ENGINE_TREE_FIELDS:
-        shape = sorted(value) if isinstance(value, dict) else type(value).__name__
-        return f"<ENGINE_TREE:{shape}>"
-    if isinstance(value, dict):
-        in_delivery_manifest = in_delivery_manifest or key == "delivery_manifest"
-        normalized: dict[object, object] = {}
-        for name, item in value.items():
-            normalized_name = (_normalize_provider_origin(name)
-                               if key == "provider_capabilities" else name)
-            if normalized_name in normalized:
-                raise AssertionError("provider capability origins collide after loopback normalization")
-            if in_delivery_manifest and name in _RUN_DELIVERY_HASH_FIELDS:
-                if isinstance(item, str) and _RUN_SCOPED_SHA256.fullmatch(item):
-                    normalized[name] = f"<RUN_SCOPED_SHA256:{name}>"
-                    continue
-            if in_delivery_manifest and name in _RUN_DELIVERY_EVENT_FIELDS and isinstance(item, str):
-                event_match = _JOURNAL_EVENT_ID.fullmatch(item)
-                if event_match is not None:
-                    normalized[name] = f"<RUN_ID>:{event_match.group('sequence')}"
-                    continue
-            if (in_delivery_manifest and name == "edit_receipt" and isinstance(item, str)
-                    and _RUN_EDIT_RECEIPT.fullmatch(item)):
-                normalized[name] = "<RUN_EDIT_RECEIPT>"
-                continue
-            normalized[normalized_name] = _normalize_run_value(
-                item, run_dir, endpoint, key=name, in_delivery_manifest=in_delivery_manifest)
-        return normalized
-    if isinstance(value, list):
-        return [_normalize_run_value(item, run_dir, endpoint, in_delivery_manifest=in_delivery_manifest)
-                for item in value]
-    if isinstance(value, str):
-        return _normalize_run_text(value, run_dir, endpoint)
-    return value
-
-
-def test_run_value_normalizer_masks_delivery_run_ids_but_preserves_product_digests(tmp_path):
-    old_run = tmp_path / "old-run"
-    new_run = tmp_path / "new-run"
-    candidate_digest = "fd7d3dc82061b29b337b9d75cab0922c52edfce69ddabe52dac4d6dc8e6d4b83"
-
-    def result(run_dir: Path, run_id: str, receipt: str, delivery_hash: str,
-               *, product_digest: str = candidate_digest) -> dict[str, object]:
-        scoped_hash = f"sha256:{delivery_hash}"
-        event_id = f"{run_id}:1991"
-        delivery = {
-            "manifest_id": scoped_hash,
-            "prompt_hash": scoped_hash,
-            "applied_edits": [{"edit_receipt": receipt, "journal_event_id": f"{run_id}:581"}],
-            "exposure": {"records": [{"event_id": event_id}], "response_event_id": f"{run_id}:2221"},
-            "payload": {
-                "payload_hash": scoped_hash,
-                "prepared_event_id": event_id,
-                "exposure": {
-                    "submitted_payload_hash": scoped_hash,
-                    "submitted_context_hash": scoped_hash,
-                },
-            },
-            "checks": [{"receipt_id": "stable-check-receipt"}],
-        }
-        return {
-            "seconds": 15.857,
-            "result": {
-                "source_map_path": str(run_dir / "worker" / "source_map.json"),
-                "ast_by_file": {"shop/pricing.py": {"candidate": {"digest": product_digest}}},
-                "delivery_manifest": delivery,
-            },
-        }
-
-    old = result(old_run, "c0df6e5621e14326ab21b0ed14d70bb0", "4306bfc42815df7c3cc3", "1" * 64)
-    new = result(new_run, "4781373dcf584521abf665f62521e425", "28533e8fa6ccc5dfba0c", "2" * 64)
-    normalized_old = _normalize_run_value(old, old_run, "http://127.0.0.1:8080/v1")
-    normalized_new = _normalize_run_value(new, new_run, "http://127.0.0.1:9090/v1")
-    assert normalized_old == normalized_new
-    assert normalized_old["seconds"] == "<RUN_DURATION:float>"
-    assert normalized_old["result"]["ast_by_file"]["shop/pricing.py"]["candidate"]["digest"] == candidate_digest
-    assert normalized_old["result"]["delivery_manifest"]["checks"][0]["receipt_id"] == (
-        "stable-check-receipt")
-
-    planted_regression = result(new_run, "4781373dcf584521abf665f62521e425",
-                                "28533e8fa6ccc5dfba0c", "2" * 64, product_digest="0" * 64)
-    assert _normalize_run_value(planted_regression, new_run, "http://127.0.0.1:9090/v1") != normalized_old
-
-
-def test_run_value_normalizer_masks_ephemeral_loopback_provider_origins(tmp_path):
-    old_run = tmp_path / "old-run"
-    new_run = tmp_path / "new-run"
-    old = {"provider_capabilities": {"http://127.0.0.1:31001": {"dialect": "llama.cpp"}}}
-    new = {"provider_capabilities": {"http://127.0.0.1:42002": {"dialect": "llama.cpp"}}}
-
-    normalized_old = _normalize_run_value(old, old_run, "http://127.0.0.1:31001/v1")
-    normalized_new = _normalize_run_value(new, new_run, "http://127.0.0.1:42002/v1")
-
-    assert normalized_old == normalized_new == {
-        "provider_capabilities": {"http://127.0.0.1:<LOOPBACK_PORT>": {"dialect": "llama.cpp"}}}
-    planted = {"provider_capabilities": {"https://api.example.com:31001": {"dialect": "llama.cpp"}}}
-    assert _normalize_run_value(planted, old_run, "http://127.0.0.1:31001/v1") != normalized_old
-
-
-def _normalize_wire_request(raw: bytes, run_dir: Path, endpoint: str) -> bytes:
-    # Run location, endpoint port and shell wall time vary between two main runs.
-    normalized = raw.replace(str(run_dir.resolve()).encode(), b"<RUN_DIR>").replace(
-        endpoint.encode(), b"<ENDPOINT>")
-    return re.sub(rb"(exit (?:timeout|\d+) \| )\d+\.\d{2}(s \|)",
-                  rb"\g<1><SHELL_SECONDS>\g<2>", normalized)
-
-
-_EDIT_RECEIPT_VALUE = re.compile(rb'(?P<key>\\*"edit_receipt\\*"\s*:\s*\\*")[0-9a-f]{20}(?=\\*")')
-
-
-def _normalize_edit_receipts(request: bytes) -> bytes:
-    return _EDIT_RECEIPT_VALUE.sub(lambda match: match.group("key") + b"<EDIT_RECEIPT>", request)
-
-
 def _wire_requests(run_dir: Path) -> dict[str, bytes]:
     wire_dir = run_dir / "wire"
     assert wire_dir.is_dir(), f"missing recorded wire directory: {wire_dir}"
@@ -347,17 +185,19 @@ def _assert_wire_bytes(left: bytes, right: bytes, *, send: int, name: str) -> No
     after = repr(right[offset:offset + 1]) if offset < len(right) else "EOF"
     raise AssertionError(f"send {send} ({name}): first differing byte {offset} (zero-based), "
                          f"{before} -> {after}; component {component}; "
-                         f"sizes {len(left)} -> {len(right)} bytes")
+                         f"sizes {len(left)} -> {len(right)} bytes\n"
+                         f"expected window {left[max(0, offset - 56):offset + 72]!r}\n"
+                         f"actual window   {right[max(0, offset - 56):offset + 72]!r}")
 
 
-def _assert_wire_parity(left_run: Path, left_endpoint: str, right_run: Path, right_endpoint: str) -> None:
+def _assert_wire_parity(left_run: Path, _left_endpoint: str,
+                        right_run: Path, _right_endpoint: str) -> None:
     left, right = _wire_requests(left_run), _wire_requests(right_run)
+    assert left and right, "expected recorded requests on both sides"
     # Compare the common sends first: a later missing send must not hide an earlier wire change.
     for send, name in enumerate(sorted(left.keys() | right.keys()), 1):
         assert name in left and name in right, f"send {send} ({name}): missing request body"
-        left_normalized = _normalize_edit_receipts(_normalize_wire_request(left[name], left_run, left_endpoint))
-        right_normalized = _normalize_edit_receipts(_normalize_wire_request(right[name], right_run, right_endpoint))
-        _assert_wire_bytes(left_normalized, right_normalized, send=send, name=name)
+        _assert_wire_bytes(left[name], right[name], send=send, name=name)
 
 
 @pytest.mark.parametrize("field,component", [("content", "messages[0].content"),
@@ -416,12 +256,28 @@ def test_exact_wire_comparison_preserves_content_order_sizes_and_hashes(change, 
     _assert_wire_bytes(before, before, send=3, name="applied-edit")
 
 
-def test_release_parity_checks_wire_before_summary():
-    import inspect
+def _pin_off_cache_switches(switches: dict[str, str]) -> dict[str, str]:
+    for name in (
+        "STATEFRAME_WORKING_SET_STABLE_FIRST",
+        "STATEFRAME_CONSTANT_TOOL_MENU",
+        "STATEFRAME_SHARED_CHECK_CACHE",
+        "STATEFRAME_PROMPT_CACHE_UNPINNED",
+    ):
+        switches.pop(name, None)
+    return switches
 
-    source = inspect.getsource(test_default_parallel_off_wire_and_public_artifacts_match_merged_main)
-    assert source.index("_assert_wire_parity(") < source.index('old_summary_a =')
-    assert 'base = "b520a637"' in source
+
+def _write_off_cache_profile(tmp_path: Path, *, released_profile: Path | None = None) -> Path:
+    source = released_profile or profiles.HERE / "r2hc3.json"
+    profile = json.loads(source.read_text())
+    switches = _pin_off_cache_switches(profile["switches"])
+    # The historical reader defaults to off. Supplying the retired key to the
+    # candidate creates a journal event for a setting this wire case does not use.
+    if released_profile is not None and switches.get("STATEFRAME_READ_LOCKOUT") == "off":
+        del switches["STATEFRAME_READ_LOCKOUT"]
+    path = tmp_path / "r2hc3-off.json"
+    path.write_text(json.dumps(profile))
+    return path
 
 
 @pytest.mark.host_sandbox
@@ -429,9 +285,10 @@ def test_release_parity_checks_wire_before_summary():
 def test_parallel_off_exact_main_wire_fixture_and_on_companion(tmp_path, mode):
     root = Path(__file__).resolve().parents[1]
     helper = root / "tests/fixtures/parallel/off_wire_capture.py"
+    profile = _write_off_cache_profile(tmp_path)
     environment = {**os.environ, "PYTHONHASHSEED": "0"}
     completed = run_monitored(
-        [sys.executable, str(helper), str(root), str(tmp_path / "capture"), mode],
+        [sys.executable, str(helper), str(root), str(tmp_path / "capture"), mode, str(profile)],
         cwd=root, env=environment, run_dir=tmp_path / "capture/run",
         expected_seconds=_engine_timeout_seconds(), step=f"pinned OFF wire fixture ({mode})",
         check=False,
@@ -459,66 +316,66 @@ def test_parallel_off_exact_main_wire_fixture_and_on_companion(tmp_path, mode):
 
 
 def _assert_default_off_spec_parity(released: dict, candidate: dict,
-                                    released_run: Path, released_endpoint: str,
-                                    candidate_run: Path, candidate_endpoint: str) -> None:
-    permitted: set[str] = set()
-    assert set(candidate) - set(released) == permitted, "candidate added unexpected run-spec keys"
-    assert set(released) - set(candidate) == set(), "candidate removed released run-spec keys"
+                                    _released_run: Path, _released_endpoint: str,
+                                    _candidate_run: Path, _candidate_endpoint: str) -> None:
+    assert not set(candidate) - set(released), "candidate added unexpected run-spec keys"
+    assert not set(released) - set(candidate), "candidate removed released run-spec keys"
     assert "parallel_mode" not in candidate and "parallel_limits" not in candidate
     assert "parallel_engine_python" not in candidate
-    comparable_candidate = {key: value for key, value in candidate.items() if key not in permitted}
-    assert _normalize_run_value(released, released_run, released_endpoint) == _normalize_run_value(
-        comparable_candidate, candidate_run, candidate_endpoint), "default-off run spec values differ"
+    assert canonical_json(released) == canonical_json(candidate), (
+        f"default-off run spec values differ at {_first_wire_component(released, candidate)}")
 
 
-def _assert_release_wire_diff_is_edit_receipt_only(
-        left: bytes, left_run: Path, left_endpoint: str,
-        right: bytes, right_run: Path, right_endpoint: str, request_name: str) -> None:
-    left_normalized = _normalize_wire_request(left, left_run, left_endpoint)
-    right_normalized = _normalize_wire_request(right, right_run, right_endpoint)
-    assert left_normalized != right_normalized, f"release request {request_name} has no normalized difference"
-    assert _EDIT_RECEIPT_VALUE.search(left_normalized) and _EDIT_RECEIPT_VALUE.search(right_normalized), (
-        f"release request {request_name} has no exact edit_receipt value")
-    assert _normalize_edit_receipts(left_normalized) == _normalize_edit_receipts(right_normalized), (
-        f"release request {request_name} differs beyond edit_receipt values")
+def _assert_default_off_result_parity(released: dict, candidate: dict,
+                                     _released_run: Path, _released_endpoint: str,
+                                     _candidate_run: Path, _candidate_endpoint: str) -> None:
+    from kernel_delivery_manifest import _digest
+
+    assert type(released.get("exit_status")) is type(candidate.get("exit_status")) is int
+    assert canonical_json(released) == canonical_json(candidate), (
+        f"default-off engine results differ at {_first_wire_component(released, candidate)}")
+    manifest = candidate["result"].get("delivery_manifest")
+    if manifest is not None:
+        body = dict(manifest)
+        assert body.pop("manifest_id") == _digest(body), "invalid delivery manifest digest"
 
 
-def _assert_release_wire_pair(left_run: Path, left_endpoint: str, right_run: Path, right_endpoint: str) -> None:
-    left, right = _wire_requests(left_run), _wire_requests(right_run)
-    assert left.keys() == right.keys()
-    # Some releases derive the same edit receipt for repeated identical edits.
-    # When receipts do vary, keep proving that they are the only wire difference.
-    for name in left:
-        left_normalized = _normalize_wire_request(left[name], left_run, left_endpoint)
-        right_normalized = _normalize_wire_request(right[name], right_run, right_endpoint)
-        if left_normalized == right_normalized:
-            continue
-        _assert_release_wire_diff_is_edit_receipt_only(
-            left[name], left_run, left_endpoint, right[name], right_run, right_endpoint, name)
-        assert _normalize_edit_receipts(left_normalized) == _normalize_edit_receipts(right_normalized)
+def test_default_off_result_parity_checks_the_published_exit_status(tmp_path):
+    released = {"result": {"result": "SUBMITTED"}, "seconds": 0.0, "exit_status": 0}
+    arguments = (tmp_path / "released", "http://127.0.0.1:30001/v1",
+                 tmp_path / "candidate", "http://127.0.0.1:30002/v1")
+    _assert_default_off_result_parity(released, released, *arguments)
+
+    for changed in ({"result": released["result"]}, {**released, "exit_status": 1},
+                    {**released, "exit_status": False}, {**released, "result": {"result": "DRAFT"}},
+                    {**released, "unexpected": "field"}):
+        with pytest.raises(AssertionError):
+            _assert_default_off_result_parity(released, changed, *arguments)
 
 
-def test_release_wire_pair_accepts_a_stable_edit_receipt(monkeypatch, tmp_path):
-    import sys
+def test_off_cache_profile_uses_omitted_defaults_without_explicit_cache_switches(tmp_path):
+    profile_path = _write_off_cache_profile(tmp_path)
+    switches = profiles.load(str(profile_path))
 
-    payload = (b'{"messages":[{"content":"{\\"edit_receipt\\":'
-               b'\\"0123456789abcdef0123\\",\\"other\\":\\"unchanged\\"}"}]}')
-    monkeypatch.setattr(sys.modules[__name__], "_wire_requests",
-                        lambda _run: {"request-1": payload})
+    assert not {
+        "STATEFRAME_WORKING_SET_STABLE_FIRST",
+        "STATEFRAME_CONSTANT_TOOL_MENU",
+        "STATEFRAME_SHARED_CHECK_CACHE",
+        "STATEFRAME_PROMPT_CACHE_UNPINNED",
+    }.intersection(switches)
 
-    _assert_release_wire_pair(tmp_path / "first", "endpoint-a",
-                              tmp_path / "second", "endpoint-b")
 
+@pytest.mark.parametrize("setting, expected", [("off", None), ("on", "on")])
+def test_historical_off_profile_does_not_send_the_retired_read_lockout_default(tmp_path, setting, expected):
+    source = tmp_path / "released.json"
+    source.write_text(json.dumps({
+        "schema": "stateframe-product-profile/1",
+        "switches": {"STATEFRAME_READ_LOCKOUT": setting},
+    }))
 
-def test_edit_receipt_wire_normalization_changes_only_exact_key_values(tmp_path):
-    first = b'{"messages":[{"content":"{\\"edit_receipt\\":\\"0123456789abcdef0123\\",\\"other\\":\\"aaaaaaaaaaaaaaaaaaaa\\"}"}]}'
-    second = first.replace(b"0123456789abcdef0123", b"fedcba9876543210fedc")
-    _assert_release_wire_diff_is_edit_receipt_only(first, tmp_path, "endpoint",
-                                                    second, tmp_path, "endpoint", "synthetic")
-    planted = second.replace(b"aaaaaaaaaaaaaaaaaaaa", b"bbbbbbbbbbbbbbbbbbbb")
-    with pytest.raises(AssertionError, match="beyond edit_receipt values"):
-        _assert_release_wire_diff_is_edit_receipt_only(first, tmp_path, "endpoint",
-                                                        planted, tmp_path, "endpoint", "synthetic")
+    profile = _write_off_cache_profile(tmp_path, released_profile=source)
+
+    assert profiles.load(str(profile)).get("STATEFRAME_READ_LOCKOUT") == expected
 
 
 def _install_release_package(python: Path, package: Path, requirements: Path) -> None:
@@ -561,44 +418,38 @@ def test_engine_venv_installs_bypass_shared_pip_cache(tmp_path, monkeypatch, hel
 
 
 def _run_scripted_engine(python: Path, script: Path, repo: Path, run_dir: Path,
-                         *, parallel_off: bool, allow_incomplete: bool = False) -> tuple[Path, str]:
+                         *, parallel_off: bool, endpoint: str, server,
+                         allow_incomplete: bool = False, profile: str = "r2hc3") -> tuple[Path, str]:
+    from stateframe.scripted_endpoint import Script, make_handler
+
+    server.RequestHandlerClass = make_handler(Script(json.loads(script.read_bytes())))
     environment = dict(os.environ)
     environment.pop("PYTHONPATH", None)
-    endpoint_process = subprocess.Popen(
-        [str(python), "-I", "-m", "stateframe.scripted_endpoint", "--script", str(script), "--port", "0"],
-        cwd=repo, env=environment, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    try:
-        assert endpoint_process.stdout is not None
-        readable, _, _ = select.select([endpoint_process.stdout], [], [], _scaled_test_timeout(10))
-        assert readable, "scripted endpoint did not publish its URL"
-        endpoint = endpoint_process.stdout.readline().strip()
-        assert endpoint.endswith("/v1"), f"scripted endpoint did not publish a v1 URL: {endpoint!r}"
-        command = [str(python), "-I", "-m", "stateframe", "run", "--repo", str(repo),
-                   "--task", "Fix the pricing code so the tests pass.", "--endpoint", endpoint,
-                   "--model", "scripted", "--profile", "r2hc3", "--run-dir", str(run_dir),
-        "--max-turns", "16", "--test-python", str(python), "--shell", "standard"]
-        if parallel_off:
-            command.extend(("--parallel", "off"))
-        completed = run_monitored(command, cwd=repo, env=environment, run_dir=run_dir,
-                                  expected_seconds=_scaled_test_timeout(_DEFAULT_ENGINE_TIMEOUT),
-                                  step="parallel-off release parity", check=False)
-        if not allow_incomplete:
-            assert completed.returncode == 0, completed.stderr + completed.stdout
-        return run_dir, endpoint
-    finally:
-        if endpoint_process.poll() is None:
-            endpoint_process.terminate()
-            try:
-                endpoint_process.wait(timeout=_scaled_test_timeout(5))
-            except subprocess.TimeoutExpired:
-                endpoint_process.kill()
-                endpoint_process.wait(timeout=_scaled_test_timeout(5))
+    environment.pop("STATEFRAME_PROMPT_CACHE_UNPINNED", None)
+    active_run = run_dir.with_name("active-run")
+    assert not active_run.exists()
+    launcher = Path(__file__).resolve().parent / "fixtures/parallel/off_release_launch.py"
+    command = [str(python), "-I", str(launcher), "run", "--repo", str(repo),
+               "--task", "Fix the pricing code so the tests pass.", "--endpoint", endpoint,
+               "--model", "scripted", "--profile", profile, "--run-dir", str(active_run),
+               "--max-turns", "16", "--test-python", str(python), "--shell", "standard"]
+    if parallel_off:
+        command.extend(("--parallel", "off"))
+    completed = run_monitored(command, cwd=repo, env=environment, run_dir=active_run,
+                              expected_seconds=_scaled_test_timeout(_DEFAULT_ENGINE_TIMEOUT),
+                              step="parallel-off release parity", check=False)
+    if active_run.exists():
+        active_run.rename(run_dir)
+    if not allow_incomplete:
+        assert completed.returncode == 0, completed.stderr + completed.stdout
+    return run_dir, endpoint
 
 
-def _read_child_environment(python: Path, helper: Path, repo: Path, endpoint: str) -> dict[str, str]:
+def _read_child_environment(python: Path, helper: Path, repo: Path, endpoint: str,
+                            *, profile: str = "r2hc3") -> dict[str, str]:
     environment = dict(os.environ)
     environment.pop("PYTHONPATH", None)
-    completed = subprocess.run([str(python), "-I", str(helper), str(repo), endpoint],
+    completed = subprocess.run([str(python), "-I", str(helper), str(repo), endpoint, profile],
                                env=environment, capture_output=True, text=True,
                                timeout=_scaled_test_timeout(30), check=False)
     assert completed.returncode == 0, completed.stdout + completed.stderr
@@ -622,9 +473,7 @@ def _directory_effect_record(run_dir: Path) -> dict[str, object]:
     return effects[0]
 
 
-def _assert_directory_effect_values_match(left: dict[str, object], left_run: Path, left_endpoint: str,
-                                          right: dict[str, object], right_run: Path,
-                                          right_endpoint: str) -> None:
+def _assert_directory_effect_values_match(left: dict[str, object], right: dict[str, object]) -> None:
     expected = "files changed by this command: created: generated"
     left_observation = left.get("observation")
     right_observation = right.get("observation")
@@ -634,23 +483,18 @@ def _assert_directory_effect_values_match(left: dict[str, object], left_run: Pat
     assert left.get("post_manifest_digest") == right.get("post_manifest_digest"), (
         "directory effect changed the recorded workspace manifest")
 
-    def normalize_observation(observation: str, run: Path, endpoint: str) -> str:
-        normalized = _normalize_run_text(observation, run, endpoint)
-        return re.sub(r"(?<=\| )\d+\.\d+s(?= \|)", "<ELAPSED>s", normalized)
-
-    assert normalize_observation(left_observation, left_run, left_endpoint) == normalize_observation(
-        right_observation, right_run, right_endpoint), "directory effect observations differ"
+    assert left_observation == right_observation, "directory effect observations differ"
 
 
-def test_directory_effect_comparison_ignores_only_shell_duration(tmp_path):
-    observation = "$ mkdir generated\nexit 0 | 1.28s | standard\nfiles changed by this command: created: generated"
+def test_directory_effect_comparison_rejects_observation_changes():
+    observation = "$ mkdir generated\nexit 0 | 0.25s | standard\nfiles changed by this command: created: generated"
     base = {"exit_code": 0, "post_manifest_digest": "stable", "observation": observation}
-    elapsed = {**base, "observation": observation.replace("1.28s", "0.64s")}
-    _assert_directory_effect_values_match(base, tmp_path, "endpoint", elapsed, tmp_path, "endpoint")
+    _assert_directory_effect_values_match(base, base)
 
-    changed = {**elapsed, "observation": elapsed["observation"].replace("exit 0", "exit 9")}
-    with pytest.raises(AssertionError, match="directory effect observations differ"):
-        _assert_directory_effect_values_match(base, tmp_path, "endpoint", changed, tmp_path, "endpoint")
+    for old, new in (("exit 0", "exit 9"), ("0.25s", "0.64s")):
+        changed = {**base, "observation": observation.replace(old, new)}
+        with pytest.raises(AssertionError, match="directory effect observations differ"):
+            _assert_directory_effect_values_match(base, changed)
 
 
 @pytest.mark.parametrize("parent_value", ["on", "off", None])
@@ -1002,7 +846,7 @@ def test_routed_worker_sends_unit_class_provider_credential(monkeypatch, tmp_pat
         monkeypatch.setenv("SF_TEST_UNIT_KEY", "fake-unit-key")
         parent_spec["api_key_env"] = "SF_TEST_PARENT_KEY"
         parent_spec["chat_url"] = endpoint + "/chat/completions"
-        parent_spec["environment"].update(profiles.load("r2hc3"))
+        parent_spec["environment"].update(_pin_off_cache_switches(profiles.load("r2hc3")))
         # prepare() consumes this runner setting before recording the engine environment.
         parent_spec["environment"].pop("STATEFRAME_PROTECT_TESTS", None)
         parent_spec["environment"].update(DS_URL=parent_spec["chat_url"], DS_MODEL="scripted")
@@ -1299,17 +1143,27 @@ def test_parallel_off_keeps_main_run_spec_keys_and_child_env(tmp_path, monkeypat
 
 
 def test_parallel_off_ignores_ambient_limits_and_slots_before_prepare(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from fixtures.parallel.off_release_launch import RunDateTime
+
+    from stateframe import runner
+
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "sample.py").write_text("VALUE = 1\n")
     (repo / "test_sample.py").write_text("def test_sample(): assert True\n")
     endpoint = Endpoint.from_args("http://127.0.0.1:8080/v1", "local-model", None)
+    monkeypatch.setattr(runner, "datetime", RunDateTime)
+    monkeypatch.setattr(runner, "secrets", SimpleNamespace(token_hex=lambda size: "ab" * size))
 
     def spec_for(name):
-        _, _, spec = prepare(RunOptions(repo=repo, task="inspect sample", endpoint=endpoint,
-                                        run_dir=tmp_path / name, max_turns=1,
-                                        parallel_mode="off"))
-        return json.loads((tmp_path / name / "spec.json").read_text()), spec
+        active, _, spec = prepare(RunOptions(repo=repo, task="inspect sample", endpoint=endpoint,
+                                             run_dir=tmp_path / "active", max_turns=1,
+                                             parallel_mode="off"))
+        published = (active / "spec.json").read_bytes()
+        active.rename(tmp_path / name)
+        return published, spec
 
     for key in ("STATEFRAME_PARALLEL_SLOTS", "STATEFRAME_PARALLEL_MAX_CONCURRENCY",
                 "STATEFRAME_PARALLEL_SUBFRAME_MAX_REQUESTS",
@@ -1321,20 +1175,14 @@ def test_parallel_off_ignores_ambient_limits_and_slots_before_prepare(tmp_path, 
     monkeypatch.setenv("STATEFRAME_PARALLEL_SUBFRAME_MAX_REQUESTS", "9")
     monkeypatch.setenv("STATEFRAME_PARALLEL_FANOUT_CONTINUATION", "on")
     ambient_disk, ambient = spec_for("ambient")
-    for recorded in (baseline_disk, ambient_disk, baseline, ambient):
+    for recorded in (json.loads(baseline_disk), json.loads(ambient_disk), baseline, ambient):
         assert "parallel_slots" not in recorded
         assert "parallel_limits" not in recorded
         assert not any(key.startswith("STATEFRAME_PARALLEL_")
                        for key in recorded["environment_sources"])
-    def normalized_spec(spec, name):
-        value = json.loads(json.dumps(spec).replace(str(tmp_path / name), "<run>"))
-        value.pop("created", None)
-        value.pop("run_identity_seed", None)
-        return value
-
-    assert normalized_spec(ambient_disk, "ambient") == normalized_spec(baseline_disk, "baseline")
-    assert ambient_disk["environment_sources"] == baseline_disk["environment_sources"]
-    assert normalized_spec(ambient, "ambient") == normalized_spec(baseline, "baseline")
+    assert ambient_disk == baseline_disk
+    assert ambient["environment_sources"] == baseline["environment_sources"]
+    assert canonical_json(ambient) == canonical_json(baseline)
 
 
 @pytest.mark.host_sandbox
@@ -1540,18 +1388,36 @@ def test_latest_stable_release_commit_fails_without_reachable_tag(tmp_path):
         _latest_stable_release_commit(root)
 
 
+def _expected_build_metadata(source_tree: Path) -> dict[str, object]:
+    # A build publishes its own fingerprint. Read the exact input for that build
+    # through the product's loader, including when the test changes the profile location.
+    with patch.object(profiles, "HERE", source_tree / "src/stateframe/profiles"):
+        metadata = profiles.engine_source_summary()
+    assert metadata["shipped_hash"]
+    return metadata
+
+
+def _archive_off_release(root: Path, destination: Path) -> None:
+    destination.mkdir()
+    archive = destination.with_suffix(".tar")
+    with archive.open("wb") as output:
+        archived = subprocess.run(["git", "-C", str(root), "archive", "--format=tar", _OFF_RELEASE_COMMIT],
+                                  stdout=output, stderr=subprocess.PIPE, check=False,
+                                  timeout=_scaled_test_timeout(120))
+    assert archived.returncode == 0, (
+        f"Could not archive release 0.8.5 ({_OFF_RELEASE_COMMIT}) from the checkout's Git object store:\n"
+        f"{archived.stderr.decode(errors='replace')}")
+    with tarfile.open(archive) as source:
+        source.extractall(destination, filter="data")
+
+
 @pytest.mark.host_sandbox
 def test_default_parallel_off_wire_and_public_artifacts_match_merged_main(tmp_path):
     root = Path(__file__).resolve().parents[1]
-    base = "b520a637"
     old = tmp_path / "main-base"
-    old.mkdir()
-    archive = tmp_path / "main-base.tar"
-    with archive.open("wb") as output:
-        subprocess.run(["git", "-C", str(root), "archive", "--format=tar", base],
-                       stdout=output, check=True)
-    with tarfile.open(archive) as source:
-        source.extractall(old)
+    _archive_off_release(root, old)
+    off_profile = str(_write_off_cache_profile(
+        tmp_path, released_profile=old / "src/stateframe/profiles/r2hc3.json"))
     repo = tmp_path / "repo"
     shutil.copytree(old / "examples" / "discount_bug", repo)
     script = old / "examples" / "discount_bug.script.json"
@@ -1569,7 +1435,7 @@ def test_default_parallel_off_wire_and_public_artifacts_match_merged_main(tmp_pa
         "from stateframe.endpoint import Endpoint\n"
         "from stateframe.runner import RunOptions, _child_env\n"
         "options = RunOptions(Path(sys.argv[1]), 'Fix the pricing code so the tests pass.',\n"
-        "    Endpoint.from_args(sys.argv[2], 'scripted', None), max_turns=16, profile='r2hc3',\n"
+        "    Endpoint.from_args(sys.argv[2], 'scripted', None), max_turns=16, profile=sys.argv[3],\n"
         ")\n"
         "child_env = _child_env(options)\n"
         "seed = profiles.load(options.profile).get('PYTHONHASHSEED')\n"
@@ -1584,52 +1450,67 @@ def test_default_parallel_off_wire_and_public_artifacts_match_merged_main(tmp_pa
     requirements = old / "requirements.txt"
     _install_release_package(python, old, requirements)
 
-    old_a, endpoint_a = _run_scripted_engine(python, script, repo, tmp_path / "old-run-a", parallel_off=False)
-    old_b, endpoint_b = _run_scripted_engine(python, script, repo, tmp_path / "old-run-b", parallel_off=False)
-    old_effect_run, old_effect_endpoint = _run_scripted_engine(
-        python, directory_effect_script, repo, tmp_path / "old-directory-effect",
-        parallel_off=False, allow_incomplete=True)
-    old_effect = _directory_effect_record(old_effect_run)
-    old_child_env_a = _read_child_environment(python, child_environment_helper, repo, endpoint_a)
-    old_child_env_b = _read_child_environment(python, child_environment_helper, repo, endpoint_b)
+    from stateframe.scripted_endpoint import Script, serve
 
-    _install_release_package(python, root, requirements)
-    new_run, new_endpoint = _run_scripted_engine(
-        python, script, repo, tmp_path / "new-run", parallel_off=True)
-    _assert_release_wire_pair(old_a, endpoint_a, old_b, endpoint_b)
-    _assert_wire_parity(old_a, endpoint_a, new_run, new_endpoint)
-    _assert_wire_parity(old_b, endpoint_b, new_run, new_endpoint)
-    new_effect_run, new_effect_endpoint = _run_scripted_engine(
-        python, directory_effect_script, repo, tmp_path / "new-directory-effect",
-        parallel_off=True, allow_incomplete=True)
-    new_effect = _directory_effect_record(new_effect_run)
-    _assert_directory_effect_values_match(old_effect, old_effect_run, old_effect_endpoint,
-                                          new_effect, new_effect_run, new_effect_endpoint)
-    planted_effect = {**new_effect, "observation": str(new_effect["observation"]).replace(
-        "created: generated", "created: planted")}
-    with pytest.raises(AssertionError, match="directory effect"):
-        _assert_directory_effect_values_match(old_effect, old_effect_run, old_effect_endpoint,
-                                              planted_effect, new_effect_run, new_effect_endpoint)
-    new_child_env = _read_child_environment(python, child_environment_helper, repo, new_endpoint)
+    server = serve(Script({}))
+    endpoint = f"http://127.0.0.1:{server.server_address[1]}/v1"
+    script_options = {"endpoint": endpoint, "server": server, "profile": off_profile}
+    try:
+        old_a, endpoint_a = _run_scripted_engine(
+            python, script, repo, tmp_path / "old-run-a", parallel_off=False, **script_options)
+        old_b, endpoint_b = _run_scripted_engine(
+            python, script, repo, tmp_path / "old-run-b", parallel_off=False, **script_options)
+        old_effect_run, _ = _run_scripted_engine(
+            python, directory_effect_script, repo, tmp_path / "old-directory-effect",
+            parallel_off=False, allow_incomplete=True, **script_options)
+        old_effect = _directory_effect_record(old_effect_run)
+        old_child_env_a = _read_child_environment(python, child_environment_helper, repo, endpoint_a,
+                                                  profile=off_profile)
+        old_child_env_b = _read_child_environment(python, child_environment_helper, repo, endpoint_b,
+                                                  profile=off_profile)
+
+        _install_release_package(python, root, requirements)
+        # Each build supplies its own shipped settings. The shared path is the
+        # actual CLI input, so the recorded profile identity must also match.
+        assert str(_write_off_cache_profile(tmp_path)) == off_profile
+        new_run, new_endpoint = _run_scripted_engine(
+            python, script, repo, tmp_path / "new-run", parallel_off=True, **script_options)
+        _assert_wire_parity(old_a, endpoint_a, old_b, endpoint_b)
+        _assert_wire_parity(old_a, endpoint_a, new_run, new_endpoint)
+        _assert_wire_parity(old_b, endpoint_b, new_run, new_endpoint)
+        new_effect_run, _ = _run_scripted_engine(
+            python, directory_effect_script, repo, tmp_path / "new-directory-effect",
+            parallel_off=True, allow_incomplete=True, **script_options)
+        new_effect = _directory_effect_record(new_effect_run)
+        _assert_directory_effect_values_match(old_effect, new_effect)
+        planted_effect = {**new_effect, "observation": str(new_effect["observation"]).replace(
+            "created: generated", "created: planted")}
+        with pytest.raises(AssertionError, match="directory effect"):
+            _assert_directory_effect_values_match(old_effect, planted_effect)
+        new_child_env = _read_child_environment(python, child_environment_helper, repo, new_endpoint,
+                                                profile=off_profile)
+    finally:
+        server.shutdown()
+        server.server_close()
 
     old_spec_a = json.loads((old_a / "spec.json").read_bytes())
     old_spec_b = json.loads((old_b / "spec.json").read_bytes())
     new_spec = json.loads((new_run / "spec.json").read_bytes())
-    assert old_spec_a["profile"] == old_spec_b["profile"] == new_spec["profile"] == "r2hc3"
-
-    normalized_spec_a = _normalize_run_value(old_spec_a, old_a, endpoint_a)
-    normalized_spec_b = _normalize_run_value(old_spec_b, old_b, endpoint_b)
-    assert normalized_spec_a == normalized_spec_b
-    _assert_default_off_spec_parity(old_spec_a, new_spec, old_a, endpoint_a, new_run, new_endpoint)
+    assert old_spec_a["profile"] == old_spec_b["profile"] == new_spec["profile"] == off_profile
+    _assert_default_off_spec_parity(old_spec_a, old_spec_b, old_a, endpoint_a, old_b, endpoint_b)
+    assert old_spec_a["environment_sources"] == new_spec["environment_sources"], (
+        "default-off run spec values differ at environment_sources")
+    released_build = _expected_build_metadata(old)
+    candidate_build = _expected_build_metadata(root)
+    assert old_spec_a["engine_source"] == released_build
+    expected_spec = {**old_spec_a, "engine_source": candidate_build}
+    _assert_default_off_spec_parity(expected_spec, new_spec, old_a, endpoint_a, new_run, new_endpoint)
 
     planted_extra = {**new_spec, "planted_unexpected_spec_key": "must fail parity"}
     with pytest.raises(AssertionError, match="candidate added unexpected run-spec keys"):
         _assert_default_off_spec_parity(old_spec_a, planted_extra, old_a, endpoint_a, new_run, new_endpoint)
 
-    old_environment_a = _normalize_run_value(old_spec_a["environment"], old_a, endpoint_a)
-    old_environment_b = _normalize_run_value(old_spec_b["environment"], old_b, endpoint_b)
-    new_environment = _normalize_run_value(new_spec["environment"], new_run, new_endpoint)
-    assert old_environment_a == old_environment_b == new_environment
+    assert old_spec_a["environment"] == old_spec_b["environment"] == new_spec["environment"]
     assert old_child_env_a == old_child_env_b == new_child_env
     assert old_child_env_a["PYTHONHASHSEED"] == "0"
 
@@ -1638,13 +1519,16 @@ def test_default_parallel_off_wire_and_public_artifacts_match_merged_main(tmp_pa
     new_summary = json.loads((new_run / "summary.json").read_bytes())
     assert "parallel" not in old_summary_a and "parallel" not in old_summary_b
     assert "parallel" not in new_summary
-    assert _normalize_run_value(old_summary_a, old_a, endpoint_a) == _normalize_run_value(
-        old_summary_b, old_b, endpoint_b)
-    assert _normalize_run_value(old_summary_a, old_a, endpoint_a) == _normalize_run_value(
-        new_summary, new_run, new_endpoint)
+    assert canonical_json(old_summary_a) == canonical_json(old_summary_b)
+    assert old_summary_a["engine_source_hash"] == released_build["source_hash"]
+    assert old_summary_a["engine_shipped_hash"] == released_build["shipped_hash"]
+    expected_summary = {**old_summary_a, "engine_source_hash": candidate_build["source_hash"],
+                        "engine_shipped_hash": candidate_build["shipped_hash"]}
+    assert canonical_json(expected_summary) == canonical_json(new_summary)
 
     for released_run, released_endpoint in ((old_a, endpoint_a), (old_b, endpoint_b)):
         released_result = json.loads((released_run / "engine-result.json").read_bytes())
         candidate_result = json.loads((new_run / "engine-result.json").read_bytes())
-        assert _normalize_run_value(released_result, released_run, released_endpoint) == (
-            _normalize_run_value(candidate_result, new_run, new_endpoint))
+        _assert_default_off_result_parity(released_result, candidate_result, released_run, released_endpoint,
+                                          new_run, new_endpoint)
+        assert (released_run / "engine-result.json").read_bytes() == (new_run / "engine-result.json").read_bytes()

@@ -138,6 +138,9 @@ class KernelBolt:
         self._reg = None
         if defer_symbols or not indexed_grep_symbols_enabled():
             self._defer_symbols = True
+        if not defer_symbols and getattr(self, "_defer_symbols", False):
+            # Full launch retains the symbol liveness slot used by trace-derived IDs.
+            self.status["symbol"] = "deferred until first unresolved grep"
         self._graph = None
         self._boot()
 

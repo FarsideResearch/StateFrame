@@ -104,10 +104,6 @@ APPROVED_TEST_SIGNALS: dict[tuple[str, str, str], tuple[int, str]] = {
     ("test_parallel_signal_identity.py", "test_macos_audit_token_signal_checks_birth_and_stops_owned_process",
      "process.kill()"):
         (1, "cleanup the held test child after signal identity assertions"),
-    ("test_parallel_worker_prep.py", "_run_scripted_engine", "endpoint_process.terminate()"):
-        (1, "stop the local scripted endpoint server"),
-    ("test_parallel_worker_prep.py", "_run_scripted_engine", "endpoint_process.kill()"):
-        (1, "bounded escalation for the local scripted endpoint server"),
     ("test_parallel_worker_prep.py", "test_spawn_to_process_record_crash_keeps_durable_launch_intent",
      "process.kill()"):
         (1, "stop the synthetic worker process used by the launch crash test"),
