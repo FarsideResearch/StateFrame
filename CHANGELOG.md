@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Tests: the retention replay case uses a neutral test command.
 ## 0.8.12 (2026-11-20)
 
 - Fixed: with indexed grep symbols off, a full launch again records the deferred symbol status at startup, so parallel-off requests and their trace-derived event ids match earlier releases. Tests: `tests/test_parallel_worker_prep.py`, `tests/test_parallel_worker_prep_digest_guard.py`.
