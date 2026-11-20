@@ -114,7 +114,9 @@ def test_bind_bounds_schema_metering_and_keeps_fast_counts(tmp_path, monkeypatch
 
 @pytest.mark.parametrize("trickle", [True, "headers", "chunked", "after-exact", "staggered"],
                          ids=["body", "headers", "chunked", "after-exact", "staggered"])
-def test_parallel_binds_share_one_tokenizer_with_bounded_workers(tmp_path, monkeypatch, trickle):
+@pytest.mark.parametrize("cached_capabilities", [True, False], ids=["warm", "cold"])
+def test_parallel_binds_share_one_tokenizer_with_bounded_workers(tmp_path, monkeypatch, trickle,
+                                                                cached_capabilities):
     import kernel_request_diet
     from kernel_provider_dialect import LLAMA_CPP, RUN_CAPABILITY_CACHE, ProviderCapabilities, origin_of
 
@@ -136,7 +138,10 @@ def test_parallel_binds_share_one_tokenizer_with_bounded_workers(tmp_path, monke
     posts_per_bind = 2 if trickle == "after-exact" else 1
     ready = Barrier(callers)
     with tokenizer(trickle=trickle, trickle_posts=callers * posts_per_bind) as (endpoint, schema_posts):
-        monkeypatch.setitem(RUN_CAPABILITY_CACHE, origin_of(endpoint), ProviderCapabilities(dialect=LLAMA_CPP))
+        if cached_capabilities:
+            monkeypatch.setitem(RUN_CAPABILITY_CACHE, origin_of(endpoint), ProviderCapabilities(dialect=LLAMA_CPP))
+        else:
+            monkeypatch.delitem(RUN_CAPABILITY_CACHE, origin_of(endpoint), raising=False)
 
         def bind(index):
             run_dir = tmp_path / str(index)
