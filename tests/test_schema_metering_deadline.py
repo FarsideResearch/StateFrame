@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from http.server import ThreadingHTTPServer
 from pathlib import Path
-from threading import Barrier, Event, Thread, current_thread
+from threading import Barrier, Event, Thread, current_thread, local
 from types import SimpleNamespace
 from urllib.parse import urlsplit
 
@@ -175,6 +175,56 @@ def test_parallel_binds_share_one_tokenizer_with_bounded_workers(tmp_path, monke
         for worker in workers:
             worker.join(timeout=max(0, cleanup_deadline - time.monotonic()))
         assert not any(worker.is_alive() for worker in workers)
+
+
+@pytest.mark.parametrize("probe_times_out", [True, False], ids=["probe-deadline", "unsupported"])
+def test_parallel_cold_binds_record_fallback_when_no_schema_can_post(
+        tmp_path, monkeypatch, probe_times_out):
+    import kernel_agent_tools
+    import kernel_provider_dialect
+    import kernel_request_diet
+
+    probe_clock = local()
+    clock = SimpleNamespace(monotonic=lambda: getattr(probe_clock, "now", 0.0))
+    for module in (kernel_agent_tools, kernel_provider_dialect, kernel_request_diet):
+        monkeypatch.setattr(module, "time", clock)
+    monkeypatch.setattr(kernel_request_diet, "TOKENIZE_REQUEST_TIMEOUT_CAP_SECONDS", CAP)
+    monkeypatch.setattr(kernel_provider_dialect, "RUN_CAPABILITY_CACHE", {})
+    monkeypatch.delenv(kernel_provider_dialect.PROVIDER_OVERRIDE_ENV, raising=False)
+    probes = []
+
+    def probe(_origin, _key, path, *, deadline):
+        probes.append(path)
+        if probe_times_out:
+            # Model a probe descheduled until its slice expires. The bind's
+            # absolute deadline still has time left when the retries run out.
+            probe_clock.now = deadline
+            return None
+        return 404, None
+
+    monkeypatch.setattr(kernel_provider_dialect, "bounded_json_probe", probe)
+    fallback = measure_schemas()
+    callers = 4
+    ready = Barrier(callers)
+    with tokenizer(trickle=False) as (endpoint, schema_posts):
+        def bind(index):
+            run_dir = tmp_path / str(index)
+            run_dir.mkdir()
+            shell = SimpleNamespace(spec={"chat_url": endpoint + "/chat/completions"},
+                                    run_dir=run_dir, settings=ToolSettings())
+            ready.wait(timeout=5)
+            tools = AgentTools(shell, CustomToolSet((), "empty"), defer_schema_budget=True)
+            tools.bind()
+            assert json.loads(tools.schema_budget_path.read_text()) == fallback
+            return tools.startup_schema_budget
+
+        with ThreadPoolExecutor(max_workers=callers) as pool:
+            records = list(pool.map(bind, range(callers)))
+
+        assert schema_posts == []
+    assert probes and set(probes) == {"/props"}
+    reason = "deadline" if probe_times_out else "completed"
+    assert records == [{"reason": reason, "counts": fallback}] * callers
 
 
 @pytest.mark.parametrize("stall", ["resolution", "first-address", "tls-context"])
