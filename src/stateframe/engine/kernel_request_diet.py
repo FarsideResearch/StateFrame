@@ -562,7 +562,20 @@ def _http_tokenize(content: str, url: str, *, deadline: float | None = None,
         timeout = min(timeout, remaining)
     opener = opener or _build_tokenize_opener()
     with opener.open(request, timeout=timeout) as response:
-        raw = response.read(_MAX_TOKENIZE_RESPONSE_BYTES + 1)
+        limit = _MAX_TOKENIZE_RESPONSE_BYTES + 1
+        if deadline is None:
+            raw = response.read(limit)
+        else:
+            # read(size) can wait for many socket reads, each with a fresh idle timeout.
+            raw = bytearray()
+            while len(raw) < limit:
+                if time.monotonic() >= deadline:
+                    _log_tokenizer_deadline()
+                    raise TimeoutError("tokenizer request deadline expired")
+                chunk = response.read1(limit - len(raw))
+                if not chunk:
+                    break
+                raw.extend(chunk)
     if len(raw) > _MAX_TOKENIZE_RESPONSE_BYTES:
         raise ValueError("oversized tokenizer response")
     decoded = json.loads(raw)
