@@ -120,6 +120,31 @@ def test_failed_delivery_of_failure_report_is_accounted_without_recursing(tmp_pa
         assert journal.path.read_bytes() == before_replay
 
 
+def test_failure_message_from_a_non_utf8_path_does_not_stop_delivery(tmp_path):
+    with ContinuationJournal(tmp_path, "observer-error-text", {}) as journal:
+        delivered = []
+
+        def reject(row):
+            if row["index"] == 1:
+                raise OSError("cannot read filename\udcff")
+            _reject(row)
+
+        journal.subscribe("rejecting", reject, kinds=(_EVENT,))
+        journal.subscribe("receiving", delivered.append, kinds=(_EVENT,))
+        try:
+            rows = journal.emit_batch([(_EVENT, {"index": i}) for i in range(22)], atomic=True)
+        except UnicodeEncodeError:
+            rows = None
+
+        assert rows is not None, f"reporting stopped fanout after {len(delivered)} deliveries"
+        assert delivered == rows
+        *details, summary = _failures_on_disk(journal)
+        assert [row["event_sequence"] for row in details] == [row["sequence"] for row in rows[:20]]
+        assert details[1]["error_type"] == "OSError"
+        assert details[1]["error"] == r"cannot read filename\udcff"
+        assert summary["dropped_count"] == 2
+
+
 def test_overflow_keeps_the_live_artifact_index_in_step_with_single_appends(tmp_path):
     with ContinuationJournal(tmp_path, "observer-artifact-sequence", {}) as journal:
         context = GeneratedContext(journal)
