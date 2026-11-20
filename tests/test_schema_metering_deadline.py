@@ -35,6 +35,7 @@ def tokenizer(*, trickle, trickle_posts=1, posts_received=None):
     script = Script(json.loads((ROOT / "examples/discount_bug.script.json").read_text()))
     schema_posts = []
     posts_lock = Lock()
+    shutting_down = Event()
 
     class Handler(make_handler(script)):
         def _tokenize(self, raw):
@@ -51,6 +52,10 @@ def tokenizer(*, trickle, trickle_posts=1, posts_received=None):
                 return
             if not trickle or post_count > trickle_posts:
                 self._send(200, {"tokens": [1, 2, 3]})
+                return
+            if trickle == "withhold":
+                shutting_down.wait()
+                self.close_connection = True
                 return
             # Each byte arrives within the socket timeout, but the full body takes over a second.
             body = b'{"tokens": [1, 2, 3]}'
@@ -77,6 +82,7 @@ def tokenizer(*, trickle, trickle_posts=1, posts_received=None):
         try:
             yield f"http://127.0.0.1:{server.server_port}/v1", schema_posts
         finally:
+            shutting_down.set()
             server.shutdown()
             worker.join()
 
@@ -434,6 +440,9 @@ def test_startup_fallback_is_journaled_and_replayed_byte_for_byte(tmp_path, monk
     monkeypatch.setenv("STATEFRAME_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("STATEFRAME_CHECKPOINT", "off")
     monkeypatch.delenv("LLAMA_CPP_TOKENIZE_URL", raising=False)
+    # This test needs one admitted POST and a deadline fallback, even while
+    # the host is starting an entire engine process and preparing its run.
+    replay_cap = 2.0
     child = tmp_path / "child.py"
     child.write_text(f"""
 import json
@@ -451,7 +460,7 @@ def install_test_cap(seed):
     spec = json.loads((Path(sys.argv[1]) / "spec.json").read_text())
     sys.path.insert(0, spec["engine_dir"])
     import kernel_request_diet
-    kernel_request_diet.TOKENIZE_REQUEST_TIMEOUT_CAP_SECONDS = {CAP!r}
+    kernel_request_diet.TOKENIZE_REQUEST_TIMEOUT_CAP_SECONDS = {replay_cap!r}
 
 state["install_run_identity"] = install_test_cap
 raise SystemExit(engine["_run_cli"](sys.argv))
@@ -465,7 +474,8 @@ raise SystemExit(engine["_run_cli"](sys.argv))
         assert started["kind"] == "run_started"
         return resolve_journal_blob_refs(started["manifest"], journal).get("startup_schema_budget")
 
-    with tokenizer(trickle=True) as (endpoint, schema_posts):
+    posts_received = Event()
+    with tokenizer(trickle="withhold", posts_received=posts_received) as (endpoint, schema_posts):
         assert cli.main(["run", "--repo", str(repo), "--task", "Fix the pricing code so the tests pass.",
                          "--endpoint", endpoint, "--model", "scripted", "--run-dir", str(run),
                          "--test-python", sys.executable, "--no-run-env",
@@ -474,6 +484,7 @@ raise SystemExit(engine["_run_cli"](sys.argv))
         live = wire.read_bytes()
         record = startup_record()
         assert record == {"reason": "deadline", "counts": measure_schemas()}
+        posts_received.wait(timeout=2)
         posts_after_live = len(schema_posts)
         assert posts_after_live == 1
         # Reclassify the completed first exchange as interrupted so resume replays it.
