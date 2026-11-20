@@ -206,6 +206,36 @@ def _interrupted_archive_tape(run: Path, spec: dict) -> list[dict[str, object]] 
     return []
 
 
+def _interrupted_archive_worker(run: Path, spec: dict) -> Path | None:
+    """Recover a worker moved before the wire tape by an interrupted archive."""
+    if (run / "worker").exists() or not (run / "wire").is_dir():
+        return None
+    attempts = run / "attempts"
+    seed = spec.get("run_identity_seed")
+    if not isinstance(seed, str) or not attempts.is_dir():
+        return None
+    active_attempt = (spec.get("resume") or {}).get("attempt", 1)
+    folders = sorted((p for p in attempts.iterdir() if p.name.isdecimal()
+                      and p.is_dir() and not p.is_symlink()), key=lambda p: int(p.name), reverse=True)
+    for folder in folders:
+        if (folder / "wire").exists():
+            break
+        worker = folder / "worker"
+        if not worker.is_dir() or worker.is_symlink():
+            continue
+        try:
+            archived = json.loads((folder / "spec.json").read_bytes())
+            archived_attempt = (archived.get("resume") or {}).get("attempt", 1)
+        except (OSError, ValueError, AttributeError):
+            continue
+        if archived.get("run_identity_seed") != seed or archived_attempt != active_attempt:
+            continue
+        if problem := _journal_lineage_ok(folder):
+            raise ResumeRefused(f"the engine journal is damaged ({problem}); this run cannot be resumed")
+        return worker
+    return None
+
+
 def _pending_marker_matches(wire_dir: Path, pending: dict[str, object],
                             route_changes: list[dict[str, object]]) -> bool:
     marker = wire_dir.parent / "resume-pending-verified.json"
@@ -1027,13 +1057,15 @@ def archive_attempt(state: dict[str, object], engine_dir: Path, *, use_checkpoin
                 raise ResumeRefused("journal publication could not be recovered") from error
     external = _tool_safety(run, spec, replay_external=replay_external) if restart_live else []
     interrupted_archive_tape = _interrupted_archive_tape(run, spec) if not restart_live else None
+    interrupted_worker = _interrupted_archive_worker(run, spec) if not restart_live else None
     number = int(state["attempt"])
     folder = run / "attempts" / str(number)
     folder.mkdir(parents=True)
     shutil.copy2(run / "spec.json", folder / "spec.json")
     for name in ATTEMPT_FILES:
-        if (run / name).exists():
-            os.replace(run / name, folder / name)
+        source_path = interrupted_worker if name == "worker" and interrupted_worker is not None else run / name
+        if source_path.exists():
+            os.replace(source_path, folder / name)
     # Rebuilt from the moved files, so the tape's paths name the archived bytes the child will read.
     # A fallback after a refused checkpoint restore replays the INTERRUPTED attempt (``tape_from``),
     # not the refused one, which holds only the restored prefix.
