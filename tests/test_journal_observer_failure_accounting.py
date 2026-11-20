@@ -774,6 +774,7 @@ def test_resume_keeps_failures_recorded_before_fanout_is_killed(tmp_path, source
 _STOP_WHILE_SAVING_OBSERVER_FAILURE = """
 import os
 import signal
+import stat
 import sys
 from pathlib import Path
 
@@ -784,9 +785,10 @@ journal = ContinuationJournal(Path(sys.argv[1]), "observer-report-save", {})
 print(journal.path, flush=True)
 point, target = sys.argv[2], int(sys.argv[3])
 intent = journal.path.parent / ".journal-observer-report"
-replace, sync, fsync = os.replace, publication.sync_directory, os.fsync
+replace, sync, fsync, link = os.replace, publication.sync_directory, os.fsync, os.link
 saves = 0
 syncing_report = False
+blob_linked = False
 
 def stop():
     os.kill(os.getpid(), signal.SIGKILL)
@@ -799,7 +801,7 @@ def replace_file(source, destination, **kwargs):
         if saves == target and point == "before_replace":
             stop()
     replace(source, destination, **kwargs)
-    if destination == intent and saves == target and point == "after_replace":
+    if destination == intent and saves == target and point in ("after_replace", "after_blob_report_replace"):
         stop()
 
 def sync_directory(path):
@@ -814,12 +816,26 @@ def sync_file(fd):
     if point == "after_temporary_file_sync" and not syncing_report and saves + 1 == target:
         # The targeted replacement is the next metadata write during an observer callback.
         stop()
+    if point == "after_blob_file_sync" and not blob_linked and stat.S_ISREG(os.fstat(fd).st_mode):
+        stop()
+    if point == "after_blob_directory_sync" and blob_linked and stat.S_ISDIR(os.fstat(fd).st_mode):
+        stop()
+
+def link_file(source, destination, **kwargs):
+    global blob_linked
+    link(source, destination, **kwargs)
+    if Path(destination).suffix == ".zlib":
+        blob_linked = True
+        if point == "after_blob_link":
+            stop()
 
 def reject(_row):
     os.replace, publication.sync_directory, os.fsync = replace_file, sync_directory, sync_file
+    os.link = link_file
     raise RuntimeError("observer rejected row")
 
-journal.subscribe("rejecting", reject, kinds=("observer_probe",))
+subscriber = "π" * 3000 if point.startswith("after_blob_") else "rejecting"
+journal.subscribe(subscriber, reject, kinds=("observer_probe",))
 journal.emit_batch([("observer_probe", {})] * 24, atomic=True)
 """
 
@@ -833,6 +849,10 @@ journal.emit_batch([("observer_probe", {})] * 24, atomic=True)
     ("after_replace", 21, 21),
     ("after_temporary_file_sync", 22, 21),
     ("after_directory_sync", 22, 22),
+    ("after_blob_file_sync", 1, 0),
+    ("after_blob_link", 1, 0),
+    ("after_blob_directory_sync", 1, 0),
+    ("after_blob_report_replace", 1, 1),
 ])
 def test_interrupted_report_save_recovers_exactly_the_published_failures(tmp_path, point, target, durable):
     stopped = subprocess.run([sys.executable, "-c", _STOP_WHILE_SAVING_OBSERVER_FAILURE,
@@ -860,6 +880,9 @@ def test_interrupted_report_save_recovers_exactly_the_published_failures(tmp_pat
             assert summary["dropped_count"] == durable - 20
         else:
             assert len(reports) == durable
+        if point == "after_blob_report_replace":
+            restored, = [row for row in journal.records() if row["kind"] == _FAILURE]
+            assert restored["subscriber"] == "π" * 3000
 
 
 def test_no_failure_batch_and_single_append_are_byte_identical_after_replay_and_resume(tmp_path, monkeypatch):
