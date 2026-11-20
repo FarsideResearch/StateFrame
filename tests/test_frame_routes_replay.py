@@ -367,6 +367,35 @@ def test_first_archive_killed_before_wire_move_keeps_the_in_flight_request(tmp_p
     assert tools.startup_schema_budget == budget
 
 
+def test_retry_cannot_drop_the_pending_request_after_missing_startup_counts(tmp_path, monkeypatch):
+    import kernel_request_diet
+    from kernel_agent_tools import AgentTools
+    from kernel_continuation_journal import ContinuationJournal
+    from kernel_custom_tools import CustomToolSet
+    from kernel_tool_settings import ToolSettings
+    from kernel_tool_tape import ToolReplayRefused
+
+    monkeypatch.setattr(kernel_request_diet, "TOKENIZE_REQUEST_TIMEOUT_CAP_SECONDS", 0)
+    run, spec = _interrupted_routed_run(tmp_path)
+    spec.pop("routes")
+    (run / "spec.json").write_text(json.dumps(spec))
+    journals = run / "worker" / "measurement-runs"
+    journals.mkdir(parents=True)
+    ContinuationJournal(journals, "task", {}).close()
+    _write_send(run / "wire", 1, route=None, completed=False)
+
+    def resume_and_bind():
+        resume.archive_attempt(resume.assess(run), tmp_path, use_checkpoint=False)
+        resumed = json.loads((run / "spec.json").read_text())
+        shell = SimpleNamespace(spec=resumed, run_dir=run, settings=ToolSettings())
+        with pytest.raises(ToolReplayRefused, match="Recorded startup schema counts are missing"):
+            AgentTools(shell, CustomToolSet((), "empty"), defer_schema_budget=True).bind()
+        return resumed["resume"]["pending"]
+
+    original_pending = resume_and_bind()
+    assert resume_and_bind() == original_pending
+
+
 def test_refused_routed_mismatch_never_adopts_its_pending_request(tmp_path):
     run, spec = _interrupted_routed_run(tmp_path)
     old_wire = run / "attempts" / "1" / "wire"
