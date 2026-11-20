@@ -155,6 +155,38 @@ def test_default_off_has_no_filesystem_access(objects, tmp_path, monkeypatch):
     assert not (tmp_path / "absent").exists()
 
 
+@pytest.mark.parametrize("mask", [0o200, 0o400])
+def test_registry_creation_restores_required_owner_bits(objects, tmp_path, monkeypatch, mask):
+    monkeypatch.setenv("STATEFRAME_WORKSPACE_OBJECTS", "on")
+    parent = tmp_path / "store"
+    parent.mkdir(mode=0o700)
+    previous_mask = os.umask(mask)
+    try:
+        store = objects.open_workspace_objects(
+            parent, "run", enabled=os.environ["STATEFRAME_WORKSPACE_OBJECTS"] == "on",
+        )
+        assert store is not None
+        from kernel_workspace_refs import RootKey, _commit_bytes, _root_directory, _root_lock
+
+        key = RootKey("run-id", "checkpoint", "current")
+        with store.lease() as lease:
+            with _root_directory(lease, key, create=True) as directories:
+                with _root_lock(directories[0], key):
+                    _commit_bytes(directories[0], key.key, b"registry record")
+        for directory in (store._path, store._path / "objects", store._path / "refs",
+                          store._path / "refs" / "run-id",
+                          store._path / "refs" / "run-id" / "checkpoint"):
+            mode = stat.S_IMODE(directory.stat().st_mode)
+            assert mode & 0o700 == 0o700
+            assert mode & 0o077 == 0
+        lock = store._path / "refs" / "run-id" / "checkpoint" / ".lock-current"
+        assert stat.S_IMODE(lock.stat().st_mode) == 0o600
+        record = store._path / "refs" / "run-id" / "checkpoint" / "current"
+        assert stat.S_IMODE(record.stat().st_mode) == 0o600
+    finally:
+        os.umask(previous_mask)
+
+
 def test_namespace_isolation_and_no_follow(objects, private_store, tmp_path):
     store, pool = private_store
     entry = _entry(objects, b"isolated")

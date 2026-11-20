@@ -92,8 +92,14 @@ def _directory(path: Path) -> Iterator[int]:
 @contextmanager
 def _child_directory(parent: int, name: str, *, create: bool = False) -> Iterator[int]:
     if create:
-        with suppress(FileExistsError):
+        try:
             os.mkdir(name, 0o700, dir_fd=parent)
+        except FileExistsError:
+            pass
+        else:
+            # mkdir modes are filtered by umask; private store directories
+            # need owner access to initialize their children and registries.
+            os.chmod(name, 0o700, dir_fd=parent, follow_symlinks=False)
     fd = os.open(name, _DIR_FLAGS, dir_fd=parent)
     try:
         yield fd

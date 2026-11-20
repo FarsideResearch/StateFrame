@@ -166,9 +166,18 @@ def _root_directory(lease: ObjectLease, key: RootKey, *, create: bool) -> Iterat
 
 @contextmanager
 def _root_lock(directory: int, key: RootKey) -> Iterator[None]:
-    fd = os.open(".lock-" + key.key, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
-                 0o600, dir_fd=directory)
+    name = ".lock-" + key.key
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK
     try:
+        fd = os.open(name, flags, 0o600, dir_fd=directory)
+    except FileExistsError:
+        fd = os.open(name, flags & ~(os.O_CREAT | os.O_EXCL), dir_fd=directory)
+        created = False
+    else:
+        created = True
+    try:
+        if created:
+            os.fchmod(fd, 0o600)
         info = os.fstat(fd)
         if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
                 or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
@@ -184,6 +193,7 @@ def _commit_bytes(directory: int, name: str, data: bytes) -> None:
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                  0o600, dir_fd=directory)
     try:
+        os.fchmod(fd, 0o600)
         with os.fdopen(fd, "wb") as output:
             output.write(data)
             output.flush()
