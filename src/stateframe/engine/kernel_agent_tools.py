@@ -42,7 +42,8 @@ def _replayed_schema_budget(spec):
         return None
     tape = resume.get("tape")
     first = tape[0] if tape else resume.get("pending")
-    if first is None and not resume.get("checkpoint"):
+    checkpoint = resume.get("checkpoint")
+    if first is None and (not isinstance(checkpoint, dict) or checkpoint.get("status") == "skipped"):
         return None
 
     from kernel_journal_store import journal_paths, open_journal
