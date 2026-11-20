@@ -139,6 +139,23 @@ def test_parallel_binds_share_one_tokenizer_with_bounded_workers(tmp_path, monke
         assert not any(worker.is_alive() for worker in workers)
 
 
+def test_resume_before_first_send_can_start_without_a_journal(tmp_path, monkeypatch):
+    import kernel_request_diet
+
+    monkeypatch.setattr(kernel_request_diet, "_http_tokenize", lambda *_args, **_kwargs: [1, 2, 3])
+    archive = tmp_path / "attempts" / "1"
+    archive.mkdir(parents=True)
+    shell = SimpleNamespace(spec={"chat_url": "http://127.0.0.1:9/v1/chat/completions", "resume": {
+        "previous_attempt": str(archive), "tape": [],
+        "checkpoint": {"status": "skipped", "reason": "hooks_configured"},
+    }}, run_dir=tmp_path, settings=ToolSettings())
+
+    tools = AgentTools(shell, CustomToolSet((), "empty"), defer_schema_budget=True)
+    tools.bind()
+
+    assert tools.schema_budget == {name: {"tokens": 3, "method": "tokenize"} for name in measure_schemas()}
+
+
 @pytest.mark.parametrize("archive_interrupted", [False, True], ids=["normal", "interrupted-archive"])
 def test_startup_fallback_is_journaled_and_replayed_byte_for_byte(tmp_path, monkeypatch, archive_interrupted):
     from kernel_journal_store import open_journal
