@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Build and verify an offline wheelhouse with universal and pinned platform wheels.
 
-Runtime roots come from pyproject.toml. Supply downloaded wheels with --wheel-dir;
-installed pure-Python packages can also be repacked with --site-packages. Resolution
+Runtime roots and default-installed extras come from pyproject.toml. Supply downloaded
+wheels with --wheel-dir; installed pure-Python packages can also be repacked with
+--site-packages. Resolution
 and verification cover CPython 3.11-3.14 on manylinux x86_64/aarch64 (glibc 2.17+)
 and macOS x86_64/arm64 (11+). Neither mode downloads anything.
 """
@@ -36,6 +37,8 @@ SUPPORTED_PLATFORMS = (
     "macosx_11_0_arm64", "macosx_11_0_x86_64",
 )
 PINNED_PLATFORM_VERSIONS = {"rpds-py": "2026.6.3"}
+# Keep in sync with install.sh's default-enabled extras (covered by a regression test).
+DEFAULT_INSTALL_EXTRAS = ("repomap",)
 PINNED_LOCAL_VERSIONS = {
     "attrs": "26.1.0",
     "PyYAML": "6.0.3",
@@ -323,8 +326,9 @@ def _verify_wheel(path: Path, requirement_name: str, version: str) -> None:
             names = set(archive.namelist())
             if len(names) != len(archive.namelist()):
                 raise WheelhouseError(f"wheel contains duplicate ZIP members: {path.name}")
-            platform_wheel = requirement_name in PINNED_PLATFORM_VERSIONS
-            if platform_wheel and PINNED_PLATFORM_VERSIONS[requirement_name] != version:
+            platform_versions = {**PINNED_PLATFORM_VERSIONS, **_default_extra_pins()}
+            platform_wheel = requirement_name in platform_versions
+            if platform_wheel and platform_versions[requirement_name] != version:
                 raise WheelhouseError(f"unreviewed platform wheel version: {requirement_name}=={version}")
             if not platform_wheel and any(_is_compiled_file(name) for name in names):
                 raise WheelhouseError(f"wheel contains compiled files: {path.name}")
@@ -371,7 +375,12 @@ def _verify_wheel(path: Path, requirement_name: str, version: str) -> None:
                 actual = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
                 if actual != expected or int(size) != len(data):
                     raise WheelhouseError(f"wheel RECORD integrity check failed: {path.name}: {record_path}")
-            if recorded != names:
+            # Upstream wheels may include structural ZIP directory entries outside RECORD.
+            # Only empty directories are exempt; every byte of file payload stays covered.
+            empty_directories = {
+                entry.filename for entry in archive.infolist() if entry.is_dir() and entry.file_size == 0
+            }
+            if recorded - names or names - recorded - empty_directories:
                 raise WheelhouseError(f"wheel RECORD does not cover every file: {path.name}")
     except (OSError, KeyError, UnicodeDecodeError, zipfile.BadZipFile, csv.Error, ValueError) as error:
         raise WheelhouseError(f"cannot read wheel {path}: {error}") from error
@@ -426,9 +435,33 @@ def _wheel_metadata(path: Path) -> Message:
         raise WheelhouseError(f"cannot read wheel metadata: {path.name}: {error}") from error
 
 
-def _runtime_roots() -> list[str]:
+def _default_extra_roots() -> list[str]:
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
-    return list(project.get("dependencies", []))
+    try:
+        return [requirement for extra in DEFAULT_INSTALL_EXTRAS
+                for requirement in project["optional-dependencies"][extra]]
+    except KeyError as error:
+        raise WheelhouseError(f"default-installed extra is missing from pyproject.toml: {error}") from error
+
+
+def _default_extra_pins() -> dict[str, str]:
+    """Native extra wheels are allowed only at the exact versions declared by the project."""
+    from packaging.requirements import Requirement
+
+    pins: dict[str, str] = {}
+    for text in _default_extra_roots():
+        requirement = Requirement(text)
+        specifiers = list(requirement.specifier)
+        if requirement.url or len(specifiers) != 1 or specifiers[0].operator != "==" or "*" in specifiers[0].version:
+            raise WheelhouseError(f"default-installed extra must use an exact version pin: {text}")
+        pins[_canonicalize(requirement.name)] = specifiers[0].version
+    return pins
+
+
+def _runtime_roots(*, include_default_extras: bool = True) -> list[str]:
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    return [*project.get("dependencies", []),
+            *(_default_extra_roots() if include_default_extras else [])]
 
 
 def _target_platform_tags(platform: str) -> list[str]:
@@ -749,9 +782,24 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--vendor-dir", type=Path, help="local directory with SHA-256-pinned vendor files")
     parser.add_argument("--wheel-dir", type=Path, help="downloaded universal and pinned platform wheels")
     parser.add_argument("--verify", action="store_true", help="verify an existing wheelhouse without rebuilding")
+    parser.add_argument("--print-requirements", action="store_true",
+                        help="verify the complete wheelhouse and print only installation pins")
+    parser.add_argument("--no-default-extras", action="store_true",
+                        help="omit default extras from --print-requirements (still verify the complete wheelhouse)")
     arguments = parser.parse_args(argv)
+    if arguments.no_default_extras and not arguments.print_requirements:
+        parser.error("--no-default-extras requires --print-requirements")
     try:
-        if arguments.verify:
+        if arguments.print_requirements:
+            requirements = verify_wheelhouse(arguments.output)
+            if arguments.no_default_extras:
+                _, by_name = _indexed_wheels(arguments.output)
+                closure = _runtime_closure(lambda name: by_name.get(name, []),
+                                           _runtime_roots(include_default_extras=False))
+                requirements = [pin for pin in requirements if pin[0] in closure]
+            for _, _, pin in requirements:
+                print(pin)
+        elif arguments.verify:
             requirements = verify_wheelhouse(arguments.output)
             print(f"Verified offline wheelhouse at {arguments.output.resolve()}")
             for _, _, pin in requirements:

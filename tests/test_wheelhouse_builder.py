@@ -22,7 +22,8 @@ builder = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(builder)
 
 
-def wheel(directory, name, *, version="1.0", tag="py3-none-any", dependencies=(), python=">=3.11"):
+def wheel(directory, name, *, version="1.0", tag="py3-none-any", dependencies=(), python=">=3.11",
+          compiled=False):
     normalized = name.replace("-", "_")
     info = f"{normalized}-{version}.dist-info"
     payload = {
@@ -30,8 +31,12 @@ def wheel(directory, name, *, version="1.0", tag="py3-none-any", dependencies=()
             f"Metadata-Version: 2.4\nName: {name}\nVersion: {version}\nLicense-Expression: MIT\n"
             f"Requires-Python: {python}\n" + "".join(f"Requires-Dist: {d}\n" for d in dependencies)
         ).encode(),
-        f"{info}/WHEEL": f"Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: {tag}\n".encode(),
+        f"{info}/WHEEL": (
+            f"Wheel-Version: 1.0\nRoot-Is-Purelib: {str(not compiled).lower()}\nTag: {tag}\n"
+        ).encode(),
     }
+    if compiled:
+        payload[f"{normalized}/_binding.so"] = b"synthetic native payload"
     record = io.StringIO()
     writer = csv.writer(record, lineterminator="\n")
     for path, data in payload.items():
@@ -146,11 +151,78 @@ def test_builder_reads_declared_roots_and_discovers_new_transitive_packages(tmp_
     source.mkdir()
     wheel(source, "novel-root", dependencies=("transitive-child",))
     wheel(source, "transitive-child")
-    (tmp_path / "pyproject.toml").write_text('[project]\ndependencies = ["novel-root==1.0"]\n')
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\ndependencies = ["novel-root==1.0"]\n'
+        '[project.optional-dependencies]\nrepomap = ["default-parser==1.0"]\n'
+    )
+    wheel(source, "default-parser", dependencies=("parser-child",))
+    wheel(source, "parser-child")
     monkeypatch.setattr(builder, "ROOT", tmp_path)
     output = tmp_path / "output"
     builder.build_wheelhouse(tmp_path / "no-installed-packages", output, wheel_dir=source)
-    assert {name for name, _, _ in builder.verify_wheelhouse(output)} == {"novel-root", "transitive-child"}
+    assert {name for name, _, _ in builder.verify_wheelhouse(output)} == {
+        "novel-root", "transitive-child", "default-parser", "parser-child",
+    }
+
+
+def test_default_extra_missing_from_project_is_reported(tmp_path, monkeypatch):
+    (tmp_path / "pyproject.toml").write_text('[project]\ndependencies = []\n')
+    monkeypatch.setattr(builder, "ROOT", tmp_path)
+    with pytest.raises(builder.WheelhouseError, match="default-installed extra is missing"):
+        builder._runtime_roots()
+
+
+def test_default_extra_native_versions_must_be_exact_pins(monkeypatch):
+    monkeypatch.setattr(builder, "_default_extra_roots", lambda: ["parser>=1"])
+    with pytest.raises(builder.WheelhouseError, match="exact version pin: parser>=1"):
+        builder._default_extra_pins()
+
+
+def test_default_extra_native_wheels_are_limited_to_declared_pins(tmp_path, monkeypatch):
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\ndependencies = []\n'
+        '[project.optional-dependencies]\nrepomap = ["default-parser==1.0"]\n'
+    )
+    monkeypatch.setattr(builder, "ROOT", tmp_path)
+    native = wheel(tmp_path, "default-parser", compiled=True, tag="cp39-abi3-manylinux2014_x86_64")
+    builder._verify_wheel(native, "default-parser", "1.0")
+    unpinned = wheel(tmp_path, "default-parser", version="2.0", compiled=True)
+    with pytest.raises(builder.WheelhouseError, match="unreviewed platform wheel version"):
+        builder._verify_wheel(unpinned, "default-parser", "2.0")
+    unrelated = wheel(tmp_path, "unrelated-parser", compiled=True)
+    with pytest.raises(builder.WheelhouseError, match="wheel contains compiled files"):
+        builder._verify_wheel(unrelated, "unrelated-parser", "1.0")
+
+
+@pytest.mark.parametrize("include_extras", [False, True])
+def test_print_install_requirements_respects_extra_opt_out(include_extras):
+    command = [sys.executable, str(ROOT / "scripts/build_wheelhouse.py"), "--print-requirements"]
+    if not include_extras:
+        command.append("--no-default-extras")
+    result = subprocess.run(command, capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stderr
+    pins = result.stdout.splitlines()
+    assert "jsonschema==4.26.0" in pins
+    assert "pytest==9.0.2" in pins
+    extra_pins = set(builder._default_extra_roots())
+    assert set(pins) & extra_pins == (extra_pins if include_extras else set())
+    assert all("==" in pin and " " not in pin for pin in pins)
+
+
+@pytest.mark.parametrize("opt_out", [False, True])
+def test_missing_default_extra_wheel_fails_before_printing_install_pins(tmp_path, opt_out):
+    source = ROOT / "wheelhouse"
+    for path in source.iterdir():
+        if path.is_file() and not path.name.startswith("tree_sitter_python-"):
+            (tmp_path / path.name).symlink_to(path)
+    command = [sys.executable, str(ROOT / "scripts/build_wheelhouse.py"),
+               "--print-requirements", "--output", str(tmp_path)]
+    if opt_out:
+        command.append("--no-default-extras")
+    result = subprocess.run(command, capture_output=True, text=True, timeout=120)
+    assert result.returncode != 0
+    assert "missing pinned wheel: tree-sitter-python==0.25.0" in result.stderr
+    assert result.stdout == ""
 
 
 def test_missing_indexed_file_names_the_distribution(tmp_path):
@@ -167,6 +239,23 @@ def test_duplicate_zip_members_are_rejected(tmp_path):
         with zipfile.ZipFile(path, "a") as archive:
             archive.writestr("root-1.0.dist-info/WHEEL", "ignored duplicate")
     with pytest.raises(builder.WheelhouseError, match="duplicate ZIP members"):
+        builder._verify_wheel(path, "root", "1.0")
+
+
+def test_empty_zip_directories_need_no_record_entry(tmp_path):
+    path = wheel(tmp_path, "root")
+    with zipfile.ZipFile(path, "a") as archive:
+        archive.writestr("root/", b"")
+        archive.writestr("root-1.0.dist-info/", b"")
+    builder._verify_wheel(path, "root", "1.0")
+
+
+@pytest.mark.parametrize("member", ["root/unrecorded.py", "root/nonempty-directory/"])
+def test_unrecorded_zip_payload_is_still_rejected(tmp_path, member):
+    path = wheel(tmp_path, "root")
+    with zipfile.ZipFile(path, "a") as archive:
+        archive.writestr(member, b"unrecorded payload")
+    with pytest.raises(builder.WheelhouseError, match="RECORD does not cover every file"):
         builder._verify_wheel(path, "root", "1.0")
 
 

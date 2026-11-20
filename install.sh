@@ -100,7 +100,11 @@ if (( OFFLINE )); then
   if [[ ! -f "$WHEELHOUSE_BUILDER" ]]; then
     die "offline wheelhouse verifier is missing: $WHEELHOUSE_BUILDER"
   fi
-  if ! "$PYTHON_PATH" "$WHEELHOUSE_BUILDER" --verify --output "$WHEELHOUSE"; then
+  WHEELHOUSE_ARGS=(--print-requirements --output "$WHEELHOUSE")
+  if (( ! REPOMAP )); then
+    WHEELHOUSE_ARGS+=(--no-default-extras)
+  fi
+  if ! OFFLINE_REQUIREMENTS="$("$PYTHON_PATH" "$WHEELHOUSE_BUILDER" "${WHEELHOUSE_ARGS[@]}")"; then
     die "offline wheelhouse is missing or incomplete; build it with scripts/build_wheelhouse.py"
   fi
 else
@@ -154,7 +158,7 @@ if (( OFFLINE )); then
   while IFS= read -r requirement || [[ -n "$requirement" ]]; do
     [[ -z "$requirement" || "$requirement" == \#* ]] && continue
     PINNED_REQUIREMENTS+=("$requirement")
-  done < "$WHEELHOUSE/requirements.txt"
+  done <<< "$OFFLINE_REQUIREMENTS"
   if (( ${#PINNED_REQUIREMENTS[@]} == 0 )); then
     die "offline wheelhouse has no pinned distributions"
   fi
