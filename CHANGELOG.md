@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.8.4 (2026-11-20)
 
 - Opt-in workspace objects (`STATEFRAME_WORKSPACE_OBJECTS=on`, default off): reliability fixes for subframe workers, unsandboxed shells, registry permissions and finished-run cleanup.
