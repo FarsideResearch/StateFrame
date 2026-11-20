@@ -235,6 +235,32 @@ def test_resume_finishes_an_interrupted_failure_report_exactly_once(tmp_path, st
         assert _failures_on_disk(journal) == reports
 
 
+def test_interrupted_replay_reports_its_failures_before_a_later_single_append(tmp_path):
+    single_kind = "single_observer_probe"
+    with ContinuationJournal(tmp_path, "observer-replay-interrupted", {}) as journal:
+        journal.subscribe("live-rejecting", _reject, kinds=(single_kind,))
+        rows = journal.emit_batch([(_EVENT, {"index": index}) for index in range(23)], atomic=True)
+
+        def interrupt_replay(row):
+            if row["index"] == 22:
+                raise KeyboardInterrupt("stop replay")
+            _reject(row)
+
+        with pytest.raises(KeyboardInterrupt, match="stop replay"):
+            journal.subscribe("interrupted", interrupt_replay, kinds=(_EVENT,))
+
+        single = journal.emit(single_kind)
+        failures = _failures_on_disk(journal)
+        overflow, = [row for row in failures if "dropped_count" in row]
+        assert overflow["first_event_sequence"] == rows[20]["sequence"]
+        assert overflow["last_event_sequence"] == rows[21]["sequence"]
+        assert overflow["dropped_count"] == 2
+        assert overflow["sequence"] < single["sequence"]
+        assert failures[-1]["event_sequence"] == single["sequence"]
+        assert failures[-1]["subscriber"] == "live-rejecting"
+        assert _accounted(failures) == 23
+
+
 def test_no_failure_batch_and_single_append_are_byte_identical_after_replay_and_resume(tmp_path, monkeypatch):
     monkeypatch.setattr(journal_module, "uuid", SimpleNamespace(
         uuid4=lambda: SimpleNamespace(hex="a" * 32)))
