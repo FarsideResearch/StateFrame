@@ -1252,6 +1252,7 @@ class ContinuationJournal(AuditJournal):
             # uncommitted and makes it the next row for a same-filter retry.
             self._subscriber_cursor_kinds[name] = selected
             self._notifying = True
+            interruption = None
             try:
                 page_size = self._record_cache_limit or RECORD_CACHE_LIMIT
                 page_size = max(1, page_size)
@@ -1297,8 +1298,20 @@ class ContinuationJournal(AuditJournal):
                 if advance_audit is not None:
                     self._subscriber_audit_advance[name] = advance_audit
                 self._subscriber_kinds[name] = selected
+            except BaseException as error:
+                if not isinstance(error, Exception):
+                    interruption = error
+                raise
             finally:
                 self._notifying = False
+                if interruption is not None:
+                    # Failures from committed replay deliveries belong to this
+                    # attempt, even when a later callback interrupts it.
+                    try:
+                        self._report_observer_failures()
+                    except BaseException as report_error:  # noqa: BLE001 - preserve the replay interruption
+                        interruption.add_note(
+                            f"Observer failure reporting failed ({type(report_error).__name__})")
             self._report_observer_failures()
 
     def subscriber_cursor(self, name: str) -> int:
