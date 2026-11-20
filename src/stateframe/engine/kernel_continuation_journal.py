@@ -2402,6 +2402,9 @@ class ContinuationJournal(AuditJournal):
                 view = memoryview(line)
                 offset = self._size
                 with self.host_spans.measure("append_fsync", sequence=record["sequence"]):
+                    # Keep interrupted report writes recoverable, including a
+                    # partial final summary. Release the intent before fanout.
+                    intent = self._begin_publication() if self._reporting_observer_failures else None
                     while view:
                         count = os.write(self._fd, view)
                         if count <= 0:
@@ -2422,6 +2425,9 @@ class ContinuationJournal(AuditJournal):
                         # Also covers every earlier unsynced telemetry row (one fsync per file).
                         os.fsync(self._fd)
                         self._unsynced = False
+                    if intent is not None:
+                        intent.unlink()
+                        _sync_directory(intent.parent)
                 self._size += len(line)
                 self._publish_record(record, offset, len(encoded_record))
             except BaseException as error:
@@ -2654,19 +2660,16 @@ class ContinuationJournal(AuditJournal):
                 return [self.emit(kind, **fields) for kind, fields in normalized]
             return self._emit_atomic_batch(normalized)
 
-    def _emit_atomic_batch(self, events: list[tuple[str, dict]]) -> list[dict]:
+    def _begin_publication(self) -> Path:
         if __package__:
             from .kernel_turn_publication import atomic_file
         else:
             from kernel_turn_publication import atomic_file
 
-        if self._replaying or self._notifying or hasattr(self, "_publication_batch"):
-            raise JournalError("cannot batch while replaying or publishing")
         intent = self.path.parent / _PUBLICATION_INTENT
         if os.path.lexists(intent):
             self._poison("unfinished journal publication")
             raise JournalError("unfinished journal publication")
-        before = self._sequence, self._head
         size = self._size
         self._ensure_record_index()
         start = self._record_offsets[-1]
@@ -2677,14 +2680,21 @@ class ContinuationJournal(AuditJournal):
         # A legacy telemetry-only suffix can precede this boundary. Flush it before
         # pointing the rollback intent at it so recovery always has a durable base.
         self.sync()
+        atomic_file(intent, canonical_bytes([size, start, hashlib.sha256(tail).hexdigest()]))
+        return intent
+
+    def _emit_atomic_batch(self, events: list[tuple[str, dict]]) -> list[dict]:
+        if self._replaying or self._notifying or hasattr(self, "_publication_batch"):
+            raise JournalError("cannot batch while replaying or publishing")
+        before = self._sequence, self._head
         self._publication_batch = []
         try:
             with self.host_spans.measure("append_fsync", sequence=before[0] + 1):
-                atomic_file(intent, canonical_bytes([size, start, hashlib.sha256(tail).hexdigest()]))
+                intent = self._begin_publication()
                 rows = [self.emit(kind, **fields) for kind, fields in events]
                 os.fsync(self._fd)
                 intent.unlink()
-                _sync_directory(self.path.parent)
+                _sync_directory(intent.parent)
             pending = self._publication_batch
         except BaseException:
             self._poison("journal publication outcome requires recovery")
