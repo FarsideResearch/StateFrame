@@ -156,6 +156,36 @@ def test_resume_before_first_send_can_start_without_a_journal(tmp_path, monkeypa
     assert tools.schema_budget == {name: {"tokens": 3, "method": "tokenize"} for name in measure_schemas()}
 
 
+def test_replay_refuses_a_journal_without_startup_counts(tmp_path, monkeypatch):
+    import kernel_request_diet
+    from kernel_continuation_journal import ContinuationJournal
+    from kernel_tool_tape import ToolReplayRefused
+
+    calls = []
+
+    def tokenize(*args, **kwargs):
+        calls.append(args)
+        return [1, 2, 3]
+
+    monkeypatch.setattr(kernel_request_diet, "_http_tokenize", tokenize)
+    archive = tmp_path / "attempts" / "1"
+    wire = archive / "wire"
+    wire.mkdir(parents=True)
+    request = wire / "0001.request.json"
+    request.write_text("{}")
+    journals = archive / "worker" / "measurement-runs"
+    journals.mkdir(parents=True)
+    ContinuationJournal(journals, "task", {}).close()
+    shell = SimpleNamespace(spec={"chat_url": "http://127.0.0.1:9/v1/chat/completions", "resume": {
+        "previous_attempt": str(archive), "tape": [{"request": str(request)}],
+    }}, run_dir=tmp_path, settings=ToolSettings())
+
+    with pytest.raises(ToolReplayRefused, match="Recorded startup schema counts are missing"):
+        tools = AgentTools(shell, CustomToolSet((), "empty"), defer_schema_budget=True)
+        tools.bind()
+    assert calls == []
+
+
 @pytest.mark.parametrize("archive_interrupted", [False, True], ids=["normal", "interrupted-archive"])
 def test_startup_fallback_is_journaled_and_replayed_byte_for_byte(tmp_path, monkeypatch, archive_interrupted):
     from kernel_journal_store import open_journal
