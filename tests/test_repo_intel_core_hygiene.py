@@ -1,6 +1,7 @@
 """Guard repository intelligence source and documentation against old identifiers."""
 
 from pathlib import Path
+import json
 import re
 
 
@@ -31,8 +32,23 @@ def _source_files(directory: str):
             yield path
 
 
-def _hits(path: Path, pattern: re.Pattern[str]) -> list[str]:
+# ENGINE_SOURCE.json keeps a patches[] provenance history keyed by the file path each patch was
+# recorded against. Those historical entries must stay byte-stable for release carries, so the
+# guard checks the rest of the record but not that history list.
+_PROVENANCE = Path("src/stateframe/engine/ENGINE_SOURCE.json")
+
+
+def _text(path: Path) -> str:
     text = path.read_bytes().decode("utf-8", errors="replace")
+    if path.relative_to(ROOT) == _PROVENANCE:
+        record = json.loads(text)
+        record.pop("patches", None)
+        text = json.dumps(record, indent=1, sort_keys=True)
+    return text
+
+
+def _hits(path: Path, pattern: re.Pattern[str]) -> list[str]:
+    text = _text(path)
     return [
         f"{path.relative_to(ROOT)}:{text.count(chr(10), 0, match.start()) + 1}: {match.group()}"
         for match in pattern.finditer(text)
