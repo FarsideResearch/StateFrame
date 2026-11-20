@@ -692,7 +692,10 @@ class _ObserverFailureReport:
     overflow: tuple[int, int, int] | None
 
     def detail(self, index: int, journal_path: Path) -> dict[str, object]:
-        value = resolve_journal_blob_refs(self.details[index], journal_path)
+        try:
+            value = resolve_journal_blob_refs(self.details[index], journal_path)
+        except (OSError, ValueError) as error:
+            raise JournalError("invalid pending observer failure detail") from error
         if not isinstance(value, dict) or any(
                 not isinstance(value.get(key), str) for key in _OBSERVER_FAILURE_TEXT_FIELDS):
             raise JournalError("invalid pending observer failure detail")
