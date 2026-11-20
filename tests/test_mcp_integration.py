@@ -15,6 +15,9 @@ from _timeouts import scaled, timeout_scale
 from acceptance._support import copy_repo, run_case
 from kernel_mcp_tools import McpError, McpTool, _schema, discover, load_mcp_files, run_driver, result_text, validate_arguments
 from kernel_agent_tools import AgentTools
+from kernel_agent_schemas import measure_schemas
+from kernel_continuation_journal import ContinuationJournal
+from kernel_custom_tools import CustomToolSet
 from kernel_exec_session import ExecSession, ExecSessionError
 from kernel_exec_capability import executable_read_roots, shell_capability
 from kernel_mcp_driver import exchange
@@ -146,6 +149,36 @@ def test_resume_refuses_changed_mcp_tool_list(tmp_path):
         resume_run(run_dir)
 
 
+def test_resume_keeps_mcp_admission_when_tokenizer_counts_change(tmp_path, monkeypatch):
+    from stateframe.engine import kernel_request_diet
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "sample.py").write_text("VALUE = 1\n")
+    (repo / "test_sample.py").write_text("def test_sample():\n    assert True\n")
+    mcp = config(tmp_path, "normal", replay="observation")
+    settings = ToolSettings(mcp_files=({"path": str(mcp), "digest": "pending"},))
+    endpoint = Endpoint.from_args("http://127.0.0.1:8080/v1", "scripted", None)
+    monkeypatch.setattr(kernel_request_diet, "_http_tokenize", lambda *_a, **_kw: [1, 2, 3])
+    run_dir, _, spec = prepare(RunOptions(repo=repo, task="inspect sample", endpoint=endpoint,
+                                         run_dir=tmp_path / "run", tool_settings=settings))
+    assert "mcp_fixture__echo" in spec["mcp_tools"]
+
+    def changed_tokenizer(*_args, **_kwargs):
+        return [0] * 1501
+
+    class ReachedEndpointProbe(Exception):
+        pass
+
+    def probe(_endpoint):
+        raise ReachedEndpointProbe
+
+    monkeypatch.setattr(kernel_request_diet, "_http_tokenize", changed_tokenizer)
+    monkeypatch.setattr(Endpoint, "probe", probe)
+    with pytest.raises(ReachedEndpointProbe):
+        resume_run(run_dir)
+
+
 def test_external_discovery_requires_resume_authorization_before_launch(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -177,6 +210,58 @@ def test_child_bind_refuses_external_discovery_before_launch(tmp_path):
     tools.shell = SimpleNamespace(settings=ToolSettings(replay_external=False))
     with pytest.raises(ToolReplayRefused, match="--replay-external"):
         tools.bind()
+
+
+@pytest.mark.parametrize("cap", [30.0, 0.0], ids=["fast", "expired"])
+def test_startup_mcp_counts_share_one_deadline_and_are_reused_on_replay(tmp_path, monkeypatch, cap):
+    import kernel_mcp_tools
+    import kernel_request_diet
+
+    monkeypatch.setattr(kernel_mcp_tools, "_driver", lambda *_: [{
+        "name": "echo", "inputSchema": {"type": "object", "properties": {}},
+    }])
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    servers = load_mcp_files([config(tmp_path, "normal", replay="observation")], shell_network="none")
+    found = discover(servers, workspace, tmp_path, shell_network="none", host_authorization=False)
+    deadlines = []
+
+    def tokenize(_content, _url, *, deadline=None, **_kwargs):
+        deadlines.append(deadline)
+        return [1, 2, 3]
+
+    monkeypatch.setattr(kernel_request_diet, "_http_tokenize", tokenize)
+    monkeypatch.setattr(kernel_request_diet, "TOKENIZE_REQUEST_TIMEOUT_CAP_SECONDS", cap)
+    spec = {"chat_url": "http://127.0.0.1:9/v1/chat/completions", "mcp_tools_digest": found.digest,
+            "mcp_tools": [tool.name for tool in found.tools], "mcp_omitted": list(found.omitted),
+            "mcp_schema_admission": [True]}
+    shell = SimpleNamespace(spec=spec, root=workspace, run_dir=tmp_path, settings=ToolSettings())
+    tools = AgentTools(shell, CustomToolSet((), "empty"), servers, defer_schema_budget=True)
+    tools.bind()
+
+    expected = measure_schemas(mcp_schemas=found.schemas(), tokenizer=(lambda _: 3) if cap else None)
+    assert tools.schema_budget == expected
+    assert tools.startup_schema_budget == {"reason": "completed" if cap else "deadline", "counts": expected}
+    if cap:
+        assert len(deadlines) == len(expected) and None not in deadlines and len(set(deadlines)) == 1
+    else:
+        assert deadlines == []
+
+    archive = tmp_path / "attempts" / "1"
+    journals = archive / "worker" / "measurement-runs"
+    journals.mkdir(parents=True)
+    ContinuationJournal(journals, "task", {"startup_schema_budget": tools.startup_schema_budget}).close()
+    request = archive / "wire" / "0001.request.json"
+    request.parent.mkdir()
+    request.write_text("{}")
+    spec["resume"] = {"previous_attempt": str(archive), "tape": [{"request": str(request)}]}
+    deadlines.clear()
+
+    tools = AgentTools(shell, CustomToolSet((), "empty"), servers, resume_active=True, defer_schema_budget=True)
+    tools.bind()
+
+    assert tools.schema_budget == expected
+    assert deadlines == []
 
 
 def test_discovery_omits_unsupported_schemas_and_dispatch_rejects_them(tmp_path):
