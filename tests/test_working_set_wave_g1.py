@@ -15,7 +15,8 @@ from kernel_working_set_prepare import prepare_candidate, PreparedCandidate
 from kernel_working_set_render import _slot_modes, render_assignment
 from kernel_working_set_proof import verify_certificate
 from test_working_set_render import snapshot, source
-from test_working_set_state import accept, capture, runtime, submit
+from test_working_set_state import accept, runtime, submit
+from test_working_set_state import capture as read_capture
 from _stateframe_home import isolated_stateframe_home
 
 REV1, REV2 = "sha256:" + "1" * 64, "sha256:" + "2" * 64
@@ -71,7 +72,7 @@ def test_unexposed_fresh_debt_at_an_edited_revision_stays_full(state, pin):
 def test_accepted_omission_discharges_the_obsolete_resident():
     """Lifecycle: the stale resident leaves the index on the accepted O carrier."""
     rt = runtime()
-    ws.record_capture(rt, capture(1, revision="1"))
+    ws.record_capture(rt, read_capture(1, revision="1"))
     submit(rt, "expose")
     accept(rt, "expose")
     state = ws.state_for(rt)
@@ -85,8 +86,8 @@ def test_accepted_omission_discharges_the_obsolete_resident():
 def test_superseded_unexposed_debt_never_forces_a_stale_page():
     """S7: a second capture of the same path at a new revision retires the old DUE debt."""
     rt = runtime()
-    ws.record_capture(rt, capture(1, revision="1"))
-    ws.record_capture(rt, capture(2, revision="2"))
+    ws.record_capture(rt, read_capture(1, revision="1"))
+    ws.record_capture(rt, read_capture(2, revision="2"))
     state = ws.state_for(rt)
     current, = state.active_obligations()
     assert current.identity.revision == "sha256:" + "2" * 64 and current.state == "DUE"
@@ -99,7 +100,7 @@ def test_overflow_never_drops_a_capture_and_clears_after_retirement():
     rt = runtime()
     total = ws.MAX_ACTIVE_OBLIGATIONS + 3
     for n in range(total):
-        ws.record_capture(rt, capture(n, path=f"file{n}.py"))
+        ws.record_capture(rt, read_capture(n, path=f"file{n}.py"))
     state = ws.state_for(rt)
     active = state.active_obligations()
     assert len(active) == total and state.overflow_count == 3 and not state.shadow_complete
@@ -129,7 +130,7 @@ def test_overflow_never_drops_a_capture_and_clears_after_retirement():
 def test_legacy_overflow_checkpoint_requires_journal_replay():
     from kernel_continuation_restart import checkpoint_runtime_fields_match, runtime_fields
     rt = runtime()
-    ws.record_capture(rt, capture())
+    ws.record_capture(rt, read_capture())
     saved = ws.state_for(rt).checkpoint()
     saved["overflow_count"] = 1  # old reducer dropped captures at the live limit
     with pytest.raises(ValueError, match="active working-set index"):
@@ -171,7 +172,7 @@ def test_reserve_retirement_needs_a_valid_retirement_representation():
 def test_kept_retiring_resident_returns_and_requeues_the_next_oldest():
     rt = runtime()
     for n in range(ws.MAX_RETAINED_RESIDENTS + 1):
-        ws.record_capture(rt, capture(n, path=f"file{n}.py"))
+        ws.record_capture(rt, read_capture(n, path=f"file{n}.py"))
     submit(rt, "expose")
     accept(rt, "expose")
     state = ws.state_for(rt)

@@ -28,12 +28,16 @@ EXAMPLES = {
 }
 
 
-def source_env(tree: Path, *, stable_tool_head: str) -> dict[str, str]:
+def source_env(tree: Path, *, stable_tool_head: str,
+               final_cache_layout: str | None) -> dict[str, str]:
     environment = {key: value for key, value in os.environ.items()
                    if not key.startswith("STATEFRAME_MUTATION")}
     environment["PYTHONPATH"] = os.pathsep.join((str(tree / "src"),
                                                  str(tree / "src/stateframe/engine")))
     environment["STATEFRAME_STABLE_TOOL_HEAD"] = stable_tool_head
+    environment.pop("STATEFRAME_FINAL_CACHE_LAYOUT", None)
+    if final_cache_layout is not None:
+        environment["STATEFRAME_FINAL_CACHE_LAYOUT"] = final_cache_layout
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     return environment
 
@@ -51,14 +55,15 @@ def write_launcher(path: Path) -> None:
 
 
 def capture(tree: Path, python: str, launcher: Path, example: str, repo: Path,
-            run_dir: Path, *, stable_tool_head: str,
+            run_dir: Path, *, stable_tool_head: str, final_cache_layout: str | None,
             resume: bool = False) -> tuple[bytes, list[list[str]], dict]:
     """Return (joined request bytes, tool-name order per request, spec.json)."""
     task, test_cmd = EXAMPLES[example]
     if repo.exists():
         shutil.rmtree(repo)
     shutil.copytree(tree / "examples" / example, repo)
-    environment = source_env(tree, stable_tool_head=stable_tool_head)
+    environment = source_env(tree, stable_tool_head=stable_tool_head,
+                             final_cache_layout=final_cache_layout)
     endpoint = subprocess.Popen([python, "-m", "stateframe.scripted_endpoint",
         "--script", str(tree / "examples" / f"{example}.script.json"), "--port", "0"],
         cwd=tree, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -134,7 +139,7 @@ def main() -> int:
         for label, tree in (("baseline", args.baseline), ("candidate", args.candidate)):
             raw, names, _spec = capture(tree.resolve(), args.python, launcher, example,
                 case_dir / "repo", case_dir / "run", stable_tool_head=args.stable_tool_head,
-                resume=resume)
+                final_cache_layout="on", resume=resume)
             (case_dir / f"{label}.requests.bin").write_bytes(raw)
             (case_dir / "run").rename(case_dir / f"{label}-run")
             captures.append(raw)

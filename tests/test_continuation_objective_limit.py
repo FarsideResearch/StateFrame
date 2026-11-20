@@ -7,13 +7,15 @@ import json
 import re
 import sys
 import tempfile
+from pathlib import Path
 
 import pytest
 
 import kernel_continuation_state as continuation_state
+from _journal import measurement_events, measurement_journal_paths
 from kernel_continuation_evidence import binding_versions
-from kernel_measurement import canonical_bytes
 from kernel_continuation_state import ContinuationState, transition
+from kernel_measurement import canonical_bytes, resolve_journal_blob_refs
 from test_intake_orientation_fail_loud import _fixture_row
 
 MAX_CONTINUATION_TEXT_CHARS = 4096
@@ -66,8 +68,9 @@ def test_long_objective_is_deterministic_bounded_and_cut_at_a_safe_boundary() ->
     assert not prefix or task[len(prefix)].isspace()
 
 
-def test_twelve_thousand_character_task_reaches_first_request_and_full_context(
-        tmp_path, monkeypatch) -> None:
+def _run_twelve_thousand_character_task(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> tuple[str, Path, list[dict]]:
     from stateframe.engine.probes import react_repair
     from stateframe.scripted_endpoint import Script, serve
 
@@ -131,22 +134,27 @@ def test_twelve_thousand_character_task_reaches_first_request_and_full_context(
         for context_var in context_vars:
             context_var.set(None)
 
-    from _journal import measurement_events
+    return task, run_dir, script.requests
+
+
+def test_twelve_thousand_character_task_reaches_first_request_and_full_context(
+        tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("STATEFRAME_REQUIRE_PINNED", raising=False)
+    task, run_dir, requests = _run_twelve_thousand_character_task(tmp_path, monkeypatch)
+
     events = measurement_events(run_dir)
     root_create = next(
         event for event in events
         if event.get("kind") == "continuation_transition" and event.get("operation") == "create"
     )
-    from _journal import measurement_journal_paths
-    from kernel_measurement import resolve_journal_blob_refs
     journal_path = measurement_journal_paths(run_dir)[0]
     root_create = resolve_journal_blob_refs(root_create, journal_path)
     stored_objective = root_create["data"]["objective"]
     assert stored_objective == _bounded_objective(task)
     assert len(stored_objective) <= MAX_CONTINUATION_TEXT_CHARS
 
-    assert len(script.requests) == 1
-    body = script.requests[0]
+    assert len(requests) == 1
+    body = requests[0]
     user_messages = [message for message in body["messages"] if message.get("role") == "user"]
     assert any(task in str(message.get("content", "")) for message in user_messages)
     continuation = next(
@@ -157,6 +165,23 @@ def test_twelve_thousand_character_task_reaches_first_request_and_full_context(
     assert state["active"]["objective"] == "Use the complete task in the original user request."
     assert state["active"]["objective_is_reference"] is True
     assert "complete task in the original user request" in state["instructions"]
+
+
+def test_unsupported_require_pinned_switch_records_preflight_refusal(
+        tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("STATEFRAME_REQUIRE_PINNED", "1")
+    _, run_dir, requests = _run_twelve_thousand_character_task(tmp_path, monkeypatch)
+
+    events = measurement_events(run_dir)
+    refusals = [event for event in events if event.get("kind") == "stateframe_switch_preflight_refused"]
+    assert len(refusals) == 1, "expected one switch preflight refusal in the run journal"
+    refusal = refusals[0]
+    assert refusal["unknown_switches"] == ["STATEFRAME_REQUIRE_PINNED"]
+    assert refusal["outcome"] == "HARNESS_CONTRACT"
+    assert refusal["failure_origin"] == "harness"
+    assert refusal["dispatch"] is False
+    assert not any(event.get("kind") == "continuation_transition" for event in events)
+    assert requests == []
 
 
 def test_long_dependency_path_uses_bounded_digest_key() -> None:

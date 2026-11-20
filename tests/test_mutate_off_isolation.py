@@ -50,7 +50,8 @@ def test_default_run_never_touches_mutation_platform(tmp_path, monkeypatch):
 
     repo, run = tmp_path / "repo", tmp_path / "run"
     poisoned_request, poisoned_tools, spec = capture(tree, sys.executable, launcher, "discount_bug",
-                                                     repo, run, stable_tool_head="on")
+                                                     repo, run, stable_tool_head="on",
+                                                     final_cache_layout=None)
     assert json.loads((run / "summary.json").read_text())["engine_result"] == "SUBMITTED"
     assert "mutations" not in spec
     assert not marker.exists()
@@ -60,7 +61,7 @@ def test_default_run_never_touches_mutation_platform(tmp_path, monkeypatch):
     # Same repo and run paths as the poisoned run, so request bytes are comparable.
     _remove_run(run)
     clean_request, clean_tools, _ = capture(CURRENT, sys.executable, launcher, "discount_bug",
-                                            repo, run, stable_tool_head="on")
+                                            repo, run, stable_tool_head="on", final_cache_layout=None)
     assert poisoned_request == clean_request
     print("DEFAULT_REQUEST_SHA256", hashlib.sha256(clean_request).hexdigest(), clean_tools[0][:3])
     assert poisoned_tools == clean_tools
@@ -78,7 +79,7 @@ def test_without_ldd_default_run_is_identical_and_mutations_refuse_naming_ldd(tm
     write_launcher(launcher)
     repo, run = tmp_path / "repo", tmp_path / "run"
     request, tools, spec = capture(CURRENT, sys.executable, launcher, "discount_bug", repo, run,
-                                   stable_tool_head="on")
+                                   stable_tool_head="on", final_cache_layout=None)
     assert json.loads((run / "summary.json").read_text())["engine_result"] == "SUBMITTED"
     assert "mutations" not in spec
     print("NO_LDD_REQUEST_SHA256", hashlib.sha256(request).hexdigest(), tools[0][:3])

@@ -99,10 +99,10 @@ def test_l0_full_run_capture_parity_against_base(tmp_path, example):
     repo = tmp_path / "repo"
     run = tmp_path / "run"
     base_request, base_tools, base_spec = capture(BASELINE, sys.executable, launcher, example, repo, run,
-                                                  stable_tool_head="on")
+                                                  stable_tool_head="on", final_cache_layout="on")
     _remove_run(run)
     current_request, current_tools, current_spec = capture(CURRENT, sys.executable, launcher, example, repo, run,
-                                                            stable_tool_head="on")
+                                                            stable_tool_head="on", final_cache_layout="on")
     assert current_request == base_request
     assert current_tools == base_tools
     assert _stable_spec(current_spec) == _stable_spec(base_spec)
