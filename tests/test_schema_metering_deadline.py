@@ -112,18 +112,22 @@ def test_bind_bounds_schema_metering_and_keeps_fast_counts(tmp_path, monkeypatch
         assert json.loads(tools.schema_budget_path.read_text()) == tools.schema_budget
 
 
-@pytest.mark.parametrize("trickle", [True, "headers", "chunked", "after-exact"],
-                         ids=["body", "headers", "chunked", "after-exact"])
+@pytest.mark.parametrize("trickle", [True, "headers", "chunked", "after-exact", "staggered"],
+                         ids=["body", "headers", "chunked", "after-exact", "staggered"])
 def test_parallel_binds_share_one_tokenizer_with_bounded_workers(tmp_path, monkeypatch, trickle):
     import kernel_request_diet
     from kernel_provider_dialect import LLAMA_CPP, RUN_CAPABILITY_CACHE, ProviderCapabilities, origin_of
 
-    monkeypatch.setattr(kernel_request_diet, "TOKENIZE_REQUEST_TIMEOUT_CAP_SECONDS", CAP)
+    staggered = trickle == "staggered"
+    cap = 0.5 if staggered else CAP
+    monkeypatch.setattr(kernel_request_diet, "TOKENIZE_REQUEST_TIMEOUT_CAP_SECONDS", cap)
     original_tokenize = kernel_request_diet._http_tokenize
     requests = []
+    first_request = Event()
 
     def record_worker(*args, **kwargs):
         requests.append((current_thread(), kwargs["deadline"]))
+        first_request.set()
         return original_tokenize(*args, **kwargs)
 
     monkeypatch.setattr(kernel_request_diet, "_http_tokenize", record_worker)
@@ -140,6 +144,9 @@ def test_parallel_binds_share_one_tokenizer_with_bounded_workers(tmp_path, monke
             shell = SimpleNamespace(spec={"chat_url": endpoint + "/chat/completions"},
                                     run_dir=run_dir, settings=ToolSettings())
             ready.wait(timeout=5)
+            if staggered and index >= callers // 2:
+                assert first_request.wait(timeout=2)
+                time.sleep(cap / 2)
             start = time.monotonic()
             tools = AgentTools(shell, CustomToolSet((), "empty"), defer_schema_budget=True)
             tools.bind()
@@ -147,13 +154,18 @@ def test_parallel_binds_share_one_tokenizer_with_bounded_workers(tmp_path, monke
 
         with ThreadPoolExecutor(max_workers=callers) as pool:
             for elapsed, counts in pool.map(bind, range(callers)):
-                assert elapsed < CAP + 0.35
+                assert elapsed < cap + (0.20 if staggered else 0.35)
+                if staggered:
+                    assert elapsed >= cap - 0.05
                 assert counts == fallback
         assert len(schema_posts) == len(requests) == callers * posts_per_bind
         workers = {worker for worker, _ in requests}
         assert len(workers) == callers
         for worker in workers:
             assert len({deadline for caller, deadline in requests if caller is worker}) == 1
+        if staggered:
+            deadlines = [deadline for _, deadline in requests]
+            assert max(deadlines) - min(deadlines) >= cap / 2
         cleanup_deadline = time.monotonic() + 0.35
         for worker in workers:
             worker.join(timeout=max(0, cleanup_deadline - time.monotonic()))
