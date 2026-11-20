@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.10 (2026-11-20)
+
+- Changed: the default namespace base name in static analysis is now sample_test_f2.
+
 ## 0.8.9 (2026-11-20)
 
 - Changed: the repository intelligence package is now named repo_intel_core; behaviour is unchanged.
