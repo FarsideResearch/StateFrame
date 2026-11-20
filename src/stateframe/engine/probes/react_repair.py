@@ -9872,11 +9872,11 @@ def work(d, *, resume=None):
                           and (action_schema_mode or contract_enabled() or native_tool_batches)
                           and _forced_schema_errors):
                         _forced_observation = _parallel_schema_refusal(
-                            _forced_call_id, _forced_schema_args, _forced_schema_errors,
+                            _forced_call_id, _forced_args, _forced_schema_errors,
                             input_expansions=_forced_input_expansions)
                     else:
                         _forced_observation = _dispatch_parent_parallel(
-                            _forced_call_id, _forced_schema_args,
+                            _forced_call_id, _forced_args,
                             input_expansions=_forced_input_expansions)
                 if _forced_observation is not None:
                     msgs.append(_tool_reply_for_call(msgs, _forced_call_id,
@@ -10669,7 +10669,7 @@ def work(d, *, resume=None):
                                 # Every parallel exchange leaves a receipt, including schema rejects.
                                 msgs.append(_tool_reply_for_call(msgs, tool_call_id,
                                     _parallel_schema_refusal(
-                                        tool_call_id, _validated_args,
+                                        tool_call_id, _args,
                                         _schema_errors or ("workspace changed since the proposal's state",),
                                         input_expansions=_input_expansions)))
                                 continue
@@ -10991,7 +10991,7 @@ def work(d, *, resume=None):
                                 msgs.append(_tool_reply_for_call(msgs, tool_call_id, _parallel_observation))
                                 continue
                             _parallel_observation = _dispatch_parent_parallel(
-                                tool_call_id, _validated_args,
+                                tool_call_id, _args,
                                 input_expansions=_input_expansions)
                             msgs.append(_tool_reply_for_call(msgs, tool_call_id, _parallel_observation))
                             continue

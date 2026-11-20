@@ -9,7 +9,8 @@ from pathlib import Path
 import pytest
 
 from stateframe.engine.kernel_parallel import (PARALLEL_TOOL, ParallelInputError, _UNIT,
-                                               _complete_arguments, _request)
+                                               _complete_arguments, _request,
+                                               normalize_goal_aliases, schema_input_error)
 from stateframe.engine.kernel_parallel_admission import DirectorySnapshot
 from stateframe.engine.probes.react_repair import _contract_errors
 
@@ -102,6 +103,24 @@ def test_outcome_alias_passes_schema_and_missing_goal_is_refused(tmp_path):
     with pytest.raises(ParallelInputError) as refusal:
         _request(missing, "call", "2")
     assert refusal.value.field == "goal"
+
+
+@pytest.mark.parametrize("invalid", ("", 3, None))
+def test_invalid_outcome_alias_keeps_outcome_refusal_through_schema(invalid):
+    args = {"subframes": [
+        {"id": "a", "outcome": invalid, "owns": ["a.py"]},
+        {"id": "b", "goal": "Change b", "owns": ["b.py"]},
+    ]}
+    normalized, expansions = normalize_goal_aliases(args)
+    assert normalized == args
+    assert not expansions
+
+    errors = _contract_errors((PARALLEL_TOOL,), "parallel", args)
+    assert errors
+    refusal = schema_input_error(args, errors)
+    assert refusal.unit_id == "a"
+    assert refusal.field == "outcome"
+    assert refusal.hint == "provide outcome as text"
 
 
 def test_shipped_parallel_example_uses_goal_for_every_subframe():

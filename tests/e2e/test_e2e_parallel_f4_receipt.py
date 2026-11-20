@@ -272,7 +272,7 @@ def test_refused_terse_plan_resend_fragment_reaches_parent_wire(
     script = _script()
     full = script["parent"][0]["arguments"]["subframes"]
     script["parent"][0]["arguments"]["subframes"] = [
-        {"id": unit["id"], "goal": unit["outcome"], "owns": unit["owns"]}
+        {"id": unit["id"], "goal": unit["goal"], "owns": unit["owns"]}
         for unit in full]
     script["parent"] = [script["parent"][0], {"tool": "read", "arguments": {
         "path": "pricing/tax.py"}}]

@@ -124,6 +124,7 @@ def test_present_invalid_outcome_is_never_replaced_by_requirement(tmp_path, inva
     with pytest.raises(ParallelInputError) as refusal:
         _parse(args, _repo(tmp_path), expand=True)
     assert refusal.value.field == "outcome"
+    assert refusal.value.hint == "provide outcome as text"
 
 
 @pytest.mark.parametrize("dropped", ("id", "owns", "reads", "requirements", "check", "model_class"))

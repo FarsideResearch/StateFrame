@@ -24,7 +24,7 @@ def test_terse_plan_expands_on_shipped_profile_wire(
     script = json.loads(script_path.read_bytes())
     full = script["parent"][0]["arguments"]["subframes"]
     script["parent"][0]["arguments"]["subframes"] = [
-        {"id": unit["id"], "goal": unit["outcome"], "owns": unit["owns"]}
+        {"id": unit["id"], "goal": unit["goal"], "owns": unit["owns"]}
         for unit in full]
     with BarrierEndpoint(script["parent"], script["subframes"]) as endpoint:
         completed = run_cli(isolated_engine_python, endpoint.url, repo, run_dir,

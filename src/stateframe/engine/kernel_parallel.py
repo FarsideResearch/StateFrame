@@ -85,7 +85,8 @@ def normalize_goal_aliases(args: Mapping) -> tuple[dict, tuple[dict, ...]]:
     if not isinstance(units, list):
         return dict(args), ()
     alias_indexes = [index for index, unit in enumerate(units)
-                     if isinstance(unit, dict) and "goal" not in unit and "outcome" in unit]
+                     if isinstance(unit, dict) and "goal" not in unit
+                     and isinstance(unit.get("outcome"), str) and unit["outcome"].strip()]
     if not alias_indexes:
         return dict(args), ()
     normalized = copy.deepcopy(dict(args))
@@ -110,6 +111,16 @@ def schema_input_error(args: Mapping, errors: Sequence[str]) -> ParallelInputErr
     """Translate a tool-schema rejection into the typed refusal the model can act on."""
     subframes = args.get("subframes") if isinstance(args, Mapping) else None
     units = subframes if isinstance(subframes, list) else []
+    for index, unit in enumerate(units):
+        if not isinstance(unit, Mapping) or "outcome" not in unit:
+            continue
+        outcome = unit.get("outcome")
+        if isinstance(outcome, str) and outcome.strip():
+            continue
+        identity = unit.get("id")
+        unit_id = identity if isinstance(identity, str) and identity.strip() else str(index)
+        return ParallelInputError(unit_id, "outcome", "expected nonempty text",
+                                  "provide outcome as text")
     for error in errors:
         match = _REQUIRED_PROPERTY.search(str(error))
         if match is None:
@@ -630,15 +641,12 @@ def _normalize_check(value: object, unit_id: str) -> dict[str, list[str]]:
 def _complete_arguments(args: Mapping, snapshot: DirectorySnapshot,
                         limits: ParallelLimits | None = None, *,
                         input_expansions: Sequence[dict] = ()) -> tuple[dict, tuple[dict, ...]]:
-    """Normalize documented aliases and complete references determined by plan and source."""
+    """Complete only references determined by the current plan and admitted source tree."""
     if not isinstance(args, Mapping) or not isinstance(args.get("subframes"), list):
         return dict(args) if isinstance(args, Mapping) else args, ()
-    completed, alias_expansions = normalize_goal_aliases(args)
-    if not alias_expansions:
-        completed = copy.deepcopy(completed)
+    completed = copy.deepcopy(dict(args))
     units = completed["subframes"]
     actions: list[dict] = list(input_expansions)
-    actions.extend(action for action in alias_expansions if action not in actions)
 
     for index, unit in enumerate(units):
         if isinstance(unit, dict) and "check" in unit:
