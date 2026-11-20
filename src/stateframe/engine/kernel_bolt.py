@@ -215,7 +215,7 @@ class KernelBolt:
         token = re.split(r"[^\w]", token, maxsplit=1)[0]
         if not token:
             return ""
-        from mc_repo_intel_vendor import background
+        from repo_intel_core import background
 
         oracle = _workspace_truth.enabled()
         root = self.root.resolve()
@@ -1724,7 +1724,7 @@ class KernelBolt:
             self.workspace_revision = getattr(self, "workspace_revision", 0) + 1
         if (result_class == "APPLIED" and indexed_grep_symbols_enabled()
                 and getattr(runtime, "_workspace_view_store", None) is None):
-            from mc_repo_intel_vendor.background import invalidate
+            from repo_intel_core.background import invalidate
 
             invalidate(self.root.resolve())
         rp = getattr(self, "receipts_path", None)

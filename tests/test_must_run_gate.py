@@ -214,7 +214,7 @@ EXPECTED_OPTIONAL_DEPENDENCIES = (
     ("src/stateframe/powerup_manifest.py", "host-capability:filesystem-modes", "filesystem_modes",
      ("tests/test_powerups_digest.py::test_unreadable_entry_fails_closed",),
      ("running with privileges that ignore directory modes",)),
-    ("src/stateframe/engine/mc_repo_intel_vendor/", "repomap", "python:tree_sitter,python:tree_sitter_python,python:tree_sitter_typescript,python:tree_sitter_go",
+    ("src/stateframe/engine/repo_intel_core/", "repomap", "python:tree_sitter,python:tree_sitter_python,python:tree_sitter_typescript,python:tree_sitter_go",
      ("tests/test_repo_map_ast.py::test_ast_path_is_taken_for_python_typescript_and_go",
       "tests/test_repo_map_ast.py::test_ast_repo_map_renders_parser_signatures",
       "tests/test_repo_map_ast.py::test_ast_and_fallback_differ_only_where_expected",

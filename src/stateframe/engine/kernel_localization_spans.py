@@ -178,7 +178,7 @@ def _context_candidate(
         identifiers: Sequence[str],
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     try:
-        from mc_repo_intel_vendor.ts_dispatch import structural_spans
+        from repo_intel_core.ts_dispatch import structural_spans
         parsed = structural_spans(context.decode("utf-8", errors="replace"), path)
     except (ImportError, OSError, RuntimeError, TypeError, ValueError) as error:
         return [], [{"kind": "owner_span_parser", "path": path, "reason": type(error).__name__}]
@@ -298,7 +298,7 @@ def rank_owner_spans_by_words(
     if len(raw) > MAX_SCAN_BYTES:
         return {**empty, "omissions": [{"kind": "word_rank_scan_bound", "path": path}]}
     try:
-        from mc_repo_intel_vendor.ts_dispatch import structural_spans
+        from repo_intel_core.ts_dispatch import structural_spans
         parsed = structural_spans(raw.decode("utf-8", errors="replace"), path)
     except (ImportError, OSError, RuntimeError, TypeError, ValueError) as error:
         return {**empty, "omissions": [{"kind": "owner_span_parser", "path": path,

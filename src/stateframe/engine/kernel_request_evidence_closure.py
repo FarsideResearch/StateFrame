@@ -490,7 +490,7 @@ def lexical_sites(source: str, path: str, tokens: Sequence[str]) -> tuple[dict[s
 
 def _outline(source: str, path: str) -> Mapping[str, object] | None:
     try:
-        from mc_repo_intel_vendor.ts_dispatch import outline_source
+        from repo_intel_core.ts_dispatch import outline_source
         value = outline_source(source, path)
     except (ImportError, OSError, TypeError, ValueError, SyntaxError):
         return None

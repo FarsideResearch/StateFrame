@@ -197,7 +197,7 @@ def _outline_symbols(path: str, source: str) -> list[ParentSymbol]:
     """Use the shared outline for polyglot definitions before lexical fallback."""
 
     try:
-        from mc_repo_intel_vendor.ts_dispatch import outline_source
+        from repo_intel_core.ts_dispatch import outline_source
 
         outline = outline_source(source, path)
         result: list[ParentSymbol] = []

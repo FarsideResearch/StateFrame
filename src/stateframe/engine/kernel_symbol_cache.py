@@ -32,7 +32,7 @@ def _digest(value: object) -> str:
 
 def cache_path(root: Path, skip: tuple[str, ...]) -> tuple[Path, str]:
     """Keep each resolved repo and parser policy in its own versioned directory."""
-    from mc_repo_intel_vendor.call_graph import repo_cache_file
+    from repo_intel_core.call_graph import repo_cache_file
 
     implementation = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
     registry_source = hashlib.sha256((Path(__file__).with_name("symbol_registry.py")).read_bytes()).hexdigest()

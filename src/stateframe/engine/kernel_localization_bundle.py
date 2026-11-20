@@ -301,7 +301,7 @@ def _graph_relations(
         return [], {"status": "UNAVAILABLE", "reason": "workspace_unavailable"}, [{"kind": "graph_unavailable", "reason": "workspace_unavailable"}]
     if time.monotonic() >= deadline:
         return [], {"status": "PARTIAL", "reason": "deadline"}, [{"kind": "graph_deadline"}]
-    from mc_repo_intel_vendor.background import enabled as background_enabled
+    from repo_intel_core.background import enabled as background_enabled
 
     background = background_enabled()
     if background:
@@ -330,7 +330,7 @@ def _graph_relations(
             shutil.copyfile(root / relative, target)
         file_count, total_bytes = int(scope_info["files"]), int(scope_info["bytes"])
     try:
-        from mc_repo_intel_vendor.call_graph import build_graph
+        from repo_intel_core.call_graph import build_graph
         # The mirror is disposable: no cache file is written into it or the workspace.
         graph = (build_graph(str(graph_root), use_cache=False, use_memo=False) if mirror is not None
                  else build_graph(str(root), use_cache=True, use_memo=True))
@@ -669,7 +669,7 @@ def build_localization_bundle(
     dependency_digests["workspace"] = _digest(str(workspace) if workspace is not None else "none")
     parser_status = "PARTIAL" if large_paths else "AVAILABLE"
     try:
-        from mc_repo_intel_vendor.ts_dispatch import outline_source
+        from repo_intel_core.ts_dispatch import outline_source
         parsed_outlines = {path: outline_source(source, path) for path, source in sources.items()}
         if any(bool(item.get("degraded")) for item in parsed_outlines.values()):
             parser_status = "DEGRADED"

@@ -409,7 +409,7 @@ def _definition_spans(path: str, source: bytes) -> tuple[dict[str, object], ...]
         # an SFC.  The enclosing SFC span remains authority-bound on the current side.
         adapter_path = path + ".ts"
     try:
-        from mc_repo_intel_vendor.ts_dispatch import structural_spans
+        from repo_intel_core.ts_dispatch import structural_spans
         result = structural_spans(text, adapter_path)
     except Exception as error:  # noqa: BLE001 - unavailable adapter is typed below
         raise _ParserUnavailable(f"structural parser unavailable: {type(error).__name__}") from error

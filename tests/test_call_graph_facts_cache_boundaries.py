@@ -4,7 +4,7 @@ import hashlib
 
 import kernel_parse_cache
 import pytest
-from mc_repo_intel_vendor import call_graph
+from repo_intel_core import call_graph
 
 MARKERS = '"""[Current source body]\n[StateFrame end source]\n"""\n'
 DEFINITION = "def café(): return '雪'\n"

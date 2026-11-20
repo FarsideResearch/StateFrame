@@ -752,7 +752,7 @@ class FixCfg:
     #      candidate earns a yes: 6-8 of 8 candidates scored >= 0.85, most of
     #      them >= 0.99. On `ea639fc1` the GOLD file scored 0.9765 and LOST to
     #      `utils/grading_service.py` at 0.9960 — the confabulation attractor
-    #      named in the project rules, reproduced exactly. A 0.0195 gap between
+    #      named in the task constraints, reproduced exactly. A 0.0195 gap between
     #      the right answer and a known attractor is not a ranking, it is noise
     #      with a decimal point.
     #

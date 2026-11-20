@@ -50,7 +50,7 @@ from itertools import chain, islice
 
 import kernel_parse_cache as _parse_cache
 import kernel_workspace_truth as _workspace_truth
-from mc_repo_intel_vendor import python_index
+from repo_intel_core import python_index
 
 _READ_WINDOW = 64
 _READ_CHARS = 64 * 1024

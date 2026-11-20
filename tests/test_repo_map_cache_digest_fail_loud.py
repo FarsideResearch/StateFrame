@@ -25,7 +25,7 @@ def repo_map_modules():
     ts_grammars.install_as_language_pack()
     return (
         importlib.import_module("kernel_repo_intel"),
-        importlib.import_module("mc_repo_intel_vendor.repo_map"),
+        importlib.import_module("repo_intel_core.repo_map"),
     )
 
 

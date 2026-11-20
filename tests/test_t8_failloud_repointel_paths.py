@@ -1,6 +1,6 @@
 """Fail-loud checks for broad except sites in the repo-intel modules (catalog, intel, call graph, LSP, repo map, tree-sitter).
 
-Scope: kernel_repo_catalog, kernel_repo_intel, mc_repo_intel_vendor/{call_graph, lsp_resolve, repo_map,
+Scope: kernel_repo_catalog, kernel_repo_intel, repo_intel_core/{call_graph, lsp_resolve, repo_map,
 ts_dispatch, ts_extract}.
 
 Loudness bar: a raise, a WARNING-or-higher record from the owning module, or a typed field / span / capability
@@ -33,17 +33,17 @@ from _except_sites import (
     shifted_module_paths,
 )
 from kernel_catalog_contracts import CoverageStatus
-from mc_repo_intel_vendor import call_graph, repo_map, ts_dispatch, ts_extract
+from repo_intel_core import call_graph, repo_map, ts_dispatch, ts_extract
 
 ENGINE = Path(repo_intel.__file__).resolve().parent
 _MODULE_FILES = (
     ENGINE / "kernel_repo_catalog.py",
     ENGINE / "kernel_repo_intel.py",
-    ENGINE / "mc_repo_intel_vendor" / "call_graph.py",
-    ENGINE / "mc_repo_intel_vendor" / "lsp_resolve.py",
-    ENGINE / "mc_repo_intel_vendor" / "repo_map.py",
-    ENGINE / "mc_repo_intel_vendor" / "ts_dispatch.py",
-    ENGINE / "mc_repo_intel_vendor" / "ts_extract.py",
+    ENGINE / "repo_intel_core" / "call_graph.py",
+    ENGINE / "repo_intel_core" / "lsp_resolve.py",
+    ENGINE / "repo_intel_core" / "repo_map.py",
+    ENGINE / "repo_intel_core" / "ts_dispatch.py",
+    ENGINE / "repo_intel_core" / "ts_extract.py",
 )
 
 
@@ -155,8 +155,8 @@ def test_graph_dependencies_all_healthy_stays_quiet(tmp_path: Path, monkeypatch:
 
 def test_ts_dispatch_module_import_failure_reads_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
     # A missing ts_dispatch module is the same unknown state as a failed scan.
-    monkeypatch.setitem(sys.modules, "mc_repo_intel_vendor.ts_dispatch", None)
-    monkeypatch.delattr(sys.modules["mc_repo_intel_vendor"], "ts_dispatch", raising=False)
+    monkeypatch.setitem(sys.modules, "repo_intel_core.ts_dispatch", None)
+    monkeypatch.delattr(sys.modules["repo_intel_core"], "ts_dispatch", raising=False)
     result = call_graph.dispatch_boundaries_in_file("export const a = 1;\n", "web/app.js")
     assert [b.kind for b in result] == [call_graph.SCAN_FAILED_KIND]
     assert "ImportError" in result[0].note or "ModuleNotFoundError" in result[0].note

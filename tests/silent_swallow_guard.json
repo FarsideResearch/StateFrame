@@ -85,8 +85,8 @@
     "src/stateframe/engine/kernel_vitals.py",
     "src/stateframe/engine/kernel_wire_*.py",
     "src/stateframe/engine/kernel_wire_truth_facts.py",
-    "src/stateframe/engine/mc_repo_intel_vendor/call_graph.py",
-    "src/stateframe/engine/mc_repo_intel_vendor/repo_map.py",
+    "src/stateframe/engine/repo_intel_core/call_graph.py",
+    "src/stateframe/engine/repo_intel_core/repo_map.py",
     "src/stateframe/engine/probes/react_repair.py"
   ],
   "required_modules": [
@@ -169,8 +169,8 @@
     "src/stateframe/engine/kernel_wire_string_hygiene.py",
     "src/stateframe/engine/kernel_wire_truth_facts.py",
     "src/stateframe/engine/kernel_wire_truth_gate.py",
-    "src/stateframe/engine/mc_repo_intel_vendor/call_graph.py",
-    "src/stateframe/engine/mc_repo_intel_vendor/repo_map.py",
+    "src/stateframe/engine/repo_intel_core/call_graph.py",
+    "src/stateframe/engine/repo_intel_core/repo_map.py",
     "src/stateframe/engine/probes/react_repair.py"
   ],
   "allowlist": [
@@ -2437,7 +2437,7 @@
       "file": "src/stateframe/engine/kernel_request_evidence_closure.py",
       "function": "_outline",
       "except_clause": "except (ImportError, OSError, TypeError, ValueError, SyntaxError):",
-      "fingerprint": "4315c1e26f72ab455173dda9",
+      "fingerprint": "94f1a8f07ddcb21557b8e2f1",
       "ordinal": 1,
       "reason": "baseline debt 2026-11-05, see inventory",
       "risk": "unclassified"
@@ -4072,7 +4072,7 @@
       "risk": "unclassified"
     },
     {
-      "file": "src/stateframe/engine/mc_repo_intel_vendor/call_graph.py",
+      "file": "src/stateframe/engine/repo_intel_core/call_graph.py",
       "function": "_entry_bytes",
       "except_clause": "except OSError:",
       "fingerprint": "decd655c887310a9511b28ec",
@@ -4081,7 +4081,7 @@
       "risk": "unclassified"
     },
     {
-      "file": "src/stateframe/engine/mc_repo_intel_vendor/call_graph.py",
+      "file": "src/stateframe/engine/repo_intel_core/call_graph.py",
       "function": "_entry_bytes",
       "except_clause": "except OSError:",
       "fingerprint": "511f64b83be0bbcfa193d0a5",
@@ -4090,7 +4090,7 @@
       "risk": "unclassified"
     },
     {
-      "file": "src/stateframe/engine/mc_repo_intel_vendor/call_graph.py",
+      "file": "src/stateframe/engine/repo_intel_core/call_graph.py",
       "function": "enforce_repo_cache_cap",
       "except_clause": "except OSError:",
       "fingerprint": "caf56d7455e95a93a000208a",
@@ -4099,7 +4099,7 @@
       "risk": "unclassified"
     },
     {
-      "file": "src/stateframe/engine/mc_repo_intel_vendor/call_graph.py",
+      "file": "src/stateframe/engine/repo_intel_core/call_graph.py",
       "function": "enforce_repo_cache_cap",
       "except_clause": "except OSError:",
       "fingerprint": "51eb3e79c13e89a2c8dac594",
@@ -4108,7 +4108,7 @@
       "risk": "unclassified"
     },
     {
-      "file": "src/stateframe/engine/mc_repo_intel_vendor/call_graph.py",
+      "file": "src/stateframe/engine/repo_intel_core/call_graph.py",
       "function": "enforce_repo_cache_cap",
       "except_clause": "except OSError:",
       "fingerprint": "1ac9b018f4d31599a2eb6837",
@@ -4117,7 +4117,7 @@
       "risk": "unclassified"
     },
     {
-      "file": "src/stateframe/engine/mc_repo_intel_vendor/call_graph.py",
+      "file": "src/stateframe/engine/repo_intel_core/call_graph.py",
       "function": "repo_cache_file",
       "except_clause": "except OSError:",
       "fingerprint": "83160900ae2a441617117c1c",
@@ -4126,7 +4126,7 @@
       "risk": "unclassified"
     },
     {
-      "file": "src/stateframe/engine/mc_repo_intel_vendor/call_graph.py",
+      "file": "src/stateframe/engine/repo_intel_core/call_graph.py",
       "function": "_finite_number",
       "except_clause": "except (OverflowError, TypeError, ValueError):",
       "fingerprint": "a58d9fc64a20cc636ef986ef",
@@ -4135,7 +4135,7 @@
       "risk": "unclassified"
     },
     {
-      "file": "src/stateframe/engine/mc_repo_intel_vendor/call_graph.py",
+      "file": "src/stateframe/engine/repo_intel_core/call_graph.py",
       "function": "_cached_extract",
       "except_clause": "except (AttributeError, IndexError, KeyError, OverflowError, RecursionError, TypeError, ValueError):",
       "fingerprint": "189e03c29372692ba434e4c1",
@@ -4144,7 +4144,7 @@
       "risk": "unclassified"
     },
     {
-      "file": "src/stateframe/engine/mc_repo_intel_vendor/call_graph.py",
+      "file": "src/stateframe/engine/repo_intel_core/call_graph.py",
       "function": "_build_import_table._resolve",
       "except_clause": "except ValueError:",
       "fingerprint": "6b9dddaf7167c20d7ef34227",
@@ -4153,7 +4153,7 @@
       "risk": "unclassified"
     },
     {
-      "file": "src/stateframe/engine/mc_repo_intel_vendor/call_graph.py",
+      "file": "src/stateframe/engine/repo_intel_core/call_graph.py",
       "function": "_extract_source",
       "except_clause": "except (SyntaxError, ValueError, MemoryError, RecursionError):",
       "fingerprint": "b976ff6979ac7020067da13f",
@@ -4162,7 +4162,7 @@
       "risk": "unclassified"
     },
     {
-      "file": "src/stateframe/engine/mc_repo_intel_vendor/call_graph.py",
+      "file": "src/stateframe/engine/repo_intel_core/call_graph.py",
       "function": "_load_cache",
       "except_clause": "except (OSError, RecursionError, UnicodeError, ValueError):",
       "fingerprint": "27f55b7e89b2d34806948a8e",
@@ -4171,7 +4171,7 @@
       "risk": "unclassified"
     },
     {
-      "file": "src/stateframe/engine/mc_repo_intel_vendor/call_graph.py",
+      "file": "src/stateframe/engine/repo_intel_core/call_graph.py",
       "function": "_atomic_write_text",
       "except_clause": "except OSError:",
       "fingerprint": "92539df992077958de6627c5",
@@ -4180,7 +4180,7 @@
       "risk": "unclassified"
     },
     {
-      "file": "src/stateframe/engine/mc_repo_intel_vendor/call_graph.py",
+      "file": "src/stateframe/engine/repo_intel_core/call_graph.py",
       "function": "dispatch_boundaries_in_file",
       "except_clause": "except (SyntaxError, ValueError):",
       "fingerprint": "b976ff6979ac7020067da13f",
@@ -4189,7 +4189,7 @@
       "risk": "unclassified"
     },
     {
-      "file": "src/stateframe/engine/mc_repo_intel_vendor/call_graph.py",
+      "file": "src/stateframe/engine/repo_intel_core/call_graph.py",
       "function": "dispatch_boundaries_near",
       "except_clause": "except OSError:",
       "fingerprint": "77d776aecbcda59a6bef3987",
@@ -4198,7 +4198,7 @@
       "risk": "unclassified"
     },
     {
-      "file": "src/stateframe/engine/mc_repo_intel_vendor/call_graph.py",
+      "file": "src/stateframe/engine/repo_intel_core/call_graph.py",
       "function": "_iter_py_files",
       "except_clause": "except ValueError:",
       "fingerprint": "4c08836835b4cedc39cfd385",
@@ -4207,7 +4207,7 @@
       "risk": "unclassified"
     },
     {
-      "file": "src/stateframe/engine/mc_repo_intel_vendor/call_graph.py",
+      "file": "src/stateframe/engine/repo_intel_core/call_graph.py",
       "function": "_scan_source_files",
       "except_clause": "except ValueError:",
       "fingerprint": "ec9ca857f8a4ee7f9f410079",
@@ -4216,7 +4216,7 @@
       "risk": "unclassified"
     },
     {
-      "file": "src/stateframe/engine/mc_repo_intel_vendor/call_graph.py",
+      "file": "src/stateframe/engine/repo_intel_core/call_graph.py",
       "function": "_extract_any_file",
       "except_clause": "except OSError:",
       "fingerprint": "cbc6acf711aebd4be05d7c62",
@@ -4225,7 +4225,7 @@
       "risk": "unclassified"
     },
     {
-      "file": "src/stateframe/engine/mc_repo_intel_vendor/call_graph.py",
+      "file": "src/stateframe/engine/repo_intel_core/call_graph.py",
       "function": "changed_ranges",
       "except_clause": "except OSError:",
       "fingerprint": "f27b7d2fa072ff87ce966103",
@@ -4234,7 +4234,7 @@
       "risk": "unclassified"
     },
     {
-      "file": "src/stateframe/engine/mc_repo_intel_vendor/repo_map.py",
+      "file": "src/stateframe/engine/repo_intel_core/repo_map.py",
       "function": "_record_commit_sha_lookup_failure",
       "except_clause": "except BaseException:",
       "fingerprint": "0d54b5f2c02a7a46d262192d",
@@ -4243,7 +4243,7 @@
       "risk": "low: hostile exception metaclass may hide its type name"
     },
     {
-      "file": "src/stateframe/engine/mc_repo_intel_vendor/repo_map.py",
+      "file": "src/stateframe/engine/repo_intel_core/repo_map.py",
       "function": "_record_commit_sha_lookup_failure",
       "except_clause": "except Exception:",
       "fingerprint": "d9b9b23368e120e5cb2886c5",
@@ -4252,7 +4252,7 @@
       "risk": "medium: if logging and journal both fail, this metadata is unavailable"
     },
     {
-      "file": "src/stateframe/engine/mc_repo_intel_vendor/repo_map.py",
+      "file": "src/stateframe/engine/repo_intel_core/repo_map.py",
       "function": "_record_commit_sha_lookup_failure",
       "except_clause": "except Exception:",
       "fingerprint": "d48c7ec12fb492af25368442",
@@ -4261,7 +4261,7 @@
       "risk": "medium: if logging also failed, this failure has no durable diagnostic"
     },
     {
-      "file": "src/stateframe/engine/mc_repo_intel_vendor/repo_map.py",
+      "file": "src/stateframe/engine/repo_intel_core/repo_map.py",
       "function": "_generate_repo_map_with_stats",
       "except_clause": "except ValueError:",
       "fingerprint": "ce37a54cd3bc644c28a74b73",
@@ -4270,7 +4270,7 @@
       "risk": "unclassified"
     },
     {
-      "file": "src/stateframe/engine/mc_repo_intel_vendor/repo_map.py",
+      "file": "src/stateframe/engine/repo_intel_core/repo_map.py",
       "function": "_get_cache_dir",
       "except_clause": "except OSError:",
       "fingerprint": "6252829291612245fe993535",
@@ -4279,7 +4279,7 @@
       "risk": "unclassified"
     },
     {
-      "file": "src/stateframe/engine/mc_repo_intel_vendor/repo_map.py",
+      "file": "src/stateframe/engine/repo_intel_core/repo_map.py",
       "function": "_load_cached_map",
       "except_clause": "except OSError:",
       "fingerprint": "6849b3e25ec369fbe308727b",
@@ -4288,7 +4288,7 @@
       "risk": "unclassified"
     },
     {
-      "file": "src/stateframe/engine/mc_repo_intel_vendor/repo_map.py",
+      "file": "src/stateframe/engine/repo_intel_core/repo_map.py",
       "function": "_save_cached_map",
       "except_clause": "except OSError:",
       "fingerprint": "cfd9be6cc899bed9d14962ed",

@@ -175,7 +175,7 @@ def test_child_reaps_orphans_and_allows_normal_python_finalizers(tmp_path):
 
 
 def test_lookup_timeout_keeps_completed_sites_and_misses(tmp_path, monkeypatch, caplog):
-    from mc_repo_intel_vendor import lsp_resolve as resolver
+    from repo_intel_core import lsp_resolve as resolver
 
     release = threading.Event()
     sites = [resolver.CallSiteRef(n, 0, "target") for n in range(1, 4)]

@@ -11,7 +11,7 @@ import sys
 
 TREES = (
     "probes", "detreason", "build_tasks", "graphs", "architecture", "swarm",
-    "mc_repo_intel_vendor", "sys1",
+    "repo_intel_core", "sys1",
     "tools",  # 10-08: shipped tools/sciledger subset (final-product manifest writer)
 )
 FORMAT = "stateframe-runtime-release/1"

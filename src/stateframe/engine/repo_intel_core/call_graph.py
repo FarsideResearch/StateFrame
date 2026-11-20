@@ -1,7 +1,6 @@
 """Code graph index — function-level call graph over a Python repo.
 
-Sibling to blast_radius.py (which is file-import fan-out). This module goes one
-level deeper: it records symbol DEFINITIONS (functions/methods/classes) and the
+This module records symbol DEFINITIONS (functions/methods/classes) and the
 CALL EDGES between them, so consumers can ask precise structural questions that
 grep cannot answer reliably:
 
@@ -11,12 +10,12 @@ grep cannot answer reliably:
   - snapshot() + diff()              — impact analysis for a PR/edit
   - pagerank() / orphans()           — repo-map ranking + dead-code
 
-Design rules (from project rules #158/#153 on interaction bugs):
+Design constraints for avoiding missed interactions:
   * BIAS TO OVER-REPORT. An unresolved call is linked to every def sharing its
     short name rather than dropped. A too-broad caller set is safe to review; a
     missed caller is exactly the silent break we are trying to catch.
   * NEVER RAISE from a public method. Parse/IO errors degrade to empty results
-    and a debug log, mirroring blast_radius.py.
+    and a debug log.
   * ZERO required deps for extraction (stdlib `ast`). networkx is optional and
     only powers transitive traversal / pagerank; without it we fall back to a
     hand-rolled BFS so the core still works.
@@ -26,8 +25,8 @@ Symbol id format:  "<relpath>::<QualName>"
   method      -> "app/grading.py::Grader.grade"
   nested fn   -> "app/grading.py::grade.<locals>.helper"   (rare; kept qualified)
 
-Python-first by design; JS/TS/Vue call-site extraction is a planned extension
-(tree-sitter defs already exist in repo_intel/signatures.py).
+Python extraction uses the standard library; other languages use the companion
+tree-sitter extractor.
 """
 
 from __future__ import annotations
@@ -52,7 +51,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from typing import Iterable, Optional
 
-if __package__ and __package__.endswith("engine.mc_repo_intel_vendor"):
+if __package__ and __package__.endswith("engine.repo_intel_core"):
     from .. import kernel_parse_cache as _parse_cache
     from ..kernel_safe_paths import safe_expanduser, safe_home
     from ..kernel_turn_work_counters import count_work
@@ -73,7 +72,7 @@ except ImportError:  # pragma: no cover - exercised only in networkx-less envs
         "a built-in BFS and pagerank is disabled. Add networkx to requirements.txt."
     )
 
-# Directories that are never part of the source graph (mirrors blast_radius)
+# Directories that are never part of the source graph.
 _SKIP_DIRS = frozenset({
     ".git", "__pycache__", "node_modules", ".venv", "venv", "env",
     "dist", "build", ".tox", "migrations", ".next", ".nuxt",
@@ -172,10 +171,9 @@ def enforce_repo_cache_cap(base: Path, keep: Path | None = None, *, now: float |
 
 
 def repo_cache_file(repo_path, filename: str = _CACHE_FILENAME) -> Path:
-    """Cache location for a repo, OUTSIDE the repo (StateFrame vendored copy, 10-05).
+    """Cache location for a repository, outside its working tree.
 
-    sample project writes the cache into a fresh clone; in StateFrame the repo is a sealed task snapshot, and a
-    cache file inside it broke exact-membership verification (sample task parent gained this file).
+    A cache file inside a sealed task snapshot changes its exact membership.
     STATEFRAME_REPO_CACHE_DIR overrides the root; the default is ~/.cache/stateframe/repo-intel.
     """
     repo = Path(repo_path).resolve()
@@ -2565,7 +2563,7 @@ def scoped_test_dependencies(root: Path, path: str) -> tuple[str, ...]:
 
 # ── Cross-session cache warming ──────────────────────────────────────────────
 #
-# Every Code Studio session is a FRESH CLONE, so its `.mc_codegraph_cache.json`
+# Every task session uses a fresh clone, so its `.mc_codegraph_cache.json`
 # starts empty and the first `build_graph` pays a full cold parse of the repo.
 # Measured 2026-08-02: only 30 of 67 live session workspaces had a warm cache, and
 # `code_graph` averaged 6.4s per call across a run.
@@ -2586,9 +2584,8 @@ _SHARED_CACHE_ROOT = Path(os.getenv("MC_CODEGRAPH_CACHE_DIR", "/workspace/.codeg
 def repo_cache_key(repo_path: str) -> str | None:
     """A key that identifies the REPO, stable across sessions. None if unknowable.
 
-    The obvious choice — the workspace path — is WRONG: every Code Studio session
-    is a fresh directory, so keying on it gives every session its own "shared"
-    cache and the warming is silently inert. (I wrote that version first.)
+    A workspace path changes with every fresh session, so keying on it gives
+    every session a separate cache and prevents reuse.
 
     The git remote is stable, but the URL embeds a per-session credential
     (`http://gitsvc:<token>@host/path`), so the userinfo MUST be stripped or

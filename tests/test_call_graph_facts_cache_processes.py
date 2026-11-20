@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 
 from kernel_invalidation import LedgerIndex
-from mc_repo_intel_vendor import call_graph
+from repo_intel_core import call_graph
 
 root, phases, slot = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
 timeout = float(sys.argv[4])

@@ -3,7 +3,7 @@ import pickle
 
 import kernel_parse_cache
 from kernel_invalidation import LedgerIndex
-from mc_repo_intel_vendor import call_graph, lsp_resolve
+from repo_intel_core import call_graph, lsp_resolve
 
 
 def _memoized_graph(root):

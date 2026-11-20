@@ -762,7 +762,7 @@ def _dynamic_bindings(inventory: SourceInventory, graph: object, anchors: Mappin
     terms = tuple(anchors.get("terms", ()))
     rows: list[dict[str, object]] = []
     try:
-        from mc_repo_intel_vendor.call_graph import SCAN_FAILED_KIND, dispatch_boundaries_in_file
+        from repo_intel_core.call_graph import SCAN_FAILED_KIND, dispatch_boundaries_in_file
     except ImportError:
         return rows
     for source in inventory.files:
@@ -843,10 +843,10 @@ class LocalizeIndex:
 
     def refresh(self) -> None:
         inventory = build_inventory(self.root)
-        from mc_repo_intel_vendor.background import enabled as background_enabled
+        from repo_intel_core.background import enabled as background_enabled
 
         if background_enabled():
-            from mc_repo_intel_vendor.call_graph import build_graph
+            from repo_intel_core.call_graph import build_graph
 
             self.inventory = inventory
             self._manifest_digest = inventory.manifest_digest
@@ -857,7 +857,7 @@ class LocalizeIndex:
         self.inventory = inventory
         self._manifest_digest = inventory.manifest_digest
         try:
-            from mc_repo_intel_vendor.call_graph import build_graph
+            from repo_intel_core.call_graph import build_graph
             with _GRAPH_BUILD_LOCK:
                 previous_lsp = os.environ.get("CODE_GRAPH_LSP")
                 if not self.use_graph_lsp:

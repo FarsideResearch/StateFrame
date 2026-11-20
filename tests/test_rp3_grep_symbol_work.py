@@ -352,7 +352,7 @@ def test_completed_facts_match_legacy_and_refresh_after_edit_and_delete(
 
 
 def test_unavailable_index_and_partial_grep_cannot_assert_absence(tmp_path, switches, monkeypatch):
-    from mc_repo_intel_vendor import background
+    from repo_intel_core import background
 
     root = tmp_path / "repo"
     (root / "scope").mkdir(parents=True)

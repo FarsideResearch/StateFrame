@@ -1,7 +1,7 @@
 """Pinned, self-contained repository-intelligence primitives.
 
-Source provenance is intentionally explicit because this package is vendored
-into a frozen request fitting release and must not import the source project at runtime.
+Source provenance is explicit because these pinned primitives must remain
+self-contained at runtime.
 """
 
 import os

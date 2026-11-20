@@ -66,12 +66,12 @@ def _install_failing_outline(monkeypatch: pytest.MonkeyPatch, error: Exception) 
     def outline_source(text: object, path: object) -> dict[str, object]:
         raise error
 
-    package = types.ModuleType("mc_repo_intel_vendor")
-    dispatch = types.ModuleType("mc_repo_intel_vendor.ts_dispatch")
+    package = types.ModuleType("repo_intel_core")
+    dispatch = types.ModuleType("repo_intel_core.ts_dispatch")
     dispatch.outline_source = outline_source  # type: ignore[attr-defined]
     package.ts_dispatch = dispatch  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "mc_repo_intel_vendor", package)
-    monkeypatch.setitem(sys.modules, "mc_repo_intel_vendor.ts_dispatch", dispatch)
+    monkeypatch.setitem(sys.modules, "repo_intel_core", package)
+    monkeypatch.setitem(sys.modules, "repo_intel_core.ts_dispatch", dispatch)
 
 
 # --- kernel_revision_bound_edit ------------------------------------------------------------------------

@@ -1118,9 +1118,9 @@ def outline_for_snapshot(snapshot: SourceSnapshot) -> dict[str, object]:
         }
     try:
         try:
-            from mc_repo_intel_vendor.ts_dispatch import outline_source
+            from repo_intel_core.ts_dispatch import outline_source
         except ImportError:  # pragma: no cover - package import path.
-            from .mc_repo_intel_vendor.ts_dispatch import outline_source
+            from .repo_intel_core.ts_dispatch import outline_source
         result = outline_source(text, snapshot.source_ref)
     except Exception as exc:  # noqa: BLE001 - navigation must not authorize edits.
         return {

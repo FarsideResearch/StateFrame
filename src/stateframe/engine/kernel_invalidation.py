@@ -1025,14 +1025,14 @@ class LedgerIndex:
             self._call_graph = graph_or_root
             self._test_dependency_cache.clear()
             return graph_or_root
-        from mc_repo_intel_vendor.background import enabled as background_enabled
+        from repo_intel_core.background import enabled as background_enabled
 
         background = background_enabled()
         root = str(graph_or_root) if background else str(Path(graph_or_root).resolve())
         if not background and self._call_graph is not None and self._call_graph_root == root:
             return self._call_graph
         try:
-            from mc_repo_intel_vendor.call_graph import build_graph
+            from repo_intel_core.call_graph import build_graph
             graph = build_graph(root, use_cache=False, use_memo=True)
             if graph is not self._call_graph:
                 self._call_graph = graph
@@ -2015,7 +2015,7 @@ def runtime_invalidation_index(runtime: object) -> LedgerIndex:
         index._deferred_call_graph_root = root
         if index._call_graph is not None:
             from kernel_repo_dependencies import active
-            from mc_repo_intel_vendor.background import enabled as background_enabled
+            from repo_intel_core.background import enabled as background_enabled
 
             if active is None and background_enabled():
                 # Refresh a graph after a dependency query has requested it.
