@@ -102,6 +102,10 @@ def test_every_documented_switch_takes_effect():
     assert unsupported(_documented(), runner.OPT_IN_SWITCHES, _product_reads()) == []
 
 
+def test_continuation_refusal_fixture_is_not_a_documented_switch():
+    assert "STATEFRAME_REQUIRE_PINNED" not in _documented()
+
+
 def test_qgates_shell_switch_reaches_engine(monkeypatch):
     for name in (*runner.OPT_IN_SWITCHES, *runner.CHECK_SETTINGS):
         monkeypatch.delenv(name, raising=False)

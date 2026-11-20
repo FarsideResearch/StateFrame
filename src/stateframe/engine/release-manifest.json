@@ -110,7 +110,7 @@
   "kernel_bestofn.py": "42c84ad8086caae8821e816e7fdd058af8b3dcc1359d3ca4dff12b50baf64a85",
   "kernel_bind_quantity.py": "af9725ed2acf546439fd693fba981d37a7f9c0560bcc51a1937d6b36d3a03ddd",
   "kernel_body_serialization_memo.py": "3642580d33314aa208e062348fadc682eb0fa3a616aef5af9491a1cc89171ed9",
-  "kernel_bolt.py": "1fa0cd1ba6a78347df9c3cf7772b4758522865ff89a00d1804600e3857729860",
+  "kernel_bolt.py": "625d4ad78499368b7346f782aa246fe6805c92ad5088a9e849c60cc030c752e6",
   "kernel_boot_cards.py": "6e747e3a44c96428949c90155fc7abfda7c5d9ffb5e11866fb0379307092229e",
   "kernel_bound_edit.py": "e1e79d07ce14e0e24289a9f833793068ae0cb9a527a3da8b8a74a494c207512b",
   "kernel_boundary_checks.py": "3ce50234dfe6571860768bf394686ed9de7aea110389d0c9fd61397f39d99160",

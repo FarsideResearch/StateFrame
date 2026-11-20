@@ -4,31 +4,36 @@ Regenerate from an unmodified b520a637 tree, from this checkout's root:
     PYTHONHASHSEED=0 PYTHONNOUSERSITE=1 .venv/bin/python \
         tests/fixtures/parallel/off_wire_capture.py MAIN_TREE OUTPUT_DIR omitted
 Copy OUTPUT_DIR/run/wire/000{1,2,3}.request.json verbatim to off_wire_main_b520a637/.
-Only provider tokenization/replies and check-process results are simulated. Request
-construction, failed-check recording, edits, CLI option parsing and child wiring are real.
+The capture pins the optional parser input to the installation without tree-sitter
+used by the fixture. Provider tokenization/replies and check-process results are
+simulated. Request construction, failed-check recording, edits, CLI option parsing
+and child wiring are real.
 """
 from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 import random
 import secrets
 import shutil
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 
 def main() -> int:
     tree, output = (Path(value).resolve() for value in sys.argv[1:3])
     mode = sys.argv[3]
+    profile = sys.argv[4] if len(sys.argv) > 4 else "r2hc3"
     # Do not inherit operator switches, user skills, routes or the invoking pytest profile.
     for name in tuple(os.environ):
         if name.startswith(("STATEFRAME_", "SF_", "DS_", "LLAMA_")):
             os.environ.pop(name)
     os.environ["STATEFRAME_HOME"] = str(output / "home")
     os.environ["PYTHONHASHSEED"] = "0"  # caller also sets it before interpreter startup
+    # Let the product select and render its text-scan map even on hosts with grammars.
+    sys.modules["tree_sitter"] = None
     sys.path[:0] = [str(tree / "src"), str(tree / "src/stateframe/engine")]
     random.seed(0)
     secrets.token_hex = lambda n=32: "0123456789abcdef" * (n // 8) + "0123456789abcdef"[:(n % 8) * 2]
@@ -52,7 +57,7 @@ def main() -> int:
     arguments = ["run", "--repo", str(repo), "--run-dir", str(output / "run"),
                  "--task", "Fix the pricing code so the tests pass.",
                  "--endpoint", "http://127.0.0.1:8080/v1", "--model", "scripted",
-                 "--profile", "r2hc3", "--max-turns", "8"]
+                 "--profile", profile, "--max-turns", "8"]
     if mode != "omitted":
         arguments += ["--parallel", mode]
     args = cli.build_parser().parse_args(arguments)
