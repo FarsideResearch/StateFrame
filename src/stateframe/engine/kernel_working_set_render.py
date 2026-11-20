@@ -7,7 +7,7 @@ are proposals; only the complete normalized transport wire is an admission cost.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import sys
@@ -518,12 +518,12 @@ def _render_assignment(snapshot: PreparationSnapshot,
                        layout: str = "plain", *, wire_only: bool = False):
     """Render selected payloads, their dependent truth and provider bytes once.
 
-    Slot order is admission order, independent of solver decision order. FULL
+    Slot order is independent of solver decision order. FULL
     carriers can share only exact identity+page material or a frozen native tool
     result whose exact page prefix equals the captured page. No path-only lookup.
     """
     modes = _assignment(snapshot, assignment)
-    if layout not in snapshot.layouts or layout not in {"plain", "final_cache"}:
+    if layout not in snapshot.layouts:
         raise ValueError("layout not admitted by snapshot")
     body = dict(_fixed_body(snapshot))
     messages = body.get("messages")
@@ -538,8 +538,23 @@ def _render_assignment(snapshot: PreparationSnapshot,
     shared = {}
     categories = {}
     ordered = sorted(snapshot.slots, key=lambda s: (s.admission_ordinal, s.key))
+    revisions = dict(snapshot.current_revisions)
+    presentation_order = ordered
+    if layout == "stable_first":
+        # Reorder presentation only. The certificate still lists witnesses in
+        # admission order, each bound to the carrier's new physical index.
+        def prefix_priority(slot):
+            if modes[slot.key] != core.FULL or revisions.get(slot.identity.path) != slot.identity.revision:
+                return (2, 0)
+            if plan_unit_slot(slot) or slot.state == "CLOSURE":
+                # Put broad standing windows before the small ranges that
+                # are more likely to be added or dropped as the frame grows.
+                return (0, -len(slot.line_numbers))
+            return (1, 0)
+
+        presentation_order = sorted(ordered, key=prefix_priority)
     deferred_plan = []
-    for slot in ordered:
+    for slot in presentation_order:
         mode = modes[slot.key]
         if mode == core.FULL:
             payload_start, payload_end = _payload_interval(slot)
@@ -575,7 +590,6 @@ def _render_assignment(snapshot: PreparationSnapshot,
             categories[len(generated) - 1] = "deferred_notices"
 
     full = [s for s in ordered if modes[s.key] == core.FULL]
-    revisions = dict(snapshot.current_revisions)
     current = [s for s in full if revisions.get(s.identity.path) == s.identity.revision]
     if current:
         # Range-scoped facts: a second disjoint or historical capture of this
@@ -645,7 +659,7 @@ def _render_assignment(snapshot: PreparationSnapshot,
     reconcile_source_coverage(body["messages"], owned_indexes=truth_indexes)
     healed_indexes = {id(message): index for index, message in enumerate(body["messages"])}
     plain = _normalize(body, snapshot)
-    if layout == "final_cache":
+    if layout in {"final_cache", "stable_first"}:
         if __package__:
             from .kernel_cache_layout_candidate import _checked_final_cache_projection
         else:
@@ -755,9 +769,12 @@ def propose_slots(snapshot: PreparationSnapshot) -> tuple[core.Slot, ...]:
     A nonnegative per-slot offset handles richer-but-cheaper representations.
     """
     baseline = {s.key: _slot_modes(snapshot, s)[-1] for s in snapshot.slots}
+    # Plain trials are marginal estimates. A projected-only search still prices
+    # and proves each complete candidate using its own admitted layout.
+    estimate_snapshot = snapshot if "plain" in snapshot.layouts else replace(snapshot, layouts=("plain",))
     result = []
     for slot in snapshot.slots:
-        measured = [(mode, len(trial_render(snapshot, {**baseline, slot.key: mode},
+        measured = [(mode, len(trial_render(estimate_snapshot, {**baseline, slot.key: mode},
                                            "plain", preview_assignment).wire))
                     for mode in _slot_modes(snapshot, slot)]
         offset = min(cost for _mode, cost in measured)

@@ -482,7 +482,8 @@ def require_selected_request_features(
 ) -> None:
     """Refuse explicitly selected native request features before provider dispatch."""
     source = os.environ if environ is None else environ
-    if source.get("STATEFRAME_KV_CHUNK_REUSE", "off").strip().lower() in {
+    run_unpinned = source.get("STATEFRAME_PROMPT_CACHE_UNPINNED", "off") == "on"
+    if not run_unpinned and source.get("STATEFRAME_KV_CHUNK_REUSE", "off").strip().lower() in {
             "on", "1", "true", "yes"}:
         require_feature(capabilities, "KV_CHUNK_REUSE", slots=True)
     prompt_cache_enabled = source.get("STATEFRAME_PROMPT_CACHE", "off").strip().lower() in {
@@ -493,37 +494,42 @@ def require_selected_request_features(
         "id_slot" in body or body.get("cache_prompt") is True
         or raw_slot is not None or type(route_slot) is int
     )
-    if prompt_cache_enabled and prompt_cache_slot_selected:
-        require_feature(capabilities, "STATEFRAME_PROMPT_CACHE", slots=True)
-        if raw_slot is None:
-            prompt_cache_slot = body.get("id_slot", route_slot)
+    if (prompt_cache_enabled or run_unpinned) and prompt_cache_slot_selected:
+        require_feature(capabilities, "STATEFRAME_PROMPT_CACHE", slots=not run_unpinned)
+        if run_unpinned:
+            if "id_slot" in body or body.get("cache_prompt") is not True:
+                raise ProviderCapabilityError(
+                    "STATEFRAME_PROMPT_CACHE", "cache_prompt=true without id_slot")
         else:
-            try:
-                prompt_cache_slot = int(raw_slot)
-            except (TypeError, ValueError) as error:
-                raise ProviderBoundaryContractError(
-                    "invalid_id_slot", "REACT_SLOT_ID must be an explicitly selected nonnegative integer",
-                ) from error
-        if type(prompt_cache_slot) is not int or prompt_cache_slot < 0:
-            raise ProviderCapabilityError(
-                "STATEFRAME_PROMPT_CACHE",
-                "an explicitly selected slot (slot 0 is never inferred)",
+            if raw_slot is None:
+                prompt_cache_slot = body.get("id_slot", route_slot)
+            else:
+                try:
+                    prompt_cache_slot = int(raw_slot)
+                except (TypeError, ValueError) as error:
+                    raise ProviderBoundaryContractError(
+                        "invalid_id_slot", "REACT_SLOT_ID must be an explicitly selected nonnegative integer",
+                    ) from error
+            if type(prompt_cache_slot) is not int or prompt_cache_slot < 0:
+                raise ProviderCapabilityError(
+                    "STATEFRAME_PROMPT_CACHE",
+                    "an explicitly selected slot (slot 0 is never inferred)",
+                )
+            require_feature(
+                capabilities, "STATEFRAME_PROMPT_CACHE", slots=True,
+                slot_id=prompt_cache_slot,
             )
-        require_feature(
-            capabilities, "STATEFRAME_PROMPT_CACHE", slots=True,
-            slot_id=prompt_cache_slot,
-        )
-        if (type(body.get("id_slot")) is not int or body.get("id_slot") != prompt_cache_slot
-                or body.get("cache_prompt") is not True):
-            raise ProviderCapabilityError(
-                "STATEFRAME_PROMPT_CACHE",
-                "selected id_slot and cache_prompt=true request fields",
-            )
-    if type(route_slot) is int:
+            if (type(body.get("id_slot")) is not int or body.get("id_slot") != prompt_cache_slot
+                    or body.get("cache_prompt") is not True):
+                raise ProviderCapabilityError(
+                    "STATEFRAME_PROMPT_CACHE",
+                    "selected id_slot and cache_prompt=true request fields",
+                )
+    if type(route_slot) is int and not run_unpinned:
         require_feature(capabilities, "routed static slot", slots=True, slot_id=route_slot)
     if source.get("STATEFRAME_THINK_PREFILL", "off").strip().lower() == "self_plan":
         require_feature(
-            capabilities, "THINK_PREFILL=self_plan", slots=True, continuation=True,
+            capabilities, "THINK_PREFILL=self_plan", slots=not run_unpinned, continuation=True,
         )
     purpose = str(call_purpose or "").casefold()
     response_format = body.get("response_format")
@@ -546,19 +552,20 @@ def require_selected_request_features(
     if history_summary_cache:
         # A routed endpoint can strip a default slot before this boundary. The
         # summary purpose still identifies selected cache use after routing.
-        require_feature(capabilities, "history-compaction cache/slot", slots=True)
+        require_feature(capabilities, "history-compaction cache/slot", slots=not run_unpinned)
         selected_slot = body.get("id_slot")
         if type(selected_slot) is not int:
             selected_slot = route_slot
-        if type(selected_slot) is not int or selected_slot < 0:
+        if not run_unpinned and (type(selected_slot) is not int or selected_slot < 0):
             raise ProviderCapabilityError(
                 "history-compaction cache/slot",
                 "an explicitly selected /slots id when cache_prompt=true",
             )
-        require_feature(
-            capabilities, "history-compaction cache/slot",
-            slots=True, slot_id=selected_slot,
-        )
+        if not run_unpinned:
+            require_feature(
+                capabilities, "history-compaction cache/slot",
+                slots=True, slot_id=selected_slot,
+            )
     continue_final_message = body.get("continue_final_message")
     continuation_requested = (
         continue_final_message not in (None, False, "")

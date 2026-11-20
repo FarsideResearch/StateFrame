@@ -5675,6 +5675,9 @@ class RequestCapture:
                                   endpoint_host=urllib.parse.urlsplit(endpoint).hostname,
                                   model=route.model, overridden_fields=route.overridden_fields,
                                   escalated_from=route.escalated_from, dispatch=False)
+        if os.environ.get("STATEFRAME_PROMPT_CACHE_UNPINNED", "off") == "on":
+            body.pop("id_slot", None)
+            body["cache_prompt"] = True
         if self.qualified_request is None and side_call_contract is None:
             from kernel_capacity_retry import apply_learned_limit
             apply_learned_limit(self, body, endpoint, key)

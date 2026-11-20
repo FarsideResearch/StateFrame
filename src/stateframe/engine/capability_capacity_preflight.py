@@ -90,20 +90,25 @@ def install(spec, capture_class):
         if timeout <= 0:
             raise TimeoutError("capacity preflight deadline expired")
         slot_id = body.get("id_slot")
-        if type(slot_id) is not int or slot_id < 0:
+        unpinned = os.environ.get("STATEFRAME_PROMPT_CACHE_UNPINNED", "off") == "on"
+        if not unpinned and (type(slot_id) is not int or slot_id < 0):
             raise ProviderCapabilityError(
                 "study capacity preflight", "an explicitly selected /slots id",
             )
-        require_feature(
-            capabilities, "study capacity preflight", slots=True, slot_id=slot_id,
-        )
+        if not unpinned:
+            require_feature(
+                capabilities, "study capacity preflight", slots=True, slot_id=slot_id,
+            )
         from kernel_bounded_http import bounded_json_probe
         slot_result = bounded_json_probe(base, key, "/slots", timeout=min(2.0, timeout))
         if slot_result is None or slot_result[0] != 200 or not isinstance(slot_result[1], list):
             raise ProviderCapabilityError("study capacity preflight", "/slots")
         slots = slot_result[1]
-        selected = [item for item in slots if isinstance(item, dict) and item.get("id") == slot_id]
-        if len(selected) != 1 or type(selected[0].get("n_ctx")) is not int or selected[0]["n_ctx"] != limit:
+        selected = [item for item in slots if isinstance(item, dict)
+                    and (unpinned or item.get("id") == slot_id)]
+        if (not selected or (not unpinned and len(selected) != 1)
+                or any(type(item.get("n_ctx")) is not int or item["n_ctx"] != limit
+                       for item in selected)):
             raise ValueError("live slot differs from declared capacity")
         from long_horizon_decode_logging import enabled as decode_depth_enabled, slots_busy
         decode_depth_per_arm_on = os.environ.get(

@@ -22,7 +22,17 @@ with pytest.MonkeyPatch.context() as patch:
     else:
         patch.setenv("STATEFRAME_WORKING_SET_ALLOCATOR", sys.argv[3])
     patch.setenv("SF_LAB_DETFIX3", "on")
-    from stateframe import runner
+    from stateframe import profiles, runner
+    load_profile = profiles.load
+
+    def load_off_profile(name):
+        switches = load_profile(name)
+        for switch in ("STATEFRAME_WORKING_SET_STABLE_FIRST", "STATEFRAME_CONSTANT_TOOL_MENU"):
+            if switch in switches:
+                switches[switch] = "off"
+        return switches
+
+    patch.setattr(profiles, "load", load_off_profile)
     runner.test_interpreter.choose = lambda *args, **kwargs: (sys.executable, "parity test interpreter")
     hashes, _, _ = _run_scripted_example(patch, "discount_bug", EXAMPLES["discount_bug"], Path(sys.argv[1]))
     Path(sys.argv[2]).write_text(json.dumps(hashes))

@@ -15,6 +15,8 @@ import pytest
 
 from stateframe.scripted_endpoint import Script, serve
 from engine_run import run_monitored
+from enginecheck import Scenario, run as run_scenario
+from enginecheck.wire import common_prefix_length
 from test_hook_wiring_parity import baseline_checkout  # noqa: F401 -- pytest registers this fixture
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -219,3 +221,111 @@ def test_switch_off_keeps_per_turn_menus(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     assert not any(str(message.get("content", "")).startswith("[Tool menu | this turn]")
                    for request in _wire(run) for message in request["messages"])
+
+
+def test_shipped_profile_finishes_scripted_symbol_lookup(tmp_path):
+    files = {
+        "pkg/value.py": b"VALUE = 1\n\n\ndef get():\n    return VALUE\n",
+        "pkg/use.py": b"from pkg.value import get\n\n\ndef run():\n    return get()\n",
+        "pkg/__init__.py": b"",
+    }
+    steps = [{"tool": "read", "arguments": {"path": path}} for path in files]
+    steps.append({"tool": "done", "arguments": {"summary": "Looked up get."}})
+    # Exercise the profile's unbounded loop and assert a bounded result below.
+    scenario = Scenario(files=files, task="Look up symbol get in this repository.",
+                        steps=steps, max_turns=0)
+
+    trace = run_scenario(scenario, tmp_path)
+
+    assert trace.exit_code == 0, trace.output
+    summary = json.loads((trace.run_dir / "summary.json").read_bytes())
+    assert summary["engine_result"] == "SUBMITTED"
+    assert len(steps) <= summary["steps"] <= 8
+    assert len(steps) <= len(trace.requests) <= 8
+
+
+def _constant_menu_run(tmp_path: Path, switch: str) -> tuple[subprocess.CompletedProcess, Path]:
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True)
+    (repo / "main.py").write_text("def answer():\n    return 42\n")
+    script = Script({
+        "model": "fixture",
+        "steps": [
+            {"tool": "read", "required": True, "arguments": {"path": "main.py"}},
+            {"tool": "read", "required": True, "arguments": {"path": "main.py"}},
+            {"tool": "done", "required": True,
+             "arguments": {"summary": "The answer function returns 42."}},
+        ],
+        "tokenize": {"mode": "ok"},
+    })
+    server = serve(script)
+    run = tmp_path / "run"
+    profile = json.loads((ROOT / "src/stateframe/profiles/r2hc3.json").read_text())
+    profile["sources"]["STATEFRAME_CONSTANT_TOOL_MENU"] = "env"
+    profile["switches"]["STATEFRAME_CONSTANT_TOOL_MENU"] = switch
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text(json.dumps(profile, indent=2) + "\n")
+    environment = {**os.environ, "PYTHONPATH": str(ROOT / "src"),
+                   "STATEFRAME_TURN_MINIMAL_LAUNCH": "on"}
+    environment.pop("STATEFRAME_STABLE_TOOL_HEAD", None)
+    environment.pop("STATEFRAME_CONSTANT_TOOL_MENU", None)
+    try:
+        result = run_monitored(
+            [sys.executable, "-m", "stateframe", "run", "--repo", str(repo),
+             "--task", "Inspect main.py and report the result of answer.",
+             "--endpoint", f"http://127.0.0.1:{server.server_port}/v1", "--model", "fixture",
+             "--profile", str(profile_path), "--run-dir", str(run), "--quiet",
+             "--test-python", sys.executable, "--test-cmd", f"{sys.executable} -c pass",
+             "--runner-kind", "generic"],
+            env=environment, capture_output=True, text=True, expected_seconds=240)
+        script.assert_consumed()
+        return result, run
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def _tools_first_bytes(request: dict) -> bytes:
+    """A deterministic bytes proxy for a template that renders tools before messages."""
+    return json.dumps(
+        {"tools": request.get("tools"), "messages": request.get("messages")},
+        ensure_ascii=False, separators=(",", ":"), allow_nan=False,
+    ).encode("utf-8")
+
+
+def _prefix_percent(left: bytes, right: bytes) -> float:
+    return 100.0 * common_prefix_length(left, right) / len(right)
+
+
+def _assert_constant_menu(run: Path) -> list[dict]:
+    requests = _wire(run)
+    assert len(requests) >= 3
+    assert [len(request["tools"]) for request in requests] == [24] * len(requests)
+    _assert_tool_arrays_identical(requests)
+    arrays = _raw_tool_arrays(run)
+    assert arrays == arrays[:1] * len(requests)
+    return requests
+
+
+def test_constant_menu_keeps_the_first_transition_prefix(tmp_path):
+    off_result, off_run = _constant_menu_run(tmp_path / "off", "off")
+    on_result, on_run = _constant_menu_run(tmp_path / "on", "on")
+    assert off_result.returncode == 0, off_result.stdout + off_result.stderr
+    assert on_result.returncode == 0, on_result.stdout + on_result.stderr
+
+    off_requests = _wire(off_run)
+    assert [len(request["tools"]) for request in off_requests[:2]] == [2, 24]
+    assert all(len(request["tools"]) == 24 for request in off_requests[1:])
+    on_requests = _assert_constant_menu(on_run)
+    assert len(off_requests) == len(on_requests)
+    first_prompt = _tools_first_bytes(on_requests[0])
+    assert first_prompt.count(b"[Tool menu | this turn] callable now: list_files, read") == 1
+
+    off_prompts = [_tools_first_bytes(request) for request in off_requests]
+    on_prompts = [_tools_first_bytes(request) for request in on_requests]
+    off_prefix = [_prefix_percent(left, right)
+                  for left, right in zip(off_prompts, off_prompts[1:])]
+    on_prefix = [_prefix_percent(left, right)
+                 for left, right in zip(on_prompts, on_prompts[1:])]
+    assert off_prefix[0] < 60.0
+    assert all(percent >= 60.0 for percent in on_prefix)

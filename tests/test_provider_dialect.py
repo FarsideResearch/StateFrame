@@ -977,6 +977,83 @@ def test_enabled_prompt_cache_requires_its_selected_slot_on_each_request():
     )
 
 
+def test_unpinned_cache_uses_llama_without_slots_proof():
+    capabilities = ProviderCapabilities("llama.cpp", False)
+    require_selected_request_features(
+        capabilities, {"model": "local", "messages": [], "cache_prompt": True},
+        environ={"STATEFRAME_PROMPT_CACHE_UNPINNED": "on"},
+    )
+    with pytest.raises(ProviderCapabilityError, match="without id_slot"):
+        require_selected_request_features(
+            capabilities, {"model": "local", "messages": [], "id_slot": 0,
+                           "cache_prompt": True},
+            environ={"STATEFRAME_PROMPT_CACHE_UNPINNED": "on"},
+        )
+
+
+def test_unpinned_switch_off_preserves_pinned_body_bytes():
+    from kernel_prompt_cache import configure_pinned_slot
+
+    body = {"model": "local", "messages": [], "max_tokens": 50}
+    configured = configure_pinned_slot(
+        body, 2, environ={"STATEFRAME_PROMPT_CACHE": "on",
+                          "STATEFRAME_PROMPT_CACHE_UNPINNED": "off"})
+    assert json.dumps(configured).encode() == (
+        b'{"model": "local", "messages": [], "max_tokens": 50, '
+        b'"id_slot": 2, "cache_prompt": true}')
+
+
+@pytest.mark.host_sandbox
+def test_unpinned_cache_sends_without_a_slot_to_scripted_endpoint(monkeypatch, tmp_path):
+    from kernel_measurement import AuditJournal, RequestCapture
+    from stateframe.scripted_endpoint import Script, serve
+
+    monkeypatch.setenv("STATEFRAME_PROMPT_CACHE_UNPINNED", "on")
+    monkeypatch.setenv("STATEFRAME_WIRE_TRUTH_GATE", "off")
+    monkeypatch.delenv("REACT_SLOT_ID", raising=False)
+    script = Script({"model": "scripted", "tokenize": {"mode": "ok"}})
+    server = serve(script)
+    try:
+        endpoint = f"http://127.0.0.1:{server.server_port}/v1/chat/completions"
+        journal = AuditJournal(tmp_path, "unpinned-cache", {})
+        body = {"model": "scripted", "messages": [{"role": "user", "content": "request"}],
+                "max_tokens": 50, "id_slot": 1, "cache_prompt": False}
+        RequestCapture(journal, 1, "snapshot", call_purpose="main_turn").send(body, endpoint, "")
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    (sent,) = script.requests
+    assert sent["cache_prompt"] is True
+    assert "id_slot" not in sent
+
+
+def test_runner_unpinned_selection_records_no_slot(monkeypatch):
+    from stateframe import runner
+    from stateframe.endpoint import Endpoint
+    from stateframe.engine.kernel_provider_dialect import ProviderCapabilities as RunnerCapabilities
+
+    options = runner.RunOptions(
+        repo=None, task="task", endpoint=Endpoint("http://127.0.0.1:8080/v1", "local"),
+        extra_env={"STATEFRAME_PROMPT_CACHE_UNPINNED": "on"},
+    )
+    monkeypatch.setattr(runner, "_provider_capabilities_for",
+                        lambda *_args: RunnerCapabilities("llama.cpp", False))
+    runner._select_prompt_cache_slot(options, lambda *_args: None)
+    assert options._cache_slot is None
+    assert options._cache_slot_selection == "unpinned"
+
+
+def test_unpinned_cache_contract_keeps_resume_and_request_cancel(monkeypatch):
+    from kernel_provider_adapter import ProviderAdapterError, _cache_contract, transport_contract
+
+    monkeypatch.setenv("STATEFRAME_PROMPT_CACHE_UNPINNED", "on")
+    cache = _cache_contract(cache_prompt=True, id_slot=None, cold_resume=True)
+    assert cache["eligible"] is True and cache["id_slot"] is None
+    with pytest.raises(ProviderAdapterError, match="cancellation was requested"):
+        transport_contract(cancel_requested=True)
+
+
 def test_enabled_prompt_cache_needs_endpoint_slot_proof_before_dispatch():
     # The shipped profile enables prompt caching, but it is only selected for a
     # request after a slot has been pinned. A strict endpoint can keep running

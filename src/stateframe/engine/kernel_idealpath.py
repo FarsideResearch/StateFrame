@@ -280,10 +280,15 @@ def tool_schema() -> dict[str, object]:
     }
 
 
-def stage_tool_schema(stage: str) -> dict[str, object]:
+def stage_tool_schema(stage: str, *, stable_description: bool = False) -> dict[str, object]:
     """Return the current-stage variant, keeping the live menu discriminated."""
     if stage not in STAGES:
         raise ValueError(f"unknown IDEALPATH stage: {stage}")
+    description = (
+        "Submit the typed IDEALPATH1 state answer for the stage in the parameters."
+        if stable_description
+        else f"Submit the typed IDEALPATH1 {stage} state answer."
+    )
     variant = {
         "type": "object",
         "properties": {
@@ -306,13 +311,15 @@ def stage_tool_schema(stage: str) -> dict[str, object]:
         "type": "function",
         "function": {
             "name": TOOL_NAME,
-            "description": f"Submit the typed IDEALPATH1 {stage} state answer.",
+            "description": description,
             "parameters": variant,
         },
     }
 
 
-def requirement_table_tool_schema(host_draft: Mapping[str, object] | None = None) -> dict[str, object]:
+def requirement_table_tool_schema(
+        host_draft: Mapping[str, object] | None = None, *, include_draft: bool = True,
+) -> dict[str, object]:
     """Return the explicit typed S1 exit contract.
 
     ``question_gate`` remains available for compatibility, but S1's live menu
@@ -344,16 +351,10 @@ def requirement_table_tool_schema(host_draft: Mapping[str, object] | None = None
         "Register the complete typed S1 requirement table. Every row must "
         "cite exact public ticket span references before S1 can advance."
     )
-    if isinstance(host_draft, Mapping):
-        draft_view = {
-            "spine_schema": host_draft.get("spine_schema"),
-            "rows": copy.deepcopy(host_draft.get("rows", ())),
-            "entry_hint": copy.deepcopy(host_draft.get("entry_hint", {})),
-            "assumptions": copy.deepcopy(host_draft.get("assumptions", ())),
-            "provenance": host_draft.get("provenance"),
-        }
-        rendered = json.dumps(draft_view, ensure_ascii=False, sort_keys=True, default=str)
-        description += " Host draft to confirm or edit: " + rendered[:7_000]
+    if include_draft:
+        rendered = _render_requirement_table_draft(host_draft)
+        if rendered:
+            description += " Host draft to confirm or edit: " + rendered[:7_000]
     return {
         "type": "function",
         "function": {
@@ -370,6 +371,25 @@ def requirement_table_tool_schema(host_draft: Mapping[str, object] | None = None
             },
         },
     }
+
+
+def requirement_table_tool_guidance(host_draft: Mapping[str, object] | None) -> str | None:
+    """Render the current S1 draft outside the tool schema when its menu is stable."""
+    rendered = _render_requirement_table_draft(host_draft)
+    return "S1 requirement draft to confirm or edit: " + rendered[:7_000] if rendered else None
+
+
+def _render_requirement_table_draft(host_draft: Mapping[str, object] | None) -> str | None:
+    if not isinstance(host_draft, Mapping):
+        return None
+    draft_view = {
+        "spine_schema": host_draft.get("spine_schema"),
+        "rows": copy.deepcopy(host_draft.get("rows", ())),
+        "entry_hint": copy.deepcopy(host_draft.get("entry_hint", {})),
+        "assumptions": copy.deepcopy(host_draft.get("assumptions", ())),
+        "provenance": host_draft.get("provenance"),
+    }
+    return json.dumps(draft_view, ensure_ascii=False, sort_keys=True, default=str)
 
 
 class StageExitDeadlock(RuntimeError):
@@ -1579,7 +1599,7 @@ class IdealPathOwner:
             "capability_set": capabilities,
         }
 
-    def menu(self) -> dict[str, object]:
+    def menu(self, *, stable_descriptions: bool = False) -> dict[str, object]:
         """Build the exact menu consumed by schema, dispatch, and continuation."""
         actions = self._actions()
         typed_check_tool = None
@@ -1606,9 +1626,12 @@ class IdealPathOwner:
             # narrowed to the reducer's active stage without breaking the
             # existing contract consumer.
             "tool": copy.deepcopy(tool_schema()) if TOOL_NAME in actions else None,
-            "current_tool": copy.deepcopy(stage_tool_schema(self.stage)) if TOOL_NAME in actions else None,
+            "current_tool": (
+                copy.deepcopy(stage_tool_schema(self.stage, stable_description=stable_descriptions))
+                if TOOL_NAME in actions else None
+            ),
             "requirement_table_tool": (
-                copy.deepcopy(requirement_table_tool_schema(self.host_draft))
+                copy.deepcopy(requirement_table_tool_schema(self.host_draft, include_draft=not stable_descriptions))
                 if S1_COMPLETION_TOOL_NAME in actions else None
             ),
             "abstain_tool": (

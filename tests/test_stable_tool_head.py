@@ -41,6 +41,17 @@ def test_mode_rejects_invalid_value(monkeypatch):
         head.mode()
 
 
+def test_constant_menu_switch_defaults_off_and_rejects_invalid_values(monkeypatch):
+    monkeypatch.delenv(head.CONSTANT_MENU_ENV, raising=False)
+    assert head.constant_menu_mode() == "off"
+    assert not head.constant_menu_enabled()
+    monkeypatch.setenv(head.CONSTANT_MENU_ENV, "on")
+    assert head.constant_menu_enabled()
+    monkeypatch.setenv(head.CONSTANT_MENU_ENV, "yes")
+    with pytest.raises(ValueError):
+        head.constant_menu_enabled()
+
+
 def test_runner_forwards_shell_off_into_run_spec(tmp_path, monkeypatch):
     from stateframe.endpoint import Endpoint
     from stateframe.runner import RunOptions, prepare
@@ -157,6 +168,197 @@ def test_final_surface_seeds_request_one_without_changing_callable_names(monkeyp
     assert first["names"] == ["read", "edit"]
     assert second["names"] == ["edit", "read", "authored_check"]
     assert names(runtime._completion_owner_dispatch_tools) == ["read", "edit", "authored_check"]
+
+
+def test_constant_menu_seeds_launch_with_full_schemas_and_navigation_dispatch(monkeypatch):
+    import kernel_completion_owner as completion_owner
+    import kernel_done_is_submit_authority as done_authority
+    import kernel_request_tool_surface as request_surface
+
+    monkeypatch.setenv(head.MODE_ENV, "on")
+    monkeypatch.setenv(head.CONSTANT_MENU_ENV, "on")
+    monkeypatch.setenv("STATEFRAME_TOOL_MENU_MEMO", "off")
+    monkeypatch.setenv("STATEFRAME_REQUEST_TOOL_FLOOR", "off")
+    monkeypatch.setattr(done_authority, "enabled", lambda _runtime: False)
+    monkeypatch.setattr(done_authority, "candidate_exists", lambda _runtime: False)
+    monkeypatch.setattr(completion_owner, "bind_final_tool_surface", lambda *args, **kwargs: True)
+
+    full_names = [
+        "authored_check", "done", "edit", "file_create", "file_delete", "file_move",
+        "grep", "list_files", "probe", "read", "read_check_receipt", "recall",
+        "recall_evidence", "recall_generated_artifact", "references", "run_tests", "shell",
+        "str_replace", "where_defined", "who_calls", "decide", "insert_before", "predict", "work",
+    ]
+    full = [tool(name) for name in full_names]
+    first_probe = next(item for item in full if item["function"]["name"] == "probe")
+    first_probe["function"]["description"] = "First-phase probe schema."
+    first_probe["function"]["parameters"] = {
+        "type": "object", "properties": {"first_phase": {"type": "string"}},
+        "required": ["first_phase"], "additionalProperties": False,
+    }
+    runtime = SimpleNamespace(
+        _completion_owner_full_tools=copy.deepcopy(full),
+        minimal_launch_pending=lambda: True,
+    )
+    capture = SimpleNamespace()
+    first_body = {"messages": [{"role": "user", "content": "task"}],
+                  "tools": copy.deepcopy(full)}
+    first = request_surface.author_final_tool_surface(
+        capture, runtime, first_body, request_id="request-1", bind_current_surface=True)
+
+    assert first is not None
+    assert names(first_body["tools"]) == full_names
+    assert first["names"] == ["list_files", "read"]
+    first_dispatch = names(runtime._completion_owner_dispatch_tools)
+    assert first_dispatch == ["list_files", "read"]
+    callable_schemas = completion_owner.callable_tool_schemas({
+        "admitted_tool_schemas": first_body["tools"],
+        "callable_actions": first["names"],
+    })
+    assert names(callable_schemas) == ["list_files", "read"]
+    with pytest.raises(completion_owner.RequestActionContractError, match="not offered"):
+        completion_owner.dispatch_tool_call(callable_schemas, "str_replace", {})
+    assert any(
+        str(message.get("content", "")).startswith(head.NOTE_HEADER)
+        and "callable now: list_files, read" in str(message.get("content", ""))
+        for message in first_body["messages"]
+    )
+
+    runtime.minimal_launch_pending = lambda: False
+    second_full = copy.deepcopy(full)
+    second_probe = next(item for item in second_full if item["function"]["name"] == "probe")
+    second_probe["function"]["description"] = "Later-phase probe schema."
+    second_full.remove(second_probe)
+    second_body = {"messages": [{"role": "user", "content": "next"}],
+                   "tools": second_full}
+    second = request_surface.author_final_tool_surface(
+        capture, runtime, second_body, request_id="request-2", bind_current_surface=True)
+
+    assert second is not None
+    assert second_body["tools"] == first_body["tools"]
+    assert next(item for item in second_body["tools"]
+                if item["function"]["name"] == "probe")["function"]["description"] == (
+                    "First-phase probe schema.")
+    callable_names = [name for name in full_names if name != "probe"]
+    assert second["names"] == callable_names
+    assert names(runtime._completion_owner_dispatch_tools) == callable_names
+    rebound = request_surface.author_final_tool_surface(
+        capture, runtime, second_body, request_id="request-2", bind_current_surface=True)
+    assert rebound is not None
+    assert rebound["names"] == callable_names
+    assert second_body["tools"] == first_body["tools"]
+
+    second_probe["function"]["parameters"] = {
+        "type": "object", "properties": {"later_phase": {"type": "integer"}},
+        "required": ["later_phase"], "additionalProperties": False,
+    }
+    late_full = [*second_full, second_probe, tool("late_tool")]
+    runtime.available_tools = late_full
+    third_body = {"messages": [{"role": "user", "content": "later"}],
+                  "tools": copy.deepcopy(late_full)}
+    third = request_surface.author_final_tool_surface(
+        capture, runtime, third_body, request_id="request-3", bind_current_surface=True)
+    assert third is not None
+    assert "late_tool" in third["names"]
+    assert next(item for item in third_body["tools"]
+                if item["function"]["name"] == "probe") == second_probe
+
+
+def test_constant_menu_preloads_generated_recall_schema_but_does_not_call_it(monkeypatch):
+    import kernel_completion_owner as completion_owner
+    import kernel_done_is_submit_authority as done_authority
+    import kernel_request_tool_surface as request_surface
+
+    monkeypatch.setenv(head.MODE_ENV, "on")
+    monkeypatch.setenv(head.CONSTANT_MENU_ENV, "on")
+    monkeypatch.setenv("KERNEL_GENERATED_ARTIFACTS", "1")
+    monkeypatch.setenv("STATEFRAME_TOOL_MENU_MEMO", "off")
+    monkeypatch.setenv("STATEFRAME_REQUEST_TOOL_FLOOR", "off")
+    monkeypatch.setattr(done_authority, "enabled", lambda _runtime: False)
+    monkeypatch.setattr(done_authority, "candidate_exists", lambda _runtime: False)
+    monkeypatch.setattr(completion_owner, "bind_final_tool_surface", lambda *args, **kwargs: True)
+
+    navigation = [tool("list_files"), tool("read")]
+    runtime = SimpleNamespace(
+        _completion_owner_full_tools=copy.deepcopy(navigation),
+        minimal_launch_pending=lambda: True,
+    )
+    body = {"messages": [{"role": "user", "content": "task"}],
+            "tools": copy.deepcopy(navigation)}
+    surface = request_surface.author_final_tool_surface(
+        SimpleNamespace(), runtime, body, request_id="request-1", bind_current_surface=True)
+
+    assert surface is not None
+    assert names(body["tools"]) == ["list_files", "read", "recall_generated_artifact"]
+    assert surface["names"] == ["list_files", "read"]
+    callable_schemas = completion_owner.callable_tool_schemas({
+        "admitted_tool_schemas": body["tools"],
+        "callable_actions": surface["names"],
+    })
+    with pytest.raises(completion_owner.RequestActionContractError, match="not offered"):
+        completion_owner.dispatch_tool_call(callable_schemas, "recall_generated_artifact", {})
+
+
+def test_menu_guidance_uses_a_message_without_changing_tool_schemas():
+    listed = [tool("read"), tool("edit")]
+    body = {"messages": [{"role": "user", "content": "task"}], "tools": copy.deepcopy(listed)}
+
+    head.apply_menu_note(body, listed, ["read"], guidance="Use the admitted action after two refusals.")
+
+    assert body["tools"] == listed
+    assert any(
+        message.get("content") == (
+            f"{head.GUIDANCE_NOTE_HEADER} Use the admitted action after two refusals.")
+        for message in body["messages"]
+    )
+
+
+def test_volatile_tail_replaces_notes_after_wire_normalization():
+    listed = [tool("read"), tool("edit")]
+    body = {"messages": [{"role": "user", "content": (
+        f"{head.VOLATILE_TAIL_MARKER}\n\ncheck facts\n\n"
+        f"{head.NOTE_HEADER} old menu\n{head.GUIDANCE_NOTE_HEADER} old guidance"
+    )}]}
+    head.apply_menu_note(body, listed, ["read"], guidance="Current limits.", volatile_tail=True)
+    messages = copy.deepcopy(body["messages"])
+    head.apply_menu_note(body, listed, ["read"], guidance="Current limits.", volatile_tail=True)
+
+    assert messages == body["messages"]
+    assert len(messages) == 1
+    content = messages[0]["content"]
+    assert content.count(head.NOTE_HEADER) == 1
+    assert content.count(head.GUIDANCE_NOTE_HEADER) == 1
+    assert "check facts" in content
+    assert "old menu" not in content and "old guidance" not in content
+
+
+def test_stage_tool_description_can_stay_fixed_as_the_stage_changes():
+    from kernel_idealpath import stage_tool_schema
+
+    off_schemas = [stage_tool_schema(stage) for stage in ("S1", "S2", "S3")]
+    assert [schema["function"]["description"] for schema in off_schemas] == [
+        f"Submit the typed IDEALPATH1 {stage} state answer."
+        for stage in ("S1", "S2", "S3")
+    ]
+
+    on_schemas = [stage_tool_schema(stage, stable_description=True) for stage in ("S1", "S2", "S3")]
+
+    assert len({schema["function"]["description"] for schema in on_schemas}) == 1
+    assert [schema["function"]["parameters"]["properties"]["stage"]["const"]
+            for schema in on_schemas] == ["S1", "S2", "S3"]
+
+
+def test_requirement_draft_can_move_from_the_schema_to_guidance():
+    from kernel_idealpath import requirement_table_tool_guidance, requirement_table_tool_schema
+
+    draft = {"rows": [{"requirement": "Keep the visible draft."}]}
+    off_schema = requirement_table_tool_schema(draft)
+    assert "Keep the visible draft." in off_schema["function"]["description"]
+
+    on_schema = requirement_table_tool_schema(draft, include_draft=False)
+    guidance = requirement_table_tool_guidance(draft)
+    assert "Keep the visible draft." not in on_schema["function"]["description"]
+    assert guidance is not None and "Keep the visible draft." in guidance
 
 
 def test_listed_tools_are_idempotent_within_a_request():

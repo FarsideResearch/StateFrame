@@ -80,6 +80,8 @@ def pair_cache_enabled(environ: Mapping[str, str] | None = None) -> bool:
 
 def self_plan_id_slot(environ: Mapping[str, str] | None = None) -> int:
     source = _source(environ)
+    if source.get("STATEFRAME_PROMPT_CACHE_UNPINNED", "off") == "on":
+        return -1
     raw = source.get(SLOT_ENV, source.get(REACT_SLOT_ENV))
     if raw is None:
         from kernel_provider_dialect import ProviderCapabilityError
@@ -292,8 +294,11 @@ def _template_kwargs(body: Mapping[str, object], *, thinking: bool) -> dict[str,
 
 
 def _pair_controls(body: dict[str, object], *, id_slot: int, cache: bool) -> None:
-    body["id_slot"] = id_slot
-    body["cache_prompt"] = bool(cache)
+    if id_slot >= 0:
+        body["id_slot"] = id_slot
+    else:
+        body.pop("id_slot", None)
+    body["cache_prompt"] = bool(cache) or id_slot == -1
 
 
 def build_pair_requests(base_body: Mapping[str, object], frame: Mapping[str, object],
@@ -330,8 +335,8 @@ def build_pair_requests(base_body: Mapping[str, object], frame: Mapping[str, obj
         "prefill_text": prefill,
         "prefill_tokens": len(prefill.split()),
         "plan_tokens": len(normalize_plan(plan).split()),
-        "id_slot": id_slot,
-        "cache_prompt": bool(cache),
+        "id_slot": id_slot if id_slot >= 0 else None,
+        "cache_prompt": bool(cache) or id_slot == -1,
     }
     return plan_body, thinking_body, metadata
 

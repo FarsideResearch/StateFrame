@@ -7,11 +7,11 @@ import json
 import os
 from collections.abc import Mapping, Sequence
 
-
 _MISSING = object()
 SURFACE_SCHEMA = "stateframe-final-tool-surface/1"
 REQUEST_TOOL_FLOOR_ENV = "STATEFRAME_REQUEST_TOOL_FLOOR"
 TOOL_MENU_MEMO_ENV = "STATEFRAME_TOOL_MENU_MEMO"
+CONSTANT_MENU_ATTR = "_stateframe_constant_tool_menu"
 _REQUEST_TOOL_FLOOR = ("read", "grep", "skill_load", "edit", "str_replace", "file_delete", "file_move", "shell", "run_tests", "done")
 _REQUEST_TOOL_FLOOR_MAX_SCHEMA_BYTES = 131072
 _RUNTIME_FIELDS = (
@@ -27,6 +27,7 @@ _RUNTIME_FIELDS = (
     "_completion_owner_actionable",
     "_request_tool_floor_schema_cache_run",
     "_request_tool_floor_schema_cache",
+    CONSTANT_MENU_ATTR,
 )
 _CAPTURE_FIELDS = (
     "_stateframe_tool_surface_pending",
@@ -435,6 +436,7 @@ def author_final_tool_surface(
         return None
     original_body_had_tools = "tools" in body
     original_body_tools = body.get("tools", _MISSING)
+    original_body_messages = body.get("messages", _MISSING)
     override_tools: list[object] | None = None
     if tools_override is not None:
         if not isinstance(tools_override, list):
@@ -453,6 +455,7 @@ def author_final_tool_surface(
         _mutations = mutation_service()
         if _mutations is not None:
             bind_current_surface = True
+    constant_menu = False
     try:
         from kernel_done_is_submit_authority import (
             candidate_exists as done_candidate_exists,
@@ -479,6 +482,8 @@ def author_final_tool_surface(
         incoming_names = set(_tool_names(incoming_tools))
         minimal_launch_pending = getattr(runtime, "minimal_launch_pending", None)
         minimal_launch = callable(minimal_launch_pending) and minimal_launch_pending()
+        from kernel_stable_tool_head import constant_menu_active, enabled as stable_tool_head_enabled
+        constant_menu = constant_menu_active(runtime, minimal_launch=minimal_launch)
         if minimal_launch:
             from kernel_turn_launch import navigation_tools
             incoming_tools = navigation_tools(incoming_tools)
@@ -571,6 +576,9 @@ def author_final_tool_surface(
         greenlock_projection_ran = False
         if reuse_previous:
             final_tools = copy.deepcopy(previous["tools"])
+            if constant_menu:
+                previous_schemas = _schema_index(final_tools)
+                final_tools = [previous_schemas[name] for name in previous["names"]]
             after_candidate_names = set(_tool_names(final_tools))
         else:
             final_tools = incoming_tools
@@ -680,21 +688,37 @@ def author_final_tool_surface(
             raise _SurfaceUnavailable("invalid_tool_surface")
         # STATEFRAME_STABLE_TOOL_HEAD: the provider sees the run's append-only tool list so the
         # prompt head stays cacheable; ``names`` (this turn's callable menu) stays the dispatch authority.
-        from kernel_stable_tool_head import enabled as stable_tool_head_enabled
         listed_tools = final_tools
         dispatch_tools = final_tools
-        if stable_tool_head_enabled() and not minimal_launch:
+        if stable_tool_head_enabled() and (not minimal_launch or constant_menu):
             from kernel_stable_tool_head import (
                 callable_subset,
+                constant_menu_tools,
                 listed_tools as stable_listed_tools,
                 run_offerable_tools,
             )
             offerable_tools = run_offerable_tools(runtime)
+            if constant_menu and getattr(runtime, CONSTANT_MENU_ATTR, None) is None:
+                from kernel_generated_context import tool_surface as generated_context_tool_surface
+                offerable_tools = generated_context_tool_surface(offerable_tools)
+                if getattr(runtime, "stateframe_completion_owner_mode", "off") == "on":
+                    from kernel_completion_owner import canonicalize_tool_surface
+                    offerable_tools = canonicalize_tool_surface(offerable_tools)
             if unit_policy is not None:
                 offerable_tools = [tool for tool in offerable_tools
                                    if tool.get("function", {}).get("name")
                                    in unit_policy.allowed_tools]
-            listed_tools = stable_listed_tools(runtime, final_tools, offerable_tools)
+            if constant_menu:
+                from kernel_tokenlab_cache_stable import tool_argument_schema
+                listed_tools = constant_menu_tools(runtime, offerable_tools)
+                seed = _schema_index(listed_tools)
+                # Configuration-specific actions can change their argument contracts.
+                # Let the normal stable head publish those changes before dispatch.
+                if any(name not in seed or tool_argument_schema(seed[name]) != tool_argument_schema(tool)
+                       for name, tool in zip(names, final_tools)):
+                    listed_tools = final_tools
+            if listed_tools is final_tools and not minimal_launch:
+                listed_tools = stable_listed_tools(runtime, final_tools, offerable_tools)
             if unit_policy is not None:
                 listed_tools = [tool for tool in listed_tools
                                 if tool.get("function", {}).get("name")
@@ -723,9 +747,12 @@ def author_final_tool_surface(
 
         # The body and every authority below are consumers of this one surface.
         body["tools"] = copy.deepcopy(surface["tools"])
-        if listed_tools is not final_tools:
+        menu_guidance = (getattr(runtime, "_stateframe_tool_menu_notice", None)
+                         if constant_menu else None)
+        if constant_menu or listed_tools is not final_tools:
             from kernel_stable_tool_head import apply_menu_note
-            apply_menu_note(body, listed_tools, names)
+            apply_menu_note(body, listed_tools, names, guidance=menu_guidance,
+                            volatile_tail=constant_menu)
         runtime._completion_owner_dispatch_tools = copy.deepcopy(dispatch_tools)
         # Ownerless completion reads this finalized request-local menu directly.
         runtime._stateframe_current_request_tool_names = tuple(names)
@@ -827,6 +854,8 @@ def author_final_tool_surface(
         )
         return surface
     except _SurfaceUnavailable as error:
+        if constant_menu and original_body_messages is not _MISSING:
+            body["messages"] = original_body_messages
         _restore(runtime, runtime_before if "runtime_before" in locals() else {})
         _restore(capture, capture_before if "capture_before" in locals() else {})
         if tools_override is not None:
@@ -840,6 +869,8 @@ def author_final_tool_surface(
             raise RuntimeError(f"subframe tool surface unavailable: {error}") from error
         return None
     except Exception as error:  # N1: author failure must not become a send-time exception.
+        if constant_menu and original_body_messages is not _MISSING:
+            body["messages"] = original_body_messages
         _restore(runtime, runtime_before if "runtime_before" in locals() else {})
         _restore(capture, capture_before if "capture_before" in locals() else {})
         if tools_override is not None:

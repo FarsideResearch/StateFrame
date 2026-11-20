@@ -792,6 +792,7 @@ DEFAULT_PROMPT_BUDGET = 33_344
 # ambient over the profile. Never a blanket STATEFRAME_* passthrough.
 OPT_IN_SWITCHES = {
     "STATEFRAME_WORKSPACE_OBJECTS": ("on", "off"),  # object-backed workspace snapshots
+    "STATEFRAME_PROMPT_CACHE_UNPINNED": ("off", "on"),  # let llama.cpp choose a slot; default off
     "STATEFRAME_EXACT_TOKEN_COUNT_CACHE": ("off", "on"),
     "STATEFRAME_TURN_REPO_INTEL": ("off", "on"),
     "STATEFRAME_TURN_TIMING": ("off", "on"),
@@ -824,6 +825,7 @@ OPT_IN_SWITCHES = {
     "STATEFRAME_QGATES": ("off", "on"),  # typed intake and first-edit question gates; off by default
     "STATEFRAME_OBLIGATION_SEED_LOSSLESS": ("on", "off"),  # exact seed occurrences and overflow reporting
     "STATEFRAME_FINAL_CACHE_LAYOUT": ("on", "off"),  # cacheable final request layout: volatile authority last; on by default
+    "STATEFRAME_WORKING_SET_STABLE_FIRST": ("on", "off"),
     "STATEFRAME_PROVIDER": ("llama.cpp",),  # operator-confirmed llama.cpp dialect override
     "STATEFRAME_STABLE_WIRE": ("on", "off"),  # append-only source windows and a split stable frame
     "STATEFRAME_HOST_ROW_IDENTITY": ("off", "shadow", "on"),  # host-authored rows tracked out of band; off by default
@@ -2156,6 +2158,21 @@ def _select_prompt_cache_slot(options: RunOptions, printer=print) -> None:
     capabilities = _provider_capabilities_for(
         options.endpoint.chat_url, options.endpoint.api_key(), options,
     )
+    environment = profiles.load(options.profile)
+    environment.update(options.extra_env)
+    unpinned = options.extra_env.get(
+        "STATEFRAME_PROMPT_CACHE_UNPINNED",
+        os.environ.get("STATEFRAME_PROMPT_CACHE_UNPINNED",
+                       environment.get("STATEFRAME_PROMPT_CACHE_UNPINNED", "off")),
+    )
+    if unpinned == "on":
+        if options.slot is not None:
+            raise RunError("--slot conflicts with STATEFRAME_PROMPT_CACHE_UNPINNED=on")
+        require_feature(capabilities, "prompt-cache unpinned")
+        options._cache_slot_selection = "unpinned"
+        options._cache_slot_reason = "llama.cpp selects a slot for each request"
+        printer("cache: unpinned slot (cache_prompt on)")
+        return
     if options.slot is not None:
         if type(options.slot) is not int or options.slot < 0:
             raise RunError("--slot must be a nonnegative integer")

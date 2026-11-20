@@ -14,6 +14,7 @@ from kernel_prompt_accounting import accounting_tokens
 
 
 MODE_ENV = "STATEFRAME_PROMPT_CACHE"
+UNPINNED_ENV = "STATEFRAME_PROMPT_CACHE_UNPINNED"
 SCHEMA = "stateframe-prompt-cache/1"
 _VALID_MODES = frozenset({"off", "on"})
 _ARMS = ("frame", "history")
@@ -55,6 +56,10 @@ def configure_pinned_slot(body: MutableMapping[str, object], slot: int,
         raise TypeError("request body must be mutable")
     if type(slot) is not int or slot < 0:
         raise ValueError("pinned slot must be a nonnegative integer")
+    if _source(environ).get(UNPINNED_ENV, "off") == "on":
+        body.pop("id_slot", None)
+        body["cache_prompt"] = True
+        return body
     body["id_slot"] = slot
     body["cache_prompt"] = prompt_cache_enabled(environ)
     return body
@@ -162,7 +167,7 @@ def emit_run_accounting(journal: object) -> dict[str, object] | None:
 
 
 __all__ = [
-    "MODE_ENV", "SCHEMA", "configuration", "configure_pinned_slot", "enabled",
+    "MODE_ENV", "UNPINNED_ENV", "SCHEMA", "configuration", "configure_pinned_slot", "enabled",
     "emit_run_accounting", "mode", "pair_cache_enabled_for_prompt_cache",
     "prompt_cache_enabled", "prompt_cache_mode", "prompt_cache_response_fields",
     "record_response_accounting", "request_arm", "run_accounting", "uncached_prefill",

@@ -1,4 +1,4 @@
-"""The shipped allocator default and its public opt-out retain exact wire contracts."""
+"""The allocator default and opt-out retain the pre-layout wire contracts."""
 from pathlib import Path
 
 from test_working_set_off_parity_base import _cached_provider_hashes, _provider_hashes
