@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.8.6 (2026-11-20)
 
 - Journal observer failures beyond the detail limit now leave a durable summary with the exact omitted count and affected sequence range, including during batched writes.
