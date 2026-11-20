@@ -188,6 +188,13 @@ emit = journal.emit
 stop_after = int(sys.argv[2])
 written = 0
 
+if len(sys.argv) > 3:
+    def interrupt_delivery(_row):
+        if written == stop_after - 1:
+            os.kill(os.getpid(), signal.SIGKILL)
+
+    journal.subscribe("interrupting", interrupt_delivery, kinds=("journal_observer_failed",))
+
 def interrupt(kind, **fields):
     global written
     if kind == "journal_observer_failed" and written == stop_after:
@@ -204,10 +211,13 @@ journal.emit_batch([("observer_probe", {})] * 32, atomic=True)
 """
 
 
-@pytest.mark.parametrize("stop_after", [1, 20, 21])
-def test_resume_finishes_an_interrupted_failure_report_exactly_once(tmp_path, stop_after):
+@pytest.mark.parametrize(("stop_after", "during_delivery"), [
+    (1, False), (20, False), (20, True), (21, False),
+])
+def test_resume_finishes_an_interrupted_failure_report_exactly_once(tmp_path, stop_after, during_delivery):
+    extra_args = ["during-delivery"] if during_delivery else []
     crashed = subprocess.run([sys.executable, "-c", _STOP_DURING_FAILURE_REPORT,
-                              str(tmp_path), str(stop_after)],
+                              str(tmp_path), str(stop_after), *extra_args],
                              capture_output=True, text=True, timeout=45, check=False)
     assert crashed.returncode == -signal.SIGKILL, crashed.stderr
     path = Path(crashed.stdout.strip())
