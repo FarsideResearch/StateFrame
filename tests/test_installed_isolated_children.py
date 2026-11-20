@@ -6,8 +6,11 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -79,8 +82,36 @@ def _run(argv: list[str], *, cwd: Path, input_data: bytes | None = None) -> subp
                           timeout=scaled(60), check=False)
 
 
+@contextmanager
+def _isolated_venv_parent(tmp_path: Path, checkout: Path) -> Iterator[Path]:
+    tmp_path = tmp_path.resolve()
+    if not str(tmp_path).startswith(str(checkout)):
+        yield tmp_path
+        return
+
+    # Pytest's scratch directory can be inside the checkout. Even with -I,
+    # the venv's own site-packages is on sys.path.
+    with tempfile.TemporaryDirectory(prefix="stateframe-isolated-wheel-", dir="/tmp") as directory:
+        yield Path(directory).resolve()
+
+
+@pytest.fixture
+def isolated_venv(tmp_path: Path) -> Iterator[Path]:
+    with _isolated_venv_parent(tmp_path, ROOT) as directory:
+        yield directory / "venv"
+
+
+def test_isolated_venv_parent_with_checkout_scratch(tmp_path: Path):
+    scratch = tmp_path / "pytest"
+    scratch.mkdir()
+    with _isolated_venv_parent(scratch, tmp_path) as directory:
+        assert directory.is_dir()
+        assert not str(directory).startswith(str(tmp_path))
+    assert not directory.exists()
+
+
 @pytest.mark.host_sandbox
-def test_installed_wheel_direct_isolated_children(tmp_path):
+def test_installed_wheel_direct_isolated_children(tmp_path: Path, isolated_venv: Path):
     """Build the release wheel and exercise child imports without checkout paths."""
     backend_path = ROOT / "_build/sf_backend.py"
     spec = importlib.util.spec_from_file_location("sf_backend", backend_path)
@@ -89,7 +120,7 @@ def test_installed_wheel_direct_isolated_children(tmp_path):
     spec.loader.exec_module(backend)
     wheel = tmp_path / backend.build_wheel(str(tmp_path))
 
-    venv = tmp_path / "venv"
+    venv = isolated_venv
     created = _run([sys.executable, "-I", "-m", "venv", str(venv)], cwd=tmp_path)
     assert created.returncode == 0, created.stderr.decode(errors="replace")
     python = venv / "bin/python"
@@ -111,8 +142,8 @@ def test_installed_wheel_direct_isolated_children(tmp_path):
     # -I must not place either the checkout or script directory on sys.path.
     probe = ("import pathlib, runpy, sys; "
              "script = pathlib.Path(sys.argv[1]); "
-             "assert str(script.parent) not in sys.path; "
-             "assert not any(p.startswith(sys.argv[2]) for p in sys.path); "
+             "assert str(script.parent) not in sys.path, sys.path; "
+             "assert not any(p.startswith(sys.argv[2]) for p in sys.path), sys.path; "
              "runpy.run_path(str(script), run_name='__isolated_import_probe__'); "
              "print('started')")
     for relative in ISOLATED_SCRIPTS:

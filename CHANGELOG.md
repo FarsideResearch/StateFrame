@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- The installed-wheel isolation test now keeps its virtual environment outside the source checkout when pytest uses an in-tree temporary directory.
 - Tests: fail-loud triage tests use neutral fixture names.
 ## 0.8.2 (2026-11-19)
 
