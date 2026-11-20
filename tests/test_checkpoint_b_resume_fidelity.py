@@ -668,9 +668,10 @@ def test_progressing_check_preserves_entire_request_bodies_and_healthy_receipts(
     monkeypatch.setenv("STATEFRAME_LOG_LEVEL", "debug")
     run = tmp_path / "run"
 
-    def capture(tree, trace):
+    def capture(tree, trace, *, stable_tool_head, final_cache_layout):
         requests, *_ = _run_checkout(tree, repo, run, launcher, wrapper, tmp_path / trace,
-                                     stable_tool_head="off", final_cache_layout="off")
+                                     stable_tool_head=stable_tool_head,
+                                     final_cache_layout=final_cache_layout)
         audit_keys = {"timestamp_ns", "previous_hash", "record_hash", "run_id",
                       "task_id", "event_id", "sequence"}
         receipts = [{key: value for key, value in event.items() if key not in audit_keys}
@@ -678,9 +679,11 @@ def test_progressing_check_preserves_entire_request_bodies_and_healthy_receipts(
         assert receipts and any(event["outcome"] == "PASS" for event in receipts)
         return requests, receipts
 
-    base_requests, base_receipts = capture(baseline, "base.json")
+    base_requests, base_receipts = capture(baseline, "base.json", stable_tool_head="off",
+                                           final_cache_layout="off")
     run.rename(tmp_path / "base")
-    requests, receipts = capture(ROOT, "current.json")
+    requests, receipts = capture(ROOT, "current.json", stable_tool_head="off",
+                                 final_cache_layout="off")
     assert requests == base_requests
     assert receipts == base_receipts
     summary = json.loads((run / "summary.json").read_text())

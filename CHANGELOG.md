@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Pin `stable_tool_head` and `final_cache_layout` in checkpoint and mutation parity comparisons and distinguish synthetic read-receipt helpers from comparison runners.
+
 ## 0.8.7 (2026-11-20)
 
 - Set `STATEFRAME_BACKGROUND_REPOSITORY_ANALYSIS` to `"on"` in a run profile to build repository dependencies, claim grounding, and call-site indexes in the background after the first model request is sealed. Later requests can proceed while the builds run, and resume reuses the facts recorded for each request. The switch defaults to off.

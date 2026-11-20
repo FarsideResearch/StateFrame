@@ -198,7 +198,9 @@ def test_parity_command_compares_raw_bytes_and_exercises_resume(
     candidate = tmp_path / "candidate"
     calls = []
 
-    def capture(tree, python, launcher, example, repo, run_dir, *, stable_tool_head, resume):
+    def capture(tree, python, launcher, example, repo, run_dir, *, stable_tool_head,
+                final_cache_layout, resume):
+        assert final_cache_layout == "on"
         calls.append((tree, example, resume))
         run_dir.mkdir()
         body = b'{"a":1,"b":2}' if tree == baseline else candidate_body
@@ -219,4 +221,14 @@ def test_capture_environment_prevents_source_tree_bytecode_writes(tmp_path, monk
     from tools import compare_mutation_off_requests as parity
 
     monkeypatch.delenv("PYTHONDONTWRITEBYTECODE", raising=False)
-    assert parity.source_env(tmp_path, stable_tool_head="on")["PYTHONDONTWRITEBYTECODE"] == "1"
+    environment = parity.source_env(tmp_path, stable_tool_head="on", final_cache_layout=None)
+    assert environment["PYTHONDONTWRITEBYTECODE"] == "1"
+
+
+@pytest.mark.parametrize("layout", ("on", "off", None))
+def test_capture_environment_controls_final_cache_layout(tmp_path, monkeypatch, layout):
+    from tools import compare_mutation_off_requests as parity
+
+    monkeypatch.setenv("STATEFRAME_FINAL_CACHE_LAYOUT", "off" if layout == "on" else "on")
+    environment = parity.source_env(tmp_path, stable_tool_head="on", final_cache_layout=layout)
+    assert environment.get("STATEFRAME_FINAL_CACHE_LAYOUT") == layout
