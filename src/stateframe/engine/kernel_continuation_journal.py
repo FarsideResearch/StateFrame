@@ -31,7 +31,7 @@ from pathlib import Path
 from kernel_continuation_menu_authority import EDIT_TOOLS
 
 from kernel_measurement import (
-    AuditJournal, HostSpanRecorder, canonical_bytes, digest,
+    AuditJournal, HostSpanRecorder, JOURNAL_BLOB_THRESHOLD_BYTES, canonical_bytes, digest,
     externalize_journal_fields, profile_host_span, profiled_journal_span,
     resolve_journal_blob_refs, host_span_profiles_enabled,
     _runtime_stateframe_mode_snapshot,
@@ -54,7 +54,12 @@ MAX_FRAMEFIT_RECEIPT_FIELD_CHARS = 1024
 GROUP_COMMIT_ENV = "SF_JOURNAL_GROUP_COMMIT"
 BATCHABLE_TELEMETRY_KINDS = frozenset({"turn_timing", "action_envelope_metrics"})
 CHECKPOINT_KIND = "continuation_worker_checkpoint"
+_OBSERVER_FAILURE_KIND = "journal_observer_failed"
 _OBSERVER_FAILURE_DETAIL_LIMIT = 20
+_OBSERVER_FAILURE_TEXT_FIELDS = ("subscriber", "event_kind", "error_type", "error")
+_OBSERVER_FAILURE_INTENT = ".journal-observer-report"
+_OBSERVER_FAILURE_INTENT_LIMIT = _OBSERVER_FAILURE_DETAIL_LIMIT * (
+    len(_OBSERVER_FAILURE_TEXT_FIELDS) * JOURNAL_BLOB_THRESHOLD_BYTES + 1024)
 # One journal kind per check execution. A re-record that dedup suppresses writes no check_receipt row, so it
 # journals CHECK_RECEIPT_UNCHANGED instead (emitted only in dedup "on" mode; off-mode bytes never change).
 CHECK_RECEIPT_UNCHANGED_KIND = "check_receipt_unchanged"
@@ -92,7 +97,7 @@ def framefit5_journal_origin_mode(environ: Mapping[str, str] | None = None) -> s
 
 
 def _is_observer_failure_overflow(record: Mapping[str, object]) -> bool:
-    return record.get("kind") == "journal_observer_failed" and "dropped_count" in record
+    return record.get("kind") == _OBSERVER_FAILURE_KIND and "dropped_count" in record
 
 
 RESERVED = frozenset({
@@ -657,6 +662,75 @@ def _sync_directory(path: Path) -> None:
         os.close(fd)
 
 
+@dataclass
+class _ObserverFailureReport:
+    base_sequence: int
+    base_head: str
+    details: list[dict[str, object]]
+    overflow: tuple[int, int, int] | None
+
+    def detail(self, index: int, journal_path: Path) -> dict[str, object]:
+        value = resolve_journal_blob_refs(self.details[index], journal_path)
+        if not isinstance(value, dict) or any(
+                not isinstance(value.get(key), str) for key in _OBSERVER_FAILURE_TEXT_FIELDS):
+            raise JournalError("invalid pending observer failure detail")
+        return value
+
+    def summary(self) -> dict[str, int] | None:
+        if self.overflow is None:
+            return None
+        first, last, count = self.overflow
+        return {"first_event_sequence": first, "last_event_sequence": last, "dropped_count": count}
+
+    def save(self, path: Path) -> None:
+        if __package__:
+            from .kernel_turn_publication import atomic_file
+        else:
+            from kernel_turn_publication import atomic_file
+
+        payload = canonical_bytes([self.base_sequence, self.base_head, self.details, self.overflow])
+        if len(payload) > _OBSERVER_FAILURE_INTENT_LIMIT:
+            raise JournalError("observer failure report exceeds limit")
+        atomic_file(path, payload)
+
+    @classmethod
+    def load(cls, path: Path, head_sequence: int) -> _ObserverFailureReport | None:
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
+            return None
+        try:
+            with os.fdopen(fd, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_size > _OBSERVER_FAILURE_INTENT_LIMIT:
+                    raise ValueError("invalid report file")
+                raw = stream.read(info.st_size + 1)
+                if len(raw) != info.st_size:
+                    raise ValueError("changed report file")
+            base, head, details, stored_overflow = json.loads(raw)
+            if (type(base) is not int or not 1 <= base <= head_sequence
+                    or not isinstance(head, str) or not isinstance(details, list)
+                    or not details or len(details) > _OBSERVER_FAILURE_DETAIL_LIMIT):
+                raise ValueError("invalid report base or detail count")
+            for detail in details:
+                if (not isinstance(detail, dict) or len(detail) != len(_OBSERVER_FAILURE_TEXT_FIELDS) + 1
+                        or any(not isinstance(detail.get(key), (str, dict))
+                               for key in _OBSERVER_FAILURE_TEXT_FIELDS)
+                        or type(detail.get("event_sequence")) is not int
+                        or not 1 <= detail["event_sequence"] <= base):
+                    raise ValueError("invalid failure detail")
+            overflow = None
+            if stored_overflow is not None:
+                first, last, count = stored_overflow
+                if (any(type(value) is not int for value in (first, last, count))
+                        or not 1 <= first <= last <= head_sequence or count < 1):
+                    raise ValueError("invalid failure summary")
+                overflow = first, last, count
+            return cls(base, head, details, overflow)
+        except (TypeError, ValueError, RecursionError) as error:
+            raise JournalError("invalid pending observer failure report") from error
+
+
 class _ReplayBlobCache(OrderedDict):
     """LRU bounded by verified logical bytes and entries, local to one read pass."""
 
@@ -1111,7 +1185,9 @@ class ContinuationJournal(AuditJournal):
             obj.manifest = copy.deepcopy(first["manifest"])
             obj.config_hash = expected_config
             obj._sequence, obj._head = last["sequence"], last["record_hash"]
-            obj.emit("continuation_writer_resumed", previous_head=obj._head,
+            obj._resume_observer_failure_report()
+            # The trusted anchor precedes any audit rows written by recovery.
+            obj.emit("continuation_writer_resumed", previous_head=last["record_hash"],
                      anchor_status="TRUSTED_HEAD_MATCH" if expected_head is not None
                      else "EXPLICIT_UNANCHORED_RECOVERY",
                      execution_authorized=False)
@@ -2458,17 +2534,83 @@ class ContinuationJournal(AuditJournal):
                 or (not self._observer_failures and self._observer_failure_overflow is None)):
             return
         failures, self._observer_failures = self._observer_failures, []
+        intent = self.path.parent / _OBSERVER_FAILURE_INTENT
+        try:
+            self.assert_owner()
+            if self._head is None or os.path.lexists(intent):
+                raise JournalError("cannot start observer failure report")
+            # The pending report is anchored to a durable journal prefix and
+            # retains only the bounded details and the aggregate it will append.
+            self.sync()
+            report = _ObserverFailureReport(
+                self._sequence, self._head,
+                [externalize_journal_fields(failure, self.path, self._blob_cache) for failure in failures],
+                self._observer_failure_overflow,
+            )
+            report.save(intent)
+            self._finish_observer_failure_report(intent, report)
+        except BaseException:
+            self._poison("observer failure report requires recovery")
+            raise
+
+    def _finish_observer_failure_report(self, intent: Path, report: _ObserverFailureReport,
+                                        *, committed_details: int = 0,
+                                        summary_committed: bool = False) -> None:
+        self._observer_failure_overflow = report.overflow
         self._reporting_observer_failures = True
         try:
-            for failure in failures:
-                self.emit("journal_observer_failed", **failure)
-            if self._observer_failure_overflow is not None:
-                first, last, count = self._observer_failure_overflow
-                self.emit("journal_observer_failed", first_event_sequence=first,
-                          last_event_sequence=last, dropped_count=count)
-                self._observer_failure_overflow = None
+            for index in range(committed_details, len(report.details)):
+                try:
+                    self.emit(_OBSERVER_FAILURE_KIND, **report.detail(index, self.path))
+                finally:
+                    if report.overflow != self._observer_failure_overflow:
+                        report.overflow = self._observer_failure_overflow
+                        report.save(intent)
+            summary = report.summary()
+            if summary is not None and not summary_committed:
+                self.emit(_OBSERVER_FAILURE_KIND, **summary)
+            intent.unlink()
+            _sync_directory(self.path.parent)
+            self._observer_failure_overflow = None
         finally:
             self._reporting_observer_failures = False
+
+    def _resume_observer_failure_report(self) -> None:
+        intent = self.path.parent / _OBSERVER_FAILURE_INTENT
+        try:
+            report = _ObserverFailureReport.load(intent, self._sequence)
+            if report is None:
+                return
+            summary = report.summary()
+            if (self._record_hashes[report.base_sequence - 1] != report.base_head
+                    or self._sequence - report.base_sequence > 2 * len(report.details) + (summary is not None)):
+                raise JournalError("pending observer failure report does not match journal")
+            from kernel_verdict_identity import FIRED_EVENT
+
+            committed_details = 0
+            summary_committed = False
+            detail_marker_allowed = False
+            for record in self._record_range(report.base_sequence, self._sequence, detached=False):
+                if (detail_marker_allowed and record["kind"] == FIRED_EVENT
+                        and record.get("source_event") == _OBSERVER_FAILURE_KIND):
+                    detail_marker_allowed = False
+                    continue
+                is_summary = committed_details == len(report.details)
+                expected = summary if is_summary else report.detail(committed_details, self.path)
+                if (record["kind"] != _OBSERVER_FAILURE_KIND or expected is None or summary_committed
+                        or _is_observer_failure_overflow(record) != is_summary
+                        or any(record.get(key) != value for key, value in expected.items())):
+                    raise JournalError("journal diverged from pending observer failure report")
+                if is_summary:
+                    summary_committed = True
+                else:
+                    committed_details += 1
+                    detail_marker_allowed = True
+            self._finish_observer_failure_report(intent, report, committed_details=committed_details,
+                                                 summary_committed=summary_committed)
+        except BaseException:
+            self._poison("pending observer failure report could not be recovered")
+            raise
 
     def host_span_snapshot(self) -> tuple[dict[str, object], ...]:
         return self.host_spans.snapshot()
