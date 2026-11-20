@@ -121,13 +121,14 @@ class AgentTools:
         self.names = OBSERVATION_NAMES | self.commit_names | self.custom.keys()
         self._pending_schema_budget = None
         self.startup_schema_budget = None
-        if defer_schema_budget and shell.spec.get("chat_url"):
+        self._defer_schema_budget = defer_schema_budget and bool(shell.spec.get("chat_url"))
+        if self._defer_schema_budget:
             self.startup_schema_budget = _replayed_schema_budget(shell.spec)
-            if self.startup_schema_budget is None:
-                self._start_schema_budget()
-            else:
+            if self.startup_schema_budget is not None:
                 self._write_schema_budget(self.startup_schema_budget["counts"])
-        else:
+            elif not self.mcp_servers:
+                self._start_schema_budget()
+        elif not self.mcp_servers:
             self._write_schema_budget(self._prepare_schema_budget()())
 
     def _prepare_schema_budget(self, *, deadline=None):
@@ -191,7 +192,6 @@ class AgentTools:
         self._pending_schema_budget = None
 
     def bind(self):
-        self._finish_schema_budget()
         if self.mcp_servers:
             from kernel_mcp_tools import discover
             from kernel_custom_tools import CustomToolError
@@ -205,7 +205,8 @@ class AgentTools:
                              shell_network=self.shell.settings.shell_network,
                              host_authorization=self.shell.settings.host_authorization is not None,
                              custom_schemas=self.custom_schemas, endpoint=self.shell.spec.get("chat_url"),
-                             auth_key=auth_key, generation_endpoint=generation_endpoint)
+                             auth_key=auth_key, generation_endpoint=generation_endpoint,
+                             budget_admission=self.shell.spec.get("mcp_schema_admission"))
             if (found.digest != self.shell.spec.get("mcp_tools_digest")
                     or [t.name for t in found.tools] != self.shell.spec.get("mcp_tools")
                     or list(found.omitted) != self.shell.spec.get("mcp_omitted")):
@@ -213,9 +214,12 @@ class AgentTools:
             self.custom.update({tool.name: tool for tool in found.tools})
             self.custom_schemas.extend(copy.deepcopy(found.schemas()))
             self.names = OBSERVATION_NAMES | self.commit_names | self.custom.keys()
-            measure_schema_budget = self._prepare_schema_budget()
-            self.schema_budget = measure_schema_budget()
-            self.schema_budget_path.write_text(json.dumps(self.schema_budget, sort_keys=True))
+            if self.startup_schema_budget is None:
+                if self._defer_schema_budget:
+                    self._start_schema_budget()
+                else:
+                    self._write_schema_budget(self._prepare_schema_budget()())
+        self._finish_schema_budget()
         if self.git is not None:
             self.git.workspace = self.shell.root
             self.git.baseline = Path(self.shell.spec.get("parent_snapshot", self.shell.root))

@@ -31,7 +31,7 @@ def test_prepare_pins_skills_and_mcp_in_the_same_run(tmp_path: Path, monkeypatch
 
     monkeypatch.setattr(RequestTokenMeter, "measure", lambda self, body: (8, "calibrated_bytes"))
     monkeypatch.setattr(runner, "discover_mcp", lambda *args, **kwargs: SimpleNamespace(
-        digest="discovered-mcp-digest", omitted=(), tools=()))
+        digest="discovered-mcp-digest", omitted=(), tools=(), budget_admission=()))
     settings = ToolSettings(git_tool=False, run_env=False,
                             mcp_files=({"path": str(mcp_file), "digest": "pending"},))
     options = runner.RunOptions(repo=repo, task="Inspect sample.py",

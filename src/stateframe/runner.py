@@ -1968,7 +1968,8 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
         spec["route_accounting"] = options._route_accounting
     if mcp is not None:
         spec.update(mcp_tools_digest=mcp.digest, mcp_omitted=list(mcp.omitted),
-                    mcp_tools=[tool.name for tool in mcp.tools])
+                    mcp_tools=[tool.name for tool in mcp.tools],
+                    mcp_schema_admission=list(mcp.budget_admission))
     if hooks is not None:
         try:
             manifest = hook_host.create_bundle(hooks, run / "hook-bundle")
@@ -4094,7 +4095,8 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
                                    custom_schemas=custom.schemas(), endpoint=spec.get("chat_url"),
                                    auth_key=(os.environ.get(spec.get("api_key_env"), "")
                                              if isinstance(spec.get("api_key_env"), str) else None),
-                                   generation_endpoint=spec.get("chat_url"))
+                                   generation_endpoint=spec.get("chat_url"),
+                                   budget_admission=spec.get("mcp_schema_admission"))
             except (CustomToolError, OSError, ValueError) as error:
                 raise resume_module.ResumeRefused(f"MCP discovery changed or failed: {error}") from error
             if mcp.digest != spec.get("mcp_tools_digest") or [t.name for t in mcp.tools] != spec.get("mcp_tools") or list(mcp.omitted) != spec.get("mcp_omitted"):
