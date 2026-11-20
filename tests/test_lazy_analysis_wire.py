@@ -21,6 +21,15 @@ ROOT = Path(__file__).resolve().parents[1]
 EXAMPLES = ROOT / "examples"
 MINIMAL = "STATEFRAME_TURN_MINIMAL_LAUNCH"
 INDEXED = "STATEFRAME_TURN_INDEXED_READS"
+CONSTANT_MENU = "STATEFRAME_CONSTANT_TOOL_MENU"
+NAVIGATION_TOOLS = {"list_files", "read"}
+FULL_FIRST_SEND_TOOLS = {
+    "authored_check", "decide", "done", "edit", "file_create", "file_delete",
+    "file_move", "grep", "insert_before", "list_files", "predict", "probe",
+    "read", "read_check_receipt", "recall", "recall_evidence",
+    "recall_generated_artifact", "references", "run_tests", "shell",
+    "str_replace", "where_defined", "who_calls", "work",
+}
 REQUEST_BUDGET = 8
 TEST_PATH = "tests/test_pricing.py"
 DRIVER = """
@@ -248,7 +257,7 @@ if stop_at or hold_until or hold_analysis:
 
 def _run(tree, work, *, minimal="off", indexed=None, hold=False, fallback=False,
          sends=None, resume=False, gate_seconds=None, analysis=None, analysis_resume=False,
-         analysis_off=False, unshown_note=None):
+         parity_fixture=False, disable_analysis_features=False, unshown_note=None, constant_menu=None):
     work.mkdir()
     repo = work / "repo"
     run = work / "run"
@@ -259,7 +268,7 @@ def _run(tree, work, *, minimal="off", indexed=None, hold=False, fallback=False,
         steps = steps[:sends]
     scope = []
     analysis_source = None
-    if analysis or analysis_off or unshown_note is not None:
+    if analysis or parity_fixture or unshown_note is not None:
         (repo / "shop" / "models.py").write_text("class LineItem: pass\n")
         snippet = "\nfrom .models import LineItem\n\ndef build_item():\n    return LineItem()\n"
         pricing = repo / "shop" / "pricing.py"
@@ -289,7 +298,9 @@ def _run(tree, work, *, minimal="off", indexed=None, hold=False, fallback=False,
                      "STATEFRAME_PER_REQUEST_TIMEOUT_S": str(REQUEST_BUDGET)})
     if indexed is not None:
         switches[INDEXED] = indexed
-    if analysis_off:
+    if constant_menu is not None:
+        switches[CONSTANT_MENU] = constant_menu
+    if disable_analysis_features:
         switches.update(STATEFRAME_CLAIM_GROUNDING="off", STATEFRAME_CENSUS_INDEX_REUSE="off")
     profile = work / "profile.json"
     profile.write_text(json.dumps({"schema": "stateframe-product-profile/1", "switches": switches}))
@@ -300,7 +311,7 @@ def _run(tree, work, *, minimal="off", indexed=None, hold=False, fallback=False,
     config = {"fallback": fallback, "gate_seconds": gate_seconds or 35}
     if analysis_source is not None:
         config.update(analysis_source=str(analysis_source), stop_at=2)
-    if analysis_off:
+    if parity_fixture:
         config["stop_at"] = 2
     if analysis:
         config.update(hold_analysis=analysis, stop_at=2)
@@ -357,7 +368,7 @@ def _run(tree, work, *, minimal="off", indexed=None, hold=False, fallback=False,
 def test_following_send_preserves_needed_facts_with_a_held_analysis(
     tmp_path, tmp_path_factory, analysis, baseline,
 ):
-    tree = pinned_tree("4c5149502", tmp_path_factory) if baseline else ROOT
+    tree = pinned_tree("39f73ee6", tmp_path_factory) if baseline else ROOT
     trace, events, run, _ = _run(tree, tmp_path / "held", analysis=analysis, fallback=True,
                                  gate_seconds=6 if baseline else 25, minimal="on", indexed="on")
     first, second = (request[0] for request in trace.requests)
@@ -396,13 +407,17 @@ def test_replay_keeps_the_cold_census_with_a_ready_worker(tmp_path):
 
 
 @pytest.mark.host_sandbox
-@pytest.mark.parametrize("minimal,indexed", [("off", "off"), ("on", "on")])
+@pytest.mark.parametrize(
+    "minimal,constant_menu,indexed",
+    [("off", "off", "off"), ("off", "on", "off"), ("on", "off", "on"), ("on", "on", "on")],
+    ids=["00", "01", "10", "11"],
+)
 @pytest.mark.parametrize("fallback", [False, True], ids=["installed", "stdlib"])
 def test_following_send_uses_scoped_dependencies_while_full_graph_waits(
-    tmp_path, minimal, indexed, fallback,
+    tmp_path, minimal, constant_menu, indexed, fallback,
 ):
     trace, events, run, home = _run(ROOT, tmp_path / "current", minimal=minimal, indexed=indexed,
-                                   hold=True, fallback=fallback, sends=2)
+                                   hold=True, fallback=fallback, sends=2, constant_menu=constant_menu)
     starts = [event for event in events if event[0] == "start"]
     finishes = [event for event in events if event[0] == "finish"]
     first, second = (request[0] for request in trace.requests[:2])
@@ -412,8 +427,21 @@ def test_following_send_uses_scoped_dependencies_while_full_graph_waits(
     assert starts[0][1] < second < finishes[0][1]
     assert all(event[2:] == [str(home), indexed] for event in starts + finishes)
 
-    first_tools = {tool["function"]["name"] for tool in json.loads(trace.requests[0][1])["tools"]}
-    assert (first_tools == {"list_files", "read"}) == (minimal == "on")
+    first_request = json.loads(trace.requests[0][1])
+    first_tools = [tool["function"]["name"] for tool in first_request["tools"]]
+    expected_tools = (
+        NAVIGATION_TOOLS if (minimal, constant_menu) == ("on", "off") else FULL_FIRST_SEND_TOOLS
+    )
+    assert set(first_tools) == expected_tools
+    assert len(first_tools) == len(expected_tools)
+
+    constant_from_launch = minimal == constant_menu == "on"
+    navigation_note = "[Tool menu | this turn] callable now: list_files, read."
+    note_count = sum(message["content"].count(navigation_note) for message in first_request["messages"])
+    assert note_count == int(constant_from_launch)
+    if constant_from_launch:
+        assert first_request["tools"] == json.loads(trace.requests[1][1])["tools"]
+
     recorded = (run / "wire/0002.repo-dependencies.json").read_bytes()
     facts = json.loads(recorded)
     journal = measurement_events(run)
@@ -439,20 +467,28 @@ def test_first_provider_request_matches_wave_one(tmp_path, tmp_path_factory):
 
 
 @pytest.mark.host_sandbox
-def test_background_analysis_off_preserves_release_requests(tmp_path, tmp_path_factory):
-    release = pinned_tree("9a75da09", tmp_path_factory)
-    options = {"minimal": "on", "indexed": "on", "fallback": True, "analysis_off": True}
+@pytest.mark.parametrize("disable_analysis_features", [False, True], ids=["shipped", "reuse-off"])
+def test_background_analysis_off_preserves_release_requests(
+    tmp_path, tmp_path_factory, disable_analysis_features,
+):
+    release = pinned_tree("39f73ee6", tmp_path_factory)
+    options = {"minimal": "on", "indexed": "on", "fallback": True, "parity_fixture": True,
+               "disable_analysis_features": disable_analysis_features}
     baseline, _, baseline_run, _ = _run(release, tmp_path / "release", **options)
     current, _, run, _ = _run(ROOT, tmp_path / "current", **options)
     release_bodies = [body for _, body in baseline.requests]
     current_bodies = [body for _, body in current.requests]
+    print(f"Release request bytes: {[len(body) for body in release_bodies]}")
+    print(f"Branch OFF request bytes: {[len(body) for body in current_bodies]}")
     assert current_bodies == release_bodies
     assert not list((run / "wire").glob("*.repository-analysis.json"))
     for observed_run in (baseline_run, run):
         assert any(row["kind"] == "callsite_census_outcome" and row["status"] == "fired"
-                   and row["index_reuse"] == "off" for row in measurement_events(observed_run))
+                   and (row["index_reuse"] == "off" if disable_analysis_features
+                        else row["index_reuse"] != "off") for row in measurement_events(observed_run))
     for send, body in enumerate(current_bodies, 1):
         assert (run / "wire" / f"{send:04d}.request.json").read_bytes() == body
+        assert (baseline_run / "wire" / f"{send:04d}.request.json").read_bytes() == body
 
 
 @pytest.mark.host_sandbox
