@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.15 (2026-11-20)
 
 - Set `STATEFRAME_SEND1_WAVE4=on` to speed up the first model request by reusing verified startup work and deferring cache writes until the request is sealed. The switch defaults to off.
 
