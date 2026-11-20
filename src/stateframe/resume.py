@@ -203,7 +203,7 @@ def _interrupted_archive_tape(run: Path, spec: dict) -> list[dict[str, object]] 
         if (folder / "wire").is_dir():
             return replay_tape.build(folder / "wire", folder / "sends.jsonl",
                                      routes_required=bool(spec.get("routes")))
-    return []
+    return None
 
 
 def _interrupted_archive(run: Path, spec: dict) -> Path | None:
