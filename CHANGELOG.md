@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.14 (2026-11-20)
 
 - Tests: required pinned-tree parity gates now fail clearly when a gate copy lacks the pinned commit or Git.
 
