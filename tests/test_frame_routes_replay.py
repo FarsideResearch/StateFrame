@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -319,6 +320,49 @@ def test_first_archive_killed_after_wire_move_replays_without_pending(tmp_path, 
     assert [item["send"] for item in resumed["tape"]] == [1]
     assert "pending" not in resumed
     assert resumed["pending_check"] == {"status": "skipped", "reason": "interrupted_archive"}
+
+
+def test_first_archive_killed_after_worker_move_keeps_the_in_flight_request(tmp_path, monkeypatch):
+    from kernel_agent_schemas import measure_schemas
+    from kernel_agent_tools import AgentTools
+    from kernel_continuation_journal import ContinuationJournal
+    from kernel_custom_tools import CustomToolSet
+    from kernel_tool_settings import ToolSettings
+
+    run, spec = _interrupted_routed_run(tmp_path)
+    spec["run_identity_seed"] = "original-attempt"
+    (run / "spec.json").write_text(json.dumps(spec))
+    journals = run / "worker" / "measurement-runs"
+    journals.mkdir(parents=True)
+    budget = {"reason": "deadline", "counts": measure_schemas()}
+    journal = ContinuationJournal(journals, "task", {"startup_schema_budget": budget})
+    journal.close()
+    _write_send(run / "wire", 1, completed=False)
+    real_replace = resume.os.replace
+
+    def killed_after_worker(src, dst):
+        if Path(src) == run / "wire":
+            raise KeyboardInterrupt("killed before moving wire")
+        real_replace(src, dst)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(resume.os, "replace", killed_after_worker)
+        with pytest.raises(KeyboardInterrupt):
+            resume.archive_attempt({"run": run, "spec": spec, "attempt": 1, "max_turns": 8}, tmp_path,
+                                   use_checkpoint=False)
+
+    state = resume.assess(run)
+    archived = resume.archive_attempt(state, tmp_path, use_checkpoint=False)
+    spec = json.loads((run / "spec.json").read_text())
+    resumed = spec["resume"]
+    assert resumed["tape"] == []
+    assert resumed["pending"]["request"] == str(archived / "wire" / "0001.request.json")
+    assert "pending_check" not in resumed
+    assert (archived / journal.path.relative_to(run)).is_file()
+    shell = SimpleNamespace(spec=spec, run_dir=run, settings=ToolSettings())
+    tools = AgentTools(shell, CustomToolSet((), "empty"), defer_schema_budget=True)
+    tools.bind()
+    assert tools.startup_schema_budget == budget
 
 
 def test_refused_routed_mismatch_never_adopts_its_pending_request(tmp_path):
