@@ -146,9 +146,15 @@ def test_parallel_binds_share_one_tokenizer_with_bounded_workers(tmp_path, monke
         probes.append((origin, path))
         return 200, {"default_generation_settings": {"n_ctx": 65536}}
 
+    def record_budget(tools, budget):
+        # Report-file persistence is covered separately. Its disk latency
+        # is outside the bound on waiting for the tokenizer.
+        tools.schema_budget = budget
+
     monkeypatch.setattr(kernel_request_diet, "_http_tokenize", record_worker)
     monkeypatch.setattr(kernel_provider_dialect, "bounded_json_probe", probe)
     monkeypatch.setattr(kernel_provider_dialect, "RUN_CAPABILITY_CACHE", capability_cache)
+    monkeypatch.setattr(AgentTools, "_write_schema_budget", record_budget)
     fallback = measure_schemas()
     callers = 4
     posts_per_bind = 2 if trickle == "after-exact" else 1
