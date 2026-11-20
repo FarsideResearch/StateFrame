@@ -376,6 +376,31 @@ def test_unsandboxed_shell_keeps_bind_time_parent_bytes(setup_tool, monkeypatch)
     assert (root / "test_app.py").read_bytes() == b"assert True\n"
 
 
+def test_unsandboxed_shell_with_workspace_objects_uses_legacy_effect_adapter(setup_tool, monkeypatch):
+    import shutil
+
+    _, root, run = setup_tool
+    monkeypatch.setenv("STATEFRAME_WORKSPACE_OBJECTS", "on")
+    parent = run / "parent"
+    shutil.copytree(root, parent)
+    settings = ToolSettings(shell="unrestricted", run_env=False, host_authorization={
+        "granted_at": "test", "flags": ["--shell unrestricted", "--shell-sandbox off"],
+    })
+    process = ProcessBoundary()
+    tool = ShellTool(run, settings, {"parent_snapshot": str(parent)}, process)
+
+    tool.bind(root, {"files": {"app.py": "VALUE = 1\n"}, "allowed_product_paths": ["app.py"]},
+              {str(root / "test_app.py")})
+
+    assert not tool.capability.sandboxed
+    assert tool.workspace_effects is None
+    assert any((run / "shell-baseline").glob("*/objects.pack"))
+    configure_replay(run, active=False)
+    reply = tool.execute({"command": "echo host shell ready"}, "call-1")
+    assert reply.observation.startswith("$ echo host shell ready\nexit 0")
+    assert process.calls
+
+
 def test_shell_off_never_launches(setup_tool):
     make, _, _ = setup_tool
     tool, process = make(settings=ToolSettings(shell="off", run_env=False))
