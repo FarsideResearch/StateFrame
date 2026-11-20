@@ -186,9 +186,10 @@ print(journal.path, flush=True)
 journal.subscribe("rejecting", reject, kinds=("observer_probe", "journal_observer_failed"))
 emit = journal.emit
 stop_after = int(sys.argv[2])
+stop_point = sys.argv[3]
 written = 0
 
-if len(sys.argv) > 3:
+if stop_point == "during_delivery":
     def interrupt_delivery(_row):
         if written == stop_after - 1:
             os.kill(os.getpid(), signal.SIGKILL)
@@ -198,7 +199,19 @@ if len(sys.argv) > 3:
 def interrupt(kind, **fields):
     global written
     if kind == "journal_observer_failed" and written == stop_after:
-        os.kill(os.getpid(), signal.SIGKILL)
+        if stop_point == "during_summary_write":
+            assert "dropped_count" in fields
+            write = os.write
+
+            def tear_summary(fd, data):
+                if fd == journal._fd:
+                    write(fd, data[:len(data) // 2])
+                    os.kill(os.getpid(), signal.SIGKILL)
+                return write(fd, data)
+
+            os.write = tear_summary
+        else:
+            os.kill(os.getpid(), signal.SIGKILL)
     row = emit(kind, **fields)
     if kind == "journal_observer_failed":
         written += 1
@@ -211,17 +224,20 @@ journal.emit_batch([("observer_probe", {})] * 32, atomic=True)
 """
 
 
-@pytest.mark.parametrize(("stop_after", "during_delivery"), [
-    (1, False), (20, False), (20, True), (21, False),
+@pytest.mark.parametrize(("stop_after", "stop_point"), [
+    (1, "between_rows"), (20, "between_rows"), (20, "during_delivery"),
+    (20, "during_summary_write"), (21, "between_rows"),
 ])
-def test_resume_finishes_an_interrupted_failure_report_exactly_once(tmp_path, stop_after, during_delivery):
-    extra_args = ["during-delivery"] if during_delivery else []
+def test_resume_finishes_an_interrupted_failure_report_exactly_once(tmp_path, stop_after, stop_point):
     crashed = subprocess.run([sys.executable, "-c", _STOP_DURING_FAILURE_REPORT,
-                              str(tmp_path), str(stop_after), *extra_args],
+                              str(tmp_path), str(stop_after), stop_point],
                              capture_output=True, text=True, timeout=45, check=False)
     assert crashed.returncode == -signal.SIGKILL, crashed.stderr
     path = Path(crashed.stdout.strip())
-    before = [json.loads(line) for line in path.read_bytes().splitlines()]
+    lines = path.read_bytes().splitlines(keepends=True)
+    if stop_point == "during_summary_write":
+        assert not lines.pop().endswith(b"\n")
+    before = [json.loads(line) for line in lines]
     probes = [row["sequence"] for row in before if row["kind"] == _EVENT]
     written_failures = [row for row in before if row["kind"] == _FAILURE]
     assert len(probes) == 32
@@ -239,6 +255,7 @@ def test_resume_finishes_an_interrupted_failure_report_exactly_once(tmp_path, st
         assert overflow["last_event_sequence"] == observed_details[-1]["sequence"]
         assert journal.cached_records()[-1]["previous_hash"] == overflow["record_hash"]
         assert journal.cached_records()[-1]["kind"] == "continuation_writer_resumed"
+        assert path.read_bytes().startswith(b"".join(lines))
 
     with ContinuationJournal.resume(path, task_id="observer-crash-recovery", manifest={},
                                     expected_head=head) as journal:
