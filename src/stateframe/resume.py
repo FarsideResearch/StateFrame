@@ -1102,14 +1102,22 @@ def archive_attempt(state: dict[str, object], engine_dir: Path, *, use_checkpoin
             restart_live=restart_live,
             interrupted_archive_tape=interrupted_archive_tape)
     else:
-        pending = replay_tape.pending_request(source / "wire") if not restart_live else None
+        wire = source / "wire"
+        pending = replay_tape.pending_request(wire) if not restart_live else None
         # A moved model name may preserve request semantics, but a later resume cannot
         # prove the archived exchange's raw bytes without the route-specific record.
-        moved_model = isinstance((spec.get("resume") or {}).get("model_swap"), dict)
-        tape = ([] if restart_live else own_tape if moved_model else carry_forward(
-            spec, own_tape, (source / "resume-divergence.json").exists(), pending))
+        prior = spec.get("resume") or {}
+        moved_model = isinstance(prior.get("model_swap"), dict)
+        diverged = (source / "resume-divergence.json").exists()
+        tape = ([] if restart_live else own_tape if moved_model else carry_forward(spec, own_tape, diverged, pending))
         if len(tape) > len(own_tape):
             pending = None
+        carried_pending = prior.get("pending")
+        if (not restart_live and not moved_model and not diverged and not tape and pending is None
+                and isinstance(carried_pending, dict) and isinstance(carried_pending.get("request"), str)
+                and not replay_tape.numbered_wire_files(wire, ".request.json")):
+            # The last attempt stopped before recording any request, so it could not check this one.
+            pending = carried_pending
         prior_route_changes, skipped_reason = [], None
     # Checkpoint restore is not supported for routed runs: checkpoint selection reads the in-flight
     # request from the archived wire, not from the carried, route-verified check. Routed runs replay.
