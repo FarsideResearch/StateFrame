@@ -77,6 +77,13 @@ class ParallelReceiptMissing(ParallelError):
 
 
 _REQUIRED_PROPERTY = re.compile(r"'([A-Za-z_][A-Za-z0-9_]{0,63})' is a required property")
+_INDEXED_REQUIRED_GOAL = re.compile(r"\$\.subframes\[([0-9]+)\]\.goal is required")
+_GOAL_MAX_LENGTH = 300
+
+
+def _outcome_length_error(unit_id: str) -> ParallelInputError:
+    return ParallelInputError(unit_id, "outcome", f"exceeds {_GOAL_MAX_LENGTH} characters",
+                              f"shorten outcome to {_GOAL_MAX_LENGTH} characters or fewer")
 
 
 def normalize_goal_aliases(args: Mapping) -> tuple[dict, tuple[dict, ...]]:
@@ -86,7 +93,8 @@ def normalize_goal_aliases(args: Mapping) -> tuple[dict, tuple[dict, ...]]:
         return dict(args), ()
     alias_indexes = [index for index, unit in enumerate(units)
                      if isinstance(unit, dict) and "goal" not in unit
-                     and isinstance(unit.get("outcome"), str) and unit["outcome"].strip()]
+                     and isinstance(unit.get("outcome"), str)
+                     and len(unit["outcome"]) <= _GOAL_MAX_LENGTH and unit["outcome"].strip()]
     if not alias_indexes:
         return dict(args), ()
     normalized = copy.deepcopy(dict(args))
@@ -111,18 +119,32 @@ def schema_input_error(args: Mapping, errors: Sequence[str]) -> ParallelInputErr
     """Translate a tool-schema rejection into the typed refusal the model can act on."""
     subframes = args.get("subframes") if isinstance(args, Mapping) else None
     units = subframes if isinstance(subframes, list) else []
+    has_alias = False
     for index, unit in enumerate(units):
         if not isinstance(unit, Mapping) or "outcome" not in unit:
             continue
-        outcome = unit.get("outcome")
-        if isinstance(outcome, str) and outcome.strip():
-            continue
         identity = unit.get("id")
         unit_id = identity if isinstance(identity, str) and identity.strip() else str(index)
-        return ParallelInputError(unit_id, "outcome", "expected nonempty text",
-                                  "provide outcome as text")
+        outcome = unit["outcome"]
+        if not isinstance(outcome, str) or not outcome.strip():
+            return ParallelInputError(unit_id, "outcome", "expected nonempty text",
+                                      "provide outcome as text")
+        if "goal" not in unit:
+            if len(outcome) > _GOAL_MAX_LENGTH:
+                return _outcome_length_error(unit_id)
+            has_alias = True
     for error in errors:
-        match = _REQUIRED_PROPERTY.search(str(error))
+        error_text = str(error)
+        indexed_goal = _INDEXED_REQUIRED_GOAL.fullmatch(error_text) if has_alias else None
+        if indexed_goal is not None:
+            index = int(indexed_goal[1])
+            unit = units[index] if index < len(units) else None
+            if isinstance(unit, Mapping) and "goal" not in unit and "outcome" not in unit:
+                identity = unit.get("id")
+                unit_id = identity if isinstance(identity, str) and identity.strip() else str(index)
+                return ParallelInputError(unit_id, "goal", "is required by the parallel schema",
+                                          'add "goal": ... and resend the whole parallel call')
+        match = _REQUIRED_PROPERTY.search(error_text)
         if match is None:
             continue
         field = match.group(1)
@@ -182,8 +204,8 @@ _SIGNATURE = {"type": "object", "properties": {
     "required": ["kind", "params", "returns", "decorators"]}
 _UNIT = {"type": "object", "properties": {
     "id": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,23}$"},
-    "goal": {"type": "string", "maxLength": 300},
-    "outcome": {"type": "string", "maxLength": 300},
+    "goal": {"type": "string", "maxLength": _GOAL_MAX_LENGTH},
+    "outcome": {"type": "string", "maxLength": _GOAL_MAX_LENGTH},
     "owns": {"type": "array", "description":
              "Existing files this subframe may edit. Every file the subframe changes must be listed here or in creates.",
              "items": {"type": "string"}},
@@ -932,6 +954,8 @@ def _request(args: Mapping, call_id: str, mode: str, *,
             if not text.strip() or len(text) > 300:
                 raise ParallelInputError(unit_id, f"requirements[{number}]", "empty or over 300 characters",
                                          "write a nonempty condition within 300 characters")
+        if "goal" not in item and len(item["outcome"]) > _GOAL_MAX_LENGTH:
+            raise _outcome_length_error(unit_id)
         exports_raw = item.get("exports", [])
         consumes_raw = item.get("consumes", [])
         if not isinstance(exports_raw, list):

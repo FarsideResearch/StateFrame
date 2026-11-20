@@ -8,9 +8,16 @@ from pathlib import Path
 
 import pytest
 
-from stateframe.engine.kernel_parallel import (PARALLEL_TOOL, ParallelInputError, _UNIT,
-                                               _complete_arguments, _request,
-                                               normalize_goal_aliases, schema_input_error)
+from stateframe.engine.kernel_parallel import (
+    _UNIT,
+    PARALLEL_TOOL,
+    ParallelInputError,
+    _complete_arguments,
+    _request,
+    execute_parallel,
+    normalize_goal_aliases,
+    schema_input_error,
+)
 from stateframe.engine.kernel_parallel_admission import DirectorySnapshot
 from stateframe.engine.probes.react_repair import _contract_errors
 
@@ -121,6 +128,56 @@ def test_invalid_outcome_alias_keeps_outcome_refusal_through_schema(invalid):
     assert refusal.unit_id == "a"
     assert refusal.field == "outcome"
     assert refusal.hint == "provide outcome as text"
+
+
+def test_mixed_plan_names_the_subframe_that_is_missing_its_goal():
+    args = {"subframes": [
+        {"id": "a", "outcome": "Change a", "owns": ["a.py"]},
+        {"id": "b", "owns": ["b.py"]},
+    ]}
+
+    errors = _contract_errors((PARALLEL_TOOL,), "parallel", args)
+    assert errors
+    refusal = schema_input_error(args, errors)
+
+    assert (refusal.unit_id, refusal.field) == ("b", "goal")
+    assert refusal.hint == 'add "goal": ... and resend the whole parallel call'
+    args["subframes"][1]["goal"] = "Change b"
+    assert not _contract_errors((PARALLEL_TOOL,), "parallel", args)
+
+
+def test_oversized_outcome_is_refused_by_the_executor(tmp_path, monkeypatch):
+    from test_parallel_dispatch import ScriptedHost, setup_context
+
+    run, _, context = setup_context(tmp_path, monkeypatch)
+    args = {"subframes": [
+        {"id": "a", "outcome": "x" * 301, "owns": ["a.py"], "creates": []},
+        {"id": "b", "outcome": "Change b", "owns": ["b.py"], "creates": []},
+    ]}
+    host = ScriptedHost({"a": {"a.py": "VALUE = 2\n"}, "b": {"b.py": "OTHER = 2\n"}})
+
+    result = execute_parallel(context, args, host=host, store_root=run / "parallel" / "parallel_1")
+
+    assert result.admission.status == "REFUSED"
+    assert result.admission.refusal.reason == "INVALID_ARGUMENTS"
+    assert "subframe a outcome" in result.observation
+    assert host.calls == []
+
+
+def test_oversized_outcome_schema_refusal_names_the_supplied_field():
+    args = {"subframes": [
+        {"id": "a", "outcome": "x" * 301, "owns": ["a.py"]},
+        {"id": "b", "goal": "Change b", "owns": ["b.py"]},
+    ]}
+
+    errors = _contract_errors((PARALLEL_TOOL,), "parallel", args)
+    assert errors
+    refusal = schema_input_error(args, errors)
+
+    assert (refusal.unit_id, refusal.field) == ("a", "outcome")
+    assert "300 characters" in refusal.hint
+    args["subframes"][0]["outcome"] = "x" * 300
+    assert not _contract_errors((PARALLEL_TOOL,), "parallel", args)
 
 
 def test_shipped_parallel_example_uses_goal_for_every_subframe():
