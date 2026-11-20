@@ -202,6 +202,7 @@ def test_forced_manifest_is_parent_only_and_child_state_is_unit_scoped(
     run_dir = tmp_path / "run"
     manifest = tmp_path / "forced-plan.json"
     manifest.write_text(json.dumps(parent_plan, separators=(",", ":")))
+    assert json.loads(manifest.read_text()) == parent_plan
 
     with BarrierEndpoint(script["parent"][1:], script["subframes"]) as endpoint:
         completed = run_cli(

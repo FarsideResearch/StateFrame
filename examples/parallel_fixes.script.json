@@ -6,7 +6,7 @@
     "subframes": [
           {
             "id": "discount",
-            "outcome": "Return the price after applying the requested percentage discount.",
+            "goal": "Return the price after applying the requested percentage discount.",
             "owns": ["pricing/discount.py"],
             "creates": [],
             "exports": [],
@@ -17,7 +17,7 @@
           },
           {
             "id": "quantity",
-            "outcome": "Include quantity in the line total.",
+            "goal": "Include quantity in the line total.",
             "owns": ["pricing/quantity.py"],
             "creates": [],
             "exports": [],
@@ -28,7 +28,7 @@
           },
           {
             "id": "rounding",
-            "outcome": "Round monetary values to two decimal places.",
+            "goal": "Round monetary values to two decimal places.",
             "owns": ["pricing/rounding.py"],
             "creates": [],
             "exports": [],
@@ -39,7 +39,7 @@
           },
           {
             "id": "tax",
-            "outcome": "Treat the tax rate as a percentage and return the tax amount.",
+            "goal": "Treat the tax rate as a percentage and return the tax amount.",
             "owns": ["pricing/tax.py"],
             "creates": [],
             "exports": [{
@@ -63,7 +63,7 @@
           },
           {
             "id": "checkout",
-            "outcome": "Add the tax calculated by the declared pricing interface.",
+            "goal": "Add the tax calculated by the declared pricing interface.",
             "owns": ["pricing/checkout.py"],
             "creates": [],
             "exports": [],
