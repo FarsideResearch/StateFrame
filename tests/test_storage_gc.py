@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import fcntl
+import hashlib
+import io
 import os
 import subprocess
 import sys
@@ -539,3 +541,62 @@ def test_finished_run_cleanup_removes_read_only_checkpoint_and_env_trees(tmp_pat
     other = _finished_run(tmp_path, "other")
     _freeze(other / "checkpoints/0001/run/workspace")
     assert storage_gc.remove_checkpoints(other) and not (other / "checkpoints").exists()
+
+
+def test_gc_apply_reclaims_checkpoint_workspace_objects(tmp_path, monkeypatch):
+    monkeypatch.setenv("STATEFRAME_WORKSPACE_OBJECTS", "on")
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    monkeypatch.setenv("STATEFRAME_HOME", str(home))
+    from kernel_workspace_refs import Ref, RootKey, bind_run_store, commit_root
+
+    runs = tmp_path / "runs"
+    run = _finished_run(runs, "objects")
+    store = bind_run_store(run, "b" * 64, run_id=run.name)
+    payload = b"checkpoint-only-object" * (4 * 1024 * 1024 // 23)
+    oid = hashlib.sha256(payload).hexdigest()
+    with store.lease() as lease:
+        stored = lease.publish_stream(io.BytesIO(payload), size=len(payload),
+                                      max_bytes=len(payload))
+        assert stored.digest == oid
+        commit_root(lease, RootKey(run.name, "checkpoint", "0001"), Ref("blob", oid), expected=None)
+
+    objects_dir = store._path / "objects"
+    before = sum(path.stat().st_size for path in objects_dir.iterdir() if path.is_file())
+    assert before == len(payload)
+
+    storage_gc.run_gc([runs], apply=True, older_than_days=0, now=time.time() + 1,
+                      printer=lambda _line: None)
+
+    after = sum(path.stat().st_size for path in objects_dir.iterdir() if path.is_file())
+    assert after == 0
+
+
+def test_finished_run_cleanup_reclaims_checkpoint_workspace_objects(tmp_path, monkeypatch):
+    monkeypatch.setenv("STATEFRAME_WORKSPACE_OBJECTS", "on")
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    monkeypatch.setenv("STATEFRAME_HOME", str(home))
+    from kernel_workspace_refs import Ref, RootKey, bind_run_store, commit_root
+    from stateframe import runner
+
+    run = _finished_run(tmp_path / "runs", "finished-objects")
+    store = bind_run_store(run, "c" * 64, run_id=run.name)
+    payload = b"finished-checkpoint-object" * (4 * 1024 * 1024 // 27)
+    oid = hashlib.sha256(payload).hexdigest()
+    with store.lease() as lease:
+        stored = lease.publish_stream(io.BytesIO(payload), size=len(payload),
+                                      max_bytes=len(payload))
+        assert stored.digest == oid
+        commit_root(lease, RootKey(run.name, "checkpoint", "0001"), Ref("blob", oid), expected=None)
+    monkeypatch.setattr(runner.resume_module, "run_finished_for_good", lambda _run: True)
+
+    objects_dir = store._path / "objects"
+    before = sum(path.stat().st_size for path in objects_dir.iterdir() if path.is_file())
+    checkpoint_bytes = sum(
+        path.stat().st_size for path in (run / "checkpoints").rglob("*") if path.is_file()
+    )
+    assert before == len(payload)
+    assert runner.clean_finished_checkpoints(run) == checkpoint_bytes
+    after = sum(path.stat().st_size for path in objects_dir.iterdir() if path.is_file())
+    assert after == 0

@@ -3105,7 +3105,15 @@ def clean_finished_checkpoints(run_dir: Path, *, keep: bool = False) -> int | No
             pass
     from .storage_gc import remove_tree
     remove_tree(root)
-    return None if root.exists() else size
+    if root.exists():
+        return None
+    try:
+        from .engine.kernel_workspace_refs import collect_run_objects
+
+        collect_run_objects(run_dir)
+    except Exception as error:
+        print(f"warning: workspace objects were not reclaimed: {type(error).__name__}: {error}")
+    return size
 
 
 def keep_run_env_requested(flag: bool = False, environ=None) -> bool:

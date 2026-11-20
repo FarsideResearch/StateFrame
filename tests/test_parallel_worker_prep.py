@@ -673,6 +673,31 @@ def test_prepare_worker_inherits_working_set_allocator_for_subframes(
         assert prepared["environment_sources"][key] == "parent:profile"
 
 
+def test_prepare_worker_binds_workspace_store_when_enabled(tmp_path, monkeypatch):
+    snapshot, run_dir, spec_path, spec, parent_spec, _parent_run = _unit_fixture(tmp_path)
+    stateframe_home = tmp_path / "stateframe-home"
+    stateframe_home.mkdir(mode=0o700)
+    monkeypatch.setenv("STATEFRAME_HOME", str(stateframe_home))
+    monkeypatch.setenv("STATEFRAME_WORKSPACE_OBJECTS", "on")
+    parent_spec["environment"]["STATEFRAME_HOME"] = str(stateframe_home)
+    parent_spec["environment"]["STATEFRAME_WORKSPACE_OBJECTS"] = "on"
+    from stateframe.parallel_worker import _child_environment
+    assert _child_environment({"environment": parent_spec["environment"]})["STATEFRAME_HOME"] == str(
+        stateframe_home)
+
+    prepare_worker(spec, spec_path, run_dir, snapshot, parent_spec=parent_spec)
+
+    from stateframe.runner import _workspace_engine_imports
+    with _workspace_engine_imports():
+        from kernel_workspace_refs import open_run_store
+
+        store = open_run_store(run_dir)
+    assert store._path.is_dir()
+    binding = (run_dir / ".workspace-objects.json").read_bytes()
+    prepare_worker(spec, spec_path, run_dir, snapshot, parent_spec=parent_spec)
+    assert (run_dir / ".workspace-objects.json").read_bytes() == binding
+
+
 def test_prepare_worker_builds_an_ordinary_isolated_run_from_verified_snapshot(tmp_path):
     snapshot, run_dir, spec_path, spec, parent_spec, parent_run = _unit_fixture(tmp_path)
     parent_spec["run_env"] = {"root": str(parent_run / "env"), "kind": "venv", "env": {}}

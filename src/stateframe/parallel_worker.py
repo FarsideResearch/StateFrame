@@ -490,6 +490,33 @@ def _prepare_hook_bundle(parent_run: Path, run_dir: Path, hooks: object, *, reus
         raise WorkerPreparationError(f"subframe hook bundle cannot be verified: {error}") from error
 
 
+def _bind_workspace_store(run_dir: Path, spec: UnitSpec, parent_spec: Mapping[str, object]) -> None:
+    environment = parent_spec.get("environment")
+    if not isinstance(environment, Mapping) or environment.get("STATEFRAME_WORKSPACE_OBJECTS") != "on":
+        return
+    engine_dir = parent_spec.get("engine_dir")
+    if not isinstance(engine_dir, str) or not Path(engine_dir).is_dir():
+        raise WorkerPreparationError("workspace object storage lacks its engine directory")
+
+    # Stable identities make retries idempotent while keeping each worker in its own store.
+    namespace = hashlib.sha256(
+        f"stateframe-subframe-workspace/1\0{spec.run_seed}\0{spec.unit_id}\0{spec.execution_id}"
+        .encode("utf-8")).hexdigest()
+    engine_path = str(Path(engine_dir).resolve())
+    added = engine_path not in sys.path
+    if added:
+        sys.path.insert(0, engine_path)
+    try:
+        from kernel_workspace_refs import bind_run_store
+
+        bind_run_store(run_dir, namespace, run_id=namespace[:32])
+    except (ImportError, OSError, ValueError) as error:
+        raise WorkerPreparationError("subframe workspace object store could not be bound") from error
+    finally:
+        if added:
+            sys.path.remove(engine_path)
+
+
 def prepare_worker(spec: UnitSpec, spec_path: Path, run_dir: Path, start_snapshot: Path,
                    *, parent_spec: dict) -> Path:
     """Persist an ordinary subframe run spec and exactly one workspace clone of its start snapshot."""
@@ -538,6 +565,7 @@ def prepare_worker(spec: UnitSpec, spec_path: Path, run_dir: Path, start_snapsho
         raise WorkerPreparationError("start snapshot manifest digest does not match the subframe spec")
 
     run_dir.mkdir(parents=True, exist_ok=True)
+    _bind_workspace_store(run_dir, spec, parent_spec)
     spec_file = run_dir / "spec.json"
     workspace = run_dir / "workspace"
     if spec_file.is_file():
@@ -1133,6 +1161,10 @@ def _child_environment(spec: Mapping[str, object]) -> dict[str, str]:
                 env[name] = value
             else:
                 env.pop(name, None)
+    if environment.get("STATEFRAME_WORKSPACE_OBJECTS") == "on":
+        stateframe_home = environment.get("STATEFRAME_HOME")
+        if isinstance(stateframe_home, str) and stateframe_home:
+            env["STATEFRAME_HOME"] = stateframe_home
 
     # Credentials are named in the spec; values stay in the launch environment only.
     key_names = [spec.get("api_key_env")]

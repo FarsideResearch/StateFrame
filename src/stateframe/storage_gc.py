@@ -389,6 +389,9 @@ def remove_checkpoints(run_dir: str | os.PathLike[str]) -> int:
         return 0
     size = _logical_tree_bytes(root)
     remove_tree(root)
+    from .engine.kernel_workspace_refs import collect_run_objects
+
+    collect_run_objects(Path(run_dir))
     return size
 
 

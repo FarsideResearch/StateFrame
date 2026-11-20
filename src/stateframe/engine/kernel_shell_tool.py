@@ -297,9 +297,8 @@ class ShellTool:
         consumers = module.consumers_for(self.root) if module is not None else None
         if consumers is None:
             import os
-            if os.environ.get("STATEFRAME_WORKSPACE_OBJECTS") == "on":
-                if not self.capability.sandboxed:
-                    raise EffectError("workspace object storage requires isolated shell execution")
+            if (os.environ.get("STATEFRAME_WORKSPACE_OBJECTS") == "on"
+                    and self.capability.sandboxed):
                 from kernel_workspace_consumers import bind_run_consumers
                 consumers = bind_run_consumers(
                     self.run_dir, self.root, parent=Path(self.spec.get("parent_snapshot", self.root)),
