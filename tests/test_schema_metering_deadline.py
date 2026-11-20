@@ -139,7 +139,8 @@ def test_parallel_binds_share_one_tokenizer_with_bounded_workers(tmp_path, monke
         assert not any(worker.is_alive() for worker in workers)
 
 
-def test_startup_fallback_is_journaled_and_replayed_byte_for_byte(tmp_path, monkeypatch):
+@pytest.mark.parametrize("archive_interrupted", [False, True], ids=["normal", "interrupted-archive"])
+def test_startup_fallback_is_journaled_and_replayed_byte_for_byte(tmp_path, monkeypatch, archive_interrupted):
     from kernel_journal_store import open_journal
     from kernel_measurement import resolve_journal_blob_refs
     from stateframe import cli, runner
@@ -194,6 +195,12 @@ raise SystemExit(engine["_run_cli"](sys.argv))
         assert posts_after_live == 1
         # Reclassify the completed first exchange as interrupted so resume replays it.
         (run / "engine-result.json").write_text(json.dumps({"result": {"result": "CANCELLED"}}))
+        if archive_interrupted:
+            # Resume creates the archive and moves the journal before moving the wire tape.
+            partial = run / "attempts" / "1"
+            partial.mkdir(parents=True)
+            shutil.copy2(run / "spec.json", partial / "spec.json")
+            (run / "worker").rename(partial / "worker")
         assert cli.main(["resume", str(run), "--quiet"]) == 1
         assert json.loads((run / "sends.jsonl").read_text().splitlines()[0])["replayed"] is True
         assert wire.read_bytes() == live
