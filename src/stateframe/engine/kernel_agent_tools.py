@@ -16,6 +16,7 @@ from kernel_agent_schemas import (
     BUILTIN_SCHEMAS,
     JOB_NAMES,
     OBSERVATION_NAMES,
+    SchemaMeteringTimeout,
     prepare_schema_measurement,
 )
 from kernel_exec_session import ExecSessionError
@@ -34,6 +35,41 @@ def _tokenizer_auth(spec):
     key = os.environ.get(key_name, "") if isinstance(key_name, str) else ""
     endpoint = spec.get("chat_url")
     return key or None, endpoint if isinstance(endpoint, str) else None
+
+
+def _replayed_schema_budget(spec):
+    resume = spec.get("resume")
+    if not isinstance(resume, dict) or resume.get("restart_live"):
+        return None
+    tape = resume.get("tape")
+    first = tape[0] if tape else resume.get("pending")
+    checkpoint = resume.get("checkpoint")
+    if first is None and (not isinstance(checkpoint, dict) or checkpoint.get("status") == "skipped"):
+        return None
+
+    from kernel_journal_store import journal_paths, open_journal
+    from kernel_measurement import digest, resolve_journal_blob_refs
+
+    # A resumed attempt can carry forward sends from an earlier archive.
+    # Use the journal that accompanied the first request being rebuilt.
+    request = first.get("request") if first is not None else None
+    attempt = Path(request).parent.parent if request else Path(resume["previous_attempt"])
+    paths = journal_paths(attempt / "worker" / "measurement-runs")
+    if len(paths) != 1:
+        raise ToolReplayRefused("Cannot locate the startup journal for the recorded request")
+    try:
+        with open_journal(paths[0]) as stream:
+            started = json.loads(stream.readline())
+        manifest = resolve_journal_blob_refs(started["manifest"], paths[0], {})
+        if (started.get("kind") != "run_started" or not isinstance(manifest, dict)
+                or started.get("config_hash") != digest(manifest)):
+            raise ValueError("invalid run start")
+    except (OSError, ValueError, TypeError, KeyError) as error:
+        raise ToolReplayRefused("Invalid startup journal for the recorded request") from error
+    budget = manifest.get("startup_schema_budget")
+    if budget is None:
+        raise ToolReplayRefused("Recorded startup schema counts are missing")
+    return budget
 
 
 class AgentTools:
@@ -84,30 +120,48 @@ class AgentTools:
         # STATEFRAME_GIT_COMMIT: commit and branch tools, absent from every request when off.
         self.commit_names = frozenset(kernel_git_commit.TOOL_NAMES) if kernel_git_commit.enabled() else frozenset()
         self.names = OBSERVATION_NAMES | self.commit_names | self.custom.keys()
-        measure_schema_budget = self._prepare_schema_budget()
         self._pending_schema_budget = None
-        if defer_schema_budget and shell.spec.get("chat_url"):
-            from concurrent.futures import Future
-            from threading import Thread
+        self.startup_schema_budget = None
+        self._defer_schema_budget = defer_schema_budget and bool(shell.spec.get("chat_url"))
+        if self._defer_schema_budget:
+            self.startup_schema_budget = _replayed_schema_budget(shell.spec)
+            if self.startup_schema_budget is not None:
+                self._write_schema_budget(self.startup_schema_budget["counts"])
+            elif not self.mcp_servers:
+                self._start_schema_budget()
+        elif not self.mcp_servers:
+            self._write_schema_budget(self._prepare_schema_budget()())
 
-            pending = Future()
-            self._pending_schema_budget = pending
-
-            def measure():
-                try:
-                    pending.set_result(measure_schema_budget())
-                except BaseException as error:  # noqa: BLE001 - forward worker failures to the caller
-                    pending.set_exception(error)
-
-            # Workspace preparation can proceed while the tokenizer checks the schemas.
-            Thread(target=measure, name="tool-schema-budget", daemon=True).start()
-        else:
-            self._write_schema_budget(measure_schema_budget())
-
-    def _prepare_schema_budget(self):
+    def _prepare_schema_budget(self, *, deadline=None):
         auth_key, endpoint = _tokenizer_auth(self.shell.spec)
         return prepare_schema_measurement(self.custom_schemas, endpoint=endpoint,
-                                          auth_key=auth_key, generation_endpoint=endpoint)
+                                          auth_key=auth_key, generation_endpoint=endpoint,
+                                          deadline=deadline)
+
+    def _start_schema_budget(self):
+        from concurrent.futures import Future
+        from threading import Thread
+
+        from kernel_request_diet import TOKENIZE_REQUEST_TIMEOUT_CAP_SECONDS
+
+        deadline = time.monotonic() + TOKENIZE_REQUEST_TIMEOUT_CAP_SECONDS
+        measure_schema_budget = self._prepare_schema_budget(deadline=deadline)
+        pending = Future()
+        self._pending_schema_budget = (deadline, measure_schema_budget, pending)
+
+        def measure():
+            if not pending.set_running_or_notify_cancel():
+                return
+            try:
+                counts = measure_schema_budget()
+            except BaseException as error:  # noqa: BLE001 - forward worker failures to the caller
+                pending.set_result((time.monotonic(), None, error))
+            else:
+                pending.set_result((time.monotonic(), counts, None))
+
+        # Workspace preparation can proceed while the tokenizer checks the schemas.
+        # An abandoned transport (including DNS) cannot hold up process exit.
+        Thread(target=measure, name="tool-schema-budget", daemon=True).start()
 
     def _write_schema_budget(self, budget):
         self.schema_budget = budget
@@ -117,13 +171,28 @@ class AgentTools:
             self.schema_budget_path = Path(report.name)
 
     def _finish_schema_budget(self):
-        pending = getattr(self, "_pending_schema_budget", None)
-        if pending is not None:
-            self._write_schema_budget(pending.result())
-            self._pending_schema_budget = None
+        waiting = getattr(self, "_pending_schema_budget", None)
+        if waiting is None:
+            return
+        deadline, measure, pending = waiting
+        try:
+            result = pending.result(timeout=max(0, deadline - time.monotonic()))
+        except TimeoutError:
+            result = None
+        if result is None or result[0] >= deadline or isinstance(result[2], SchemaMeteringTimeout):
+            pending.cancel()
+            counts = measure(estimate=True)
+            reason = "deadline"
+        else:
+            _, counts, error = result
+            if error is not None:
+                raise error
+            reason = "completed"
+        self._write_schema_budget(counts)
+        self.startup_schema_budget = {"reason": reason, "counts": counts}
+        self._pending_schema_budget = None
 
     def bind(self):
-        self._finish_schema_budget()
         if self.mcp_servers:
             from kernel_mcp_tools import discover
             from kernel_custom_tools import CustomToolError
@@ -137,7 +206,8 @@ class AgentTools:
                              shell_network=self.shell.settings.shell_network,
                              host_authorization=self.shell.settings.host_authorization is not None,
                              custom_schemas=self.custom_schemas, endpoint=self.shell.spec.get("chat_url"),
-                             auth_key=auth_key, generation_endpoint=generation_endpoint)
+                             auth_key=auth_key, generation_endpoint=generation_endpoint,
+                             budget_admission=self.shell.spec.get("mcp_schema_admission"))
             if (found.digest != self.shell.spec.get("mcp_tools_digest")
                     or [t.name for t in found.tools] != self.shell.spec.get("mcp_tools")
                     or list(found.omitted) != self.shell.spec.get("mcp_omitted")):
@@ -145,9 +215,12 @@ class AgentTools:
             self.custom.update({tool.name: tool for tool in found.tools})
             self.custom_schemas.extend(copy.deepcopy(found.schemas()))
             self.names = OBSERVATION_NAMES | self.commit_names | self.custom.keys()
-            measure_schema_budget = self._prepare_schema_budget()
-            self.schema_budget = measure_schema_budget()
-            self.schema_budget_path.write_text(json.dumps(self.schema_budget, sort_keys=True))
+            if self.startup_schema_budget is None:
+                if self._defer_schema_budget:
+                    self._start_schema_budget()
+                else:
+                    self._write_schema_budget(self._prepare_schema_budget()())
+        self._finish_schema_budget()
         if self.git is not None:
             self.git.workspace = self.shell.root
             self.git.baseline = Path(self.shell.spec.get("parent_snapshot", self.shell.root))

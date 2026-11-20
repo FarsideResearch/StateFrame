@@ -48,7 +48,8 @@ class ContinuationExecutive:
         if self._retention_enabled():
             from kernel_continuation_retention import ContinuationRetention
             self._retention = ContinuationRetention(journal)
-        journal.subscribe("continuation_executive", self._observe)
+        journal.subscribe("continuation_executive", self._observe,
+                          advance_audit=self._advance_audit_sequence)
         with journal.ownership():
             policy_record = {"schema": "continuation-policy/1", "scheduler": asdict(self.policy)}
             if self._policy_record is None:
@@ -262,6 +263,10 @@ class ContinuationExecutive:
         blockers = self._planned_artifacts.completion_blockers(now=now)
         return ("[planned artifacts] unresolved required inputs: "
                 + ", ".join(blockers)) if blockers else None
+
+    def _advance_audit_sequence(self, sequence: int) -> None:
+        if sequence == self._sequence + 1:
+            self._sequence = sequence
 
     def _observe(self, event: dict) -> None:
         if (event.get("run_id") != self.journal.run_id

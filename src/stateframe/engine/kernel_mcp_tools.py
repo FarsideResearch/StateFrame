@@ -271,6 +271,7 @@ class McpSet:
     tools: tuple[McpTool, ...] = ()
     digest: str = ""
     omitted: tuple[str, ...] = ()
+    budget_admission: tuple[bool, ...] = ()
 
     def __iter__(self):
         return iter(self.servers)
@@ -391,22 +392,26 @@ def _driver(server: McpServer, session, base_cap, workspace: Path, request: byte
 
 def discover_mcp(config: McpSet, session, base_cap, workspace: Path, *, custom_schemas=(),
                  endpoint: str | None = None, auth_key: str | None = None,
-                 generation_endpoint: str | None = None) -> McpSet:
-    # Host and child must admit the same tools, so both use the engine meter.
-    # Its own flat imports resolve through the engine path added at import time.
-    if __package__:
-        from .kernel_request_diet import RequestTokenMeter
-    else:
-        from kernel_request_diet import RequestTokenMeter
-    meter = RequestTokenMeter(
-        endpoint=endpoint, template_overhead_tokens=0,
-        auth_key=auth_key, generation_endpoint=generation_endpoint,
-    )
-    budget_custom = json.loads(json.dumps(custom_schemas))
-    for schema in budget_custom:
-        schema["function"]["parameters"]["properties"].setdefault("why", {"type": "string"})
+                 generation_endpoint: str | None = None,
+                 budget_admission: Sequence[bool] | None = None) -> McpSet:
+    if budget_admission is None:
+        if __package__:
+            from .kernel_request_diet import RequestTokenMeter
+        else:
+            from kernel_request_diet import RequestTokenMeter
+        meter = RequestTokenMeter(
+            endpoint=endpoint, template_overhead_tokens=0,
+            auth_key=auth_key, generation_endpoint=generation_endpoint,
+        )
+        budget_custom = json.loads(json.dumps(custom_schemas))
+        for schema in budget_custom:
+            schema["function"]["parameters"]["properties"].setdefault("why", {"type": "string"})
+    elif (not isinstance(budget_admission, (tuple, list))
+            or any(type(admitted) is not bool for admitted in budget_admission)):
+        raise McpError("invalid recorded MCP schema admission")
     admitted: list[McpTool] = []
     omitted: list[str] = []
+    decisions: list[bool] = []
     seen: set[str] = {item.get("function", {}).get("name") for item in custom_schemas
                       if isinstance(item, dict) and isinstance(item.get("function"), dict)
                       and isinstance(item["function"].get("name"), str)}
@@ -449,20 +454,30 @@ def discover_mcp(config: McpSet, session, base_cap, workspace: Path, *, custom_s
             tool = McpTool(name, server, remote, description,
                            parameters, _digest(_canonical((server.definition_digest,
                            server.executable_digest, value))))
-            candidate = [*budget_custom, *(McpSet((), tuple(admitted + [tool])).schemas())]
-            count, _ = meter.measure({"messages": [], "tools": candidate})
-            if count > SCHEMA_BUDGET:
+            if budget_admission is None:
+                candidate = [*budget_custom, *McpSet((), (*admitted, tool)).schemas()]
+                count, _ = meter.measure({"messages": [], "tools": candidate})
+                fits = count <= SCHEMA_BUDGET
+            else:
+                if len(decisions) >= len(budget_admission):
+                    raise McpError("MCP tool list or schema changed")
+                fits = budget_admission[len(decisions)]
+            decisions.append(fits)
+            if not fits:
                 omitted.append(f"OVER_BUDGET {name}")
                 continue
             admitted.append(tool)
             seen.add(name)
-    return McpSet(config.servers, tuple(admitted), _digest(_canonical(pinned)), tuple(omitted))
+    if budget_admission is not None and len(decisions) != len(budget_admission):
+        raise McpError("MCP tool list or schema changed")
+    return McpSet(config.servers, tuple(admitted), _digest(_canonical(pinned)), tuple(omitted), tuple(decisions))
 
 
 def discover(servers: Sequence[McpServer], workspace: Path, run_dir: Path, *,
              shell_network: str, host_authorization: bool, custom_schemas=(),
              endpoint: str | None = None, auth_key: str | None = None,
-             generation_endpoint: str | None = None) -> McpSet:
+             generation_endpoint: str | None = None,
+             budget_admission: Sequence[bool] | None = None) -> McpSet:
     """Use the same sandbox boundary on the host and in the engine child."""
     workspace = Path(workspace).resolve(strict=True)
     run_dir = Path(run_dir).resolve(strict=True)
@@ -476,7 +491,8 @@ def discover(servers: Sequence[McpServer], workspace: Path, run_dir: Path, *,
     try:
         return discover_mcp(McpSet(tuple(servers)), None, cap, workspace,
                             custom_schemas=custom_schemas, endpoint=endpoint,
-                            auth_key=auth_key, generation_endpoint=generation_endpoint)
+                            auth_key=auth_key, generation_endpoint=generation_endpoint,
+                            budget_admission=budget_admission)
     except ExecSessionError as error:
         raise McpError(f"MCP discovery boundary failed: {error}") from error
 

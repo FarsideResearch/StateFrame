@@ -9,11 +9,15 @@ cannot fit its stage budget.
 from __future__ import annotations
 
 import copy
+import functools
 import hashlib
+import http.client
+import io
 import json
 import math
 import os
 import re
+import socket
 import ssl
 import stat
 import sys
@@ -435,6 +439,7 @@ class _TokenizeRedirects(urllib.request.HTTPRedirectHandler):
             return None
         redirected._stateframe_route_allow_remote = route_allow_remote
         redirected._stateframe_generation_origin = generation_origin
+        redirected._stateframe_tokenize_deadline = getattr(req, "_stateframe_tokenize_deadline", None)
         from kernel_redirect_policy import (
             REDIRECT_CREDENTIAL_ORIGIN_ATTRIBUTE,
             REDIRECT_SECRET_HEADERS,
@@ -450,6 +455,87 @@ class _TokenizeRedirects(urllib.request.HTTPRedirectHandler):
         return redirected
 
 
+def _tokenize_remaining(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        _log_tokenizer_deadline()
+        raise TimeoutError("tokenizer request deadline expired")
+    return remaining
+
+
+class _TokenizeDeadlineReader(io.RawIOBase):
+    """Check the deadline before each socket read, including HTTP framing."""
+
+    def __init__(self, sock, deadline):
+        self._socket = sock
+        self._raw = sock.makefile("rb", buffering=0)
+        self._deadline = deadline
+        self._timeout = sock.gettimeout()
+
+    def readable(self):
+        return True
+
+    def readinto(self, buffer):
+        self._socket.settimeout(min(self._timeout, _tokenize_remaining(self._deadline)))
+        return self._raw.readinto(buffer)
+
+    def close(self):
+        try:
+            self._raw.close()
+        finally:
+            super().close()
+
+
+def _tokenize_response(deadline, sock, *args, **kwargs):
+    response = http.client.HTTPResponse(sock, *args, **kwargs)
+    response.fp.close()
+    response.fp = io.BufferedReader(_TokenizeDeadlineReader(sock, deadline))
+    return response
+
+
+def _connect_tokenizer_socket(deadline, address, timeout, source_address=None):
+    """Spend the remaining deadline across address resolution and connection attempts."""
+    host, port = address
+    last_error = OSError("getaddrinfo returns an empty list")
+    _tokenize_remaining(deadline)
+    for family, kind, protocol, _, target in socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM):
+        remaining = _tokenize_remaining(deadline)
+        sock = None
+        try:
+            sock = socket.socket(family, kind, protocol)
+            sock.settimeout(min(timeout, remaining))
+            if source_address:
+                sock.bind(source_address)
+            sock.connect(target)
+            sock.settimeout(min(timeout, _tokenize_remaining(deadline)))
+        except OSError as error:
+            last_error = error
+            if sock is not None:
+                sock.close()
+        else:
+            return sock
+    raise last_error
+
+
+def _tokenize_connection(connection_type, request):
+    deadline = getattr(request, "_stateframe_tokenize_deadline", None)
+    if deadline is None:
+        return connection_type
+
+    def connect(host, **kwargs):
+        connection = connection_type(host, **kwargs)
+        connection._create_connection = functools.partial(_connect_tokenizer_socket, deadline)
+        connection.response_class = functools.partial(_tokenize_response, deadline)
+        return connection
+
+    return connect
+
+
+class _TokenizeHTTPHandler(urllib.request.HTTPHandler):
+    def http_open(self, request):
+        return self.do_open(_tokenize_connection(http.client.HTTPConnection, request), request)
+
+
 class _TokenizeHTTPSHandler(urllib.request.HTTPSHandler):
     """Use the meter's shared context without sharing redirect policy."""
 
@@ -459,7 +545,6 @@ class _TokenizeHTTPSHandler(urllib.request.HTTPSHandler):
         self._context_provider = context_provider
         self._context: ssl.SSLContext | None = None
         self._context_lock = threading.Lock()
-        self._check_hostname = None
 
     def https_open(self, req):
         if self._context is None:
@@ -470,9 +555,8 @@ class _TokenizeHTTPSHandler(urllib.request.HTTPSHandler):
                         if self._context_provider is not None
                         else ssl._create_default_https_context()
                     )
-        # Delegate connection kwargs to urllib so supported Python versions
-        # retain their native HTTPSConnection signature and hostname policy.
-        return super().https_open(req)
+        return self.do_open(_tokenize_connection(http.client.HTTPSConnection, req), req,
+                            context=self._context)
 
 
 def _build_tokenize_opener(
@@ -480,7 +564,7 @@ def _build_tokenize_opener(
 ) -> urllib.request.OpenerDirector:
     """Build a fresh opener; only its TLS context may be shared across calls."""
     return urllib.request.build_opener(
-        urllib.request.ProxyHandler({}), _TokenizeRedirects(),
+        urllib.request.ProxyHandler({}), _TokenizeRedirects(), _TokenizeHTTPHandler(),
         _TokenizeHTTPSHandler(context_provider),
     )
 
@@ -530,11 +614,13 @@ def _http_tokenize(content: str, url: str, *, deadline: float | None = None,
     if deadline is not None and time.monotonic() >= deadline:
         _log_tokenizer_deadline()
         raise TimeoutError("tokenizer request deadline expired")
-    if (probe_deadline is not None and time.monotonic() >= probe_deadline
-            and capabilities.props_status is None and capabilities.slots_status is None
-            and not capabilities.continuation):
-        _log_tokenizer_deadline()
-        raise TimeoutError("tokenizer request deadline expired")
+    if (probe_deadline is not None and capabilities.props_status is None
+            and capabilities.slots_status is None and not capabilities.continuation):
+        degradation = capabilities.probe_degradation
+        if (time.monotonic() >= probe_deadline or (degradation is not None
+                and degradation.last_error_type in {"TimeoutError", "TimeoutExpired"})):
+            _log_tokenizer_deadline()
+            raise TimeoutError("tokenizer request deadline expired")
     require_feature(capabilities, "request tokenization")
 
     payload = json.dumps({
@@ -546,6 +632,7 @@ def _http_tokenize(content: str, url: str, *, deadline: float | None = None,
     request = urllib.request.Request(url, data=payload, headers=headers, method="POST")
     request._stateframe_route_allow_remote = route_allow_remote
     request._stateframe_generation_origin = generation_origin
+    request._stateframe_tokenize_deadline = deadline
     # Budget the actual UTF-8 JSON payload, including escaping. Three times
     # SPEED's upper measured relay cost covers the earlier run 134 KB load case.
     timeout = min(TOKENIZE_REQUEST_TIMEOUT_CAP_SECONDS, max(
@@ -555,14 +642,13 @@ def _http_tokenize(content: str, url: str, *, deadline: float | None = None,
         * TOKENIZE_RELAY_REFERENCE_SECONDS * len(payload) / TOKENIZE_RELAY_REFERENCE_BYTES,
     ))
     if deadline is not None:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            _log_tokenizer_deadline()
-            raise TimeoutError("tokenizer request deadline expired")
-        timeout = min(timeout, remaining)
+        timeout = min(timeout, _tokenize_remaining(deadline))
     opener = opener or _build_tokenize_opener()
     with opener.open(request, timeout=timeout) as response:
         raw = response.read(_MAX_TOKENIZE_RESPONSE_BYTES + 1)
+    if deadline is not None and time.monotonic() >= deadline:
+        _log_tokenizer_deadline()
+        raise TimeoutError("tokenizer request deadline expired")
     if len(raw) > _MAX_TOKENIZE_RESPONSE_BYTES:
         raise ValueError("oversized tokenizer response")
     decoded = json.loads(raw)

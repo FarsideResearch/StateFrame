@@ -2992,7 +2992,7 @@ class StateFrameRuntime:
                  tools: object, temperature: float,
                  source_resolver: Callable[[str, str], str | None], step_limit: int | None = 200,
                  multi_file: bool = False, edit_contract: dict | None = None, workspace=None,
-                 resume=None, endpoint_profile: object | None = None):
+                 resume=None, endpoint_profile: object | None = None, startup_schema_budget=None):
         self.owner = owner
         self.stateframe_micrograph_mode = os.environ.get("STATEFRAME_MICROGRAPH", "off").strip().lower()
         self.micrograph_wire = None
@@ -4982,6 +4982,8 @@ class StateFrameRuntime:
             if any(mode != Mode.OFF for name, mode in self.modes.items()
                    if name not in {"history_cap", "render_selection", "pilot"}):
                 raise ValueError("restart cannot reset an active organ without its replay")
+        if startup_schema_budget is not None:
+            manifest["startup_schema_budget"] = startup_schema_budget
         if use_continuation:
             from kernel_continuation_journal import ContinuationJournal
             output.mkdir(parents=True, exist_ok=True)

@@ -31,7 +31,7 @@ from pathlib import Path
 from kernel_continuation_menu_authority import EDIT_TOOLS
 
 from kernel_measurement import (
-    AuditJournal, HostSpanRecorder, canonical_bytes, digest,
+    AuditJournal, HostSpanRecorder, JOURNAL_BLOB_THRESHOLD_BYTES, canonical_bytes, digest,
     externalize_journal_fields, profile_host_span, profiled_journal_span,
     resolve_journal_blob_refs, host_span_profiles_enabled,
     _runtime_stateframe_mode_snapshot,
@@ -54,6 +54,12 @@ MAX_FRAMEFIT_RECEIPT_FIELD_CHARS = 1024
 GROUP_COMMIT_ENV = "SF_JOURNAL_GROUP_COMMIT"
 BATCHABLE_TELEMETRY_KINDS = frozenset({"turn_timing", "action_envelope_metrics"})
 CHECKPOINT_KIND = "continuation_worker_checkpoint"
+_OBSERVER_FAILURE_KIND = "journal_observer_failed"
+_OBSERVER_FAILURE_DETAIL_LIMIT = 20
+_OBSERVER_FAILURE_TEXT_FIELDS = ("subscriber", "event_kind", "error_type", "error")
+_OBSERVER_FAILURE_INTENT = ".journal-observer-report"
+_OBSERVER_FAILURE_INTENT_LIMIT = _OBSERVER_FAILURE_DETAIL_LIMIT * (
+    len(_OBSERVER_FAILURE_TEXT_FIELDS) * JOURNAL_BLOB_THRESHOLD_BYTES + 1024)
 # One journal kind per check execution. A re-record that dedup suppresses writes no check_receipt row, so it
 # journals CHECK_RECEIPT_UNCHANGED instead (emitted only in dedup "on" mode; off-mode bytes never change).
 CHECK_RECEIPT_UNCHANGED_KIND = "check_receipt_unchanged"
@@ -88,6 +94,15 @@ def framefit5_journal_origin_mode(environ: Mapping[str, str] | None = None) -> s
     source = os.environ if environ is None else environ
     value = (source.get(FRAMEFIT5_JOURNAL_ORIGIN_ENV, "off") or "off").strip().lower()
     return value if value in {"off", "shadow", "on"} else "off"
+
+
+def _is_observer_failure_overflow(record: Mapping[str, object]) -> bool:
+    return record.get("kind") == _OBSERVER_FAILURE_KIND and "dropped_count" in record
+
+
+def _observer_failure_message(error: Exception) -> str:
+    # Filesystem errors may include surrogate-escaped filename bytes.
+    return str(error)[:200].encode("utf-8", errors="backslashreplace").decode("utf-8")[:200]
 
 
 RESERVED = frozenset({
@@ -603,7 +618,7 @@ _PUBLICATION_SWITCH = "STATEFRAME_TURN_ATOMIC_PUBLICATION"
 
 
 def _recover_publication(path: Path, fd: int) -> None:
-    """Recover only an explicitly marked, unacknowledged batch under the writer lease."""
+    """Recover a marked append under the writer lease."""
     intent = path.parent / _PUBLICATION_INTENT
     try:
         with os.fdopen(os.open(intent, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as stream:
@@ -612,26 +627,48 @@ def _recover_publication(path: Path, fd: int) -> None:
             raw = stream.read(1025)
     except FileNotFoundError:
         return
+    complete_row = False
     try:
-        size, start, tail_hash = json.loads(raw)
+        size, start, tail_hash, *pending_row = json.loads(raw)
+        file_size = os.fstat(fd).st_size
         if (len(raw) > 1024 or type(size) is not int or type(start) is not int
-                or not 0 <= start < size <= os.fstat(fd).st_size
+                or not 0 <= start < size <= file_size
                 or size - start > MAX_RECORD_BYTES or not isinstance(tail_hash, str)):
             raise ValueError("invalid rollback span")
         tail = os.pread(fd, size - start, start)
         if (len(tail) != size - start
                 or hashlib.sha256(tail).hexdigest() != tail_hash):
             raise ValueError("journal rollback prefix does not match")
+        if pending_row:
+            row_size, row_hash = pending_row
+            suffix_size = file_size - size
+            if (type(row_size) is not int or not 1 <= row_size <= MAX_RECORD_BYTES
+                    or suffix_size > row_size or not isinstance(row_hash, str)
+                    or re.fullmatch(r"[0-9a-f]{64}", row_hash) is None):
+                raise ValueError("invalid pending journal row")
+            suffix = os.pread(fd, suffix_size, size)
+            if len(suffix) != suffix_size:
+                raise ValueError("pending journal row changed")
+            complete_row = suffix_size == row_size
+            if complete_row:
+                if hashlib.sha256(suffix).hexdigest() != row_hash:
+                    raise ValueError("pending journal row does not match")
+            elif b"\n" in suffix:
+                raise ValueError("short pending journal row contains a line break")
     except (ValueError, TypeError) as error:
         raise JournalError("invalid journal publication intent") from error
-    os.ftruncate(fd, size)
+    if not complete_row:
+        os.ftruncate(fd, size)
     os.fsync(fd)
     intent.unlink()
     _sync_directory(path.parent)
 
 
 def recover_publication_mirror(path: Path) -> None:
-    """Repair a stopped continuation journal before a legacy reader opens it."""
+    """Repair pending appends and reports before a stopped journal is archived."""
+    if os.path.lexists(path.parent / _OBSERVER_FAILURE_INTENT):
+        ContinuationJournal._recover_observer_failure_mirror(path)
+        return
     if not os.path.lexists(path.parent / _PUBLICATION_INTENT):
         return
     fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -650,6 +687,78 @@ def _sync_directory(path: Path) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+@dataclass
+class _ObserverFailureReport:
+    base_sequence: int
+    base_head: str
+    details: list[dict[str, object]]
+    overflow: tuple[int, int, int] | None
+
+    def detail(self, index: int, journal_path: Path) -> dict[str, object]:
+        try:
+            value = resolve_journal_blob_refs(self.details[index], journal_path)
+        except (OSError, ValueError) as error:
+            raise JournalError("invalid pending observer failure detail") from error
+        if not isinstance(value, dict) or any(
+                not isinstance(value.get(key), str) for key in _OBSERVER_FAILURE_TEXT_FIELDS):
+            raise JournalError("invalid pending observer failure detail")
+        return value
+
+    def summary(self) -> dict[str, int] | None:
+        if self.overflow is None:
+            return None
+        first, last, count = self.overflow
+        return {"first_event_sequence": first, "last_event_sequence": last, "dropped_count": count}
+
+    def save(self, path: Path) -> None:
+        if __package__:
+            from .kernel_turn_publication import atomic_file
+        else:
+            from kernel_turn_publication import atomic_file
+
+        payload = canonical_bytes([self.base_sequence, self.base_head, self.details, self.overflow])
+        if len(payload) > _OBSERVER_FAILURE_INTENT_LIMIT:
+            raise JournalError("observer failure report exceeds limit")
+        atomic_file(path, payload)
+
+    @classmethod
+    def load(cls, path: Path, head_sequence: int) -> _ObserverFailureReport | None:
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
+            return None
+        try:
+            with os.fdopen(fd, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_size > _OBSERVER_FAILURE_INTENT_LIMIT:
+                    raise ValueError("invalid report file")
+                raw = stream.read(info.st_size + 1)
+                if len(raw) != info.st_size:
+                    raise ValueError("changed report file")
+            base, head, details, stored_overflow = json.loads(raw)
+            if (type(base) is not int or not 1 <= base <= head_sequence
+                    or not isinstance(head, str) or not isinstance(details, list)
+                    or not details or len(details) > _OBSERVER_FAILURE_DETAIL_LIMIT):
+                raise ValueError("invalid report base or detail count")
+            for detail in details:
+                if (not isinstance(detail, dict) or len(detail) != len(_OBSERVER_FAILURE_TEXT_FIELDS) + 1
+                        or any(not isinstance(detail.get(key), (str, dict))
+                               for key in _OBSERVER_FAILURE_TEXT_FIELDS)
+                        or type(detail.get("event_sequence")) is not int
+                        or not 1 <= detail["event_sequence"] <= base):
+                    raise ValueError("invalid failure detail")
+            overflow = None
+            if stored_overflow is not None:
+                first, last, count = stored_overflow
+                if (any(type(value) is not int for value in (first, last, count))
+                        or not 1 <= first <= last <= head_sequence or count < 1):
+                    raise ValueError("invalid failure summary")
+                overflow = first, last, count
+            return cls(base, head, details, overflow)
+        except (TypeError, ValueError, RecursionError) as error:
+            raise JournalError("invalid pending observer failure report") from error
 
 
 class _ReplayBlobCache(OrderedDict):
@@ -788,8 +897,9 @@ class ContinuationJournal(AuditJournal):
         self._poisoned = False
         # 10-08 (L126e 928/929 died at assert_owner with no cause): why the writer is unusable.
         self._poison_cause: str | None = None
-        self._observer_failures: list[dict[str, object]] = []
-        self._reporting_observer_failures = False
+        self._pending_observer_failure_report: _ObserverFailureReport | None = None
+        self._observer_batch_head: tuple[int, str] | None = None
+        self._reporting_observer_failures: _ObserverFailureReport | None = None
         self._sequence = 0
         self._head: str | None = None
         self._size = 0
@@ -826,6 +936,7 @@ class ContinuationJournal(AuditJournal):
         self._replaying = False
         self._notifying = False
         self._subscribers: dict[str, Callable[[dict], None]] = {}
+        self._subscriber_audit_advance: dict[str, Callable[[int], None]] = {}
         self._subscriber_kinds: dict[str, frozenset[str] | None] = {}
         self._subscriber_cursors: dict[str, int] = {}
         self._subscriber_cursor_kinds: dict[str, frozenset[str] | None] = {}
@@ -1082,29 +1193,19 @@ class ContinuationJournal(AuditJournal):
         obj._initialize(Path(path))
         try:
             obj._open(create=False)
-            first = None
-            last = None
-            for record in obj.records():
-                if record.get("kind") == CHECKPOINT_KIND:
-                    obj._checkpoint_seen = True
-                if first is None:
-                    first = record
-                last = record
-            if first is None or last is None:
-                raise JournalError("empty journal")
+            first, last = obj._read_resume_bounds()
             if (first.get("manifest") != expected_manifest
                     or first.get("config_hash") != expected_config
                     or first["task_id"] != task_id):
                 raise JournalError("task/config identity mismatch")
             if expected_head is not None and last["record_hash"] != expected_head:
                 raise JournalError("trusted journal head mismatch")
-            obj.run_id, obj.task_id = first["run_id"], task_id
+            obj._restore_resume_state(first, last)
             from kernel_wire_identity import bind_wire_task_identity
             bind_wire_task_identity(task_id)
-            obj.manifest = copy.deepcopy(first["manifest"])
-            obj.config_hash = expected_config
-            obj._sequence, obj._head = last["sequence"], last["record_hash"]
-            obj.emit("continuation_writer_resumed", previous_head=obj._head,
+            obj._resume_observer_failure_report()
+            # The trusted anchor precedes any audit rows written by recovery.
+            obj.emit("continuation_writer_resumed", previous_head=last["record_hash"],
                      anchor_status="TRUSTED_HEAD_MATCH" if expected_head is not None
                      else "EXPLICIT_UNANCHORED_RECOVERY",
                      execution_authorized=False)
@@ -1112,6 +1213,37 @@ class ContinuationJournal(AuditJournal):
         except BaseException:
             obj.close()
             raise
+
+    def _read_resume_bounds(self) -> tuple[dict, dict]:
+        first = last = None
+        for record in self.records():
+            if record.get("kind") == CHECKPOINT_KIND:
+                self._checkpoint_seen = True
+            if first is None:
+                first = record
+            last = record
+        if first is None or last is None:
+            raise JournalError("empty journal")
+        return first, last
+
+    def _restore_resume_state(self, first: dict, last: dict) -> None:
+        self.run_id, self.task_id = first["run_id"], first["task_id"]
+        self.manifest = copy.deepcopy(first["manifest"])
+        self.config_hash = first["config_hash"]
+        self._sequence, self._head = last["sequence"], last["record_hash"]
+
+    @classmethod
+    def _recover_observer_failure_mirror(cls, path: Path) -> None:
+        """Finish the audit report under the writer lease before archiving."""
+        obj = cls.__new__(cls)
+        obj._initialize(path)
+        try:
+            obj._open(create=False)
+            first, last = obj._read_resume_bounds()
+            obj._restore_resume_state(first, last)
+            obj._resume_observer_failure_report()
+        finally:
+            obj.close()
 
     @contextmanager
     def ownership(self) -> Iterator[None]:
@@ -1121,11 +1253,14 @@ class ContinuationJournal(AuditJournal):
             yield
 
     def subscribe(self, name: str, observer: Callable[[dict], None], *,
-                  kinds: Sequence[str] | None = None) -> None:
-        """Validate replay, commit each completed delivery, then attach the observer."""
+                  kinds: Sequence[str] | None = None,
+                  advance_audit: Callable[[int], None] | None = None) -> None:
+        """Replay and attach an observer, with optional audit-only cursor updates."""
         with self.ownership():
             if self._notifying or not name or name in self._subscribers or not callable(observer):
                 raise JournalError("invalid or already attached projection")
+            if advance_audit is not None and not callable(advance_audit):
+                raise JournalError("audit cursor update must be callable")
             selected = None if kinds is None else frozenset(str(kind) for kind in kinds)
             if selected is not None and not all(selected):
                 raise JournalError("subscriber kinds must be non-empty strings")
@@ -1166,6 +1301,7 @@ class ContinuationJournal(AuditJournal):
             # uncommitted and makes it the next row for a same-filter retry.
             self._subscriber_cursor_kinds[name] = selected
             self._notifying = True
+            interruption = None
             try:
                 page_size = self._record_cache_limit or RECORD_CACHE_LIMIT
                 page_size = max(1, page_size)
@@ -1185,6 +1321,16 @@ class ContinuationJournal(AuditJournal):
                         # not filter, deliver, or copy those already committed rows.
                         if legacy_mode and sequence <= resume_cursor:
                             continue
+                        if _is_observer_failure_overflow(record):
+                            if advance_audit is not None:
+                                self.assert_owner()
+                                try:
+                                    advance_audit(sequence)
+                                except Exception as error:
+                                    interruption = error
+                                    raise
+                                self._subscriber_cursors[name] = sequence
+                            continue
                         if selected is not None and record.get("kind") not in selected:
                             continue
                         self.assert_owner()
@@ -1202,10 +1348,24 @@ class ContinuationJournal(AuditJournal):
                     # publication advances the cursor for every durable row.
                     self._subscriber_cursors[name] = final_cursor
                 self._subscribers[name] = observer
+                if advance_audit is not None:
+                    self._subscriber_audit_advance[name] = advance_audit
                 self._subscriber_kinds[name] = selected
+            except BaseException as error:
+                if not isinstance(error, Exception):
+                    interruption = error
+                raise
             finally:
                 self._notifying = False
-        self._report_observer_failures()
+                if interruption is not None:
+                    # Failures from committed replay deliveries belong to this
+                    # attempt, even when a later callback interrupts it.
+                    try:
+                        self._report_observer_failures()
+                    except BaseException as report_error:  # noqa: BLE001 - preserve the replay interruption
+                        interruption.add_note(
+                            f"Observer failure reporting failed ({type(report_error).__name__})")
+            self._report_observer_failures()
 
     def subscriber_cursor(self, name: str) -> int:
         with self._lock:
@@ -1791,7 +1951,7 @@ class ContinuationJournal(AuditJournal):
                     self._poison("journal replaced while opening reader")
                     raise JournalError("journal replaced while opening reader")
                 sequence, previous, task_id = 0, None, None
-                observed_through = self._sequence if getattr(self, "_observing_publication", False) else None
+                observed_through = self._sequence if self._observer_batch_head is not None else None
                 while observed_through is None or sequence < observed_through:
                     offset = handle.tell()
                     line = handle.readline(MAX_RECORD_BYTES + 1)
@@ -2295,6 +2455,9 @@ class ContinuationJournal(AuditJournal):
                 view = memoryview(line)
                 offset = self._size
                 with self.host_spans.measure("append_fsync", sequence=record["sequence"]):
+                    # Keep interrupted report writes recoverable, including a
+                    # partial final summary. Release the intent before fanout.
+                    intent = self._begin_publication(complete_line=line) if self._reporting_observer_failures else None
                     while view:
                         count = os.write(self._fd, view)
                         if count <= 0:
@@ -2315,6 +2478,9 @@ class ContinuationJournal(AuditJournal):
                         # Also covers every earlier unsynced telemetry row (one fsync per file).
                         os.fsync(self._fd)
                         self._unsynced = False
+                    if intent is not None:
+                        intent.unlink()
+                        _sync_directory(intent.parent)
                 self._size += len(line)
                 self._publish_record(record, offset, len(encoded_record))
             except BaseException as error:
@@ -2322,7 +2488,7 @@ class ContinuationJournal(AuditJournal):
                              f"{self._sequence}: {str(error)[:160]}")
                 raise
             self._report_observer_failures()
-            if identity_fire:
+            if identity_fire and not _is_observer_failure_overflow(record):
                 from kernel_verdict_identity import journal_identity_fired
                 journal_identity_fired(self, kind)
             return record
@@ -2361,18 +2527,29 @@ class ContinuationJournal(AuditJournal):
             self._index_receipt_record(record)
             self._receipt_generation = record["sequence"]
             self._notifying = True
+            # The summary is terminal audit data. Delivering it could produce
+            # another observer failure and require another summary indefinitely.
+            audit_only = _is_observer_failure_overflow(record)
             generated = getattr(self, "generated_artifacts", None)
             if generated is not None:
-                self._notify_isolated(
-                    "generated_artifacts", generated.observe, record,
-                    on_unobserved=generated.mark_unobserved)
+                if audit_only:
+                    generated.advance_audit_record(record)
+                else:
+                    self._notify_isolated(
+                        "generated_artifacts", generated.observe, record,
+                        on_unobserved=generated.mark_unobserved)
             with self.host_spans.measure("subscriber_fanout", sequence=record["sequence"]):
                 for name, observer in self._subscribers.items():
                     if self._subscriber_cursors.get(name, 0) != record["sequence"] - 1:
                         raise JournalError("subscriber sequence gap")
                     self._subscriber_cursors[name] = record["sequence"]
                     selected = self._subscriber_kinds.get(name)
-                    if selected is None or record.get("kind") in selected:
+                    if audit_only:
+                        advance_audit = self._subscriber_audit_advance.get(name)
+                        if advance_audit is not None:
+                            advance_audit(record["sequence"])
+                        self._publication_stats["filtered"] += 1
+                    elif selected is None or record.get("kind") in selected:
                         self._publication_stats["published"] += 1
                         self._publication_stats["deep_copies"] += 1
                         self._notify_isolated(name, observer, record)
@@ -2399,37 +2576,112 @@ class ContinuationJournal(AuditJournal):
         try:
             observer(copy.deepcopy(record))
         except Exception as error:  # noqa: BLE001 - isolated, then journaled
-            self._publication_stats["observer_failures"] = (
-                self._publication_stats.get("observer_failures", 0) + 1)
-            failure = {
-                "subscriber": str(name), "event_kind": str(record.get("kind")),
-                "event_sequence": record.get("sequence"), "error_type": type(error).__name__,
-                "error": str(error)[:200],
-            }
-            self._observer_failures.append(failure)
+            error_type, message = type(error).__name__, _observer_failure_message(error)
+            self._record_observer_failure(name, record, error_type, message)
             if callable(on_unobserved):
                 try:
-                    on_unobserved(
-                        record, error_type=failure["error_type"], error=failure["error"])
+                    on_unobserved(record, error_type=error_type, error=message)
                 except Exception as marker_error:  # noqa: BLE001 - preserve the original failure
-                    self._observer_failures.append({
-                        "subscriber": f"{name}_unobserved_marker",
-                        "event_kind": str(record.get("kind")),
-                        "event_sequence": record.get("sequence"),
-                        "error_type": type(marker_error).__name__,
-                        "error": str(marker_error)[:200],
-                    })
+                    self._record_observer_failure(
+                        f"{name}_unobserved_marker", record,
+                        type(marker_error).__name__, _observer_failure_message(marker_error))
+
+    def _record_observer_failure(self, name: str, record: Mapping[str, object],
+                                 error_type: str, message: str) -> None:
+        self._publication_stats["observer_failures"] = (
+            self._publication_stats.get("observer_failures", 0) + 1)
+        sequence = int(record["sequence"])
+        active_report = self._reporting_observer_failures
+        report = active_report or self._pending_observer_failure_report
+        intent = self.path.parent / _OBSERVER_FAILURE_INTENT
+        try:
+            if report is None:
+                # A batch's full prefix is durable before its first callback,
+                # even though the projection cursor is still moving through it.
+                base, head = self._observer_batch_head or (self._sequence, self._head)
+                if head is None or os.path.lexists(intent):
+                    raise JournalError("cannot start observer failure report")
+                self.sync()
+                report = _ObserverFailureReport(base, head, [], None)
+                self._pending_observer_failure_report = report
+            if active_report is None and len(report.details) < _OBSERVER_FAILURE_DETAIL_LIMIT:
+                detail = {
+                    "subscriber": str(name), "event_kind": str(record["kind"]),
+                    "event_sequence": sequence, "error_type": error_type, "error": message,
+                }
+                report.details.append(externalize_journal_fields(detail, self.path, self._blob_cache))
+            else:
+                first, last, count = report.overflow or (sequence, sequence, 0)
+                report.overflow = min(first, sequence), max(last, sequence), count + 1
+            # Commit before any later callback can interrupt fanout or replay.
+            report.save(intent)
+        except BaseException:
+            self._poison("observer failure report requires recovery")
+            raise
 
     def _report_observer_failures(self) -> None:
-        if not self._observer_failures or self._reporting_observer_failures:
+        report = self._pending_observer_failure_report
+        if self._reporting_observer_failures is not None or report is None:
             return
-        failures, self._observer_failures = self._observer_failures, []
-        self._reporting_observer_failures = True
         try:
-            for failure in failures[:20]:
-                self.emit("journal_observer_failed", **failure)
+            self.assert_owner()
+            self._finish_observer_failure_report(self.path.parent / _OBSERVER_FAILURE_INTENT, report)
+            self._pending_observer_failure_report = None
+        except BaseException:
+            self._poison("observer failure report requires recovery")
+            raise
+
+    def _finish_observer_failure_report(self, intent: Path, report: _ObserverFailureReport,
+                                        *, committed_details: int = 0,
+                                        summary_committed: bool = False) -> None:
+        self._reporting_observer_failures = report
+        try:
+            for index in range(committed_details, len(report.details)):
+                self.emit(_OBSERVER_FAILURE_KIND, **report.detail(index, self.path))
+            summary = report.summary()
+            if summary is not None and not summary_committed:
+                self.emit(_OBSERVER_FAILURE_KIND, **summary)
+            intent.unlink()
+            _sync_directory(self.path.parent)
         finally:
-            self._reporting_observer_failures = False
+            self._reporting_observer_failures = None
+
+    def _resume_observer_failure_report(self) -> None:
+        intent = self.path.parent / _OBSERVER_FAILURE_INTENT
+        try:
+            report = _ObserverFailureReport.load(intent, self._sequence)
+            if report is None:
+                return
+            summary = report.summary()
+            if (self._record_hashes[report.base_sequence - 1] != report.base_head
+                    or self._sequence - report.base_sequence > 2 * len(report.details) + (summary is not None)):
+                raise JournalError("pending observer failure report does not match journal")
+            from kernel_verdict_identity import FIRED_EVENT
+
+            committed_details = 0
+            summary_committed = False
+            detail_marker_allowed = False
+            for record in self._record_range(report.base_sequence, self._sequence, detached=False):
+                if (detail_marker_allowed and record["kind"] == FIRED_EVENT
+                        and record.get("source_event") == _OBSERVER_FAILURE_KIND):
+                    detail_marker_allowed = False
+                    continue
+                is_summary = committed_details == len(report.details)
+                expected = summary if is_summary else report.detail(committed_details, self.path)
+                if (record["kind"] != _OBSERVER_FAILURE_KIND or expected is None or summary_committed
+                        or _is_observer_failure_overflow(record) != is_summary
+                        or any(record.get(key) != value for key, value in expected.items())):
+                    raise JournalError("journal diverged from pending observer failure report")
+                if is_summary:
+                    summary_committed = True
+                else:
+                    committed_details += 1
+                    detail_marker_allowed = True
+            self._finish_observer_failure_report(intent, report, committed_details=committed_details,
+                                                 summary_committed=summary_committed)
+        except BaseException:
+            self._poison("pending observer failure report could not be recovered")
+            raise
 
     def host_span_snapshot(self) -> tuple[dict[str, object], ...]:
         return self.host_spans.snapshot()
@@ -2459,19 +2711,16 @@ class ContinuationJournal(AuditJournal):
                 return [self.emit(kind, **fields) for kind, fields in normalized]
             return self._emit_atomic_batch(normalized)
 
-    def _emit_atomic_batch(self, events: list[tuple[str, dict]]) -> list[dict]:
+    def _begin_publication(self, *, complete_line: bytes | None = None) -> Path:
         if __package__:
             from .kernel_turn_publication import atomic_file
         else:
             from kernel_turn_publication import atomic_file
 
-        if self._replaying or self._notifying or hasattr(self, "_publication_batch"):
-            raise JournalError("cannot batch while replaying or publishing")
         intent = self.path.parent / _PUBLICATION_INTENT
         if os.path.lexists(intent):
             self._poison("unfinished journal publication")
             raise JournalError("unfinished journal publication")
-        before = self._sequence, self._head
         size = self._size
         self._ensure_record_index()
         start = self._record_offsets[-1]
@@ -2482,14 +2731,26 @@ class ContinuationJournal(AuditJournal):
         # A legacy telemetry-only suffix can precede this boundary. Flush it before
         # pointing the rollback intent at it so recovery always has a durable base.
         self.sync()
+        metadata: list[int | str] = [size, start, hashlib.sha256(tail).hexdigest()]
+        # Preserve a complete report row if the writer stopped before it could
+        # clear the intent. Ordinary batches still roll back as a unit.
+        if complete_line is not None:
+            metadata.extend((len(complete_line), hashlib.sha256(complete_line).hexdigest()))
+        atomic_file(intent, canonical_bytes(metadata))
+        return intent
+
+    def _emit_atomic_batch(self, events: list[tuple[str, dict]]) -> list[dict]:
+        if self._replaying or self._notifying or hasattr(self, "_publication_batch"):
+            raise JournalError("cannot batch while replaying or publishing")
+        before = self._sequence, self._head
         self._publication_batch = []
         try:
             with self.host_spans.measure("append_fsync", sequence=before[0] + 1):
-                atomic_file(intent, canonical_bytes([size, start, hashlib.sha256(tail).hexdigest()]))
+                intent = self._begin_publication()
                 rows = [self.emit(kind, **fields) for kind, fields in events]
                 os.fsync(self._fd)
                 intent.unlink()
-                _sync_directory(self.path.parent)
+                _sync_directory(intent.parent)
             pending = self._publication_batch
         except BaseException:
             self._poison("journal publication outcome requires recovery")
@@ -2498,12 +2759,12 @@ class ContinuationJournal(AuditJournal):
             del self._publication_batch
         self._sequence, self._head = before
         try:
-            self._observing_publication = True
+            self._observer_batch_head = rows[-1]["sequence"], rows[-1]["record_hash"]
             try:
                 for record, offset, encoded_size, _ in pending:
                     self._publish_record(record, offset, encoded_size)
             finally:
-                del self._observing_publication
+                self._observer_batch_head = None
             self._report_observer_failures()
             if any(fire for _, _, _, fire in pending):
                 from kernel_verdict_identity import journal_identity_fired

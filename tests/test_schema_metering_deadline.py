@@ -1,0 +1,521 @@
+"""A trickling tokenizer cannot hold startup schema admission open."""
+from __future__ import annotations
+
+import json
+import shutil
+import socket
+import subprocess
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from http.server import ThreadingHTTPServer
+from pathlib import Path
+from threading import Barrier, Event, Lock, Thread, current_thread, local
+from types import SimpleNamespace
+from urllib.parse import urlsplit
+
+import pytest
+
+from _journal import measurement_journal_paths
+from kernel_agent_schemas import measure_schemas
+from kernel_agent_tools import AgentTools
+from kernel_custom_tools import CustomToolSet
+from kernel_tool_settings import ToolSettings
+from stateframe.scripted_endpoint import Script, make_handler
+
+
+CAP = 0.25
+ROOT = Path(__file__).resolve().parents[1]
+pytestmark = pytest.mark.host_sandbox
+
+
+@contextmanager
+def tokenizer(*, trickle, trickle_posts=1, posts_received=None):
+    script = Script(json.loads((ROOT / "examples/discount_bug.script.json").read_text()))
+    schema_posts = []
+    posts_lock = Lock()
+    shutting_down = Event()
+
+    class Handler(make_handler(script)):
+        def _tokenize(self, raw):
+            content = json.loads(json.loads(raw)["content"])
+            if content.get("messages") != [] or not content.get("tools"):
+                return super()._tokenize(raw)
+            with posts_lock:
+                schema_posts.append(content)
+                post_count = len(schema_posts)
+                if posts_received is not None and post_count == trickle_posts:
+                    posts_received.set()
+            if trickle == "after-exact" and content["tools"][0]["function"]["name"] == "shell":
+                self._send(200, {"tokens": [1, 2, 3]})
+                return
+            if not trickle or post_count > trickle_posts:
+                self._send(200, {"tokens": [1, 2, 3]})
+                return
+            if trickle == "withhold":
+                shutting_down.wait()
+                self.close_connection = True
+                return
+            # Each byte arrives within the socket timeout, but the full body takes over a second.
+            body = b'{"tokens": [1, 2, 3]}'
+            if trickle == "headers":
+                body = b"HTTP/1.1 200 OK\r\nContent-Length: 21\r\n\r\n" + body
+            else:
+                self.send_response(200)
+                if trickle == "chunked":
+                    self.send_header("Transfer-Encoding", "chunked")
+                    body = b"15;extension=abcdefghijklmno\r\n" + body + b"\r\n0\r\n\r\n"
+                else:
+                    self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+            try:
+                for byte in body:
+                    self.wfile.write(bytes([byte]))
+                    time.sleep(0.065)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+    with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+        worker = Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            yield f"http://127.0.0.1:{server.server_port}/v1", schema_posts
+        finally:
+            shutting_down.set()
+            server.shutdown()
+            worker.join()
+
+
+@pytest.mark.parametrize(("trickle", "cap"), [(True, CAP), (False, None), (False, 0)],
+                         ids=["trickle", "fast-default-cap", "zero-cap"])
+def test_bind_bounds_schema_metering_and_keeps_fast_counts(tmp_path, monkeypatch, trickle, cap):
+    import kernel_agent_tools
+    import kernel_request_diet
+    from kernel_provider_dialect import LLAMA_CPP, RUN_CAPABILITY_CACHE, ProviderCapabilities, origin_of
+
+    if cap is not None:
+        monkeypatch.setattr(kernel_request_diet, "TOKENIZE_REQUEST_TIMEOUT_CAP_SECONDS", cap)
+    monkeypatch.setattr(kernel_agent_tools, "time", SimpleNamespace(monotonic=time.monotonic))
+    fallback = measure_schemas()
+    with tokenizer(trickle=trickle) as (endpoint, schema_posts):
+        # Product runs seed the child's provider proof from the host preflight.
+        monkeypatch.setitem(RUN_CAPABILITY_CACHE, origin_of(endpoint), ProviderCapabilities(dialect=LLAMA_CPP))
+        shell = SimpleNamespace(spec={"chat_url": endpoint + "/chat/completions"},
+                                run_dir=tmp_path, settings=ToolSettings())
+        start = time.monotonic()
+        tools = AgentTools(shell, CustomToolSet((), "empty"), defer_schema_budget=True)
+        tools.bind()
+        elapsed = time.monotonic() - start
+
+        if cap == 0:
+            assert elapsed < 0.35
+            assert tools.schema_budget == fallback
+            assert schema_posts == []
+        elif trickle:
+            assert elapsed < CAP + 0.35
+            assert tools.schema_budget == fallback
+            assert len(schema_posts) == 1
+        else:
+            assert len(schema_posts) == len(fallback)
+            assert tools.schema_budget == {name: {"tokens": 3, "method": "tokenize"} for name in fallback}
+        assert json.loads(tools.schema_budget_path.read_text()) == tools.schema_budget
+
+
+@pytest.mark.parametrize("trickle", [True, "headers", "chunked", "after-exact", "staggered"],
+                         ids=["body", "headers", "chunked", "after-exact", "staggered"])
+@pytest.mark.parametrize("cached_capabilities", [True, False], ids=["warm", "cold"])
+def test_parallel_binds_share_one_tokenizer_with_bounded_workers(tmp_path, monkeypatch, trickle,
+                                                                cached_capabilities):
+    import kernel_provider_dialect
+    import kernel_request_diet
+    from kernel_provider_dialect import LLAMA_CPP, ProviderCapabilities, origin_of
+
+    staggered = trickle == "staggered"
+    cap = 0.5 if staggered else CAP
+    monkeypatch.setattr(kernel_request_diet, "TOKENIZE_REQUEST_TIMEOUT_CAP_SECONDS", cap)
+    original_tokenize = kernel_request_diet._http_tokenize
+    requests = []
+    first_request = Event()
+    posts_received = Event()
+    probes = []
+    capability_cache = {}
+
+    def record_worker(*args, **kwargs):
+        requests.append((current_thread(), kwargs["deadline"]))
+        first_request.set()
+        return original_tokenize(*args, **kwargs)
+
+    def probe(origin, _key, path, *, deadline):
+        # Supply a successful response so this case tests the shared proof
+        # and schema POSTs. Slow provider probes have separate coverage.
+        probes.append((origin, path))
+        return 200, {"default_generation_settings": {"n_ctx": 65536}}
+
+    def record_budget(tools, budget):
+        # Report-file persistence is covered separately. Its disk latency
+        # is outside the bound on waiting for the tokenizer.
+        tools.schema_budget = budget
+
+    monkeypatch.setattr(kernel_request_diet, "_http_tokenize", record_worker)
+    monkeypatch.setattr(kernel_provider_dialect, "bounded_json_probe", probe)
+    monkeypatch.setattr(kernel_provider_dialect, "RUN_CAPABILITY_CACHE", capability_cache)
+    monkeypatch.setattr(AgentTools, "_write_schema_budget", record_budget)
+    fallback = measure_schemas()
+    callers = 4
+    posts_per_bind = 2 if trickle == "after-exact" else 1
+    ready = Barrier(callers)
+    with tokenizer(trickle=trickle, trickle_posts=callers * posts_per_bind,
+                   posts_received=posts_received) as (endpoint, schema_posts):
+        origin = origin_of(endpoint)
+        if cached_capabilities:
+            capability_cache[origin] = ProviderCapabilities(dialect=LLAMA_CPP)
+
+        def bind(index):
+            run_dir = tmp_path / str(index)
+            run_dir.mkdir()
+            shell = SimpleNamespace(spec={"chat_url": endpoint + "/chat/completions"},
+                                    run_dir=run_dir, settings=ToolSettings())
+            ready.wait(timeout=5)
+            if staggered and index >= callers // 2:
+                assert first_request.wait(timeout=2)
+                time.sleep(cap / 2)
+            start = time.monotonic()
+            tools = AgentTools(shell, CustomToolSet((), "empty"), defer_schema_budget=True)
+            tools.bind()
+            assert tools.startup_schema_budget["reason"] == "deadline"
+            return time.monotonic() - start, tools.schema_budget
+
+        with ThreadPoolExecutor(max_workers=callers) as pool:
+            for elapsed, counts in pool.map(bind, range(callers)):
+                assert elapsed < cap + (0.20 if staggered else 0.35)
+                if staggered:
+                    assert elapsed >= cap - 0.05
+                assert counts == fallback
+        workers = {worker for worker, _ in requests}
+        cleanup_deadline = time.monotonic() + 0.35
+        for worker in workers:
+            worker.join(timeout=max(0, cleanup_deadline - time.monotonic()))
+        assert not any(worker.is_alive() for worker in workers)
+        posts_received.wait(timeout=2)
+        assert len(schema_posts) == len(requests) == callers * posts_per_bind
+        assert len(workers) == callers
+        for worker in workers:
+            assert len({deadline for caller, deadline in requests if caller is worker}) == 1
+        if staggered:
+            deadlines = [deadline for _, deadline in requests]
+            assert max(deadlines) - min(deadlines) >= cap / 2
+        assert probes == ([] if cached_capabilities else [(origin, "/props")])
+
+
+@pytest.mark.parametrize("probe_outcome", ["probe-deadline", "transport-deadline", "unsupported"])
+def test_parallel_cold_binds_record_fallback_when_no_schema_can_post(
+        tmp_path, monkeypatch, probe_outcome):
+    import kernel_agent_tools
+    import kernel_provider_dialect
+    import kernel_request_diet
+
+    probe_clock = local()
+    clock = SimpleNamespace(monotonic=lambda: getattr(probe_clock, "now", 0.0))
+    for module in (kernel_agent_tools, kernel_provider_dialect, kernel_request_diet):
+        monkeypatch.setattr(module, "time", clock)
+    monkeypatch.setattr(kernel_request_diet, "TOKENIZE_REQUEST_TIMEOUT_CAP_SECONDS", CAP)
+    monkeypatch.setattr(kernel_provider_dialect, "RUN_CAPABILITY_CACHE", {})
+    monkeypatch.delenv(kernel_provider_dialect.PROVIDER_OVERRIDE_ENV, raising=False)
+    probes = []
+
+    def probe(_origin, _key, path, *, deadline):
+        probes.append(path)
+        if probe_outcome == "probe-deadline":
+            # Model a probe descheduled until its slice expires. The bind's
+            # absolute deadline still has time left when the retries run out.
+            probe_clock.now = deadline
+        if probe_outcome != "unsupported":
+            return None
+        return 404, None
+
+    monkeypatch.setattr(kernel_provider_dialect, "bounded_json_probe", probe)
+    if probe_outcome == "transport-deadline":
+        monkeypatch.setattr(kernel_provider_dialect, "last_probe_error", lambda: "TimeoutExpired")
+    fallback = measure_schemas()
+    callers = 4
+    ready = Barrier(callers)
+    with tokenizer(trickle=False) as (endpoint, schema_posts):
+        def bind(index):
+            run_dir = tmp_path / str(index)
+            run_dir.mkdir()
+            shell = SimpleNamespace(spec={"chat_url": endpoint + "/chat/completions"},
+                                    run_dir=run_dir, settings=ToolSettings())
+            ready.wait(timeout=5)
+            tools = AgentTools(shell, CustomToolSet((), "empty"), defer_schema_budget=True)
+            tools.bind()
+            assert json.loads(tools.schema_budget_path.read_text()) == fallback
+            return tools.startup_schema_budget
+
+        with ThreadPoolExecutor(max_workers=callers) as pool:
+            records = list(pool.map(bind, range(callers)))
+
+        assert schema_posts == []
+    assert probes and set(probes) == {"/props"}
+    reason = "completed" if probe_outcome == "unsupported" else "deadline"
+    assert records == [{"reason": reason, "counts": fallback}] * callers
+
+
+@pytest.mark.parametrize("stall", ["resolution", "first-address", "tls-context"])
+def test_expired_schema_worker_does_not_start_a_connection(tmp_path, monkeypatch, stall):
+    import kernel_request_diet
+    from kernel_provider_dialect import LLAMA_CPP, RUN_CAPABILITY_CACHE, ProviderCapabilities, origin_of
+
+    monkeypatch.setattr(kernel_request_diet, "TOKENIZE_REQUEST_TIMEOUT_CAP_SECONDS", CAP)
+    original_resolve = socket.getaddrinfo
+    original_connect = socket.socket.connect
+    started = Event()
+    release = Event()
+    workers = []
+    connections = []
+    resolutions = []
+
+    with tokenizer(trickle=True) as (endpoint, _):
+        port = urlsplit(endpoint).port
+        if stall == "tls-context":
+            endpoint = endpoint.replace("http:", "https:", 1)
+        monkeypatch.setitem(RUN_CAPABILITY_CACHE, origin_of(endpoint), ProviderCapabilities(dialect=LLAMA_CPP))
+
+        def wait_for_bind():
+            workers.append(current_thread())
+            started.set()
+            assert release.wait(5), "test did not release the tokenizer worker"
+
+        def resolve(host, service, *args, **kwargs):
+            addresses = original_resolve(host, service, *args, **kwargs)
+            if (host, service) != ("127.0.0.1", port):
+                return addresses
+            resolutions.append((host, service))
+            if stall == "resolution":
+                wait_for_bind()
+                return addresses
+            if stall == "tls-context":
+                return addresses
+            family, kind, protocol, canonical, _ = addresses[0]
+            return [(family, kind, protocol, canonical, ("127.0.0.2", port)), *addresses]
+
+        def connect(sock, address):
+            if address == ("127.0.0.2", port):
+                wait_for_bind()
+                raise TimeoutError("first address did not respond")
+            if address == ("127.0.0.1", port):
+                connections.append(address)
+            return original_connect(sock, address)
+
+        monkeypatch.setattr(socket, "getaddrinfo", resolve)
+        monkeypatch.setattr(socket.socket, "connect", connect)
+        if stall == "tls-context":
+            from ssl import PROTOCOL_TLS_CLIENT, SSLContext
+
+            monkeypatch.setattr("urllib.request.getproxies", lambda: {})
+            context = SSLContext(PROTOCOL_TLS_CLIENT)
+
+            def prepare_context(_meter):
+                wait_for_bind()
+                return context
+
+            monkeypatch.setattr(kernel_request_diet.RequestTokenMeter, "_get_http_ssl_context", prepare_context)
+        shell = SimpleNamespace(spec={"chat_url": endpoint + "/chat/completions"},
+                                run_dir=tmp_path, settings=ToolSettings())
+        start = time.monotonic()
+        tools = AgentTools(shell, CustomToolSet((), "empty"), defer_schema_budget=True)
+        try:
+            assert started.wait(1)
+            tools.bind()
+            assert time.monotonic() - start < CAP + 0.35
+            assert tools.schema_budget == measure_schemas()
+        finally:
+            release.set()
+            for worker in workers:
+                worker.join(timeout=1)
+        assert not any(worker.is_alive() for worker in workers)
+        assert connections == []
+        if stall == "tls-context":
+            assert resolutions == []
+
+
+def test_stuck_address_resolution_does_not_hold_interpreter_open(tmp_path):
+    child = """
+import socket
+import sys
+from pathlib import Path
+from threading import Event
+from types import SimpleNamespace
+
+sys.path[:0] = sys.argv[2:]
+import kernel_request_diet
+from kernel_agent_tools import AgentTools
+from kernel_custom_tools import CustomToolSet
+from kernel_provider_dialect import LLAMA_CPP, RUN_CAPABILITY_CACHE, ProviderCapabilities
+from kernel_tool_settings import ToolSettings
+
+started = Event()
+blocked = Event()
+
+def resolve(*args, **kwargs):
+    started.set()
+    blocked.wait()
+
+socket.getaddrinfo = resolve
+kernel_request_diet.TOKENIZE_REQUEST_TIMEOUT_CAP_SECONDS = 0.25
+origin = "http://127.0.0.1:9"
+RUN_CAPABILITY_CACHE[origin] = ProviderCapabilities(dialect=LLAMA_CPP)
+shell = SimpleNamespace(spec={"chat_url": origin + "/v1/chat/completions"},
+                        run_dir=Path(sys.argv[1]), settings=ToolSettings())
+tools = AgentTools(shell, CustomToolSet((), "empty"), defer_schema_budget=True)
+assert started.wait(3), "tokenizer did not reach address resolution"
+tools.bind()
+assert tools.startup_schema_budget["reason"] == "deadline"
+"""
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", child, str(tmp_path), str(ROOT / "src"), str(ROOT / "src/stateframe/engine")],
+        capture_output=True, text=True, timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_resume_before_first_send_can_start_without_a_journal(tmp_path, monkeypatch):
+    import kernel_request_diet
+
+    monkeypatch.setattr(kernel_request_diet, "_http_tokenize", lambda *_args, **_kwargs: [1, 2, 3])
+    archive = tmp_path / "attempts" / "1"
+    archive.mkdir(parents=True)
+    shell = SimpleNamespace(spec={"chat_url": "http://127.0.0.1:9/v1/chat/completions", "resume": {
+        "previous_attempt": str(archive), "tape": [],
+        "checkpoint": {"status": "skipped", "reason": "hooks_configured"},
+    }}, run_dir=tmp_path, settings=ToolSettings())
+
+    tools = AgentTools(shell, CustomToolSet((), "empty"), defer_schema_budget=True)
+    tools.bind()
+
+    assert tools.schema_budget == {name: {"tokens": 3, "method": "tokenize"} for name in measure_schemas()}
+
+
+def test_replay_refuses_a_journal_without_startup_counts(tmp_path, monkeypatch):
+    import kernel_request_diet
+    from kernel_continuation_journal import ContinuationJournal
+    from kernel_tool_tape import ToolReplayRefused
+
+    calls = []
+
+    def tokenize(*args, **kwargs):
+        calls.append(args)
+        return [1, 2, 3]
+
+    monkeypatch.setattr(kernel_request_diet, "_http_tokenize", tokenize)
+    archive = tmp_path / "attempts" / "1"
+    wire = archive / "wire"
+    wire.mkdir(parents=True)
+    request = wire / "0001.request.json"
+    request.write_text("{}")
+    journals = archive / "worker" / "measurement-runs"
+    journals.mkdir(parents=True)
+    ContinuationJournal(journals, "task", {}).close()
+    shell = SimpleNamespace(spec={"chat_url": "http://127.0.0.1:9/v1/chat/completions", "resume": {
+        "previous_attempt": str(archive), "tape": [{"request": str(request)}],
+    }}, run_dir=tmp_path, settings=ToolSettings())
+
+    with pytest.raises(ToolReplayRefused, match="Recorded startup schema counts are missing"):
+        tools = AgentTools(shell, CustomToolSet((), "empty"), defer_schema_budget=True)
+        tools.bind()
+    assert calls == []
+
+
+@pytest.fixture(scope="module")
+def expected_startup_fallback():
+    # A fresh engine measures before the composed tool menu decorates shared schemas.
+    # Other tests may already have loaded that menu in this pytest process.
+    counts = subprocess.check_output(
+        [sys.executable, "-I", "-c",
+         "import json, sys\n"
+         "sys.path[:0] = sys.argv[1:]\n"
+         "from kernel_agent_schemas import measure_schemas\n"
+         "print(json.dumps(measure_schemas()))",
+         str(ROOT / "src"), str(ROOT / "src/stateframe/engine")],
+        text=True, timeout=30,
+    )
+    return {"reason": "deadline", "counts": json.loads(counts)}
+
+
+@pytest.mark.parametrize("archive_moved", [(), ("worker",), ("worker", "wire"),
+                                          ("worker", "wire", "requests", "sends.jsonl")],
+                         ids=["normal", "after-worker", "after-wire", "after-sends"])
+def test_startup_fallback_is_journaled_and_replayed_byte_for_byte(
+        tmp_path, monkeypatch, archive_moved, expected_startup_fallback):
+    from kernel_journal_store import open_journal
+    from kernel_measurement import resolve_journal_blob_refs
+    from stateframe import cli, runner
+
+    repo = tmp_path / "repo"
+    shutil.copytree(ROOT / "examples/discount_bug", repo)
+    run = tmp_path / "run"
+    monkeypatch.setenv("STATEFRAME_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("STATEFRAME_CHECKPOINT", "off")
+    monkeypatch.delenv("LLAMA_CPP_TOKENIZE_URL", raising=False)
+    # This test needs one admitted POST and a deadline fallback, even while
+    # the host is starting an entire engine process and preparing its run.
+    replay_cap = 2.0
+    child = tmp_path / "child.py"
+    child.write_text(f"""
+import json
+import runpy
+import sys
+from pathlib import Path
+
+sys.path.insert(0, {str(runner.CHILD.parent)!r})
+engine = runpy.run_path({str(runner.CHILD)!r}, run_name="schema_deadline_child")
+state = engine["main"].__globals__
+install_identity = state["install_run_identity"]
+
+def install_test_cap(seed):
+    install_identity(seed)
+    spec = json.loads((Path(sys.argv[1]) / "spec.json").read_text())
+    sys.path.insert(0, spec["engine_dir"])
+    import kernel_request_diet
+    kernel_request_diet.TOKENIZE_REQUEST_TIMEOUT_CAP_SECONDS = {replay_cap!r}
+
+state["install_run_identity"] = install_test_cap
+raise SystemExit(engine["_run_cli"](sys.argv))
+""")
+    monkeypatch.setattr(runner, "CHILD", child)
+
+    def startup_record():
+        journal, = measurement_journal_paths(run)
+        with open_journal(journal) as stream:
+            started = json.loads(stream.readline())
+        assert started["kind"] == "run_started"
+        return resolve_journal_blob_refs(started["manifest"], journal).get("startup_schema_budget")
+
+    posts_received = Event()
+    with tokenizer(trickle="withhold", posts_received=posts_received) as (endpoint, schema_posts):
+        assert cli.main(["run", "--repo", str(repo), "--task", "Fix the pricing code so the tests pass.",
+                         "--endpoint", endpoint, "--model", "scripted", "--run-dir", str(run),
+                         "--test-python", sys.executable, "--no-run-env",
+                         "--max-turns", "1", "--quiet"]) == 1
+        wire = next((run / "wire").glob("*.request.json"))
+        live = wire.read_bytes()
+        record = startup_record()
+        assert record == expected_startup_fallback
+        posts_received.wait(timeout=2)
+        posts_after_live = len(schema_posts)
+        assert posts_after_live == 1
+        # Reclassify the completed first exchange as interrupted so resume replays it.
+        (run / "engine-result.json").write_text(json.dumps({"result": {"result": "CANCELLED"}}))
+        if archive_moved:
+            # Resume moves attempt files before publishing the new run spec.
+            partial = run / "attempts" / "1"
+            partial.mkdir(parents=True)
+            shutil.copy2(run / "spec.json", partial / "spec.json")
+            for name in archive_moved:
+                if (run / name).exists():
+                    (run / name).rename(partial / name)
+        assert cli.main(["resume", str(run), "--quiet"]) == 1
+        assert json.loads((run / "sends.jsonl").read_text().splitlines()[0])["replayed"] is True
+        assert wire.read_bytes() == live
+        assert startup_record() == record
+        assert len(schema_posts) == posts_after_live

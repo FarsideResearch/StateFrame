@@ -408,6 +408,13 @@ def _probe_output(process: subprocess.Popen[bytes], packet: bytes, timeout: floa
                 if not chunk:
                     break
                 output += chunk
+        if not output or len(output) > _MAX_PROBE_RESPONSE_BYTES:
+            raise
+        try:
+            json.loads(output)
+        except ValueError:
+            # A partial reply at expiry is still a timeout.
+            raise error from None
     return output if output and len(output) <= _MAX_PROBE_RESPONSE_BYTES else None
 
 

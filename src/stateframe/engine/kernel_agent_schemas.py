@@ -1,12 +1,15 @@
 """Frozen schemas for host-authorized execution and observation tools."""
 
 from copy import deepcopy
-from functools import partial
 
 try:
     from kernel_reason_log import emit_reason
 except ImportError:
     from .kernel_reason_log import emit_reason
+
+
+class SchemaMeteringTimeout(TimeoutError):
+    """Startup schema tokenization exhausted its attempts on a timeout."""
 
 
 def _log_schema_fallback(what, method, tokens, *, configured):
@@ -57,7 +60,7 @@ def measure_schemas(custom_schemas=(), *, mcp_schemas=(), endpoint=None, tokeniz
 
 
 def prepare_schema_measurement(custom_schemas=(), *, mcp_schemas=(), endpoint=None, tokenizer=None,
-                               auth_key=None, generation_endpoint=None):
+                               auth_key=None, generation_endpoint=None, deadline=None):
     """Capture the schema inputs and bound meter before startup configures the live menu."""
     from kernel_request_diet import RequestTokenMeter
     from kernel_shell_tool import SHELL_SCHEMA
@@ -66,10 +69,31 @@ def prepare_schema_measurement(custom_schemas=(), *, mcp_schemas=(), endpoint=No
         tokenizer, endpoint=endpoint, template_overhead_tokens=0,
         auth_key=auth_key, generation_endpoint=generation_endpoint,
     )
+
+    # Capture both bound methods before the live request meter gains its warning wrapper.
+    measure = meter.measure
+    live_count = estimate_count = measure
+    if deadline is not None:
+        meter.bind_request("startup-schema-budget", "startup-schema-budget", deadline=deadline)
+        estimate_count = RequestTokenMeter(template_overhead_tokens=0).measure
+
+        def live_count(body):
+            count, method = measure(body)
+            # Cold provider probes have shorter deadlines than the bind. Their
+            # retries can exhaust before the absolute deadline expires.
+            if method == "calibrated_bytes" and meter.unavailable_reason() == "timeout":
+                raise SchemaMeteringTimeout("tokenizer timed out in startup schema metering")
+            return count, method
+
     builtin_schemas = deepcopy((SHELL_SCHEMA, *BUILTIN_SCHEMAS))
     additional_schemas = deepcopy([*custom_schemas, *mcp_schemas])
-    return partial(_measure_schemas, builtin_schemas, additional_schemas, meter.measure,
-                   configured=endpoint is not None or tokenizer is not None)
+    configured = endpoint is not None or tokenizer is not None
+
+    def measure_schemas_once(*, estimate=False):
+        count = estimate_count if estimate else live_count
+        return _measure_schemas(builtin_schemas, additional_schemas, count, configured=configured)
+
+    return measure_schemas_once
 
 
 def _measure_schemas(builtin_schemas, additional_schemas, measure, *, configured):

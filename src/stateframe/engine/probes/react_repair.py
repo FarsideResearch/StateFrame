@@ -8496,7 +8496,8 @@ def work(d, *, resume=None):
             tools=tool_surface if toolcall_mode else None,
             temperature=TEMPERATURE, source_resolver=fn_src,
             step_limit=_budget.tool_attempt_limit,
-            multi_file=multifile, edit_contract=_edit_contract, workspace=continuation_workspace, resume=resume)
+            multi_file=multifile, edit_contract=_edit_contract, workspace=continuation_workspace, resume=resume,
+            startup_schema_budget=_agent_tools.startup_schema_budget if _agent_tools is not None else None)
         if _minimal_launch:
             measurement._minimal_launch = True
         measurement.run_limitations = run_limitations

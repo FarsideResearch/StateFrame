@@ -203,7 +203,41 @@ def _interrupted_archive_tape(run: Path, spec: dict) -> list[dict[str, object]] 
         if (folder / "wire").is_dir():
             return replay_tape.build(folder / "wire", folder / "sends.jsonl",
                                      routes_required=bool(spec.get("routes")))
-    return []
+    return None
+
+
+def _interrupted_archive(run: Path, spec: dict) -> Path | None:
+    """Find the unfinished archive of the attempt still named by the live spec."""
+    attempts = run / "attempts"
+    seed = spec.get("run_identity_seed")
+    resume = spec.get("resume")
+    if not isinstance(seed, str) or not attempts.is_dir():
+        return None
+    if resume is not None and not isinstance(resume, dict):
+        return None
+    active_attempt = (resume or {}).get("attempt", 1)
+    if type(active_attempt) is not int:
+        return None
+    folders = sorted((p for p in attempts.iterdir() if p.name.isdecimal()
+                      and int(p.name) >= active_attempt
+                      and p.is_dir() and not p.is_symlink()), key=lambda p: int(p.name), reverse=True)
+    for folder in folders:
+        if not any(path.is_dir() and not path.is_symlink()
+                   for path in (folder / "worker", folder / "wire")):
+            continue
+        try:
+            archived = json.loads((folder / "spec.json").read_bytes())
+            archived_attempt = (archived.get("resume") or {}).get("attempt", 1)
+        except (OSError, ValueError, AttributeError):
+            continue
+        if archived.get("run_identity_seed") == seed and archived_attempt == active_attempt:
+            return folder
+    return None
+
+
+def _attempt_file(run: Path, archive: Path | None, name: str) -> Path:
+    live = run / name
+    return archive / name if archive is not None and not live.exists() else live
 
 
 def _pending_marker_matches(wire_dir: Path, pending: dict[str, object],
@@ -512,13 +546,15 @@ def _inspect_parallel_pending(run: Path, pending: tuple[object, ...]) -> dict[st
 def _tool_safety(run: Path, spec: dict, *, replay_external: bool,
                  parallel_pending: bool = False) -> list[dict[str, str]]:
     """Check the live tape and prior external effects before any attempt is archived."""
+    interrupted = _interrupted_archive(run, spec)
+    tool_root = _attempt_file(run, interrupted, "tool-tape.jsonl").parent
     try:
-        tape = ToolTape(run)
+        tape = ToolTape(tool_root)
     except (OSError, ValueError, ToolTapeError) as error:
         raise ResumeRefused(f"tool tape is damaged: {error}") from error
     if "mutations" in spec:
         _reconcile_mutations(run, replay_external=replay_external)
-        tape = ToolTape(run)
+        tape = ToolTape(tool_root)
     pending = tape.pending()
     # A validated pending subframe call (parallel_pending) has its own recovery protocol.
     if pending and not parallel_pending:
@@ -535,6 +571,8 @@ def _tool_safety(run: Path, spec: dict, *, replay_external: bool,
     archived = []
     for folder in sorted((p for p in (run / "attempts").glob("[0-9]*") if p.name.isdigit()),
                          key=lambda p: int(p.name)):
+        if folder == tool_root:
+            continue  # This tape still belongs to the attempt named by the live spec.
         if not (folder / "tool-tape.jsonl").exists():
             continue
         try:
@@ -702,9 +740,12 @@ def assess(run: Path, *, max_turns: int | None = None, model: str | None = None,
     for key in ("environment", "public_row", "parent_snapshot", "chat_url", "model", "max_turns", "repo"):
         if key not in spec:
             raise ResumeRefused(f"spec.json lacks {key!r}; this run was made by an older stateframe")
+    interrupted = _interrupted_archive(run, spec)
     terminal = outcomes.terminal_receipt(run)
+    if not terminal and interrupted is not None:
+        terminal = outcomes.terminal_receipt(interrupted)
     status = terminal.get("result")
-    summary_path = run / "summary.json"
+    summary_path = _attempt_file(run, interrupted, "summary.json")
     try:
         summary = json.loads(summary_path.read_text()) if summary_path.is_file() else {}
     except (OSError, ValueError):
@@ -747,7 +788,8 @@ def assess(run: Path, *, max_turns: int | None = None, model: str | None = None,
         raise ResumeRefused(f"this run directory was moved: it was created at {original}, and its records "
                             f"use that path. Move it back to {original} (or copy it there) and resume from there")
 
-    blocked_dispatch = _blocked_dispatch_marker(run)
+    worker_root = _attempt_file(run, interrupted, "worker").parent
+    blocked_dispatch = _blocked_dispatch_marker(worker_root)
     if blocked_dispatch is not None and status not in (None, "SUBFRAME_BLOCKED"):
         raise ResumeRefused("subframe blocked dispatch conflicts with the terminal receipt")
     if blocked_dispatch is not None and status == "SUBFRAME_BLOCKED" and (
@@ -780,28 +822,30 @@ def assess(run: Path, *, max_turns: int | None = None, model: str | None = None,
     if external and not replay_external:
         names = ", ".join(f"{item['call_id']} ({item['tool']})" for item in external)
         raise ResumeRefused(f"external operation {names} requires --replay-external")
-    problem = _journal_lineage_ok(run)
+    problem = _journal_lineage_ok(worker_root)
     if problem:
         raise ResumeRefused(f"the engine journal is damaged ({problem}); this run cannot be resumed")
     try:
-        own_tape = replay_tape.build(run / "wire", run / "sends.jsonl",
-                                     routes_required=bool(spec.get("routes")))
+        wire = _attempt_file(run, interrupted, "wire")
+        sends = _attempt_file(run, interrupted, "sends.jsonl")
+        own_tape = replay_tape.build(wire, sends, routes_required=bool(spec.get("routes")))
         tape, _, _, _ = carry_forward_records(
-            spec, own_tape, None, run / "wire",
-            diverged=(run / "resume-divergence.json").exists(),
-            interrupted_archive_tape=_interrupted_archive_tape(run, spec))
+            spec, own_tape, None, wire,
+            diverged=_attempt_file(run, interrupted, "resume-divergence.json").exists(),
+            interrupted_archive_tape=_interrupted_archive_tape(run, spec) if interrupted is None else None)
         if spec.get("routes"):
-            replay_tape.pending_request(run / "wire", routes_required=True)
+            replay_tape.pending_request(wire, routes_required=True)
     except (OSError, replay_tape.TapeError) as error:
         raise ResumeRefused(f"the recorded model exchanges are damaged ({error}); "
                             "this run cannot be resumed") from None
     attempts = sorted(int(p.name) for p in (run / "attempts").glob("[0-9]*") if p.name.isdigit()) \
         if (run / "attempts").is_dir() else []
+    attempt = int(interrupted.name) if interrupted is not None else (attempts[-1] if attempts else 0) + 1
     result = {"run": run, "spec": spec, "tape_count": len(tape), "previous_status": status,
               "previous_error": terminal.get("error"), "max_turns": turns,
               "external_operations": external,
               "model_swap": model_swap_for(spec, model),
-              "attempt": (attempts[-1] if attempts else 0) + 1}
+              "attempt": attempt}
     if parallel_recovery is not None:
         result["parallel_recovery"] = parallel_recovery
     return result
@@ -1010,24 +1054,40 @@ def archive_attempt(state: dict[str, object], engine_dir: Path, *, use_checkpoin
     atomic_publication = (
         spec.get("environment", {}).get("STATEFRAME_TURN_ATOMIC_PUBLICATION", "").strip().lower() == "on"
     )
-    publication_intents = list((run / "worker" / "measurement-runs").glob("*/.journal-publication"))
-    if publication_intents:
-        from .engine.kernel_continuation_journal import JournalError, recover_publication_mirror
+    interrupted = _interrupted_archive(run, spec)
+    worker = _attempt_file(run, interrupted, "worker")
+    measurements = worker / "measurement-runs"
+    pending_journals = {intent.parent / "events.jsonl"
+                        for name in (".journal-publication", ".journal-observer-report")
+                        for intent in measurements.glob(f"*/{name}")}
+    if pending_journals:
+        from .runner import _workspace_engine_imports
 
-        try:
-            for intent in publication_intents:
-                recover_publication_mirror(intent.parent / "events.jsonl")
-        except (JournalError, OSError) as error:
-            raise ResumeRefused("journal publication could not be recovered") from error
+        with _workspace_engine_imports():
+            from .engine.kernel_continuation_journal import JournalError, recover_publication_mirror
+
+            try:
+                for journal_path in sorted(pending_journals):
+                    recover_publication_mirror(journal_path)
+            except (JournalError, OSError) as error:
+                raise ResumeRefused("journal publication could not be recovered") from error
     external = _tool_safety(run, spec, replay_external=replay_external) if restart_live else []
-    interrupted_archive_tape = _interrupted_archive_tape(run, spec) if not restart_live else None
-    number = int(state["attempt"])
-    folder = run / "attempts" / str(number)
-    folder.mkdir(parents=True)
-    shutil.copy2(run / "spec.json", folder / "spec.json")
+    if interrupted is None:
+        interrupted_archive_tape = None if restart_live else _interrupted_archive_tape(run, spec)
+        number = int(state["attempt"])
+        folder = run / "attempts" / str(number)
+        folder.mkdir(parents=True)
+        shutil.copy2(run / "spec.json", folder / "spec.json")
+    else:
+        # Finish the original archive so the journal stays beside the wire on another interruption.
+        folder = interrupted
+        number = int(folder.name)
+        # Preserve the first routed resume's conservative pending check once the wire was moved.
+        interrupted_archive_tape = [] if (folder / "wire").is_dir() else None
     for name in ATTEMPT_FILES:
-        if (run / name).exists():
-            os.replace(run / name, folder / name)
+        source_path = run / name
+        if source_path.exists():
+            os.replace(source_path, folder / name)
     # Rebuilt from the moved files, so the tape's paths name the archived bytes the child will read.
     # A fallback after a refused checkpoint restore replays the INTERRUPTED attempt (``tape_from``),
     # not the refused one, which holds only the restored prefix.
@@ -1049,14 +1109,22 @@ def archive_attempt(state: dict[str, object], engine_dir: Path, *, use_checkpoin
             restart_live=restart_live,
             interrupted_archive_tape=interrupted_archive_tape)
     else:
-        pending = replay_tape.pending_request(source / "wire") if not restart_live else None
+        wire = source / "wire"
+        pending = replay_tape.pending_request(wire) if not restart_live else None
         # A moved model name may preserve request semantics, but a later resume cannot
         # prove the archived exchange's raw bytes without the route-specific record.
-        moved_model = isinstance((spec.get("resume") or {}).get("model_swap"), dict)
-        tape = ([] if restart_live else own_tape if moved_model else carry_forward(
-            spec, own_tape, (source / "resume-divergence.json").exists(), pending))
+        prior = spec.get("resume") or {}
+        moved_model = isinstance(prior.get("model_swap"), dict)
+        diverged = (source / "resume-divergence.json").exists()
+        tape = ([] if restart_live else own_tape if moved_model else carry_forward(spec, own_tape, diverged, pending))
         if len(tape) > len(own_tape):
             pending = None
+        carried_pending = prior.get("pending")
+        if (not restart_live and not moved_model and not diverged and not tape and pending is None
+                and isinstance(carried_pending, dict) and isinstance(carried_pending.get("request"), str)
+                and not replay_tape.numbered_wire_files(wire, ".request.json")):
+            # The last attempt stopped before recording any request, so it could not check this one.
+            pending = carried_pending
         prior_route_changes, skipped_reason = [], None
     # Checkpoint restore is not supported for routed runs: checkpoint selection reads the in-flight
     # request from the archived wire, not from the carried, route-verified check. Routed runs replay.
