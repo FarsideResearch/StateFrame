@@ -271,6 +271,42 @@ def test_resume_finishes_an_interrupted_failure_report_exactly_once(tmp_path, st
         assert _failures_on_disk(journal) == reports
 
 
+@pytest.mark.parametrize("stop_point", ["between_rows", "during_summary_write"])
+def test_replay_resume_archives_the_completed_observer_failure_report(tmp_path, stop_point):
+    from stateframe.resume import archive_attempt
+
+    measurements = tmp_path / "worker" / "measurement-runs"
+    measurements.mkdir(parents=True)
+    crashed = subprocess.run([sys.executable, "-c", _STOP_DURING_FAILURE_REPORT,
+                              str(measurements), "20", stop_point],
+                             capture_output=True, text=True, timeout=45, check=False)
+    assert crashed.returncode == -signal.SIGKILL, crashed.stderr
+    path = Path(crashed.stdout.strip())
+    lines = path.read_bytes().splitlines(keepends=True)
+    if stop_point == "during_summary_write":
+        assert not lines.pop().endswith(b"\n")
+    before = [json.loads(line) for line in lines]
+    probes = [row for row in before if row["kind"] == _EVENT]
+    details = [row for row in before if row["kind"] == _FAILURE]
+    assert len(probes) == 32
+    assert len(details) == 20
+
+    spec = {"schema": "stateframe-run/1", "environment": {}, "max_turns": 2}
+    (tmp_path / "spec.json").write_text(json.dumps(spec))
+    state = {"run": tmp_path, "spec": spec, "attempt": 1, "max_turns": 2}
+    archived = archive_attempt(state, tmp_path / "engine", use_checkpoint=False)
+
+    archived_journal = archived / path.relative_to(tmp_path)
+    rows = [json.loads(line) for line in archived_journal.read_bytes().splitlines()]
+    assert rows[:-1] == before
+    overflow = rows[-1]
+    assert overflow["kind"] == _FAILURE
+    assert overflow["previous_hash"] == before[-1]["record_hash"]
+    assert overflow["dropped_count"] == 32
+    assert overflow["first_event_sequence"] == probes[20]["sequence"]
+    assert overflow["last_event_sequence"] == details[-1]["sequence"]
+
+
 def test_interrupted_replay_reports_its_failures_before_a_later_single_append(tmp_path):
     single_kind = "single_observer_probe"
     with ContinuationJournal(tmp_path, "observer-replay-interrupted", {}) as journal:
