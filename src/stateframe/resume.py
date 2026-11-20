@@ -546,13 +546,15 @@ def _inspect_parallel_pending(run: Path, pending: tuple[object, ...]) -> dict[st
 def _tool_safety(run: Path, spec: dict, *, replay_external: bool,
                  parallel_pending: bool = False) -> list[dict[str, str]]:
     """Check the live tape and prior external effects before any attempt is archived."""
+    interrupted = _interrupted_archive(run, spec)
+    tool_root = _attempt_file(run, interrupted, "tool-tape.jsonl").parent
     try:
-        tape = ToolTape(run)
+        tape = ToolTape(tool_root)
     except (OSError, ValueError, ToolTapeError) as error:
         raise ResumeRefused(f"tool tape is damaged: {error}") from error
     if "mutations" in spec:
         _reconcile_mutations(run, replay_external=replay_external)
-        tape = ToolTape(run)
+        tape = ToolTape(tool_root)
     pending = tape.pending()
     # A validated pending subframe call (parallel_pending) has its own recovery protocol.
     if pending and not parallel_pending:
@@ -569,6 +571,8 @@ def _tool_safety(run: Path, spec: dict, *, replay_external: bool,
     archived = []
     for folder in sorted((p for p in (run / "attempts").glob("[0-9]*") if p.name.isdigit()),
                          key=lambda p: int(p.name)):
+        if folder == tool_root:
+            continue  # This tape still belongs to the attempt named by the live spec.
         if not (folder / "tool-tape.jsonl").exists():
             continue
         try:
