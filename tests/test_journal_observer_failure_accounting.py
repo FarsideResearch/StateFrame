@@ -124,7 +124,7 @@ def test_overflow_keeps_the_live_artifact_index_in_step_with_single_appends(tmp_
         second = journal.emit_batch([(_EVENT, {})] * 21, atomic=True)
         artifact = journal.emit(
             "rejected_candidate_artifact",
-            reference="stateframe://artifacts/rejected/probe", text="candidate",
+            reference="stateframe://artifacts/rejected/probe", artifact_id="probe", text="candidate",
         )
         last = journal.emit(_EVENT)
 

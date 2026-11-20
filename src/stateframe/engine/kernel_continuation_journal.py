@@ -2372,10 +2372,13 @@ class ContinuationJournal(AuditJournal):
             # another observer failure and require another summary indefinitely.
             audit_only = _is_observer_failure_overflow(record)
             generated = getattr(self, "generated_artifacts", None)
-            if generated is not None and not audit_only:
-                self._notify_isolated(
-                    "generated_artifacts", generated.observe, record,
-                    on_unobserved=generated.mark_unobserved)
+            if generated is not None:
+                if audit_only:
+                    generated.advance_audit_record(record)
+                else:
+                    self._notify_isolated(
+                        "generated_artifacts", generated.observe, record,
+                        on_unobserved=generated.mark_unobserved)
             with self.host_spans.measure("subscriber_fanout", sequence=record["sequence"]):
                 for name, observer in self._subscribers.items():
                     if self._subscriber_cursors.get(name, 0) != record["sequence"] - 1:

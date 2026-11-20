@@ -229,11 +229,22 @@ class GeneratedArtifactIndex:
         except (TypeError, ValueError, RecursionError):
             event_digest = "UNOBSERVED:" + str(error_type)[:80]
             snapshot, weight = None, 0
-        self._events[sequence] = event_digest
-        self.sequence = sequence
-        self._remember_event(sequence, snapshot, weight)
+        self._remember_observed(sequence, event_digest, snapshot, weight)
         self._record_unobserved(
             sequence=sequence, kind=event.get("kind"), error_type=error_type)
+
+    def advance_audit_record(self, event: dict) -> None:
+        """Track a durable audit row with no artifact work or observer callback."""
+        sequence = event["sequence"]
+        if sequence == self.sequence + 1:
+            identity = _hydrated_identity(event, retain=True)
+            self._remember_observed(sequence, *identity)
+
+    def _remember_observed(self, sequence: int, digest: str, snapshot: dict | None,
+                           weight: int) -> None:
+        self._events[sequence] = digest
+        self.sequence = sequence
+        self._remember_event(sequence, snapshot, weight)
 
     def _add(self, event: dict, suffix: str, text: str, **metadata: object) -> str:
         reference = f"generated:{self.run_id}:{event['sequence']}:{suffix}"
@@ -291,9 +302,7 @@ class GeneratedArtifactIndex:
             self._received(event)
         elif isinstance(kind, str) and kind.startswith("native_batch_"):
             self._lifecycle(event)
-        self._events[seq] = digest
-        self.sequence = seq
-        self._remember_event(seq, snapshot, weight)
+        self._remember_observed(seq, digest, snapshot, weight)
 
     def _response(self, event: dict) -> None:
         self._responses[event["event_id"]] = event.get("request_id")
