@@ -146,6 +146,29 @@ def test_overflow_keeps_the_live_artifact_index_in_step_with_single_appends(tmp_
         assert overflow["sequence"] + 1 == artifact["sequence"]
 
 
+def test_replay_observer_failure_storage_stays_bounded_past_the_detail_limit(tmp_path):
+    with ContinuationJournal(tmp_path, "observer-storage-bound", {}) as journal:
+        rows = journal.emit_batch([(_EVENT, {"index": index}) for index in range(1025)], atomic=True)
+        samples = {}
+
+        def reject(row):
+            index = row["index"]
+            if index in (20, 1024):
+                pending = journal._pending_observer_failure_report
+                samples[index] = len(pending.details), pending.overflow
+            if index != 1024:
+                raise RuntimeError(f"failure {index:04}: " + "é" * 170)
+
+        journal.subscribe("rejecting", reject, kinds=(_EVENT,))
+        assert samples == {20: (20, None), 1024: (20, (rows[20]["sequence"], rows[1023]["sequence"], 1004))}
+        *details, summary = _failures_on_disk(journal)
+        assert [row["event_sequence"] for row in details] == [row["sequence"] for row in rows[:20]]
+        assert summary["dropped_count"] == 1004
+        assert summary["first_event_sequence"] == rows[20]["sequence"]
+        assert summary["last_event_sequence"] == rows[1023]["sequence"]
+        assert journal._pending_observer_failure_report is None
+
+
 @pytest.mark.parametrize("attach_after_overflow", [False, True])
 def test_overflow_preserves_continuation_transitions(tmp_path, attach_after_overflow):
     task = "observer-continuation-sequence"
@@ -272,6 +295,177 @@ def test_resume_finishes_an_interrupted_failure_report_exactly_once(tmp_path, st
         assert _failures_on_disk(journal) == reports
 
 
+_STOP_AT_REPORT_IO_BOUNDARY = """
+import os
+import signal
+import sys
+from pathlib import Path
+
+import kernel_continuation_journal as journal_module
+import kernel_turn_publication as publication
+
+point = sys.argv[2]
+
+def stop():
+    os.kill(os.getpid(), signal.SIGKILL)
+
+def arm(journal_path):
+    info = journal_path.stat()
+    intent = journal_path.parent / ".journal-publication"
+    report = journal_path.parent / ".journal-observer-report"
+    replace, fsync, write, truncate = os.replace, os.fsync, os.write, os.ftruncate
+    unlink, sync_dir, sync_intent_dir = Path.unlink, journal_module._sync_directory, publication.sync_directory
+
+    def journal_fd(fd):
+        opened = os.fstat(fd)
+        return (opened.st_dev, opened.st_ino) == (info.st_dev, info.st_ino)
+
+    def replace_file(source, target, **kwargs):
+        if target == intent and point == "before_row_intent_replace":
+            stop()
+        replace(source, target, **kwargs)
+        if target == intent and point == "after_row_intent_replace":
+            stop()
+
+    def write_row(fd, data):
+        if journal_fd(fd) and point == "during_detail_write":
+            write(fd, data[:len(data) // 2])
+            stop()
+        written = write(fd, data)
+        if journal_fd(fd) and point == "after_detail_write":
+            stop()
+        return written
+
+    def truncate_row(fd, size):
+        truncate(fd, size)
+        if journal_fd(fd) and point == "after_recovery_truncate":
+            stop()
+
+    def sync_file(fd):
+        fsync(fd)
+        if journal_fd(fd) and point in ("after_detail_fsync", "after_recovery_fsync"):
+            stop()
+
+    def unlink_file(path, *args, **kwargs):
+        unlink(path, *args, **kwargs)
+        if path == intent and point in ("after_row_intent_unlink", "after_recovery_intent_unlink"):
+            stop()
+        if path == report and point == "after_report_unlink":
+            stop()
+
+    def sync_directory(path):
+        sync_dir(path)
+        if path == journal_path.parent:
+            if not report.exists() and point == "after_report_cleanup_sync":
+                stop()
+            if not intent.exists() and point in ("after_row_cleanup_sync", "after_recovery_cleanup_sync"):
+                stop()
+
+    def sync_intent_directory(path):
+        sync_intent_dir(path)
+        if path == journal_path.parent and intent.exists() and point == "after_row_intent_sync":
+            stop()
+
+    os.replace, os.fsync, os.write, os.ftruncate = replace_file, sync_file, write_row, truncate_row
+    Path.unlink = unlink_file
+    journal_module._sync_directory = sync_directory
+    publication.sync_directory = sync_intent_directory
+
+if point.startswith("after_recovery_") or point.startswith("after_report_"):
+    path = Path(sys.argv[1])
+    arm(path)
+    with journal_module.ContinuationJournal.resume(path, task_id="observer-crash-recovery", manifest={},
+                                                   expected_head=sys.argv[3]):
+        pass
+else:
+    journal = journal_module.ContinuationJournal(Path(sys.argv[1]), "observer-io-boundary", {})
+    print(journal.path, flush=True)
+
+    def reject(_row):
+        raise RuntimeError("observer rejected row")
+
+    journal.subscribe("rejecting", reject, kinds=("observer_probe",))
+    emit = journal.emit
+
+    def emit_with_stop(kind, **fields):
+        if kind == "journal_observer_failed":
+            arm(journal.path)
+        return emit(kind, **fields)
+
+    journal.emit = emit_with_stop
+    journal.emit_batch([("observer_probe", {})] * 22, atomic=True)
+"""
+
+
+def _complete_prefix(path):
+    data = path.read_bytes()
+    return data[:data.rfind(b"\n") + 1]
+
+
+@pytest.mark.parametrize(("point", "complete_details", "torn"), [
+    ("before_row_intent_replace", 0, False),
+    ("after_row_intent_replace", 0, False),
+    ("after_row_intent_sync", 0, False),
+    ("during_detail_write", 0, True),
+    ("after_detail_write", 1, False),
+    ("after_detail_fsync", 1, False),
+    ("after_row_intent_unlink", 1, False),
+    ("after_row_cleanup_sync", 1, False),
+])
+def test_report_recovery_preserves_complete_rows_at_write_boundaries(tmp_path, point, complete_details, torn):
+    stopped = subprocess.run([sys.executable, "-c", _STOP_AT_REPORT_IO_BOUNDARY, str(tmp_path), point],
+                             capture_output=True, text=True, timeout=45, check=False)
+    assert stopped.returncode == -signal.SIGKILL, stopped.stderr
+    path = Path(stopped.stdout.strip())
+    assert path.read_bytes().endswith(b"\n") is not torn
+    prefix = _complete_prefix(path)
+    rows = list(map(json.loads, prefix.splitlines()))
+    assert sum(row["kind"] == _FAILURE for row in rows) == complete_details
+    probes = [row["sequence"] for row in rows if row["kind"] == _EVENT]
+    assert len(probes) == 22
+
+    with ContinuationJournal.resume(path, task_id="observer-io-boundary", manifest={},
+                                    expected_head=rows[-1]["record_hash"]) as journal:
+        assert path.read_bytes().startswith(prefix)
+        *details, summary = _failures_on_disk(journal)
+        assert [row["event_sequence"] for row in details] == probes[:20]
+        assert summary["dropped_count"] == 2
+        assert summary["first_event_sequence"] == probes[20]
+        assert summary["last_event_sequence"] == probes[21]
+        assert journal.cached_records()[-1]["previous_hash"] == summary["record_hash"]
+
+
+@pytest.mark.parametrize("point", [
+    "after_recovery_truncate", "after_recovery_fsync", "after_recovery_intent_unlink",
+    "after_recovery_cleanup_sync", "after_report_unlink", "after_report_cleanup_sync",
+])
+def test_repeated_interruption_during_report_recovery_keeps_original_rows(tmp_path, point):
+    stopped = subprocess.run([sys.executable, "-c", _STOP_DURING_FAILURE_REPORT,
+                              str(tmp_path), "20", "during_summary_write"],
+                             capture_output=True, text=True, timeout=45, check=False)
+    assert stopped.returncode == -signal.SIGKILL, stopped.stderr
+    path = Path(stopped.stdout.strip())
+    prefix = _complete_prefix(path)
+    rows = list(map(json.loads, prefix.splitlines()))
+
+    retry = subprocess.run([sys.executable, "-c", _STOP_AT_REPORT_IO_BOUNDARY, str(path), point,
+                            rows[-1]["record_hash"]], capture_output=True, text=True, timeout=45, check=False)
+    assert retry.returncode == -signal.SIGKILL, retry.stderr
+    recovered_prefix = _complete_prefix(path)
+    recovered_head = json.loads(recovered_prefix.splitlines()[-1])["record_hash"]
+    assert recovered_prefix.startswith(prefix)
+
+    with ContinuationJournal.resume(path, task_id="observer-crash-recovery", manifest={},
+                                    expected_head=recovered_head) as journal:
+        assert path.read_bytes().startswith(recovered_prefix)
+        *details, summary = _failures_on_disk(journal)
+        assert details == [row for row in rows if row["kind"] == _FAILURE]
+        assert len(details) == 20
+        assert summary["dropped_count"] == 32
+        assert summary["previous_hash"] == details[-1]["record_hash"]
+        assert journal.cached_records()[-1]["previous_hash"] == summary["record_hash"]
+
+
 @pytest.mark.parametrize("stop_point", ["between_rows", "during_summary_write"])
 def test_replay_resume_archives_the_completed_observer_failure_report(tmp_path, stop_point):
     from stateframe.resume import archive_attempt
@@ -306,6 +500,58 @@ def test_replay_resume_archives_the_completed_observer_failure_report(tmp_path, 
     assert overflow["dropped_count"] == 32
     assert overflow["first_event_sequence"] == probes[20]["sequence"]
     assert overflow["last_event_sequence"] == details[-1]["sequence"]
+
+
+_STOP_AFTER_REPORT_RECOVERY_BEFORE_ARCHIVE = """
+import json
+import os
+import signal
+import sys
+from pathlib import Path
+
+from stateframe.engine import kernel_continuation_journal as journal_module
+from stateframe.resume import archive_attempt
+
+run = Path(sys.argv[1])
+spec = json.loads((run / "spec.json").read_bytes())
+recover = journal_module.recover_publication_mirror
+
+def stop_after_recover(path):
+    recover(path)
+    os.kill(os.getpid(), signal.SIGKILL)
+
+journal_module.recover_publication_mirror = stop_after_recover
+archive_attempt({"run": run, "spec": spec, "attempt": 1, "max_turns": 2}, run / "engine")
+"""
+
+
+def test_retry_archive_after_report_recovery_preserves_the_completed_report(tmp_path):
+    from stateframe.resume import archive_attempt
+
+    measurements = tmp_path / "worker" / "measurement-runs"
+    measurements.mkdir(parents=True)
+    stopped = subprocess.run([sys.executable, "-c", _STOP_DURING_FAILURE_REPORT,
+                              str(measurements), "20", "during_summary_write"],
+                             capture_output=True, text=True, timeout=45, check=False)
+    assert stopped.returncode == -signal.SIGKILL, stopped.stderr
+    path = Path(stopped.stdout.strip())
+    prefix = _complete_prefix(path)
+    spec = {"schema": "stateframe-run/1", "environment": {}, "max_turns": 2}
+    (tmp_path / "spec.json").write_text(json.dumps(spec))
+
+    archive_stop = subprocess.run([sys.executable, "-c", _STOP_AFTER_REPORT_RECOVERY_BEFORE_ARCHIVE,
+                                   str(tmp_path)], capture_output=True, text=True, timeout=45, check=False)
+    assert archive_stop.returncode == -signal.SIGKILL, archive_stop.stderr
+    assert not (tmp_path / "attempts").exists()
+    repaired = path.read_bytes()
+    assert repaired.startswith(prefix)
+    summary = json.loads(repaired[len(prefix):])
+    assert summary["kind"] == _FAILURE
+    assert summary["dropped_count"] == 32
+
+    state = {"run": tmp_path, "spec": spec, "attempt": 1, "max_turns": 2}
+    archived = archive_attempt(state, tmp_path / "engine")
+    assert (archived / path.relative_to(tmp_path)).read_bytes() == repaired
 
 
 def test_archive_refuses_an_unreadable_pending_observer_detail(tmp_path):
@@ -456,6 +702,97 @@ def test_resume_keeps_failures_recorded_before_fanout_is_killed(tmp_path, source
         appended = journal.emit("after_recovery")
         assert appended["sequence"] == summary["sequence"] + 2
         assert _failures_on_disk(journal) == [*details, summary]
+
+
+_STOP_WHILE_SAVING_OBSERVER_FAILURE = """
+import os
+import signal
+import sys
+from pathlib import Path
+
+import kernel_turn_publication as publication
+from kernel_continuation_journal import ContinuationJournal
+
+journal = ContinuationJournal(Path(sys.argv[1]), "observer-report-save", {})
+print(journal.path, flush=True)
+point, target = sys.argv[2], int(sys.argv[3])
+intent = journal.path.parent / ".journal-observer-report"
+replace, sync, fsync = os.replace, publication.sync_directory, os.fsync
+saves = 0
+syncing_report = False
+
+def stop():
+    os.kill(os.getpid(), signal.SIGKILL)
+
+def replace_file(source, destination, **kwargs):
+    global saves, syncing_report
+    if destination == intent:
+        saves += 1
+        syncing_report = True
+        if saves == target and point == "before_replace":
+            stop()
+    replace(source, destination, **kwargs)
+    if destination == intent and saves == target and point == "after_replace":
+        stop()
+
+def sync_directory(path):
+    global syncing_report
+    sync(path)
+    if syncing_report and saves == target and point == "after_directory_sync":
+        stop()
+    syncing_report = False
+
+def sync_file(fd):
+    fsync(fd)
+    if point == "after_temporary_file_sync" and not syncing_report and saves + 1 == target:
+        # The targeted replacement is the next metadata write during an observer callback.
+        stop()
+
+def reject(_row):
+    os.replace, publication.sync_directory, os.fsync = replace_file, sync_directory, sync_file
+    raise RuntimeError("observer rejected row")
+
+journal.subscribe("rejecting", reject, kinds=("observer_probe",))
+journal.emit_batch([("observer_probe", {})] * 24, atomic=True)
+"""
+
+
+@pytest.mark.parametrize(("point", "target", "durable"), [
+    ("after_temporary_file_sync", 1, 0),
+    ("after_replace", 1, 1),
+    ("before_replace", 20, 19),
+    ("after_directory_sync", 20, 20),
+    ("before_replace", 21, 20),
+    ("after_replace", 21, 21),
+    ("after_temporary_file_sync", 22, 21),
+    ("after_directory_sync", 22, 22),
+])
+def test_interrupted_report_save_recovers_exactly_the_published_failures(tmp_path, point, target, durable):
+    stopped = subprocess.run([sys.executable, "-c", _STOP_WHILE_SAVING_OBSERVER_FAILURE,
+                              str(tmp_path), point, str(target)],
+                             capture_output=True, text=True, timeout=45, check=False)
+    assert stopped.returncode == -signal.SIGKILL, stopped.stderr
+    path = Path(stopped.stdout.strip())
+    prefix = path.read_bytes()
+    rows = list(map(json.loads, prefix.splitlines()))
+    probes = [row["sequence"] for row in rows if row["kind"] == _EVENT]
+    assert len(probes) == 24
+    assert all(row["kind"] != _FAILURE for row in rows)
+
+    with ContinuationJournal.resume(path, task_id="observer-report-save", manifest={},
+                                    expected_head=rows[-1]["record_hash"]) as journal:
+        assert path.read_bytes().startswith(prefix)
+        reports = _failures_on_disk(journal)
+        assert _accounted(reports) == durable
+        detail_count = min(20, durable)
+        assert [row["event_sequence"] for row in reports[:detail_count]] == probes[:detail_count]
+        if durable > 20:
+            summary, = reports[20:]
+            assert summary["first_event_sequence"] == probes[20]
+            assert summary["last_event_sequence"] == probes[durable - 1]
+            assert summary["dropped_count"] == durable - 20
+        else:
+            assert len(reports) == durable
 
 
 def test_no_failure_batch_and_single_append_are_byte_identical_after_replay_and_resume(tmp_path, monkeypatch):
