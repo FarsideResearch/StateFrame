@@ -206,7 +206,7 @@ def test_byte_floor_just_under_cap_passes_and_just_over_is_refused(tmp_path, mon
 
     monkeypatch.setenv(ALLOCATOR_ENV, "on")
     unit, runtime, _events = _gate_fixture(tmp_path, monkeypatch, cap=10_000_000)
-    prepared, closure = _value_file_prepared(tmp_path, "r10", max_request_bytes=None)
+    prepared, closure = _value_file_prepared(tmp_path, "uncapped", max_request_bytes=None)
     runtime._request_source_closure = closure
     source = (tmp_path / "pkg/a.py").read_text()
     floor = len(_clean_floor_body("pkg/a.py", source).encode())

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.3 (2026-11-20)
+
+- Tests: fail-loud triage tests use neutral fixture names.
+### Fixed
+- The installed-wheel isolation test now keeps its virtual environment outside the source checkout when pytest uses an in-tree temporary directory.
+
 ## 0.8.2 (2026-11-19)
 
 - Add `STATEFRAME_PROMPT_CACHE_UNPINNED=on` to let llama.cpp select each request's slot while retaining `cache_prompt:true`; the default preserves pinned request bytes.

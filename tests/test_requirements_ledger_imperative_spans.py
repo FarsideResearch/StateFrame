@@ -13,7 +13,7 @@ import kernel_requirements_ledger as ledger
 
 def _build(text: str) -> dict:
     ledger.clear_cache()
-    return ledger.build_ledger("ticket-r05", text)
+    return ledger.build_ledger("ticket-spans", text)
 
 
 def _span_id_for(built: dict, quote: str) -> str:

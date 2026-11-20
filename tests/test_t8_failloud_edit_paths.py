@@ -1,4 +1,4 @@
-"""Fail-loud batch 4: broad except sites in the edit, source, evidence and tool kernel modules.
+"""Fail-loud triage for broad except sites in the edit, source, evidence and tool kernel modules.
 
 Companion to the original T8 pilot census. Every census site in kernel_*edit*.py, kernel_*source*.py,
 kernel_*evidence*.py and kernel_tool_*.py outside the pilot sample was triaged. No site in this batch hides
@@ -238,7 +238,7 @@ def test_schema_diet_emit_failures_return_false_without_marking_applied(
 # --- census bookkeeping --------------------------------------------------------------------------------
 
 
-def test_t8_batch4_sites_are_still_broad_excepts() -> None:
+def test_t8_edit_path_sites_are_still_broad_excepts() -> None:
     assert_triaged(_broad_except_sites(_MODULE_PATHS), _TRIAGED)
 
 
