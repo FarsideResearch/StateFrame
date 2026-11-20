@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fixed: offline installs now include the syntax-aware repo map by default; `--no-repomap` skips it.
+
 ## 0.8.0 (2026-11-19)
 
 - Startup reaches the first model request sooner, especially in large repositories. StateFrame postpones optional repository-wide analysis until it is needed and reuses validated startup results.

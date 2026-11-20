@@ -4,7 +4,7 @@ StateFrame's own code is licensed under AGPL-3.0-only or a commercial license (s
 
 ## 1. Bundled in the source package (offline wheelhouse)
 
-The source package includes universal and platform wheels in `wheelhouse/` for `./install.sh --offline`, covering the complete required runtime dependency closure. They are redistributed with their license files kept inside each wheel. PyYAML is repackaged: the wheelhouse builder rebuilds it as a pure-Python wheel (without the optional compiled libyaml accelerator), so its packaging is modified; its code and its MIT license are unchanged.
+The source package includes universal and platform wheels in `wheelhouse/` for `./install.sh --offline`, covering the complete required runtime dependency closure and the default-installed `repomap` extra. Native wheels cover CPython 3.11-3.14 on manylinux x86_64/aarch64 and macOS arm64/x86_64; grammar wheels use the stable ABI across those Python versions. They are redistributed with their license files kept inside each wheel. PyYAML is repackaged: the wheelhouse builder rebuilds it as a pure-Python wheel (without the optional compiled libyaml accelerator), so its packaging is modified; its code and its MIT license are unchanged.
 
 | Package | Version | License |
 | --- | --- | --- |
@@ -23,10 +23,27 @@ The source package includes universal and platform wheels in `wheelhouse/` for `
 | referencing | 0.37.0 | MIT |
 | rpds-py | 2026.6.3 | MIT |
 | typing-extensions | 4.15.0 | PSF-2.0 (BSD-style) |
+| tree-sitter | 0.25.2 | MIT |
+| tree-sitter-c | 0.24.2 | MIT |
+| tree-sitter-c-sharp | 0.23.5 | MIT |
+| tree-sitter-cpp | 0.23.4 | MIT |
+| tree-sitter-css | 0.25.0 | MIT |
+| tree-sitter-go | 0.25.0 | MIT |
+| tree-sitter-html | 0.23.2 | MIT |
+| tree-sitter-java | 0.23.5 | MIT |
+| tree-sitter-javascript | 0.25.0 | MIT |
+| tree-sitter-json | 0.24.8 | MIT |
+| tree-sitter-php | 0.25.1 | MIT |
+| tree-sitter-python | 0.25.0 | MIT |
+| tree-sitter-ruby | 0.23.1 | MIT |
+| tree-sitter-rust | 0.24.2 | MIT |
+| tree-sitter-toml | 0.7.0 | MIT |
+| tree-sitter-typescript | 0.23.2 | MIT |
+| tree-sitter-yaml | 0.7.2 | MIT |
 
 ## 2. Installed by pip (declared dependencies)
 
-The default install downloads these from PyPI, pinned and hash-checked (`requirements.txt`, `requirements-repomap.txt`). The required runtime wheels are also redistributed in the offline wheelhouse. Each exact pinned release was checked against both its PyPI license metadata and the license file inside that release's wheel.
+The default online install downloads these from PyPI, pinned and hash-checked (`requirements.txt`, `requirements-repomap.txt`). All required runtime and repo map wheels are also redistributed in the offline wheelhouse. Each exact pinned release was checked against both its PyPI license metadata and the license file inside that release's wheel. The full license texts below apply to the redistributed platform variants as well.
 
 ### Core (requirements.txt)
 

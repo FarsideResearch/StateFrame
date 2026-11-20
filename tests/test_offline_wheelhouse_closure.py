@@ -21,6 +21,15 @@ from packaging.utils import InvalidWheelFilename, canonicalize_name, parse_wheel
 from packaging.version import Version
 
 
+def _builder():
+    path = Path(__file__).resolve().parents[1] / "scripts/build_wheelhouse.py"
+    spec = importlib.util.spec_from_file_location("offline_wheelhouse_builder", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 @dataclass(frozen=True)
 class _Wheel:
     path: Path
@@ -109,7 +118,11 @@ def _closure_problems(project_root: Path) -> list[str]:
 
     try:
         project = tomllib.loads((project_root / "pyproject.toml").read_text(encoding="utf-8"))
-        dependencies = project["project"]["dependencies"]
+        dependencies = [
+            *project["project"]["dependencies"],
+            *(requirement for extra in _builder().DEFAULT_INSTALL_EXTRAS
+              for requirement in project["project"]["optional-dependencies"][extra]),
+        ]
     except (OSError, KeyError, tomllib.TOMLDecodeError) as exc:
         return problems + [f"could not read project dependencies: {exc}"]
 
@@ -156,8 +169,27 @@ def test_wheelhouse_contains_runtime_dependency_closure() -> None:
     assert not problems, "Offline wheelhouse closure failed:\n- " + "\n- ".join(problems)
 
 
+def test_default_extras_match_installer_and_pinned_requirements() -> None:
+    root = Path(__file__).resolve().parents[1]
+    installer = (root / "install.sh").read_text(encoding="utf-8")
+    defaults = installer.split('for arg in "$@";', 1)[0]
+    enabled = tuple(name.lower() for name in re.findall(r"^([A-Z_]+)=1$", defaults, re.MULTILINE))
+    builder = _builder()
+    assert builder.DEFAULT_INSTALL_EXTRAS == enabled
+    project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    for extra in enabled:
+        declared = {str(Requirement(text)) for text in project["optional-dependencies"][extra]}
+        pinned = set(re.findall(r"^([\w-]+==[\w.]+)",
+                               (root / f"requirements-{extra}.txt").read_text(), re.MULTILINE))
+        assert declared == pinned
+    assert set(builder._runtime_roots()) == {
+        *project["dependencies"],
+        *(text for extra in enabled for text in project["optional-dependencies"][extra]),
+    }
+
+
 @pytest.mark.slow
-def test_offline_install_passes_pip_check_and_imports_jsonschema(
+def test_offline_install_passes_pip_check_and_imports_default_extras(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     for module in ("venv", "ensurepip"):
@@ -215,11 +247,16 @@ def test_offline_install_passes_pip_check_and_imports_jsonschema(
                 "--no-index",
                 "--find-links",
                 str(project_root / "wheelhouse"),
-                str(project_root),
+                f"{project_root}[repomap]",
             ],
         ),
         ("pip check", [str(executable), "-m", "pip", "check"]),
         ("jsonschema import", [str(executable), "-c", "import jsonschema"]),
+        (
+            "repo map imports",
+            [str(executable), "-c",
+             "import tree_sitter, tree_sitter_python; print('tree_sitter and tree_sitter_python imports OK')"],
+        ),
     )
     for label, command in commands:
         result = subprocess.run(
@@ -229,6 +266,7 @@ def test_offline_install_passes_pip_check_and_imports_jsonschema(
             capture_output=True,
             text=True,
             check=False,
+            timeout=180,
         )
         if result.returncode != 0:
             pytest.fail(
@@ -236,3 +274,65 @@ def test_offline_install_passes_pip_check_and_imports_jsonschema(
                 f"{result.stdout}{result.stderr}",
                 pytrace=False,
             )
+        print(f"{label}: exit {result.returncode}\n{result.stdout}{result.stderr}")
+
+
+def _installer_environment(tmp_path: Path) -> dict[str, str]:
+    home = tmp_path / "home"
+    home.mkdir()
+    environment = {key: value for key, value in os.environ.items()
+                   if not key.startswith("PIP_") and key not in {"PYTHONHOME", "PYTHONPATH"}}
+    environment.update({
+        "HOME": str(home), "SF_HOME": str(tmp_path / "install"), "PYTHON": sys.executable,
+        "PIP_CONFIG_FILE": os.devnull, "PIP_NO_INDEX": "1", "PYTHONNOUSERSITE": "1",
+        "XDG_CACHE_HOME": str(tmp_path / "cache"), "PIP_CACHE_DIR": str(tmp_path / "pip-cache"),
+    })
+    return environment
+
+
+def test_offline_installer_missing_grammar_fails_before_creating_environment(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[1]
+    source = tmp_path / "source"
+    for relative in ("install.sh", "scripts/build_wheelhouse.py", "pyproject.toml"):
+        target = source / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((root / relative).read_bytes())
+    wheelhouse = source / "wheelhouse"
+    wheelhouse.mkdir()
+    for path in (root / "wheelhouse").iterdir():
+        if path.is_file() and not path.name.startswith("tree_sitter_python-"):
+            (wheelhouse / path.name).symlink_to(path)
+    result = subprocess.run(
+        ["bash", str(source / "install.sh"), "--offline"], cwd=source,
+        env=_installer_environment(tmp_path), capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode != 0
+    assert "missing pinned wheel: tree-sitter-python==0.25.0" in result.stderr
+    assert "offline wheelhouse is missing or incomplete" in result.stderr
+    assert not (tmp_path / "install").exists()
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("repomap", [True, False])
+def test_offline_installer_respects_repomap_default_and_opt_out(tmp_path: Path, repomap: bool) -> None:
+    root = Path(__file__).resolve().parents[1]
+    environment = _installer_environment(tmp_path)
+    command = ["bash", str(root / "install.sh"), "--offline"]
+    if not repomap:
+        command.append("--no-repomap")
+    result = subprocess.run(command, cwd=root, env=environment, capture_output=True, text=True, timeout=180)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert ("repo map: on (17 languages:" if repomap else "repo map: OFF") in result.stdout
+    executable = tmp_path / "install/venv/bin/python"
+    check = subprocess.run([str(executable), "-m", "pip", "check"], env=environment,
+                           capture_output=True, text=True, timeout=30)
+    assert check.returncode == 0, check.stdout + check.stderr
+    imports = subprocess.run([
+        str(executable), "-c",
+        "import importlib.util; "
+        f"assert (importlib.util.find_spec('tree_sitter') is not None) is {repomap}; "
+        f"assert (importlib.util.find_spec('tree_sitter_python') is not None) is {repomap}",
+    ], env=environment, capture_output=True, text=True, timeout=30)
+    assert imports.returncode == 0, imports.stdout + imports.stderr
+    print(f"offline installer repomap={repomap}: exit {result.returncode}; "
+          f"pip check exit {check.returncode}; imports/absence OK")
