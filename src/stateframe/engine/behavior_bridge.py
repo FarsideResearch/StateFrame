@@ -6,9 +6,9 @@ it cannot reach the code. The micro-call verifier is lexical too, which makes th
 check circular.
 
 A deterministic bridge cannot map unconstrained prose to code with no anchor at
-all. It must attach the behavior to an OBSERVABLE artifact. Per the committed
-design (sol_answers/w19/a_semantic_bridge.md) the top two artifacts on a real
-FastAPI app are, in the design's own precision/coverage ranking:
+all. It must attach the behavior to an OBSERVABLE artifact. In the committed
+design, the top two artifacts on a real FastAPI app are ranked by precision
+and coverage:
 
   1. ROUTE TABLE       — broadest coverage for HTTP-visible incidents.
                          behavior noun -> route path/tag -> handler -> callees.

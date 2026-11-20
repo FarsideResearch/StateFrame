@@ -1,9 +1,8 @@
 """GET-SURE — the bounded abstention-to-sure engine.
 
-Design authority: sol_answers w63 `a_getsure_engine.md` (executor + action
-catalog + re-decide-from-scratch), `a_sure_semantics.md` (doubt -> retirement
-evidence table, risk ladder, independence accounting, evidence floors) and
-`a_getsure_measure.md` (the false-sure rate is the sacred metric).
+Design: executor, action catalog, and re-decide-from-scratch behavior;
+doubt-to-retirement evidence table, risk ladder, independence accounting,
+and evidence floors. False-sure rate is the key metric.
 
 The U-ledger (`detreason/uledger.py`) stays authoritative for typed doubt rows,
 the accounting identity, `ready_to_act` and `next_action`. This module adds the

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.11 (2026-11-20)
+
+- Changed: premortem.discover_rule_ids takes rules_path (renamed parameter); internal path names removed from shipped code and docs; behaviour is unchanged.
+
 ## 0.8.10 (2026-11-20)
 
 - Changed: the default namespace base name in static analysis is now sample_test_f2.

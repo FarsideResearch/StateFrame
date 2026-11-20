@@ -56,6 +56,10 @@ MAX_REASON_CHARS = 180
 _MAX_WHERE_USED_SCAN_FILES = 256
 _MAX_WHERE_USED_SCAN_DIRECTORIES = 256
 _MAX_WHERE_USED_SCAN_BYTES = 16 * 1024 * 1024
+_EXCLUDED_BIN_PREFIX_DIGESTS = frozenset({
+    (10, "f3f30ef2998543edba311c7113145115dcd5a87c9250d14c392e7741881acc47"),
+    (5, "a991d6e2374ea0ba31fca0df1188e17e24d8e5737e2f6153daf40cd387ca4763"),
+})
 
 _GRAPH_MODULES = {
     "where_used_closure": "kernel_where_used",
@@ -1109,6 +1113,13 @@ def _merge_candidates(rows: Iterable[tuple[str, Mapping[str, object]]],
     return tuple(admitted)
 
 
+def _matches_digest_prefix(
+        part: str, prefixes: frozenset[tuple[int, str]] = _EXCLUDED_BIN_PREFIX_DIGESTS,
+) -> bool:
+    return any(hashlib.sha256(part[:length].encode("utf-8", "surrogatepass")).hexdigest() == digest
+               for length, digest in prefixes)
+
+
 def _within_where_used_scan_budget(root: object) -> bool:
     """Bound optional repository scans before the where-used pack reads files."""
     from pathlib import Path
@@ -1127,7 +1138,7 @@ def _within_where_used_scan_budget(root: object) -> bool:
             next_part = folded_root_parts[index + 1]
             if part == "tools" and next_part == "bug_replay":
                 return False
-            if part == "bin" and next_part.startswith(("operator2_", "belt_")):
+            if part == "bin" and _matches_digest_prefix(next_part):
                 return False
         pending = [root_path]
         file_count = 0
@@ -1148,7 +1159,7 @@ def _within_where_used_scan_budget(root: object) -> bool:
                             continue
                         if (len(folded_parts) >= 2
                                 and folded_parts[0] == "bin"
-                                and folded_parts[1].startswith(("operator2_", "belt_"))):
+                                and _matches_digest_prefix(folded_parts[1])):
                             continue
                         directory_count += 1
                         if directory_count > _MAX_WHERE_USED_SCAN_DIRECTORIES:

@@ -18,9 +18,9 @@ new:
   off_by_one     integer literals / range() / subscript boundaries get +-1 variants
   wrong_variable swap a name reference for a same-ish local name visible in the span
   missing_not    insert / remove `not ` on an if / elif / while condition
-contact families (2026-08-28, sol_answers/w7/a_contact_families.md build order —
-these exist because gym gold-contact 12 vs fixed 4 was a family-EXPRESSIVENESS gap,
-not a localization gap; each is AST-grounded, not regex-grounded):
+contact families (these address a family-EXPRESSIVENESS gap in the gym's
+gold-contact 12 vs fixed 4 result, not a localization gap; each is AST-grounded,
+not regex-grounded):
   wrong_variable_used  replace exactly ONE Name load with an in-scope symbol whose
                        definition DOMINATES the use (ranked, one-node AST diff)
   missing_kwarg        insert `param=source` into ONE Call whose span-resolved

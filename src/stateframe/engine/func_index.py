@@ -1,4 +1,4 @@
-"""FUNCTION-GRANULARITY MECHANICAL LAYER (sol_answers/a_mechanical.md, Q1/Q3/Q4).
+"""FUNCTION-GRANULARITY MECHANICAL LAYER.
 
 The file-level locate stage (probes/real_repo_baseline_v2.py build_index/bm25_rank
 plus fixer.class_pattern_rank) ranks FILES. Its known residue is density dilution:

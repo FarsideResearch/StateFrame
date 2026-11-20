@@ -1,9 +1,9 @@
 """KERNEL ECONOMICS v1 — decision-cost ledger, marginal-value rule, ESCALATE EV,
 fleet throughput/cost reporting.
 
-Design authority: sol_answers/w8/a_kernel_econ.md (Q1 decision-cost ledger +
-marginal-value rule, Q2 ESCALATE expected-value formula, Q3 fleet scheduling).
-This module implements Q1 and Q2 exactly as committed there, plus a Q3-adjacent
+Design: decision-cost ledger and marginal-value rule (Q1), ESCALATE
+expected-value formula (Q2), and fleet scheduling (Q3).
+This module implements Q1 and Q2, plus a Q3-adjacent
 fleet *reporting* view (throughput_report) — not the GPU-slot scheduler itself,
 which is out of scope for this file.
 
@@ -131,8 +131,8 @@ class CostModel:
     """Per-action-class cost, in the ledger's four commensurable units:
     GPU-seconds (g), external dollars (m), human-minutes (h), latency-seconds (t).
 
-    Matches sol_answers/w8/a_kernel_econ.md Q1's C(d) = sum_i(lambda_G g_i +
-    lambda_$ m_i + lambda_H h_i + lambda_T t_i) decomposition — this dataclass
+    Uses the decision-cost decomposition C(d) = sum_i(lambda_G g_i +
+    lambda_$ m_i + lambda_H h_i + lambda_T t_i) — this dataclass
     IS the per-action (g, m, h, t) tuple for one action class; DecisionCostLedger
     applies the lambda weights and sums across stages.
     """

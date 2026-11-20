@@ -214,13 +214,13 @@ def _rule_sort_key(rule_id: str) -> Tuple[int, str]:
     return (int(m.group(1)), m.group(2))
 
 
-def discover_rule_ids(claude_md_path: str) -> Tuple[str, ...]:
+def discover_rule_ids(rules_path: str) -> Tuple[str, ...]:
     """MEASURE the rule ids actually present in the instruction file — a scan, not an
     assumption (rules: never trust a compressed or remembered
     count). Pure I/O helper; ``generate_premortem`` itself never touches the
     filesystem — callers freeze this result before generation.
     """
-    with open(claude_md_path, "r", encoding="utf-8") as fh:
+    with open(rules_path, "r", encoding="utf-8") as fh:
         text = fh.read()
     ids = sorted(set(_RULE_HEADER_RE.findall(text)), key=_rule_sort_key)
     return tuple(ids)

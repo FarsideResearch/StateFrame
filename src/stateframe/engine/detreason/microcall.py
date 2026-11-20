@@ -1,8 +1,7 @@
 """MICRO-CALL CONTRACT LAYER — bounded semantic sensors, never kernel authorities.
 
-Design authority: sol_answers a_microcalls.md (the doctrine + the ranked
-shopping list) and a_microcalls_crucible.md (the hostile review, whose
-guardrails are MANDATORY here, not advisory).
+Design: bounded micro-call doctrine and ranked candidate uses. The
+adversarial review's guardrails are MANDATORY here, not advisory.
 
 The one sentence: *a micro-call is a typed, bounded evidence vote.* It may
 propose an atom. It may never own authorization, state mutation, budget

@@ -1,8 +1,7 @@
 """ATTENTION ALLOCATOR — where a fixed compute budget gets spent.
 
-Design of record: `sol_answers/w8/a_attention.md` (floor-constrained,
-risk-prioritized water-filling), plus the crucible correction that the design
-does not state loudly enough and which this module exists to make impossible:
+Design: floor-constrained, risk-prioritized water-filling. This module also
+enforces a critical constraint:
 
     A CONFIDENTLY-WRONG UPSTREAM PICK STARVES DOWNSTREAM VERIFICATION.
 

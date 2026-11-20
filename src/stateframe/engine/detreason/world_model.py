@@ -1,8 +1,8 @@
 """WORLD MODEL v1 — predict the blast radius BEFORE the edit, then score the
 prediction against what actually broke.
 
-Committed design: `sol_answers/w8/a_world_model.md`. Three commitments from
-that answer are load-bearing here and are implemented literally:
+Three commitments from the design are load-bearing here and are implemented
+literally:
 
   Q1  impact(x) is a *capped-depth* reverse-dependency closure over the typed
       relation substrate (`detreason/relations.py`), NOT a bespoke graph. The

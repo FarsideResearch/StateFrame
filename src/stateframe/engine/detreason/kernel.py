@@ -4,9 +4,8 @@ verdict = deterministic_kernel(policy, evidence, atom_answers)
 
 The model (or any registered SENSOR) answers leaf ATOMS as TRUE/FALSE/UNKNOWN with
 a margin; CODE owns decomposition, elimination, interval scoring, ranking, ties,
-verification, certificates, and escalation. Design authority:
-DETREASON_DESIGN.md + sol_answers/ (a1 architecture, a3 substrate/tri-logic,
-a5 escalation, a_sense2 sensors, a_crossboot margin probe, a_hats aggregation).
+verification, certificates, and escalation. Design: architecture,
+substrate/tri-logic, escalation, sensors, margin probing, and aggregation.
 
 Everything here is pure code except Sensor.answer implementations.
 """

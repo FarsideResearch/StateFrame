@@ -1,8 +1,7 @@
 """ADHERENCE — action binding, executable milestones, amendment protocol, focus.
 
-PLANNING V1 MODULE 2. Design authority: ``sol_answers``-style banked specs at
-``/tmp/solq/w14`` — ``a_plan_v1_cut.md`` (module 2), ``a_plan_amendment.md``
-(anti-gaming protocol) and ``a_plan_focus.md`` (focus/tangent/thrash).
+PLANNING V1 MODULE 2. Design: action binding, an anti-gaming amendment
+protocol, and focus/tangent/thrash detection.
 
 The problem this file exists to solve is NOT "did the agent do work" — the
 ledger already answers that, and E38's self-coherence trap is exactly an agent

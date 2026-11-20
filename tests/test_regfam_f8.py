@@ -46,7 +46,7 @@ PENDING_RELEASE_SELECTION: dict[str, int] = {
     # always skip in a gate run
     "tests/test_mutate_parity.py": 1,  # needs SF_TEST_PARITY_BASELINE, which the must-run gate rejects as retired
     "tests/test_mutation_adversarial_parity.py": 2,  # needs SF_TEST_PARITY_BASELINE (retired, rejected by the gate)
-    "tests/test_stable_wire_chief_parity.py": 1,  # pinned commit 37f0ac81 is not in this repository's objects
+    "tests/test_stable_wire_parity.py": 1,  # pinned commit 37f0ac81 is not in this repository's objects
     # pass only through pytest.raises: no passing assert statement for an assertion_match witness
     "tests/test_journal_replay_publication.py": 2,  # external_effect / parent_meter refusal type change controls
     "tests/test_llama_wire_seal_parity.py": 1,  # test_wire_guard_rejects_planted_changes

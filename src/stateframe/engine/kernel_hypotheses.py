@@ -5,8 +5,8 @@ wired and has NEVER produced an evidence edge. `KernelBolt.note()` routes BOTH
 `"hypothesis"` and `"evidence"` notes through `add_hypothesis()`, so the graph's
 evidence / posture / discriminator APIs — the entire reason the module exists — are
 dead weight, and the hypothesis IDs it mints use `len(self.trace)` as identity, which
-is not stable across a replay. the wire spec (`sol_answers/cogwire_micrograph.md`)
-names the safe boundary; this module implements the hypothesis half of it.
+is not stable across a replay. This module implements the hypothesis half
+of the safe wire boundary.
 
 THE BOUNDARY:
 

@@ -97,7 +97,7 @@ class VitalsEKG:
         "hypothesis before the next edit"
     )
 
-    # Measured cutoffs from sol_answers/cs_vitals.md.
+    # Measured cutoffs.
     SCOPE_WINDOW = 4
     SCOPE_MIN_EDITS = 3
     SCOPE_MIN_TEST_EDITS = 2
