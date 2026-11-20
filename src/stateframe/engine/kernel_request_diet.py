@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 import functools
 import hashlib
+import hmac
 import http.client
 import io
 import json
@@ -29,8 +30,10 @@ import urllib.request
 from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
+from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 import kernel_frame_routes as _frame_routes
@@ -163,9 +166,49 @@ _TOKENIZER_UNAVAILABLE_REASONS = frozenset({
 # pressure walk can exceed 64 distinct bodies, then revisit them on another
 # budget pass. Keep the complete walk without retaining prompt text.
 _EXACT_TOKEN_COUNT_CACHE_ENTRIES = 512
+_COUNT_CONTRACT_VERSION = "token-count/2"
+_TOKENIZE_FLAGS = {"add_special": False, "parse_special": True}
 _PREFETCHED_HTTP_COUNTS: ContextVar[
-    dict[tuple[object, str, str], Future[Sequence[int]]] | None
+    dict[tuple[object, ...], Future[Sequence[int]]] | None
 ] = ContextVar("prefetched_http_counts", default=None)
+_TOKENIZE_GROUPS: dict[tuple[object, ...], int] = {}
+_TOKENIZE_GROUPS_LOCK = threading.Lock()
+
+
+def wave4_token_counts_enabled() -> bool:
+    try:
+        from stateframe import _startup_optimization_enabled as enabled
+    except ModuleNotFoundError as error:
+        if error.name != "stateframe":
+            raise
+        return False
+    return enabled()
+
+
+def _replaying_counts() -> bool:
+    from kernel_tool_tape import replay_mode_active
+
+    layout = sys.modules.get("kernel_cache_layout_candidate")
+    return (replay_mode_active()
+            or getattr(layout, "_REPLAY_LAYOUT_DECISION_PROVIDER", None) is not None
+            or getattr(layout, "_REPLAY_STABLE_WIRE_DECISION_PROVIDER", None) is not None)
+
+
+def _claim_tokenize_worker(group: tuple[object, ...]) -> bool:
+    with _TOKENIZE_GROUPS_LOCK:
+        active = _TOKENIZE_GROUPS.get(group, 0)
+        if active >= 2 or sum(_TOKENIZE_GROUPS.values()) >= 4:
+            return False
+        _TOKENIZE_GROUPS[group] = active + 1
+        return True
+
+
+def _release_tokenize_worker(group: tuple[object, ...], _future: Future | None = None) -> None:
+    with _TOKENIZE_GROUPS_LOCK:
+        if _TOKENIZE_GROUPS[group] == 1:
+            del _TOKENIZE_GROUPS[group]
+        else:
+            _TOKENIZE_GROUPS[group] -= 1
 
 
 def _log_count_cache_fallback(cause: str, why: str) -> None:
@@ -173,18 +216,86 @@ def _log_count_cache_fallback(cause: str, why: str) -> None:
                 level="DEBUG", journal=False)
 
 
-def _read_exact_count(path: Path, key: str) -> int | None:
+@contextmanager
+def _private_count_directory(path: Path, *, create: bool = False):
+    """Hold the private home and slot directory open while accessing entries."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    with ExitStack() as stack:
+        home = os.open(path.parent, flags)
+        stack.callback(os.close, home)
+        info = os.fstat(home)
+        if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+            raise PermissionError("token count home is not private")
+        if create:
+            try:
+                os.mkdir(path.name, 0o700, dir_fd=home)
+            except FileExistsError:
+                pass
+        directory = os.open(path.name, flags, dir_fd=home)
+        stack.callback(os.close, directory)
+        info = os.fstat(directory)
+        if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+            raise PermissionError("token count directory is not private")
+        yield directory
+
+
+@dataclass(frozen=True)
+class _TokenCountAuthority:
+    secret: bytes
+    key_stamp: tuple[int, ...]
+
+    def current(self, directory: Path, fd: int) -> bool:
+        from kernel_request_auth_identity import _key_fingerprint
+
+        opened = os.fstat(fd)
+        named = directory.stat(follow_symlinks=False)
+        return (os.path.samestat(opened, named)
+                and named.st_uid == os.getuid() and stat.S_IMODE(named.st_mode) == 0o700
+                and _key_fingerprint(directory.parent / "identity.key") == self.key_stamp)
+
+
+def _read_exact_count(path: Path, key: str, authority: _TokenCountAuthority | None = None) -> int | None:
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
     try:
-        fd = os.open(path, flags)
-        try:
-            if not stat.S_ISREG(os.fstat(fd).st_mode):
-                _log_count_cache_fallback("exact_count_cache_invalid", "not a regular file")
-                return None
-            with os.fdopen(fd, "rb", closefd=False) as stream:
-                raw = stream.read(96)
-        finally:
-            os.close(fd)
+        if authority is not None:
+            from stateframe.startup_cache_writes import active_writer
+
+            writer = active_writer()
+            if writer is not None:
+                reader = _count_reader(writer, path.parent)
+                if reader is None:
+                    return None
+                info = os.fstat(reader)
+                if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+                    return None
+                directory = nullcontext(reader)
+            else:
+                directory = _private_count_directory(path.parent)
+            with directory as fd:
+                if not authority.current(path.parent, fd):
+                    return None
+                with os.fdopen(os.open(path.name, flags, dir_fd=fd), "rb") as stream:
+                    info = os.fstat(stream.fileno())
+                    if not stat.S_ISREG(info.st_mode) or (
+                            info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600):
+                        return None
+                    raw = stream.read(160)
+                record, _, signature = raw.partition(b"\n")
+                if (not hmac.compare_digest(
+                        signature, hmac.digest(authority.secret, record, "sha256").hex().encode())
+                        or not authority.current(path.parent, fd)):
+                    return None
+            raw = record + b"\n"
+        else:
+            fd = os.open(path, flags)
+            try:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    _log_count_cache_fallback("exact_count_cache_invalid", "not a regular file")
+                    return None
+                with os.fdopen(fd, "rb", closefd=False) as stream:
+                    raw = stream.read(96)
+            finally:
+                os.close(fd)
         record = re.fullmatch(rb"([0-9a-f]{64}) ([0-9]{1,7})\n", raw)
         if record is not None:
             count = int(record[2])
@@ -200,7 +311,39 @@ def _read_exact_count(path: Path, key: str) -> int | None:
     return None
 
 
-def _write_exact_count(path: Path, key: str, count: int) -> None:
+def _write_exact_count(path: Path, key: str, count: int,
+                       authority: _TokenCountAuthority | None = None) -> None:
+    if authority is not None:
+        from secrets import token_hex
+
+        record = f"{key} {count}".encode("ascii")
+        signed = record + b"\n" + hmac.digest(authority.secret, record, "sha256").hex().encode()
+        try:
+            with _private_count_directory(path.parent, create=True) as fd:
+                name = f".{path.name}.{token_hex(8)}.tmp"
+                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                descriptor = os.open(name, flags, 0o600, dir_fd=fd)
+                try:
+                    with os.fdopen(descriptor, "wb") as stream:
+                        os.fchmod(stream.fileno(), 0o600)
+                        stream.write(signed)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    os.replace(name, path.name, src_dir_fd=fd, dst_dir_fd=fd)
+                    os.fsync(fd)
+                finally:
+                    try:
+                        os.unlink(name, dir_fd=fd)
+                    except FileNotFoundError:
+                        pass
+        except OSError as error:
+            from stateframe.startup_cache_writes import active_writer
+
+            if active_writer() is not None:
+                raise
+            _log_count_cache_fallback("exact_count_cache_write_failed", type(error).__name__)
+
+        return
     from tempfile import NamedTemporaryFile
 
     temporary = None
@@ -217,6 +360,38 @@ def _write_exact_count(path: Path, key: str, count: int) -> None:
                 temporary.unlink(missing_ok=True)
             except OSError as error:
                 _log_count_cache_fallback("exact_count_cache_cleanup_failed", type(error).__name__)
+
+
+def _count_reader(writer, directory):
+    return writer.reader(("token-counts", directory), lambda: _private_count_directory(directory))
+
+
+def _strong_count_slot(directory, identity, content_digest, format_domain):
+    from kernel_request_auth_identity import _key_fingerprint, _read_secret
+
+    key_path = directory.parent / "identity.key"
+    stamp = _key_fingerprint(key_path)
+    secret = _read_secret(key_path) if stamp is not None else None
+    if secret is None or stamp != _key_fingerprint(key_path):
+        return None
+    payload = json.dumps(
+        (_COUNT_CONTRACT_VERSION, format_domain, identity, content_digest), separators=(",", ":"),
+    ).encode("ascii")
+    key = hashlib.sha256(payload).hexdigest()
+    slot = int(key, 16) % _EXACT_TOKEN_COUNT_CACHE_ENTRIES
+    return directory / f"{slot:03x}", key, _TokenCountAuthority(secret, stamp)
+
+
+def _publish_strong_count(directory, identity, content_digest, format_domain, count):
+    slot = _strong_count_slot(directory, identity, content_digest, format_domain)
+    if slot is None:
+        from stateframe.startup_cache_writes import active_writer
+
+        if active_writer() is not None:
+            raise PermissionError("no private token count identity")
+        return
+    path, key, authority = slot
+    _write_exact_count(path, key, count, authority)
 
 
 def resolve_tokenize_url(
@@ -275,27 +450,30 @@ def resolve_tokenize_url(
     candidates.extend(os.environ.get(name) for name in _TOKENIZER_URL_ENV)
 
     for candidate in candidates:
-        if not isinstance(candidate, str) or not candidate.strip():
-            continue
-        raw = candidate.strip()
-        try:
-            parsed = urllib.parse.urlsplit(raw)
-            hostname = parsed.hostname
-            has_credentials = parsed.username is not None or parsed.password is not None
-        except ValueError:
-            continue
-        if parsed.scheme not in {"http", "https"} or not hostname or has_credentials:
-            continue
-        if parsed.path.rstrip("/").endswith("/tokenize"):
-            return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", ""))
-        path = parsed.path.rstrip("/")
+        url = _tokenize_url_for_endpoint(candidate)
+        if url is not None:
+            return url
+    return None
+
+
+def _tokenize_url_for_endpoint(endpoint: object) -> str | None:
+    if not isinstance(endpoint, str) or not endpoint.strip():
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(endpoint.strip())
+        if (parsed.scheme not in {"http", "https"} or not parsed.hostname
+                or parsed.username is not None or parsed.password is not None):
+            return None
+    except ValueError:
+        return None
+    path = parsed.path.rstrip("/")
+    if not path.endswith("/tokenize"):
         for suffix in ("/v1/chat/completions", "/chat/completions", "/v1"):
             if path.endswith(suffix):
                 path = path[:-len(suffix)]
                 break
-        tokenize_path = f"{path}/tokenize" if path else "/tokenize"
-        return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, tokenize_path, "", ""))
-    return None
+        path += "/tokenize"
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
 
 
 def tokenize_route_label(endpoint: object) -> str | None:
@@ -374,6 +552,22 @@ def _url_origin(url: object) -> tuple[str, str, int | None] | None:
     return scheme, hostname.lower(), port
 
 
+def _cacheable_tokenizer_route(url: object, generation: object, allow_remote: bool | None) -> bool:
+    for endpoint in (url, generation):
+        if _url_origin(endpoint) is None:
+            return False
+        parsed = urllib.parse.urlsplit(endpoint)
+        if parsed.username is not None or parsed.password is not None or parsed.query or parsed.fragment:
+            return False
+    if allow_remote is not None:
+        from kernel_frame_routes import require_local
+        try:
+            require_local(url, allow_remote=allow_remote)
+        except ValueError:
+            return False  # The live transport owns refused routes.
+    return True
+
+
 def request_tokenizer_credentials(capture: object | None = None) -> tuple[str | None, str | None]:
     """Return this request's in-memory generation key and endpoint for meter binding."""
     route = getattr(capture, "frame_route", None) if _frame_routes.ROUTES_ACTIVE else None
@@ -410,20 +604,69 @@ def _tokenizer_failure_reason(error: Exception) -> str:
     return "bad_response"
 
 
-def tokenizer_contract(runtime: object | None, capture: object | None) -> str:
+def tokenizer_contract(
+        runtime: object | None, capture: object | None, *,
+        persistent: bool = False, recorded: Mapping[str, object] | None = None,
+) -> str:
     """Known served/configured tokenizer identity, without endpoint secrets."""
     route = getattr(capture, "frame_route", None) if _frame_routes.ROUTES_ACTIVE else None
-    if route is not None:
+    if route is not None and not persistent:
         return json.dumps({"model": route.model,
                            "tokenizer": resolve_tokenize_url(capture=capture)},
                           sort_keys=True, separators=(",", ":"))
     fields = ("model", "server_build", "tokenizer", "chat_template")
+    if persistent:
+        fields += ("model_revision", "quantization")
     manifest = getattr(getattr(capture, "journal", None), "manifest", None)
     contract = {key: manifest[key] for key in fields if isinstance(manifest, Mapping) and key in manifest}
     for owner in (runtime, capture):
         backend = getattr(owner, "backend_identity", None)
         if isinstance(backend, Mapping):
             contract.update({key: backend[key] for key in fields if key in backend})
+    if persistent:
+        if recorded is not None:
+            env = recorded.get("environment", {})
+            if not isinstance(env, Mapping):
+                return "{}"
+            contract.update({
+                "model": recorded.get("model"),
+                "model_revision": recorded.get("model_revision"),
+                "tokenizer": env.get("REACT_TOKENIZER"),
+                "chat_template": env.get("REACT_CHAT_TEMPLATE"),
+                "server_build": env.get("REACT_SERVER_BUILD"),
+                "quantization": env.get("REACT_QUANTIZATION"),
+            })
+            generation = recorded.get("chat_url")
+            # Use the recorded explicit tokenizer URL, if any, to verify the
+            # deployment to which the recorded pin applies.
+            tokenize_endpoint = env.get("LLAMA_CPP_TOKENIZE_URL") or generation
+        else:
+            _, generation = request_tokenizer_credentials()
+            tokenize_endpoint = generation
+        if not isinstance(tokenize_endpoint, str) or not isinstance(generation, str):
+            return "{}"
+        if route is not None:
+            # The recorded pin describes the primary deployment. An override
+            # may point at another deployment even when its alias is identical.
+            _, primary_endpoint = request_tokenizer_credentials()
+            primary_tokenizer = resolve_tokenize_url(endpoint=primary_endpoint)
+            primary_model = manifest.get("model") if isinstance(manifest, Mapping) else None
+            if (route.endpoint != primary_endpoint or route.model != primary_model
+                    or route.model != contract.get("model")
+                    or resolve_tokenize_url(capture=capture) != primary_tokenizer):
+                return "{}"
+            contract["route"] = [route.role, route.scope, route.unit_class]
+        else:
+            contract["route"] = "primary"
+        tokenize_url = (
+            _tokenize_url_for_endpoint(tokenize_endpoint) if recorded is not None
+            else resolve_tokenize_url(endpoint=tokenize_endpoint)
+        )
+        if not _cacheable_tokenizer_route(tokenize_url, generation, None):
+            return "{}"
+        contract["generation_endpoint"] = generation
+        contract["tokenize_url"] = tokenize_url
+        contract["version"] = _COUNT_CONTRACT_VERSION
     return json.dumps(contract, sort_keys=True, separators=(",", ":"))
 
 
@@ -437,6 +680,7 @@ class _TokenizeRedirects(urllib.request.HTTPRedirectHandler):
         redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
         if redirected is None:
             return None
+        req._tokenize_redirected = True
         redirected._stateframe_route_allow_remote = route_allow_remote
         redirected._stateframe_generation_origin = generation_origin
         redirected._stateframe_tokenize_deadline = getattr(req, "_stateframe_tokenize_deadline", None)
@@ -583,6 +827,10 @@ def _dropped_samples(records: Sequence[Mapping[str, object]], limit: int = 5) ->
     return ", ".join(parts) or None
 
 
+class _UncacheableTokenIds(list):
+    """A legacy count response that cannot certify the direct POST contract."""
+
+
 def _http_tokenize(content: str, url: str, *, deadline: float | None = None,
                    route_allow_remote: bool | None = None,
                    auth_key: str | None = None,
@@ -623,9 +871,7 @@ def _http_tokenize(content: str, url: str, *, deadline: float | None = None,
             raise TimeoutError("tokenizer request deadline expired")
     require_feature(capabilities, "request tokenization")
 
-    payload = json.dumps({
-        "content": content, "add_special": False, "parse_special": True,
-    }, ensure_ascii=False).encode("utf-8")
+    payload = json.dumps({"content": content, **_TOKENIZE_FLAGS}, ensure_ascii=False).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     if auth_key and generation_origin is not None and tokenizer_origin == generation_origin:
         headers["Authorization"] = "Bearer " + auth_key
@@ -646,6 +892,10 @@ def _http_tokenize(content: str, url: str, *, deadline: float | None = None,
     opener = opener or _build_tokenize_opener()
     with opener.open(request, timeout=timeout) as response:
         raw = response.read(_MAX_TOKENIZE_RESPONSE_BYTES + 1)
+        direct = (not wave4_token_counts_enabled()
+                  or (not getattr(request, "_tokenize_redirected", False)
+                      and response.geturl() == url and response.status == 200
+                      and not getattr(response, "length", None)))
     if deadline is not None and time.monotonic() >= deadline:
         _log_tokenizer_deadline()
         raise TimeoutError("tokenizer request deadline expired")
@@ -655,7 +905,7 @@ def _http_tokenize(content: str, url: str, *, deadline: float | None = None,
     tokens = decoded.get("tokens") if isinstance(decoded, Mapping) else None
     if not isinstance(tokens, list) or not _valid_token_ids(tokens):
         raise ValueError("invalid llama.cpp tokenizer response")
-    return tokens
+    return tokens if direct else _UncacheableTokenIds(tokens)
 
 
 def _valid_token_ids(tokens: Sequence[object]) -> bool:
@@ -946,8 +1196,46 @@ class RequestTokenMeter:
         if self._request_id is not None:
             self._reprobe_status_by_request[self._request_id] = "failed"
 
-    def tokenizer_identity(self, body: Mapping[str, object], *, endpoint: str | None = None) -> str:
+    def tokenizer_identity(self, body: Mapping[str, object], *, endpoint: str | None = None,
+                           persistent: bool = False) -> str:
         from kernel_request_measurement import PROJECTION_VERSION, digest
+        if persistent:
+            try:
+                provider = json.loads(getattr(self, "_persistent_provider_identity", "{}"))
+            except (TypeError, ValueError):
+                return ""
+            if not isinstance(provider, dict):
+                return ""
+            model = provider.get("model")
+            pin = provider.get("tokenizer")
+            tokenize_url = endpoint or self.endpoint
+            if (provider.get("version") != _COUNT_CONTRACT_VERSION
+                    or not isinstance(model, str) or not model
+                    or body.get("model", model) != model
+                    or provider.get("generation_endpoint") != self._generation_endpoint
+                    or provider.get("tokenize_url") != tokenize_url
+                    or not isinstance(pin, str)
+                    or re.fullmatch(r"(?:sha256:)?[0-9a-fA-F]{64}", pin) is None):
+                return ""
+            if not _cacheable_tokenizer_route(
+                    tokenize_url, self._generation_endpoint, self.route_allow_remote):
+                return ""
+            return digest(json.dumps({
+                "provider": provider,
+                "generation_endpoint": self._generation_endpoint,
+                "generation_auth_binding": _auth_binding_for_key(self._tokenizer_auth_key),
+                "tokenize_url": tokenize_url,
+                "tokenize_origin": _url_origin(tokenize_url),
+                "route_allow_remote": self.route_allow_remote,
+                "allow_remote_override": os.environ.get("STATEFRAME_ALLOW_REMOTE_ENDPOINT") == "1",
+                "transport": "direct-urllib-post/1",
+                "projection": PROJECTION_VERSION,
+                "special_tokens": _TOKENIZE_FLAGS,
+                "template": body.get("chat_template"),
+                "template_options": body.get("chat_template_kwargs"),
+                "template_overhead": self.template_overhead_tokens,
+                "template_reference": TEMPLATE_OVERHEAD_EVIDENCE,
+            }, sort_keys=True, separators=(",", ":")).encode())
         auth_binding = _auth_binding_for_key(self._tokenizer_auth_key)
         contract = {
             "endpoint": endpoint or self.endpoint, "model": body.get("model"),
@@ -1004,7 +1292,28 @@ class RequestTokenMeter:
         capabilities = RUN_CAPABILITY_CACHE.get(origin_of(self.endpoint or ""))
         return capabilities is not None and capabilities.continuation
 
-    def _persistent_count_slot(self, identity: str, content_digest: str) -> tuple[Path, str] | None:
+    def _strong_count_directory(self, identity: str) -> Path | None:
+        home = os.environ.get("STATEFRAME_HOME")
+        if (not home or not os.path.isabs(home) or not identity or self.endpoint is None or self._tokenizer is not None
+                or self._reprobe_active or self._reprobe_status == "probing" or self._disabled
+                or not self._tokenizer_capability_proven() or _replaying_counts()
+                or not _cacheable_tokenizer_route(
+                    self.endpoint, self._generation_endpoint, self.route_allow_remote)):
+            return None
+        return Path(home) / "token-counts-v1"
+
+    def _persistent_count_slot(
+            self, identity: str, content_digest: str, *, strong: bool = False,
+            format_domain: str = "prompt",
+    ) -> tuple[Path, str] | tuple[Path, str, _TokenCountAuthority] | None:
+        if strong:
+            from stateframe.startup_cache_writes import active_writer
+
+            directory = self._strong_count_directory(identity)
+            writer = active_writer()
+            if directory is None or (writer is not None and _count_reader(writer, directory) is None):
+                return None
+            return _strong_count_slot(directory, identity, content_digest, format_domain)
         home = os.environ.get("STATEFRAME_HOME")
         if (not home or not os.path.isabs(home) or self.endpoint is None
                 or self._tokenizer is not None or self._reprobe_status == "probing"
@@ -1030,7 +1339,10 @@ class RequestTokenMeter:
         slot = int(key[:4], 16) % _EXACT_TOKEN_COUNT_CACHE_ENTRIES
         return directory / f"{slot:03x}", key
 
-    def _count_tokens(self, content: str, *, cache_identity: str | None = None) -> int:
+    def _count_tokens(
+            self, content: str, *, cache_identity: str | None = None,
+            body: Mapping[str, object] | None = None, format_domain: str = "prompt",
+    ) -> int:
         # Identical content is tokenized once per meter: re-measuring an unchanged (or normalized-to-identical)
         # request must not cost a second /tokenize round trip on the request path.
         # The memoized projection hands back the same str object for an unchanged body, so the
@@ -1041,14 +1353,46 @@ class RequestTokenMeter:
         else:
             key = hashlib.sha256(content.encode("utf-8")).hexdigest()
             self.__dict__["_count_key_last"] = (content, key)
-        cache = self.__dict__.setdefault("_count_cache", OrderedDict())
-        if key in cache:
-            cache.move_to_end(key)
-            return cache[key]
-        slot = self._persistent_count_slot(cache_identity, key) if cache_identity else None
+        wave4 = wave4_token_counts_enabled()
+        wave4_live = wave4 and not _replaying_counts()
+        bypass = wave4_live and self._reprobe_active
+        cache = OrderedDict() if bypass else self.__dict__.setdefault("_count_cache", OrderedDict())
+        if wave4_live:
+            private_identity = self.tokenizer_identity(body or {}, persistent=True)
+            cache_key = (format_domain, private_identity, key)
+        else:
+            cache_key = key
+        if cache_key in cache:
+            cache.move_to_end(cache_key)
+            return cache[cache_key]
+        slot = None
+        if wave4_live and private_identity and not bypass:
+            slot = self._persistent_count_slot(private_identity, key, strong=True,
+                                               format_domain=format_domain)
+        elif not wave4 and cache_identity:
+            slot = self._persistent_count_slot(cache_identity, key)
         count = _read_exact_count(*slot) if slot is not None else None
+        if wave4_live and count is not None:
+            # Verify the directory and signing key again on the next lookup.
+            return count
         if count is None:
-            if (cache_identity is not None and self._tokenizer is None
+            if wave4_live:
+                proof = []
+                count = self._count_tokens_uncached(
+                    content, direct_proof=proof,
+                    prefetched_identity=private_identity if format_domain == "prompt" and not bypass else None,
+                )
+                if (proof == [True] and private_identity and not bypass
+                        and not self._consecutive_failures):
+                    from stateframe.startup_cache_writes import defer
+
+                    # A live POST may establish the capability. Freeze the
+                    # count inputs here and compute the disk key on the writer.
+                    directory = self._strong_count_directory(private_identity)
+                    if directory is not None:
+                        defer("exact-token-count", lambda: _publish_strong_count(
+                            directory, private_identity, key, format_domain, count))
+            elif (not wave4 and cache_identity is not None and self._tokenizer is None
                     and self.endpoint is not None and _exact_token_count_cache_enabled()):
                 # Import only after explicit opt-in.
                 from stateframe.token_count_cache import get_or_compute
@@ -1059,11 +1403,12 @@ class RequestTokenMeter:
             else:
                 count = self._count_tokens_uncached(content)
             # A standalone first lookup may have established provider proof.
-            if slot is None and cache_identity is not None:
-                slot = self._persistent_count_slot(cache_identity, key)
-            if slot is not None:
-                _write_exact_count(*slot, count)
-        cache[key] = count
+            if not wave4:
+                if slot is None and cache_identity is not None:
+                    slot = self._persistent_count_slot(cache_identity, key)
+                if slot is not None:
+                    _write_exact_count(*slot, count)
+        cache[cache_key] = count
         while len(cache) > _EXACT_TOKEN_COUNT_CACHE_ENTRIES:
             cache.popitem(last=False)
         return count
@@ -1075,15 +1420,30 @@ class RequestTokenMeter:
                               generation_endpoint=self._generation_endpoint,
                               opener=self._get_http_opener())
 
-    def _count_tokens_uncached(self, content: str) -> int:
+    def _count_tokens_uncached(self, content: str, *, direct_proof: list[bool] | None = None,
+                               prefetched_identity: str | None = None) -> int:
         key = self._request_id
         self._tokenizer_calls_by_request[key] = self._tokenizer_calls_by_request.get(key, 0) + 1
         if self._tokenizer is not None:
             result = self._tokenizer(content)
         elif self.endpoint is not None:
             pending = _PREFETCHED_HTTP_COUNTS.get()
-            future = pending.pop((self, self._namespace, content), None) if pending else None
-            result = self._http_token_ids(content) if future is None else future.result()
+            candidate = (self, self._namespace, content)
+            if direct_proof is not None and prefetched_identity is not None:
+                candidate += (prefetched_identity, self.route_allow_remote, self._request_id, self._deadline)
+            future = pending.pop(candidate, None) if pending else None
+            result = None
+            try:
+                result = self._http_token_ids(content) if future is None else future.result()
+            finally:
+                if direct_proof is not None and pending and type(result) is not list:
+                    # An ambiguous earlier input makes later speculation
+                    # ineligible. The consumer retains the normal retry order.
+                    for unused in pending.values():
+                        unused.cancel()
+                    pending.clear()
+            if direct_proof is not None:
+                direct_proof.append(type(result) is list)
         else:
             # No endpoint by design (offline/replay/tests): normal, so INFO. journal=False: request path.
             emit_reason("fallback", "tokenizer_endpoint_unavailable", "request_diet",
@@ -1120,7 +1480,9 @@ class RequestTokenMeter:
                 raise TimeoutError("tokenizer request deadline expired")
             self._last_attempts += 1
             try:
-                count = self._count_tokens(content, cache_identity=self._namespace)
+                count = self._count_tokens(
+                    content, cache_identity=self._namespace, format_domain="countdown-normalized-text/1",
+                )
             except Exception as error:
                 self._consecutive_failures += 1
                 self._failure_reason = _tokenizer_failure_reason(error)
@@ -1159,11 +1521,22 @@ class RequestTokenMeter:
         return self._measure_with_wire_bytes(body, None)
 
     @contextmanager
-    def overlap_http_counts(self, bodies: Sequence[Mapping[str, object]]):
+    def overlap_http_counts(self, bodies: Sequence[Mapping[str, object]], *,
+                            pilot_only: bool = False, max_request_bytes: int | None = None):
         """Start HTTP counts while their callers prepare to measure the bodies."""
-        if (not bodies or self._availability == "unavailable" or self.endpoint is None
+        if not bodies:
+            yield
+            return
+        wave4 = wave4_token_counts_enabled()
+        if (self._availability == "unavailable" or self.endpoint is None
                 or self._tokenizer is not None or self._deadline is not None
-                or _exact_token_count_cache_enabled()
+                or (pilot_only and not wave4)
+                or (not wave4 and _exact_token_count_cache_enabled())
+                or (wave4 and (self._reprobe_active or _replaying_counts()
+                               or self._consecutive_failures
+                               or _PREFETCHED_HTTP_COUNTS.get() is not None
+                               or not _cacheable_tokenizer_route(
+                                   self.endpoint, self._generation_endpoint, self.route_allow_remote)))
                 or not self._tokenizer_capability_proven()):
             yield
             return
@@ -1172,8 +1545,10 @@ class RequestTokenMeter:
 
         cache = self.__dict__.get("_count_cache", {})
         candidates = {}
-        for body in bodies:
+        for body in bodies[:2] if wave4 else bodies:
             byte_limit, _ = _lean_request_limits(body, FREE_STAGE, exact_tokenizer=True)
+            if max_request_bytes is not None:
+                byte_limit = min(byte_limit, max_request_bytes)
             if len(plain_wire(body)) > byte_limit:
                 continue
             identity = self.tokenizer_identity(body)
@@ -1182,26 +1557,61 @@ class RequestTokenMeter:
                 digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
             except UnicodeEncodeError:
                 continue  # Leave invalid content to the normal measurement and fallback path.
-            if identity == self._namespace and digest in cache:
-                continue
-            slot = self._persistent_count_slot(identity, digest)
+            if wave4:
+                private_identity = self.tokenizer_identity(body, persistent=True)
+                if identity == self._namespace and ("prompt", private_identity, digest) in cache:
+                    continue
+                slot = self._persistent_count_slot(private_identity, digest, strong=True)
+            else:
+                if identity == self._namespace and digest in cache:
+                    continue
+                slot = self._persistent_count_slot(identity, digest)
             if slot is not None and _read_exact_count(*slot) is not None:
                 continue
-            candidates[(self, identity, content)] = content
+            candidate = (self, identity, content)
+            if wave4:
+                candidate += (private_identity, self.route_allow_remote, self._request_id, self._deadline)
+            candidates[candidate] = content
         if not candidates:
             yield
             return
 
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            pending = {key: pool.submit(self._http_token_ids, content)
-                       for key, content in candidates.items()}
+        pool = ThreadPoolExecutor(max_workers=2 if wave4 else 4)
+        pending = {}
+        try:
+            if wave4:
+                url, auth = self.endpoint, self._tokenizer_auth_key
+                generation, allow_remote = self._generation_endpoint, self.route_allow_remote
+                group = (_url_origin(url), _auth_binding_for_key(
+                    auth if _url_origin(url) == _url_origin(generation) else None))
+                for key, content in candidates.items():
+                    if not _claim_tokenize_worker(group):
+                        break
+                    try:
+                        future = pool.submit(
+                            _http_tokenize, content, url, route_allow_remote=allow_remote,
+                            auth_key=auth, generation_endpoint=generation, opener=self._get_http_opener(),
+                        )
+                    except (OSError, RuntimeError):
+                        _release_tokenize_worker(group)
+                        break
+                    except BaseException:
+                        _release_tokenize_worker(group)
+                        raise
+                    future.add_done_callback(partial(_release_tokenize_worker, group))
+                    pending[key] = future
+            else:
+                pending = {key: pool.submit(self._http_token_ids, content)
+                           for key, content in candidates.items()}
             scope = _PREFETCHED_HTTP_COUNTS.set(pending)
             try:
                 yield
             finally:
                 _PREFETCHED_HTTP_COUNTS.reset(scope)
-                for future in pending.values():
-                    future.cancel()
+        finally:
+            for future in pending.values():
+                future.cancel()
+            pool.shutdown(wait=not wave4, cancel_futures=True)
 
     def measure_subframe_cap(
             self, body: Mapping[str, object], *, tokens_per_byte: float,
@@ -1298,7 +1708,7 @@ class RequestTokenMeter:
                 self._last_attempts += 1
                 try:
                     token_count = self._count_tokens(
-                        _tokenization_content(body), cache_identity=self._namespace,
+                        _tokenization_content(body), cache_identity=self._namespace, body=body,
                     )
                 except Exception as error:
                     self._consecutive_failures += 1

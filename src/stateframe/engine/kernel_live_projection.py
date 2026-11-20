@@ -9,6 +9,8 @@ import copy
 import json
 import os
 import re
+import stat
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -27,6 +29,7 @@ if TYPE_CHECKING:
     from kernel_workspace_index import EntryFilter
     from kernel_workspace_state import WorkspaceState
     from kernel_workspace_tree import Directory
+    from stateframe.workspace_start_snapshot import StartupObservation
 
 
 _READ_PAGE_IDENTITY = re.compile(
@@ -102,7 +105,8 @@ def is_harness_path(path: Path) -> bool:
 def workspace_binding(
         root: Path, environment: str, *, command: object = (),
         run_write_set: tuple[str, ...] | list[str] = (),
-        _entries: list[tuple[tuple[str, ...], str, bool]] | None = None) -> dict:
+        _entries: list[tuple[tuple[str, ...], str, bool]] | None = None,
+        _startup: StartupObservation | None = None) -> dict:
     """Bind all public workspace files, including siblings and test helpers.
 
     L112 host-time fix: identical to hashing every file on every call (the former
@@ -110,6 +114,9 @@ def workspace_binding(
     (1) directories whose every descendant ``is_non_product`` are not walked, and
     (2) a file is rehashed only when its lstat signature changed (see
     :func:`_file_value`).  The result must always equal a full rehash.
+
+    A caller supplying an admitted snapshot validates it before publishing
+    the combined view.
     """
     policy = discover_test_artifact_policy(root, command=command)
     policy_key: object = policy  # frozen dataclass: memo is keyed by policy VALUE
@@ -118,15 +125,26 @@ def workspace_binding(
     except TypeError:
         policy_key = None
     product, harness = {}, {}
-    for parts, path, is_link in (_entries if _entries is not None
-                                 else _workspace_entries(Path(root))):
+    observe_startup = _entries is None and _startup is None
+    if observe_startup:
+        admission = sys.modules.get("stateframe.workspace_start_snapshot")
+        if admission is not None:
+            _startup = admission.startup_observation(root, "workspace-binding")
+    if _startup is not None:
+        entries = ((tuple(path.split("/")), digest, False)
+                   for path, digest in _startup.files.items())
+    else:
+        entries = _entries if _entries is not None else _workspace_entries(Path(root))
+    for parts, path, is_link in entries:
         key = "/".join(parts)
         non_product, is_test = _path_roles(key, parts)
         if non_product:  # .git/.test-tmp + coverage/caches (audit #2)
             continue
         if _policy_matches(policy, policy_key, key):
             continue
-        if is_link:
+        if _startup is not None:
+            value = "sha256:" + path
+        elif is_link:
             # Link identity is included without reading an escaped target.
             value = "symlink:" + os.readlink(path)
         else:
@@ -134,9 +152,13 @@ def workspace_binding(
             if value is None:  # vanished or no longer a regular file mid-walk
                 continue
         (harness if is_test else product)[key] = value
-    return {"product_revision": digest(product), "test_harness_revision": digest(harness),
-            "environment_revision": environment, "product_files": product,
-            "harness_files": harness}
+    binding = {"product_revision": digest(product), "test_harness_revision": digest(harness),
+               "environment_revision": environment, "product_files": product,
+               "harness_files": harness}
+    if observe_startup and _startup is not None and not _startup.validate_for_use("workspace-binding"):
+        return workspace_binding(root, environment, command=command, run_write_set=run_write_set,
+                                 _entries=_workspace_entries(Path(root)))
+    return binding
 
 
 # Lexical role memos.  ``is_non_product`` and ``is_harness_path`` are pure functions
@@ -406,8 +428,51 @@ class WorkspaceViewStore:
             return self._fenced_view(boundary_name, context)
         if context != self._last_context:
             self._dirty = True
+        seeded = getattr(self, "_startup_view", False)
+        admission = sys.modules.get("stateframe.workspace_start_snapshot")
+        unsafe = boundary_name in self._UNSAFE_BOUNDARIES
+        if admission is not None and (unsafe or self.mutation_epoch):
+            admission.revoke_startup_observation(self.root)
+        if (self._view is None or seeded) and self.mutation_epoch == 0:
+            if admission is not None and not unsafe:
+                start = admission.startup_observation(self.root, "workspace-binding")
+                if start is not None:
+                    view = self._view
+                    entry_signatures = self._entry_signatures
+                    if view is None or self._dirty:
+                        binding = workspace_binding(
+                            self.root, self.environment, command=context[0], run_write_set=context[1],
+                            _startup=start)
+                        view = self._new_view(binding, boundary_name)
+                        visible_dirs = {""}
+                        signatures = []
+                        for relative, mode in start.modes.items():
+                            if not relative or relative.rpartition("/")[0] not in visible_dirs:
+                                continue
+                            parts = tuple(relative.split("/"))
+                            if stat.S_ISDIR(mode):
+                                if not _prunable_directory(parts):
+                                    visible_dirs.add(relative)
+                            else:
+                                device, inode, _, size, mtime, ctime, *_ = start.stamps[relative]
+                                signatures.append((parts, False, (inode, device, size, mtime, ctime), None))
+                        entry_signatures = tuple(sorted(signatures))
+                    if start.validate_for_use("workspace-binding"):
+                        self._view = view
+                        self._entry_signatures = entry_signatures
+                        self._startup_view = True
+                        self._dirty = False
+                        self._last_context = context
+                        self._last_boundary = boundary_name
+                        self._last_boundary_epoch = self.mutation_epoch
+                        return view
+        if seeded:
+            # Once the admitted generation ends, eagerly establish the ordinary
+            # live signature before serving this view again, including on restore.
+            self._startup_view = False
+            self._dirty = True
         reconcile_entries: list[tuple[tuple[str, ...], str, bool]] | None = None
-        if self._view is not None and boundary_name in self._UNSAFE_BOUNDARIES and (
+        if self._view is not None and unsafe and (
                 boundary_name != self._last_boundary or self._last_boundary_epoch != self.mutation_epoch):
             # Reconcile once at the host-controlled boundary. The same entries
             # feed binding construction so an external write does not cause a

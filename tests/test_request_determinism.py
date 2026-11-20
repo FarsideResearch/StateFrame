@@ -77,6 +77,11 @@ RANDOM_CALL_ALLOWLIST = {
             1, "Names a private run-directory backup of the previous commits export; never sent to the model."
         ),
     },
+    "src/stateframe/endpoint.py": {
+        "os.urandom": (
+            1, "Binds a host-only provider preflight proof to its probe; model request bytes omit it."
+        ),
+    },
     "src/stateframe/engine/kernel_checkpoint.py": {
         "os.urandom": (
             1, "Uniquifies a checkpoint index chunk file name; never sent to the model."
@@ -154,6 +159,11 @@ RANDOM_CALL_ALLOWLIST = {
             1, "Names the atomic identity.key publication temp file; never stored or sent."
         ),
     },
+    "src/stateframe/engine/kernel_request_diet.py": {
+        "token_hex": (
+            1, "Names the private temporary exact-count cache entry before atomic publication."
+        ),
+    },
     "src/stateframe/engine/kernel_stateframe_resume.py": {
         "uuid.uuid4": (
             1, "Creates journal correlation metadata; the resumed model message uses user text only."
@@ -213,6 +223,11 @@ RANDOM_CALL_ALLOWLIST = {
     "src/stateframe/parallel_seals.py": {
         "secrets.token_hex": (
             2, "Fences private seal helper attempts and staging files; published proposals use stable paths and content digests, not the nonce."
+        ),
+    },
+    "src/stateframe/send1_probe_cache.py": {
+        "secrets.token_hex": (
+            1, "Names the private temporary startup receipt before atomic publication."
         ),
     },
     "src/stateframe/engine/kernel_unit_policy.py": {

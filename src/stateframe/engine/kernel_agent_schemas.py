@@ -60,15 +60,19 @@ def measure_schemas(custom_schemas=(), *, mcp_schemas=(), endpoint=None, tokeniz
 
 
 def prepare_schema_measurement(custom_schemas=(), *, mcp_schemas=(), endpoint=None, tokenizer=None,
-                               auth_key=None, generation_endpoint=None, deadline=None):
+                               auth_key=None, generation_endpoint=None, deadline=None,
+                               builtin_schemas=None, recorded=None, resume_active=False):
     """Capture the schema inputs and bound meter before startup configures the live menu."""
-    from kernel_request_diet import RequestTokenMeter
-    from kernel_shell_tool import SHELL_SCHEMA
+    from kernel_request_diet import RequestTokenMeter, tokenizer_contract, wave4_token_counts_enabled
 
     meter = RequestTokenMeter(
         tokenizer, endpoint=endpoint, template_overhead_tokens=0,
         auth_key=auth_key, generation_endpoint=generation_endpoint,
     )
+
+    reuse_counts = not resume_active and wave4_token_counts_enabled()
+    if reuse_counts and recorded is not None:
+        meter._persistent_provider_identity = tokenizer_contract(None, None, persistent=True, recorded=recorded)
 
     # Capture both bound methods before the live request meter gains its warning wrapper.
     measure = meter.measure
@@ -85,29 +89,51 @@ def prepare_schema_measurement(custom_schemas=(), *, mcp_schemas=(), endpoint=No
                 raise SchemaMeteringTimeout("tokenizer timed out in startup schema metering")
             return count, method
 
-    builtin_schemas = deepcopy((SHELL_SCHEMA, *BUILTIN_SCHEMAS))
+    if builtin_schemas is None:
+        builtin_schemas = builtin_schema_snapshot()
     additional_schemas = deepcopy([*custom_schemas, *mcp_schemas])
     configured = endpoint is not None or tokenizer is not None
 
     def measure_schemas_once(*, estimate=False):
         count = estimate_count if estimate else live_count
-        return _measure_schemas(builtin_schemas, additional_schemas, count, configured=configured)
+        overlap = meter.overlap_http_counts if reuse_counts and not estimate else None
+        return _measure_schemas(builtin_schemas, additional_schemas, count, configured=configured,
+                                overlap=overlap)
 
     return measure_schemas_once
 
 
-def _measure_schemas(builtin_schemas, additional_schemas, measure, *, configured):
+def builtin_schema_snapshot():
+    from kernel_shell_tool import SHELL_SCHEMA
+
+    return deepcopy((SHELL_SCHEMA, *BUILTIN_SCHEMAS))
+
+
+def _measure_schemas(builtin_schemas, additional_schemas, measure, *, configured, overlap):
     from kernel_custom_tools import CustomToolError
 
     result = {}
-    for item in builtin_schemas:
-        count, method = measure({"messages": [], "tools": [item]})
-        result[item["function"]["name"]] = {"tokens": count, "method": method}
+
+    def measure_builtin(body):
+        name = body["tools"][0]["function"]["name"]
+        count, method = measure(body)
+        result[name] = {"tokens": count, "method": method}
         if method != "tokenize":
-            _log_schema_fallback(f"schema {item['function']['name']} measured without tokenizer",
+            _log_schema_fallback(f"schema {name} measured without tokenizer",
                                  method, count, configured=configured)
         if count > 1200:
-            raise CustomToolError(f"built-in {item['function']['name']} schema exceeds 1200 tokens: {count}")
+            raise CustomToolError(f"built-in {name} schema exceeds 1200 tokens: {count}")
+
+    if overlap is None:
+        for schema in builtin_schemas:
+            measure_builtin({"messages": [], "tools": [schema]})
+    else:
+        projections = [{"messages": [], "tools": [item]} for item in builtin_schemas]
+        for index in range(0, len(projections), 2):
+            pair = projections[index:index + 2]
+            with overlap(pair, pilot_only=True):
+                for body in pair:
+                    measure_builtin(body)
     if additional_schemas:
         count, method = measure({"messages": [], "tools": additional_schemas})
         result["custom_total"] = {"tokens": count, "method": method}

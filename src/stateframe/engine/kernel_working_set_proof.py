@@ -1,19 +1,27 @@
 """Carrier-bound proof of a complete provider wire, with exact recomputation."""
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, fields
+from functools import cache
 import json
 
 if __package__:
     from .kernel_working_set_cache import independent
-    from .kernel_read_receipts import line_digests_with_numbers
+    from .kernel_read_receipts import DecodedSpan, ReceiptIdentity, line_digests_with_numbers
     from .kernel_working_set_allocator import FULL, DEFERRED
-    from .kernel_working_set_render import (AssignmentCertificate, _recovery_arguments,
+    from .kernel_working_set_snapshot import PreparationSnapshot, SourceSlot
+    from .kernel_working_set_render import (AssignmentCertificate, CarrierWitness,
+                                           DeferredPlanWitness, _recovery_arguments, _unit_active,
                                            deferred_plan_slot, digest, render_assignment)
 else:
     from kernel_working_set_cache import independent
-    from kernel_read_receipts import line_digests_with_numbers
+    from kernel_read_receipts import DecodedSpan, ReceiptIdentity, line_digests_with_numbers
     from kernel_working_set_allocator import FULL, DEFERRED
-    from kernel_working_set_render import (AssignmentCertificate, _recovery_arguments,
+    from kernel_working_set_snapshot import PreparationSnapshot, SourceSlot
+    from kernel_working_set_render import (AssignmentCertificate, CarrierWitness,
+                                          DeferredPlanWitness, _recovery_arguments, _unit_active,
                                           deferred_plan_slot, digest, render_assignment)
 
 
@@ -21,21 +29,138 @@ class CertificateError(ValueError):
     """The trusted assignment, reconstructed body or physical witness differs."""
 
 
+@cache
+def _certificate_fields():
+    return {
+        cls: tuple(field.name for field in fields(cls))
+        for cls in (AssignmentCertificate, PreparationSnapshot, SourceSlot, ReceiptIdentity,
+                    DecodedSpan, CarrierWitness, DeferredPlanWitness)
+    }
+
+
+_IMMUTABLE_LEAVES = frozenset((str, bytes, bool, int, float, type(None)))
+_PROOF_VERSION = 1
+_MAX_PROOF_NODES = 100_000
+
+
+@dataclass
+class _QualificationProof:
+    request_id: str
+    lineage: str
+    generation: int
+    verified: tuple[tuple[object, ...], bytes] | None = None
+    closed: bool = False
+
+    def close(self) -> None:
+        self.closed = True
+        self.verified = None
+
+
+_QUALIFICATION_PROOF: ContextVar[_QualificationProof | None] = ContextVar(
+    "qualification_proof", default=None,
+)
+
+
+@contextmanager
+def qualification_proof(request_id: str, lineage: str, generation: int):
+    """Retain one independently verified proof within a fresh qualification."""
+    scope = _QualificationProof(request_id, lineage, generation)
+    token = _QUALIFICATION_PROOF.set(scope)
+    try:
+        yield
+    finally:
+        scope.close()
+        _QUALIFICATION_PROOF.reset(token)
+
+
+def discard_qualification_proof(request_id: str) -> None:
+    scope = _QUALIFICATION_PROOF.get()
+    if scope is not None and scope.request_id == request_id:
+        scope.close()
+
+
+def _proof_key(scope: _QualificationProof, certificate: AssignmentCertificate) -> tuple | None:
+    # Unit mode participates in the renderer's assignment domains. Keep those
+    # checks eager. The plain renderer otherwise uses detached authority only.
+    if scope.closed or type(certificate) is not AssignmentCertificate or _unit_active():
+        return None
+    snapshot = getattr(certificate, "snapshot", None)
+    layout = getattr(certificate, "layout", None)
+    request_id = getattr(snapshot, "request_id", None)
+    if (type(snapshot) is not PreparationSnapshot
+            or type(request_id) is not str or request_id != scope.request_id
+            or type(layout) is not str or layout != "plain"):
+        return None
+    # Walk the actual fields, including witnesses, rather than trusting claimed
+    # digests. Exact leaf identity avoids hashing source text or treating True
+    # and 1 as equal. Keep strong references until the qualifier exits.
+    order = []
+    stack = [certificate]
+    certificate_fields = _certificate_fields()
+    while stack:
+        value = stack.pop()
+        kind = type(value)
+        order.append(value)
+        if kind is tuple:
+            if len(order) + len(stack) + len(value) > _MAX_PROOF_NODES:
+                return None
+            stack.extend(reversed(value))
+        elif kind in certificate_fields:
+            try:
+                stack.extend(getattr(value, name) for name in reversed(certificate_fields[kind]))
+            except AttributeError:
+                return None
+        elif kind not in _IMMUTABLE_LEAVES:
+            return None
+        if len(order) + len(stack) > _MAX_PROOF_NODES:
+            return None
+    return (_PROOF_VERSION, scope.request_id, scope.lineage, scope.generation,
+            certificate.body_sha256, certificate.snapshot_digest, certificate.assignment_digest,
+            tuple(order))
+
+
+def _verified_wire(scope: _QualificationProof, key: tuple) -> bytes | None:
+    entry = scope.verified
+    if entry is not None and not scope.closed:
+        previous, wire = entry
+        if (previous[:-1] == key[:-1] and len(previous[-1]) == len(key[-1])
+                and all(old is new for old, new in zip(previous[-1], key[-1]))):
+            return wire
+    return None
+
+
 def verify_messages(messages, certificate: AssignmentCertificate) -> bool:
     """Product-boundary source proof without legacy path-based reconciliation."""
-    modes = {FULL.name: FULL, DEFERRED.name: DEFERRED}
-    rendered = render_assignment(certificate.snapshot,
-        {key: modes[mode] for key, mode in certificate.assignment}, certificate.layout)
-    if json.loads(rendered.wire)["messages"] != messages:
+    scope = _QUALIFICATION_PROOF.get()
+    key = None if scope is None else _proof_key(scope, certificate)
+    verified_wire = None if key is None else _verified_wire(scope, key)
+    wire = verified_wire
+    if wire is None:
+        modes = {FULL.name: FULL, DEFERRED.name: DEFERRED}
+        wire = render_assignment(certificate.snapshot,
+            {key: modes[mode] for key, mode in certificate.assignment}, certificate.layout).wire
+    physical = json.loads(wire)["messages"]
+    if physical != messages:
         # The product validator sees semantic messages for a final-cache wire.
         from kernel_cache_layout_view import semantic_messages
-        if semantic_messages(json.loads(rendered.wire)["messages"]) != messages:
+        if semantic_messages(json.loads(wire)["messages"]) != messages:
             raise CertificateError("product source carriers differ from certified wire")
-    return verify_certificate(rendered.wire, certificate)
+    return verified_wire is not None or verify_certificate(wire, certificate)
+
+
+def verify_certificate(wire: bytes, certificate: AssignmentCertificate) -> bool:
+    scope = _QUALIFICATION_PROOF.get()
+    key = None if scope is None or type(wire) is not bytes else _proof_key(scope, certificate)
+    if key is not None and wire == _verified_wire(scope, key):
+        return True
+    verified = _verify_certificate(wire, certificate)
+    if key is not None and not scope.closed:
+        scope.verified = (key, wire)
+    return verified
 
 
 @independent
-def verify_certificate(wire: bytes, certificate: AssignmentCertificate) -> bool:
+def _verify_certificate(wire: bytes, certificate: AssignmentCertificate) -> bool:
     """Validate exact bytes at host-owned coordinates, then recompute the wire.
 
     The caller supplies a trusted renderer certificate. Model-authored paths,

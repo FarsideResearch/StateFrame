@@ -500,11 +500,13 @@ def decide(status: object, *, previous: "ReadinessDecision | None" = None) -> Re
             promoted = blocking_rows(counterexamples, revision=revision, active=True)
         except (ImportError, TypeError, ValueError):
             promoted = ()
-    blocker_keys = {_check_id(item) for item in blockers if _check_id(item)}
-    blockers = blockers + tuple(
-        item for item in promoted if _check_id(item) not in blocker_keys)
-    promoted_keys = {_check_id(item) for item in promoted if _check_id(item)}
-    advisory = tuple(_annotate_advisory(item, getattr(status, "current_revision", None))
+    ids = [_check_id(item) for item in blockers]
+    blocker_keys = set(ids) - {""}
+    promoted_rows = tuple((_check_id(item), item) for item in promoted)
+    blockers = blockers + tuple(item for key, item in promoted_rows if key not in blocker_keys)
+    ids.extend(key for key, _ in promoted_rows if key not in blocker_keys)
+    promoted_keys = {key for key, _ in promoted_rows if key}
+    advisory = tuple(_annotate_advisory(item, revision)
                      for item in counterexamples
                      if (not bool(item.get("counterexample_authority"))
                          and _check_id(item) not in promoted_keys))
@@ -516,7 +518,6 @@ def decide(status: object, *, previous: "ReadinessDecision | None" = None) -> Re
     host_blocking = tuple(str(item) for item in (getattr(status, "blocking", ()) or ()))
     if no_host_checks:
         public_status = NO_HOST_CHECKS
-    ids = [_check_id(item) for item in blockers]
     digest = _digest(revision, green, public_status, ids, advisory, host_blocking)
     version = 1
     if previous is not None:

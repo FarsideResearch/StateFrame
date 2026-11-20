@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field, fields
 import hashlib
 import hmac
 import json
@@ -553,6 +553,14 @@ class FrameRequestAllocation:
 
     _payload: bytes
     digest: str
+    _sections: tuple[bytes, str, tuple[tuple[str, int, int], ...]] | None = field(
+        default=None, init=False, repr=False, compare=False,
+    )
+
+    def __getstate__(self) -> list[object]:
+        # The section offsets are derived locally and never part of a checkpoint.
+        return [None if item.name == "_sections" else getattr(self, item.name)
+                for item in fields(self)]
 
     def __post_init__(self) -> None:
         if type(self._payload) is not bytes:
@@ -561,12 +569,36 @@ class FrameRequestAllocation:
             )
         document = _decode_document(self._payload)
         _validate_document(document)
-        if canonical_allocation_bytes(document) != self._payload:
+        if __package__:
+            from .kernel_body_serialization_memo import qualification_reuse_enabled
+        else:
+            from kernel_body_serialization_memo import qualification_reuse_enabled
+
+        offsets = []
+        if type(self) is FrameRequestAllocation and qualification_reuse_enabled():
+            # Use the detached JSON document to establish canonical bytes and
+            # index them in the same pass. Each entry spans exactly one value.
+            parts = [b"{"]
+            position = 1
+            for name, value in sorted(document.items()):
+                prefix = (b"," if offsets else b"") + json.dumps(name).encode() + b":"
+                section = canonical_allocation_bytes(value)
+                start = position + len(prefix)
+                position = start + len(section)
+                offsets.append((name, start, position))
+                parts.extend((prefix, section))
+            parts.append(b"}")
+            canonical = b"".join(parts)
+        else:
+            canonical = canonical_allocation_bytes(document)
+        if canonical != self._payload:
             raise FrameRequestAllocationError("allocation payload is not canonical")
         if not verify_frame_request_allocation_digest(self._payload, self.digest):
             raise FrameRequestAllocationError(
                 "allocation digest does not match its contents"
             )
+        if offsets:
+            object.__setattr__(self, "_sections", (self._payload, self.digest, tuple(offsets)))
 
     @classmethod
     def create(
@@ -659,6 +691,11 @@ class FrameRequestAllocation:
         return cast(dict[str, object], self._section("outcome"))
 
     def _section(self, name: str) -> object:
+        sections = getattr(self, "_sections", None)
+        if sections is not None and sections[0] is self._payload and sections[1] == self.digest:
+            for key, start, end in sections[2]:
+                if key == name:
+                    return json.loads(self._payload[start:end])
         document = _decode_document(self._payload)
         return document[name]
 

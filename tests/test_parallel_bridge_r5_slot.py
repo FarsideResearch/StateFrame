@@ -18,7 +18,7 @@ from stateframe import _child, parallel_resources, replay_tape
 def _main_cleanup_finalbody() -> list[ast.stmt]:
     tree = ast.parse(Path(_child.__file__).read_text(encoding="utf-8"))
     main = next(node for node in tree.body
-                if isinstance(node, ast.FunctionDef) and node.name == "main")
+                if isinstance(node, ast.FunctionDef) and node.name == "_main")
     outer = next(node for node in main.body
                  if isinstance(node, ast.Try)
                  and any(isinstance(child, ast.Try) for child in node.finalbody))

@@ -11,9 +11,11 @@ import pytest
 import kernel_reread_result_truth
 from kernel_stateframe_framefit5 import (
     PRODUCT_MODE,
+    SCHEMA,
     STATE_HEADER,
     FrameFit5Error,
     _state_payload,
+    validate_final_product_boundary,
     validate_product_request,
 )
 
@@ -221,3 +223,28 @@ def test_allocator_on_with_certificate_does_not_rewrite_state_message(monkeypatc
     assert len(verified) == 1
     assert verified[0][1] is certificate
     assert messages[2]["content"] == state_before
+
+
+def test_final_boundary_binds_optional_inputs_to_the_fitted_frame(tmp_path):
+    from kernel_frame_optional_allocation import (
+        FrameAllocationReplanNeeded,
+        snapshot_optional_inputs,
+    )
+
+    frame = {**_frame("present"), "schema": SCHEMA}
+    messages = _messages(frame, _read_page())
+    runtime = _runtime()
+    runtime.frame_ceiling = 100_000
+    optional, inventory = snapshot_optional_inputs(frame, tmp_path)
+
+    result = validate_final_product_boundary(
+        runtime, messages, [], refresh_sources=False, refresh_headcarry=False,
+        optional_inputs=(optional, inventory),
+    )
+    assert result["checked_before_provider"] is True
+
+    with pytest.raises(FrameAllocationReplanNeeded, match="inventory changed"):
+        validate_final_product_boundary(
+            runtime, messages, [], refresh_sources=False, refresh_headcarry=False,
+            optional_inputs=(optional, {**inventory, "sites": [{"path": PATH}]}),
+        )

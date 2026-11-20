@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from . import _startup_optimization_enabled
 from .engine.kernel_edit_merge import ConflictHunk, MergeApplied, MergeConflict, merge_texts
 from .engine.kernel_secret_paths import SECRET_DIRS, is_secret_file
 
@@ -77,6 +78,7 @@ class WorkCopy:
     skipped: list[str] = field(default_factory=list)
     snapshot: Path | None = None  # immutable copy of the start state (diff baseline), if the run made one
     snapshot_reader: Callable[[str], bytes] | None = field(default=None, repr=False)
+    _admission: object | None = field(default=None, init=False, repr=False, compare=False)
 
     def text_files(self) -> dict[str, str]:
         """Text files in the copy, keyed by POSIX relative path."""
@@ -116,7 +118,8 @@ def frame_source_path_allowed(path: str) -> bool:
                 and not _ignored(parts[-1], False))
 
 
-def create(original: Path, destination: Path, limits: Limits | None = None) -> WorkCopy:
+def create(original: Path, destination: Path, limits: Limits | None = None, *,
+           admit_snapshot: bool | None = None) -> WorkCopy:
     """Copy ``original`` into ``destination`` (which must not exist), recording hashes."""
     limits = limits or Limits()
     original = original.resolve()
@@ -128,6 +131,13 @@ def create(original: Path, destination: Path, limits: Limits | None = None) -> W
     if destination.is_relative_to(original):
         raise WorkCopyError("run directory must be outside the repository")
     work = WorkCopy(original=original, copy=destination)
+    if admit_snapshot is None:
+        admit_snapshot = _startup_optimization_enabled()
+    if admit_snapshot:
+        from .workspace_start_snapshot import admit_workcopy
+
+        admit_workcopy(work, limits)
+        return work
     total = 0
     destination.mkdir(parents=True)
 

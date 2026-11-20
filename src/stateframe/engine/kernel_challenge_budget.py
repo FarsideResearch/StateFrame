@@ -20,6 +20,7 @@ import copy
 import hashlib
 import json
 import os
+import sys
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -313,6 +314,19 @@ def artifact_revision(runtime: object, *, basis: object = None,
     root = _root(runtime)
     if root is not None:
         revision = _projected_artifact_revision(runtime, root)
+        if revision is None and os.environ.get("STATEFRAME_WORKSPACE_OBJECTS") != "on":
+            admission = sys.modules.get("stateframe.workspace_start_snapshot")
+            start = admission.startup_observation(root, "artifact-revision") if admission else None
+            if start is not None:
+                excluded = _excluded_paths(runtime, root)
+                files = {
+                    name: "sha256:" + start.files[name]
+                    for name in sorted(start.files)
+                    if _included(Path(name), start.root / name, excluded)
+                }
+                admitted_revision = _digest({"files": files}) if files else ""
+                if start.validate_for_use("artifact-revision"):
+                    revision = admitted_revision
         if revision is None:
             files = _artifact_files(runtime, root)
             if files:

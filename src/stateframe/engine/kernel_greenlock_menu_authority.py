@@ -33,12 +33,13 @@ import copy
 import hashlib
 import json
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from kernel_bounded_locate_code import OBSERVATION_TOOLS
 from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 from kernel_measurement import profiled_function_span
+from kernel_menu_composer import freeze_menu_payload, schema_reuse_enabled
 
 
 MODE_ENV = "STATEFRAME_GREENLOCK_MENU_AUTHORITY"
@@ -844,15 +845,18 @@ def constrain_repair_paths(offered: Sequence[dict], decisions: Mapping[str, Deci
     return out
 
 
-def menu_decisions(lock: object, surface: Sequence[Mapping[str, object]]) -> dict[str, Decision]:
+def _decisions_for_names(lock: object, names: Iterable[str]) -> dict[str, Decision]:
     result: dict[str, Decision] = {}
     from kernel_v30_token_contracts import verification_menu_arguments
-    for tool in surface:
-        name = _name(tool)
+    for name in names:
         if name and name not in result:
             arguments = verification_menu_arguments(lock.runtime) if canonical_action(name) in VERIFY_ACTIONS else {}
             result[name] = decide(lock, name, arguments, for_menu=True)
     return result
+
+
+def menu_decisions(lock: object, surface: Sequence[Mapping[str, object]]) -> dict[str, Decision]:
+    return _decisions_for_names(lock, map(_name, surface))
 
 
 @profiled_function_span("green_lock_menu_projection")
@@ -873,13 +877,13 @@ def project_request_menu(runtime: object, selected: Sequence[dict],
         return list(selected)
     # Full surface: the request tools plus any tool a mutator synthesised
     # (predict, job tools) that is not in the raw surface.
-    surface: list[dict] = []
-    seen: set[str] = set()
+    reuse = schema_reuse_enabled()
+    by_name: dict[str, dict] = {}
     for tool in [*selected, *tools]:
         name = _name(tool)
-        if name and name not in seen:
-            seen.add(name)
-            surface.append(tool)
+        if name:
+            by_name.setdefault(name, tool)
+    surface = list(by_name.values())
     previous = getattr(runtime, "_greenlock_menu_authority_engaged", None)
     setattr(runtime, "_greenlock_menu_authority_engaged", engaged)
     if boundary and previous is not None and previous != engaged:
@@ -894,15 +898,17 @@ def project_request_menu(runtime: object, selected: Sequence[dict],
         # model; then the lock's own allow-set is the menu (recovery).
         upstream = frozenset(upstream_names) if lock_allowed else None
     setattr(runtime, "_greenlock_menu_authority_upstream", upstream)
-    decisions = menu_decisions(lock, surface)
+    decisions = _decisions_for_names(lock, by_name) if reuse else menu_decisions(lock, surface)
     allowed = {name for name, decision in decisions.items() if decision.allowed}
-    order = [*selected, *surface]
-    offered, seen_names = [], set()
-    for tool in order:
-        name = _name(tool)
-        if name in allowed and name not in seen_names:
-            seen_names.add(name)
-            offered.append(next(item for item in surface if _name(item) == name))
+    if reuse:
+        offered = [tool for name, tool in by_name.items() if name in allowed]
+    else:
+        offered, seen_names = [], set()
+        for tool in [*selected, *surface]:
+            name = _name(tool)
+            if name in allowed and name not in seen_names:
+                seen_names.add(name)
+                offered.append(next(item for item in surface if _name(item) == name))
     offered = constrain_repair_paths(offered, decisions)
     if getattr(runtime, "stateframe_tokenlab_stall_breaker_mode", "off") == "on":
         from kernel_tokenlab_stall_breaker import apply_menu as apply_stall_menu
@@ -930,6 +936,7 @@ def project_request_menu(runtime: object, selected: Sequence[dict],
         # review6: an upstream narrowing must never cause termination while the
         # full surface still has permitted tools; drop it and project the surface.
         setattr(runtime, "_greenlock_menu_authority_upstream", None)
+        # Re-read the current surface after the live menu transforms above.
         decisions = menu_decisions(lock, surface)
         offered = [tool for tool in surface if decisions[_name(tool)].allowed]
         names = [_name(tool) for tool in offered]
@@ -963,16 +970,9 @@ def project_request_menu(runtime: object, selected: Sequence[dict],
     frozen_payload = {
         "schema": "stateframe-greenlock-final-menu/1",
         "allow_set": list(names),
-        "tools": copy.deepcopy(offered),
+        "tools": offered,
     }
-    frozen_bytes = json.dumps(
-        frozen_payload, sort_keys=True, ensure_ascii=False,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    setattr(runtime, "_greenlock_frozen_menu", {
-        **frozen_payload,
-        "digest": "sha256:" + hashlib.sha256(frozen_bytes).hexdigest(),
-    })
+    setattr(runtime, "_greenlock_frozen_menu", freeze_menu_payload(frozen_payload, reuse=reuse))
     # The notice/recovery contract reads this exact final projection.  Update
     # it even when the names happen to equal the upstream menu; otherwise a
     # stale menu can recommend a runner that is absent from this request.
@@ -996,6 +996,7 @@ def finalize_wire_menu_authority(
     lock = getattr(runtime, "green_lock", None)
     if not applies(lock):
         return ()
+    reuse = schema_reuse_enabled()
 
     from kernel_done_readiness_authority import (
         DoneReadinessContractError, assert_refusal_recovery, decision_for_runtime,
@@ -1085,20 +1086,13 @@ def finalize_wire_menu_authority(
     payload = {
         "schema": "stateframe-greenlock-final-menu/1",
         "allow_set": list(names),
-        "tools": copy.deepcopy([dict(tool) for tool in tools if isinstance(tool, Mapping)]),
+        "tools": [dict(tool) for tool in tools if isinstance(tool, Mapping)],
     }
     if done_decision is not None:
         payload["done_decision_key"] = list(done_decision.key)
-    frozen_bytes = json.dumps(
-        payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"),
-    ).encode("utf-8")
-    setattr(runtime, "_greenlock_frozen_menu", {
-        **payload,
-        "digest": "sha256:" + hashlib.sha256(frozen_bytes).hexdigest(),
-    })
-    setattr(runtime, "_greenlock_menu_authority_upstream", frozenset(
-        canonical_action(name) for name in names if canonical_action(name)
-    ))
+    setattr(runtime, "_greenlock_frozen_menu", freeze_menu_payload(payload, reuse=reuse))
+    upstream = frozenset(filter(None, map(canonical_action, names)))
+    setattr(runtime, "_greenlock_menu_authority_upstream", upstream)
     setattr(runtime, "completion_menu", tuple(names))
     setattr(runtime, "offered_tools", tuple(names))
     setattr(runtime, "_question_done_available", "done" in names)

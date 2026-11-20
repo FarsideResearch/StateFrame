@@ -16,7 +16,7 @@ from kernel_effects import (
     BaselineStore, ContentStore, EffectError, Manifest, effect_policy_for_run, manifest_digest,
     reconcile, scan,
 )
-from kernel_exec_capability import shell_capability
+from kernel_exec_capability import current_path_authority_fingerprint, shell_capability
 from kernel_exec_session import ExecSession, ExecSessionError
 from kernel_run_env import RunEnv, RunEnvError, env_identity
 from kernel_shell_policy import ShellPolicyRefused, admit_shell, normalize_output_delivery
@@ -213,6 +213,7 @@ class ShellTool:
         self._post_manifest_reuse_enabled = True
         self._post_manifest: Manifest | None = None
         self._post_manifest_key: tuple[str, int, int, str | None] | None = None
+        self._path_snapshot = spec.get("shell_path_snapshot")
         # STATEFRAME_SHELL_STATE: cwd and exported variables carried between foreground calls.
         import kernel_shell_state
         self.shell_state = kernel_shell_state.ShellState() if kernel_shell_state.enabled() else None
@@ -277,7 +278,8 @@ class ShellTool:
         cap = shell_capability(workspace=self.root, run_env_dir=env_root, scratch_home=home,
             network=self.settings.shell_network, writable=writable,
             extra_read_roots=tuple(Path(p) for p in self.spec.get("shell_read_roots", ())),
-            path_dirs=tuple(Path(p) for p in self.spec.get("shell_path_dirs", ())))
+            path_dirs=tuple(Path(p) for p in self.spec.get("shell_path_dirs", ())),
+            **({"path_snapshot": self._path_snapshot} if self._path_snapshot is not None else {}))
         environment = dict(cap.env)
         if self.environment:
             environment.update({key: value for key, value in self.environment.env.items() if key != "PATH"})
@@ -334,6 +336,27 @@ class ShellTool:
         self.policy = (replace(policy, baseline_manifest=self.baseline) if policy is not None else
                        effect_policy_for_run(self.root, row, baseline_tests,
                                              baseline_manifest=self.baseline))
+
+    @property
+    def capability(self):
+        self._validate_path_authority()
+        return self._capability
+
+    @capability.setter
+    def capability(self, value):
+        self._capability = value
+
+    def _validate_path_authority(self) -> None:
+        # All command purposes derive their capabilities here. Check the host's
+        # frozen inputs before using them, including files reached by shebangs.
+        snapshot = self._path_snapshot
+        if snapshot is not None:
+            try:
+                current = current_path_authority_fingerprint(snapshot["inputs"])
+            except OSError as error:
+                raise ShellExecutionFailed(f"shell PATH authority changed: {error}") from error
+            if current != snapshot["fingerprint"]:
+                raise ShellExecutionFailed("shell PATH authority changed")
 
     def _prepare_effect_policy(self, row, baseline_tests, policy):
         self.baseline = self.workspace_effects.baseline()

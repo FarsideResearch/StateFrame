@@ -12,12 +12,16 @@ Supports tree-sitter-language-pack (preferred) and tree-sitter-languages (legacy
 with a plain text fallback when neither is available.
 """
 
+from __future__ import annotations
+
 import hashlib
 import json
 import logging
 import os
 import re
+import stat
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 
 from kernel_obligation_assess import UnavailableEvidence
@@ -218,6 +222,7 @@ def _outline_sigs(source: str, rel_path: str) -> tuple[list[str], str, str | Non
 
 def _file_entry_with_mode(
     file_path: Path, repo_root: Path, *, source_bytes: bytes | None = None,
+    observed: bool = False,
 ) -> tuple[str | None, str, str | None]:
     """Return a bounded entry, the mode that produced it, and the parser-failure reason (None if none).
 
@@ -230,8 +235,8 @@ def _file_entry_with_mode(
     scanned = ext in _SCAN_EXTS or ext == ".vue"
 
     try:
-        stat = file_path.stat()
-        if stat.st_size > _MAX_FILE_READ_BYTES or (scanned and stat.st_size < 10):
+        size = len(source_bytes) if observed and source_bytes is not None else file_path.stat().st_size
+        if size > _MAX_FILE_READ_BYTES or (scanned and size < 10):
             return None, "", None
         if source_bytes is None:
             source_bytes = file_path.read_bytes()
@@ -282,10 +287,124 @@ def _file_entry(file_path: Path, repo_root: Path) -> str | None:
     return _file_entry_with_mode(file_path, repo_root)[0]
 
 
+def _map_children(directory: Path, observation: IntakeMapObservation) -> list[os.DirEntry[str]]:
+    observation.directory(directory)
+    with os.scandir(directory) as entries:
+        return sorted(entries, key=lambda entry: os.path.normcase(entry.name), reverse=True)
+
+
+def _map_candidates(root: Path, observation: IntakeMapObservation) -> Iterator[Path]:
+    """Yield files in path order, pruning excluded trees before listing them."""
+    pending = _map_children(root, observation)
+    while pending:
+        entry = pending.pop()
+        if entry.name in _SKIP_DIRS or entry.name.endswith(".egg-info"):
+            continue
+        if entry.is_dir(follow_symlinks=False):
+            pending.extend(_map_children(Path(entry.path), observation))
+            continue
+        path = Path(entry.path)
+        if path.suffix.lower() in _LANG_MAP and (
+            path.is_file() if entry.is_symlink() else entry.is_file()
+        ):
+            yield path
+
+
 # ── Map generation ────────────────────────────────────────────────────────────
+
+class IntakeObservationUnavailable(Exception):
+    """The eager map must handle this source or parser environment."""
+
+
+class IntakeMapObservation:
+    """Hash exactly the ordered sources visited by the capped text-scan map."""
+
+    max_candidates = 4096
+    max_bytes = 64 * 1024 * 1024
+
+    def __init__(self, root: Path):
+        self.root = root
+        self.count = 0
+        self.bytes_read = 0
+        self.digest = hashlib.sha256()
+        self._stamps: dict[Path, tuple[int, ...] | None] = {}
+
+    @staticmethod
+    def _stamp(info: os.stat_result) -> tuple[int, ...]:
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_size,
+                info.st_mtime_ns, info.st_ctime_ns)
+
+    @classmethod
+    def _path_stamp(cls, path: Path) -> tuple[int, ...] | None:
+        try:
+            return cls._stamp(path.lstat())
+        except FileNotFoundError:
+            return None
+
+    def _remember(self, path: Path, stamp: tuple[int, ...] | None) -> None:
+        if len(self._stamps) >= 2 * self.max_candidates:
+            raise IntakeObservationUnavailable
+        if self._stamps.setdefault(path, stamp) != stamp:
+            raise IntakeObservationUnavailable
+
+    def directory(self, path: Path) -> None:
+        info = path.lstat()
+        if not stat.S_ISDIR(info.st_mode):
+            raise IntakeObservationUnavailable
+        self._remember(path, self._stamp(info))
+
+    def missing(self, path: Path) -> None:
+        self._remember(path, None)
+
+    def current(self) -> bool:
+        return all(self._path_stamp(path) == stamp for path, stamp in self._stamps.items())
+
+    @staticmethod
+    def policy() -> tuple | None:
+        # Native grammars can fail per language, and the source outline can
+        # notify a capability listener. Keep both on the ordinary parser path.
+        if _parser_available():
+            return None
+        return (
+            "text-scan/1", _TREE_SITTER_AVAILABLE, _USES_LANGUAGE_PACK,
+            os.name, sorted(_SKIP_DIRS), sorted(_LANG_MAP), _SCAN_EXTS,
+            _MAX_FILES, _MAX_SIGS_PER_FILE, _MAX_SIG_CHARS,
+            _MAX_FILE_ENTRY_CHARS, _MAX_FILE_READ_BYTES,
+        )
+
+    def source(self, path: Path) -> bytes | None:
+        ext = path.suffix.lower()
+        if ext not in (*_SCAN_EXTS, ".vue") or self.count >= self.max_candidates:
+            raise IntakeObservationUnavailable
+        # Refuse symlinks and nonregular files before using their contents as
+        # evidence. A length or stat change during the read is also ambiguous.
+        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as stream:
+            before = os.fstat(stream.fileno())
+            if not stat.S_ISREG(before.st_mode):
+                raise IntakeObservationUnavailable
+            size = before.st_size
+            data = None
+            if 10 <= size <= _MAX_FILE_READ_BYTES:
+                if self.bytes_read + size > self.max_bytes:
+                    raise IntakeObservationUnavailable
+                data = stream.read(size + 1)
+                if len(data) != size:
+                    raise IntakeObservationUnavailable
+                self.bytes_read += size
+            stamp = self._stamp(before)
+            if stamp != self._path_stamp(path):
+                raise IntakeObservationUnavailable
+            self._remember(path, stamp)
+        self.count += 1
+        relative = str(path.relative_to(self.root)).encode("utf-8", errors="surrogatepass")
+        self.digest.update(relative + b"\0")
+        self.digest.update(b"skip" if data is None else b"read" + hashlib.sha256(data).digest())
+        return data
+
 
 def _generate_repo_map_with_stats(
     workspace_dir: str, *, cache: dict | None = None, fresh: dict | None = None,
+    observation: IntakeMapObservation | None = None,
 ) -> tuple[str, dict]:
     """Walk the workspace; return the map text and the modes actually used.
 
@@ -301,7 +420,8 @@ def _generate_repo_map_with_stats(
     skipped = 0
     reasons: dict[str, int] = {}
 
-    for file_path in sorted(root.rglob("*")):
+    candidates = _map_candidates(root, observation) if observation is not None else sorted(root.rglob("*"))
+    for file_path in candidates:
         if not file_path.is_file():
             continue
 
@@ -317,8 +437,13 @@ def _generate_repo_map_with_stats(
             if file_path.is_symlink() or file_path.suffix.lower() not in _LANG_MAP:
                 continue
             entry, mode, failure = _cached_map_entry(file_path, root, cache, fresh)
-        else:
+        elif observation is None:
             entry, mode, failure = _file_entry_with_mode(file_path, root)
+        else:
+            data = observation.source(file_path)
+            if data is None:
+                continue
+            entry, mode, failure = _file_entry_with_mode(file_path, root, source_bytes=data, observed=True)
         if failure:
             reasons[failure] = reasons.get(failure, 0) + 1
         if entry:

@@ -26,13 +26,14 @@ from collections import OrderedDict, deque
 from dataclasses import dataclass
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from itertools import islice
 from pathlib import Path
 
 from kernel_continuation_menu_authority import EDIT_TOOLS
 
 from kernel_measurement import (
     AuditJournal, HostSpanRecorder, JOURNAL_BLOB_THRESHOLD_BYTES, canonical_bytes, digest,
-    externalize_journal_fields, profile_host_span, profiled_journal_span,
+    externalize_journal_fields, startup_pilot_enabled, profile_host_span, profiled_journal_span,
     resolve_journal_blob_refs, host_span_profiles_enabled,
     _runtime_stateframe_mode_snapshot,
 )
@@ -788,6 +789,74 @@ class _ReplayBlobCache(OrderedDict):
             self.bytes -= removed[0]
 
 
+@dataclass(frozen=True)
+class _WriterRow:
+    offset: int
+    line: bytes
+    envelope: dict
+    logical_size: int
+
+
+class _WriterRows:
+    """Bounded stored envelopes and their exact bytes for a fresh writer."""
+
+    def __init__(self) -> None:
+        self.rows: deque[_WriterRow] = deque()
+        self.size = 0
+
+    def append(self, row: _WriterRow) -> None:
+        self.rows.append(row)
+        self.size += len(row.line)
+        while len(self.rows) > RECORD_CACHE_LIMIT or self.size > RECORD_CACHE_BYTE_LIMIT:
+            self.size -= len(self.rows.popleft().line)
+
+
+# The checkpoint codec snapshots journal attributes. A new journal instance
+# must validate its durable input before using any attempt-local writer data.
+_STARTUP_WRITER_ROWS = None
+_STARTUP_WRITER_ROWS_LOCK = threading.Lock()
+
+
+def _verified_writer_rows(journal: ContinuationJournal, first: int = 1,
+                          last: int | None = None) -> tuple[_WriterRow, ...]:
+    if _STARTUP_WRITER_ROWS is None:
+        return ()
+    view = _STARTUP_WRITER_ROWS.get(journal)
+    if (view is None or not view.rows or journal._replaying
+            or getattr(journal, "_observing_publication", False)
+            or hasattr(journal, "_publication_batch")):
+        return ()
+    journal.assert_owner()
+    oldest, newest = view.rows[0], view.rows[-1]
+    oldest_sequence = oldest.envelope["sequence"]
+    last = journal._sequence if last is None else last
+    if (first < oldest_sequence or last < first or last > journal._sequence
+            or newest.envelope["sequence"] != journal._sequence
+            or newest.envelope["record_hash"] != journal._head
+            or len(journal._record_offsets) != journal._sequence
+            or len(journal._record_hashes) != journal._sequence
+            or oldest.offset + view.size != journal._size):
+        return ()
+    rows = tuple(islice(view.rows, first - oldest_sequence, last - oldest_sequence + 1))
+    start, end = rows[0], rows[-1]
+    previous = journal._record_hashes[first - 2] if first > 1 else None
+    if (start.offset != journal._record_offsets[first - 1]
+            or start.envelope["previous_hash"] != previous
+            or end.offset != journal._record_offsets[last - 1]
+            or end.envelope["record_hash"] != journal._record_hashes[last - 1]):
+        return ()
+    expected = b"".join(row.line for row in rows) if len(rows) > 1 else start.line
+    try:
+        exact = os.pread(journal._fd, len(expected), start.offset)
+    except OSError:
+        exact = None
+    journal.assert_owner()
+    if exact != expected:
+        _STARTUP_WRITER_ROWS.pop(journal, None)
+        return ()
+    return rows
+
+
 class _CachedRecordView(Sequence[dict]):
     """A fixed journal prefix; hydrate and detach only rows actually read."""
 
@@ -1265,7 +1334,28 @@ class ContinuationJournal(AuditJournal):
             if selected is not None and not all(selected):
                 raise JournalError("subscriber kinds must be non-empty strings")
             legacy_mode = self._record_cache_limit is None
-            if legacy_mode:
+            writer_rows = (() if legacy_mode or _STARTUP_WRITER_ROWS is None
+                           else _verified_writer_rows(self))
+            startup_records = None
+            if writer_rows:
+                matches = [row for row in writer_rows
+                           if selected is None or row.envelope["kind"] in selected]
+                if sum(row.logical_size for row in matches) <= RECORD_CACHE_BYTE_LIMIT:
+                    blob_cache = _ReplayBlobCache()
+                    startup_records = []
+                    cache_start = self._record_cache_start
+                    cached_suffix = cache_start + len(self._record_cache) == self._sequence
+                    for row in matches:
+                        record = self._hydrate_record(row.line, row.envelope, blob_cache)
+                        cache_index = record["sequence"] - 1 - cache_start
+                        # Preserve the published key order for the live suffix
+                        # after independently checking any on-disk blob refs.
+                        if cached_suffix and cache_index >= 0:
+                            record = self._record_cache[cache_index]
+                        startup_records.append(record)
+            if startup_records is not None:
+                final_cursor = self._sequence
+            elif legacy_mode:
                 # Legacy cached_records() exposes the live dictionaries. Use the
                 # append-maintained index so each durable row is parsed once,
                 # including a committed prefix on retry, without a separate scan.
@@ -1306,20 +1396,20 @@ class ContinuationJournal(AuditJournal):
                 page_size = self._record_cache_limit or RECORD_CACHE_LIMIT
                 page_size = max(1, page_size)
                 first_cursor = 0 if legacy_mode else resume_cursor
-                for page_start in range(first_cursor, final_cursor, page_size):
-                    page_stop = min(final_cursor, page_start + page_size)
-                    # Filter before observer isolation; _notify_isolated makes
-                    # the sole delivered-row copy.
-                    records = (
-                        self._indexed_records(page_start + 1, page_stop)
-                        if legacy_mode
-                        else self._record_range(page_start, page_stop, detached=False)
-                    )
+                # Filter before observer isolation; _notify_isolated makes
+                # the sole delivered-row copy.
+                pages = (startup_records,) if startup_records is not None else (
+                    self._indexed_records(start + 1, min(final_cursor, start + page_size))
+                    if legacy_mode else self._record_range(
+                        start, min(final_cursor, start + page_size), detached=False)
+                    for start in range(first_cursor, final_cursor, page_size)
+                )
+                for records in pages:
                     for record in records:
                         sequence = int(record["sequence"])
-                        # Legacy retries validate their committed prefix, but do
-                        # not filter, deliver, or copy those already committed rows.
-                        if legacy_mode and sequence <= resume_cursor:
+                        # Legacy retries validate their committed prefix, and
+                        # the startup page may also include committed rows.
+                        if sequence <= resume_cursor:
                             continue
                         if _is_observer_failure_overflow(record):
                             if advance_audit is not None:
@@ -2148,12 +2238,22 @@ class ContinuationJournal(AuditJournal):
         """Hydrate one verified line without materializing its predecessors."""
         return next(self._indexed_records(sequence, sequence))
 
-    def _indexed_records(self, first: int, last: int) -> Iterator[dict]:
+    def _indexed_records(self, first: int, last: int, *,
+                         kinds: frozenset[str] | None = None) -> Iterator[dict]:
         """Hydrate a contiguous range with one open and a bounded shared blob LRU."""
         self._ensure_record_index()
         if first > last:
             return
         blob_cache = _ReplayBlobCache()
+        writer_rows = (() if _STARTUP_WRITER_ROWS is None
+                       else _verified_writer_rows(self, first, last))
+        if writer_rows:
+            for row in writer_rows:
+                self.assert_owner()
+                if kinds is None or row.envelope["kind"] in kinds:
+                    hydrated = self._hydrate_record(row.line, row.envelope, blob_cache)
+                    yield copy.deepcopy(hydrated) if hydrated is row.envelope else hydrated
+            return
         fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
         with os.fdopen(fd, "rb") as handle:
             reader, writer = os.fstat(handle.fileno()), os.fstat(self._fd)
@@ -2166,9 +2266,15 @@ class ContinuationJournal(AuditJournal):
                 if handle.tell() != self._record_offsets[sequence - 1]:
                     raise JournalError("indexed journal offset mismatch")
                 line = handle.readline(MAX_RECORD_BYTES + 1)
-                yield self._resolve_indexed_line(line, sequence, blob_cache)
+                if kinds is None:
+                    yield self._resolve_indexed_line(line, sequence, blob_cache)
+                else:
+                    record = self._resolve_indexed_line(line, sequence, blob_cache, kinds=kinds)
+                    if record is not None:
+                        yield record
 
-    def _resolve_indexed_line(self, line: bytes, sequence: int, blob_cache: dict) -> dict:
+    def _resolve_indexed_line(self, line: bytes, sequence: int, blob_cache: dict, *,
+                              kinds: frozenset[str] | None = None) -> dict | None:
         if len(line) > MAX_RECORD_BYTES or not line.endswith(b"\n"):
             raise JournalError("oversize or torn indexed journal record")
         try:
@@ -2191,12 +2297,26 @@ class ContinuationJournal(AuditJournal):
                 or record.get("record_hash") != digest(
                     {key: value for key, value in record.items() if key != "record_hash"})):
             raise JournalError("indexed journal hash or lineage mismatch")
+        if kinds is not None and record["kind"] not in kinds:
+            return None
         try:
             resolved = resolve_journal_blob_refs(record, self.path, blob_cache)
         except (OSError, ValueError) as error:
             raise JournalError("invalid indexed journal blob reference") from error
         if not isinstance(resolved, dict):
             raise JournalError("indexed journal blob did not resolve to an object")
+        return resolved
+
+    def _hydrate_record(self, line: bytes, envelope: dict, blob_cache: dict) -> dict:
+        # The caller has independently verified these exact stored bytes.
+        if b'"$blob"' not in line:
+            return envelope
+        try:
+            resolved = resolve_journal_blob_refs(envelope, self.path, blob_cache)
+        except (OSError, ValueError) as error:
+            raise JournalError("invalid journal blob reference") from error
+        if not isinstance(resolved, dict):
+            raise JournalError("journal blob did not resolve to an object")
         return resolved
 
     def _record_range(self, start: int, stop: int, *, detached: bool = True) -> Iterator[dict]:
@@ -2402,6 +2522,21 @@ class ContinuationJournal(AuditJournal):
             self.assert_owner()
             if self._replaying or self._notifying:
                 raise JournalError("cannot append while replaying or publishing")
+            global _STARTUP_WRITER_ROWS
+            if (self._sequence == 0 and self._record_cache_limit is not None
+                    and startup_pilot_enabled()):
+                if _STARTUP_WRITER_ROWS is None:
+                    from weakref import WeakKeyDictionary
+
+                    with _STARTUP_WRITER_ROWS_LOCK:
+                        if _STARTUP_WRITER_ROWS is None:
+                            _STARTUP_WRITER_ROWS = WeakKeyDictionary()
+                _STARTUP_WRITER_ROWS[self] = _WriterRows()
+            writer_rows = None if _STARTUP_WRITER_ROWS is None else _STARTUP_WRITER_ROWS.get(self)
+            if writer_rows is not None and kind in (
+                    "request_prepared", "qualified_request_sealed", "request_submitted", CHECKPOINT_KIND):
+                _STARTUP_WRITER_ROWS.pop(self, None)
+                writer_rows = None
             if kind == "run_started" and self._sequence != 0:
                 raise ValueError("run_started is only valid as the first event")
             if not isinstance(kind, str) or not kind or RESERVED.intersection(fields):
@@ -2441,14 +2576,22 @@ class ContinuationJournal(AuditJournal):
             # One canonical encode of the stored record: the hash covers the sorted members without
             # record_hash, and the written line is the same member bytes with record_hash merged in
             # sorted position (byte-identical to canonical_bytes of the finished record).
-            members = {key: canonical_bytes(value) for key, value in stored_record.items()}
-            hashed = b",".join(canonical_bytes(key) + b":" + members[key] for key in sorted(members))
-            record_hash = "sha256:" + hashlib.sha256(b"{" + hashed + b"}").hexdigest()
-            stored_record["record_hash"] = record_hash
-            members["record_hash"] = canonical_bytes(record_hash)
+            values = {key: canonical_bytes(value) for key, value in stored_record.items()}
+            keys = sorted(values)
+            members = [canonical_bytes(key) + b":" + values[key] for key in keys]
+            record_hash = "sha256:" + hashlib.sha256(
+                b"{" + b",".join(members) + b"}").hexdigest()
+            if writer_rows is not None:
+                from bisect import bisect_left
+
+                hash_member = b'"record_hash":' + canonical_bytes(record_hash)
+                hash_position = bisect_left(keys, "record_hash")
+                members.insert(hash_position, hash_member)
+            else:
+                values["record_hash"] = canonical_bytes(record_hash)
+                members = [canonical_bytes(key) + b":" + values[key] for key in sorted(values)]
+            line = b"{" + b",".join(members) + b"}\n"
             record["record_hash"] = record_hash
-            line = b"{" + b",".join(canonical_bytes(key) + b":" + members[key]
-                                   for key in sorted(members)) + b"}\n"
             if len(line) > MAX_RECORD_BYTES:
                 raise ValueError("journal record exceeds limit")
             try:
@@ -2483,6 +2626,12 @@ class ContinuationJournal(AuditJournal):
                         _sync_directory(intent.parent)
                 self._size += len(line)
                 self._publish_record(record, offset, len(encoded_record))
+                if writer_rows is not None:
+                    keys.insert(hash_position, "record_hash")
+                    stored_record["record_hash"] = record_hash
+                    envelope = {key: stored_record[key] for key in keys}
+                    writer_rows.append(_WriterRow(offset, line, envelope,
+                                                  len(encoded_record) + len(hash_member) + 1))
             except BaseException as error:
                 self._poison(f"{type(error).__name__} appending {kind!r} after seq "
                              f"{self._sequence}: {str(error)[:160]}")
@@ -2709,6 +2858,8 @@ class ContinuationJournal(AuditJournal):
                     or getattr(self, "_verdict_identity_provider", None) is not None
                     or not (atomic or os.environ.get(_PUBLICATION_SWITCH, "").strip().lower() == "on")):
                 return [self.emit(kind, **fields) for kind, fields in normalized]
+            if _STARTUP_WRITER_ROWS is not None:
+                _STARTUP_WRITER_ROWS.pop(self, None)
             return self._emit_atomic_batch(normalized)
 
     def _begin_publication(self, *, complete_line: bytes | None = None) -> Path:

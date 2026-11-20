@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Set `STATEFRAME_SEND1_WAVE4=on` to speed up the first model request by reusing verified startup work and deferring cache writes until the request is sealed. The switch defaults to off.
+
 ## 0.8.14 (2026-11-20)
 
 - Tests: required pinned-tree parity gates now fail clearly when a gate copy lacks the pinned commit or Git.

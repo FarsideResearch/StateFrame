@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import errno
 import io
 import json
@@ -291,3 +292,46 @@ def test_parent_rejects_errno_table_injected_reason(tmp_path: Path, monkeypatch)
 
     if kernel_checkpoint._writer_failure_reason(run, 7) != "unexpected writer error":
         raise AssertionError("parent accepted a reason injected through errno.errorcode")
+
+
+def test_serialization_failure_logs_error_type_and_value_free_field_path(
+        tmp_path: Path, capsys, monkeypatch) -> None:
+    previous_state = kernel_checkpoint._STATE.copy()
+    run = tmp_path / "run"
+    (run / "wire").mkdir(parents=True)
+    (run / "wire" / "0001.request.json").write_text("{}")
+    kernel_checkpoint._STATE.clear()
+    kernel_checkpoint._STATE.update(
+        failed=kernel_checkpoint.MAX_CONSECUTIVE_FAILURES - 1,
+        consecutive_failed=kernel_checkpoint.MAX_CONSECUTIVE_FAILURES - 1,
+        disabled=False, last_sends=None, restored_step=None,
+    )
+    monkeypatch.setattr(kernel_checkpoint, "mode", lambda: "save")
+    monkeypatch.setattr(kernel_checkpoint, "_every", lambda: 1)
+    monkeypatch.setattr(kernel_checkpoint, "_async_enabled", lambda: False)
+    monkeypatch.setattr(kernel_checkpoint, "_low_disk_space", lambda _run_dir: None)
+    monkeypatch.setattr(kernel_checkpoint, "_sends", lambda _run_dir: 1)
+
+    error = pickle.PicklingError(_KEY)
+    kernel_checkpoint._mark_serialization_failure(error, {_KEY: contextvars.copy_context()})
+
+    def fail_save(*_args, **_kwargs):
+        raise error
+
+    monkeypatch.setattr(kernel_checkpoint, "save", fail_save)
+    try:
+        kernel_checkpoint.save_point(object(), 1, run / "checkpoint-target")
+        output = capsys.readouterr().err
+        events = [json.loads(line) for line in
+                  (run / "checkpoints" / "events.jsonl").read_text().splitlines()]
+        event = next(row for row in reversed(events) if row.get("event") == "checkpoint_failed")
+
+        assert event["serialization_error_type"] == "PicklingError"
+        assert event["serialization_field_path"] == "payload.mapping_value[0]"
+        assert "PicklingError at payload.mapping_value[0]" in output
+        _assert_secret_free(output, _KEY)
+        _assert_secret_free(event["serialization_field_path"], _KEY)
+        assert event["error"] == "checkpoint serialization failed"
+    finally:
+        kernel_checkpoint._STATE.clear()
+        kernel_checkpoint._STATE.update(previous_state)

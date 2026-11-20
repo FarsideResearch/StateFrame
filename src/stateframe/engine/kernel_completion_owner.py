@@ -4605,10 +4605,13 @@ def offer_terminal_choice(runtime: object, prepared: Sequence[Mapping[str, objec
     if witness_limitation:
         _emit(runtime, "completion_owner_witness_limitation_disclosed",
               open_ids=list(_reqwitness_open_ids(runtime)), notice=witness_limitation)
+    from kernel_wire_truth_gate import assembly_reuse_enabled
+
+    no_host_checks = _no_host_checks(runtime)
     preserved_tools = (
         _expanded_zero_edit_submit_menu(
             runtime, getattr(runtime, "_completion_owner_full_tools", ()))
-        if not _no_host_checks(runtime) else None
+        if not no_host_checks else None
     )
     preserved_actions = ([_tool_name(tool) for tool in preserved_tools if _tool_name(tool) != "done"]
                          if preserved_tools else [])
@@ -4618,11 +4621,13 @@ def offer_terminal_choice(runtime: object, prepared: Sequence[Mapping[str, objec
                 f"(uncertified; {'witness limitation disclosed; ' if witness_limitation else ''}"
                 f"open: [{open_label}]).")
     else:
+        no_host_check_text = (
+            no_host_checks and assembly_reuse_enabled() or _no_host_checks(runtime))
         text = ("Final step: call done now to submit this revision "
                 f"(no public host checks exist; acceptance discloses that limitation; "
                 f"{'witness limitation disclosed; ' if witness_limitation else ''}"
                 f"open: [{open_label}])."
-                if _no_host_checks(runtime) else
+                if no_host_check_text else
                 "Final step: call done now to submit this revision "
                 f"(uncertified; {'witness limitation disclosed; ' if witness_limitation else ''}"
                 f"open: [{open_label}]). No other action is available.")
@@ -6651,7 +6656,7 @@ def establish_request_action_contract(
             route=route,
             tool_names=names,
         )
-    record_owner_block(
+    menu_record = record_owner_block(
         runtime,
         "menu",
         schemas,
@@ -6732,7 +6737,12 @@ def establish_request_action_contract(
             "receipt": "host-observed execution receipt",
             "assessment": "model references returned receipt IDs",
         }
-    contract["tool_schema_digest"] = _digest(schemas)
+    from kernel_wire_truth_gate import assembly_reuse_enabled
+
+    # The menu block hashed a detached copy of these same ordered schemas.
+    # The owner contract still binds the entire current authority below.
+    contract["tool_schema_digest"] = (
+        menu_record["digest"] if assembly_reuse_enabled() else _digest(schemas))
     contract["decision_digest"] = _contract_decision_digest(contract)
     setattr(runtime, "_completion_owner_request_contract", _freeze_contract(contract))
     dispatch_names = tuple(
@@ -7007,9 +7017,12 @@ def assert_request_action_contract(
     schemas = [copy.deepcopy(dict(tool)) for tool in raw_tools]
     names = [_contract_tool_name(tool) for tool in schemas]
     admitted_schemas = contract.get("admitted_tool_schemas")
-    if (schemas != admitted_schemas
-            or names != expected
-            or _digest(schemas) != contract.get("tool_schema_digest")):
+    from kernel_wire_truth_gate import assembly_reuse_enabled
+
+    reuse = assembly_reuse_enabled()
+    schemas_match = schemas == admitted_schemas and names == expected
+    schema_digest = _digest(schemas) if schemas_match else None
+    if not schemas_match or schema_digest != contract.get("tool_schema_digest"):
         if runtime is None:
             raise RequestActionContractError(
                 "advertised actions differ from serialized/admitted tool schemas")
@@ -7098,7 +7111,7 @@ def assert_request_action_contract(
         if isinstance(current_owner_blocks, Mapping) else None
     )
     if (isinstance(menu_block, Mapping)
-            and menu_block.get("digest") != _digest(schemas)):
+            and menu_block.get("digest") != (schema_digest if reuse else _digest(schemas))):
         message = "serialized menu drifted from the typed owner block"
         if runtime is None:
             raise RequestActionContractError(message)
@@ -7193,7 +7206,8 @@ def assert_request_action_contract(
             admitted=True,
             decision_digest=contract.get("decision_digest"),
         )
-    return copy.deepcopy(contract)
+    # Thawing at entry already detached the entire returned snapshot.
+    return contract if reuse else copy.deepcopy(contract)
 
 
 def request_action_contract(runtime: object) -> dict[str, object] | None:

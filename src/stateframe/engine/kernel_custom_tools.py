@@ -7,6 +7,7 @@ import math
 import os
 import re
 import shutil
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
@@ -232,10 +233,137 @@ class CustomToolSet:
     tools: tuple[CustomTool, ...]
     digest: str
 
-    def schemas(self) -> list[dict]:
-        return [{"type": "function", "function": {"name": tool.name,
+    def schemas(self, *, detached: bool = False) -> list[dict]:
+        schemas = [{"type": "function", "function": {"name": tool.name,
                 "description": tool.description,
                 "parameters": {**tool.parameters, "additionalProperties": False}}} for tool in self.tools]
+        return deepcopy(schemas) if detached else schemas
+
+
+def _instantiate(definition, executable, definition_digest, executable_digest):
+    return CustomTool(definition["name"], definition["description"], definition["parameters"],
+                      tuple(definition["argv"]), definition_digest, executable, executable_digest,
+                      definition.get("network", "none"), definition.get("writes", "none"),
+                      definition.get("replay", "external"), float(definition["timeout_seconds"]))
+
+
+def _load_tool(definition, where, names, shell_network):
+    if not isinstance(definition, dict):
+        _fail(where, "definition", "expected object")
+    allowed = {"name", "description", "parameters", "argv", "network", "writes", "replay", "timeout_seconds"}
+    if set(definition) - allowed:
+        _fail(where, sorted(set(definition) - allowed)[0], "unsupported field")
+    name = definition.get("name")
+    if not isinstance(name, str) or not NAME.fullmatch(name):
+        _fail(where, "name", "expected ^[a-z][a-z0-9_]{1,40}$")
+    if name in names:
+        _fail(where, "name", "duplicates a built-in or earlier custom tool")
+    names.add(name)
+    description = definition.get("description")
+    if not isinstance(description, str) or not description or len(description) > 300:
+        _fail(where, "description", "expected 1 to 300 characters")
+    params = _parameters(definition.get("parameters"), where)
+    argv = definition.get("argv")
+    if not isinstance(argv, list) or not argv or any(not isinstance(item, str) or not item or "\0" in item for item in argv):
+        _fail(where, "argv", "expected nonempty string items")
+    if len(argv) > 32 or sum(len(item) for item in argv) > 16384:
+        _fail(where, "argv", "maximum 32 items and 16384 characters")
+    for item in argv:
+        if "{" in item or "}" in item:
+            match = PLACEHOLDER.fullmatch(item)
+            if not match or match.group(1) not in params["properties"]:
+                _fail(where, "argv", "placeholders must occupy a whole item and name a property")
+            if match.group(1) not in params["required"]:
+                _fail(where, "argv", "placeholder properties must be required")
+    if PLACEHOLDER.fullmatch(argv[0]):
+        _fail(where, "argv", "executable cannot be a placeholder")
+    executable = resolve_executable(argv, where)
+    network = definition.get("network", "none")
+    if not isinstance(network, str) or network not in NETWORK_ORDER:
+        _fail(where, "network", "expected none, loopback, or full")
+    if NETWORK_ORDER[network] > NETWORK_ORDER[shell_network]:
+        _fail(where, "network", "exceeds --shell-network")
+    writes = definition.get("writes", "none")
+    if writes not in ("none", "workspace"):
+        _fail(where, "writes", "expected none or workspace")
+    replay = definition.get("replay", "external")
+    if replay not in ("local", "external"):
+        _fail(where, "replay", "expected local or external")
+    if network == "full" and replay == "local":
+        _fail(where, "replay", "full network tools must use external replay")
+    timeout = definition.get("timeout_seconds")
+    if type(timeout) not in (int, float) or not math.isfinite(timeout) or not 0 < timeout <= 600:
+        _fail(where, "timeout_seconds", "expected finite number greater than 0 and at most 600")
+    try:
+        executable_digest = _file_digest(executable)
+    except OSError as error:
+        _fail(where, "argv", f"cannot hash executable: {error}")
+    return _instantiate(definition, executable, _digest(_canonical(definition)), executable_digest)
+
+
+def _tool_input_identity(executable, executable_digest):
+    if __package__:
+        from .kernel_exec_capability import _executable_read_roots
+    else:
+        from kernel_exec_capability import _executable_read_roots
+
+    dependencies = {}
+    _executable_read_roots(executable, dependencies)
+    info = executable.stat()
+    return _digest(_canonical((os.fspath(executable), executable_digest, info.st_dev, info.st_ino,
+                               info.st_mode, info.st_uid, info.st_gid, info.st_ctime_ns,
+                               sorted(dependencies.items()))))
+
+
+def _is_digest(value):
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def _cached_tools(store, key, path, definitions, names):
+    # The authenticated receipt covers validation of the exact input bytes.
+    # Arguments still come from those bytes and the executable is resolved and
+    # hashed here. Dispatch rebuilds the sandbox grants for the current run.
+    try:
+        record = store.lookup("custom-definitions", key)
+        if type(record) is not dict or set(record) != {"definitions"}:
+            return None
+        rows = record["definitions"]
+        if type(rows) is not list or len(rows) != len(definitions):
+            return None
+        loaded = []
+        taken = set(names)
+        for definition, row in zip(definitions, rows):
+            if (type(row) is not list or len(row) != 3 or not _is_digest(row[1])
+                    or not _is_digest(row[2]) or type(definition) is not dict):
+                return None
+            name, definition_digest, executable_identity = row
+            if not isinstance(name, str) or name != definition.get("name") or name in taken:
+                return None
+            taken.add(name)
+            executable = resolve_executable(definition["argv"], f"{path}:{name}")
+            executable_digest = _file_digest(executable)
+            if _tool_input_identity(executable, executable_digest) != executable_identity:
+                return None
+            loaded.append(_instantiate(definition, executable, definition_digest, executable_digest))
+        return loaded
+    except (OSError, TypeError, ValueError, KeyError, IndexError, RecursionError):
+        return None
+
+
+def _definition_cache_key(store, path, raw, index, names, shell_network):
+    from kernel_agent_registration import _registration_key
+
+    return _registration_key(store, "custom-definitions/1", str(path), _digest(raw), index,
+                             sorted(names), shell_network, MAX_SCHEMA_TOKENS)
+
+
+def _publish_definitions(store, key, inputs, loaded):
+    if key is None:
+        key = _definition_cache_key(store, *inputs)
+    if key is not None:
+        rows = [[tool.name, tool.definition_digest, _tool_input_identity(tool.executable, tool.executable_digest)]
+                for tool in loaded]
+        store.publish("custom-definitions", key, {"definitions": rows})
 
 
 def load_tool_files(paths: Sequence[Path], *, builtin_names: frozenset[str],
@@ -244,7 +372,18 @@ def load_tool_files(paths: Sequence[Path], *, builtin_names: frozenset[str],
         raise CustomToolError("shell_network: invalid network mode")
     found: list[CustomTool] = []
     names = set(builtin_names)
-    for path in paths:
+    pending = []
+    store = None
+    # The package import is the host validator, also used during resume.
+    # The child import runs with the recorded pilot selection.
+    if not __package__ and paths:
+        from kernel_measurement import startup_pilot_enabled
+
+        if startup_pilot_enabled():
+            from kernel_agent_registration import _enabled_store
+
+            store = _enabled_store()
+    for index, path in enumerate(paths):
         path = safe_expanduser(Path(path)).resolve()
         try:
             if path.stat().st_size > 1 << 20:
@@ -261,64 +400,36 @@ def load_tool_files(paths: Sequence[Path], *, builtin_names: frozenset[str],
             _fail(str(path), "schema", "expected stateframe-tools/1 with tools")
         if not isinstance(document["tools"], list):
             _fail(str(path), "tools", "expected list")
-        for index, definition in enumerate(document["tools"]):
-            where = f"{path}:{definition.get('name', index) if isinstance(definition, dict) else index}"
-            if not isinstance(definition, dict):
-                _fail(where, "definition", "expected object")
-            allowed = {"name", "description", "parameters", "argv", "network", "writes", "replay", "timeout_seconds"}
-            if set(definition) - allowed:
-                _fail(where, sorted(set(definition) - allowed)[0], "unsupported field")
-            name = definition.get("name")
-            if not isinstance(name, str) or not NAME.fullmatch(name):
-                _fail(where, "name", "expected ^[a-z][a-z0-9_]{1,40}$")
-            if name in names:
-                _fail(where, "name", "duplicates a built-in or earlier custom tool")
-            names.add(name)
-            description = definition.get("description")
-            if not isinstance(description, str) or not description or len(description) > 300:
-                _fail(where, "description", "expected 1 to 300 characters")
-            params = _parameters(definition.get("parameters"), where)
-            argv = definition.get("argv")
-            if not isinstance(argv, list) or not argv or any(not isinstance(item, str) or not item or "\0" in item for item in argv):
-                _fail(where, "argv", "expected nonempty string items")
-            if len(argv) > 32 or sum(len(item) for item in argv) > 16384:
-                _fail(where, "argv", "maximum 32 items and 16384 characters")
-            for item in argv:
-                if "{" in item or "}" in item:
-                    match = PLACEHOLDER.fullmatch(item)
-                    if not match or match.group(1) not in params["properties"]:
-                        _fail(where, "argv", "placeholders must occupy a whole item and name a property")
-                    if match.group(1) not in params["required"]:
-                        _fail(where, "argv", "placeholder properties must be required")
-            if PLACEHOLDER.fullmatch(argv[0]):
-                _fail(where, "argv", "executable cannot be a placeholder")
-            executable = resolve_executable(argv, where)
-            network = definition.get("network", "none")
-            if not isinstance(network, str) or network not in NETWORK_ORDER:
-                _fail(where, "network", "expected none, loopback, or full")
-            if NETWORK_ORDER[network] > NETWORK_ORDER[shell_network]:
-                _fail(where, "network", "exceeds --shell-network")
-            writes = definition.get("writes", "none")
-            if writes not in ("none", "workspace"):
-                _fail(where, "writes", "expected none or workspace")
-            replay = definition.get("replay", "external")
-            if replay not in ("local", "external"):
-                _fail(where, "replay", "expected local or external")
-            if network == "full" and replay == "local":
-                _fail(where, "replay", "full network tools must use external replay")
-            timeout = definition.get("timeout_seconds")
-            if type(timeout) not in (int, float) or not math.isfinite(timeout) or not 0 < timeout <= 600:
-                _fail(where, "timeout_seconds", "expected finite number greater than 0 and at most 600")
-            try:
-                executable_digest = _file_digest(executable)
-            except OSError as error:
-                _fail(where, "argv", f"cannot hash executable: {error}")
-            found.append(CustomTool(name, description, params, tuple(argv), _digest(_canonical(definition)),
-                                    executable, executable_digest, network, writes, replay, float(timeout)))
+        definitions = document["tools"]
+        key = None
+        cache_inputs = None
+        if store is not None and index < 32 and 0 < len(definitions) <= 32 and len(names) <= 256:
+            cache_inputs = (path, raw, index, frozenset(names), shell_network)
+            if getattr(store, "reads_available", lambda: True)():
+                key = _definition_cache_key(store, *cache_inputs)
+        loaded = _cached_tools(store, key, path, definitions, names) if key else None
+        if loaded is None:
+            loaded = []
+            for position, definition in enumerate(definitions):
+                label = definition.get("name", position) if isinstance(definition, dict) else position
+                loaded.append(_load_tool(definition, f"{path}:{label}", names, shell_network))
+            if cache_inputs is not None:
+                pending.append((key, cache_inputs, loaded))
+        else:
+            names.update(tool.name for tool in loaded)
+        found.extend(loaded)
     result = CustomToolSet(tuple(found), _digest(_canonical([
         (tool.definition_digest, tool.executable_digest) for tool in found])))
     rendered = json.dumps(result.schemas(), ensure_ascii=False, separators=(",", ":"))
     count = tokenizer(rendered) if tokenizer else (len(rendered.encode()) + 3) // 4
     if count > MAX_SCHEMA_TOKENS:
         raise CustomToolError(f"custom tool schemas: {count} tokens exceeds {MAX_SCHEMA_TOKENS}")
+    if pending:
+        from stateframe.startup_cache_writes import defer
+    for key, inputs, loaded in pending:
+        try:
+            defer("custom-definitions", lambda key=key, inputs=inputs, loaded=loaded:
+                  _publish_definitions(store, key, inputs, loaded))
+        except (OSError, TypeError, ValueError, RecursionError):
+            pass
     return result

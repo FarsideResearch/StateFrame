@@ -7,6 +7,7 @@ builds or launches such a command must be reviewed for that, then added here.
 """
 import ast
 from pathlib import Path
+import sys
 
 import pytest
 
@@ -21,6 +22,7 @@ FLAG_SITES = {
     "engine/kernel_test_isolation.py::isolated_command",
     "engine/kernel_test_isolation.py::_mutation_command",
     "engine/protected_tree_guard.py::guarded_command",
+    "send1_probe_cache.py::check_sandbox",
 }
 
 # Functions that use a flag-emitting builder, each reviewed: the forking thread waits for
@@ -35,6 +37,8 @@ BUILDER_USERS = {
     "engine/kernel_public_probe_execution.py::execute_probe",
     "engine/kernel_test_isolation.py::check_sandbox_exec_denial",
     "engine/protected_tree_guard.py::main",
+    # The forking thread runs the no-op probe synchronously and waits for it.
+    "send1_probe_cache.py::check_sandbox",
 }
 
 
@@ -84,7 +88,7 @@ def test_guard_sees_a_planted_new_launch_site(tmp_path, monkeypatch):
         "import subprocess, threading\n"
         "def launch():\n"
         "    threading.Thread(target=lambda: subprocess.Popen(['bwrap', '--die-with-parent', 'true'])).start()\n")
-    monkeypatch.setattr(__import__(__name__), "ROOT", tmp_path / "stateframe")
+    monkeypatch.setattr(sys.modules[__name__], "ROOT", tmp_path / "stateframe")
     flag_sites, _users = _scan()
     assert flag_sites == {"engine/planted.py::launch"}
 

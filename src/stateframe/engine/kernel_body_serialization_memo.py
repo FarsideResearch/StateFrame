@@ -10,10 +10,12 @@ a fresh serialization. Unknown value types disable the memo for that call.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
+from typing import NamedTuple
 
 _MAX_ENTRIES = 8
 _MAX_NODES = 200_000
@@ -107,8 +109,33 @@ def _entry(body: object) -> _Entry | None:
         return entry
 
 
-def plain_wire(body: Mapping[str, object]) -> bytes:
-    """Bytes of ``json.dumps(body).encode()``."""
+class WireSnapshot(NamedTuple):
+    wire: bytes
+    sha256: str
+
+
+def qualification_reuse_enabled() -> bool:
+    """Read the recorded pilot setting when its host integration is available."""
+    try:
+        from stateframe import _startup_optimization_enabled as enabled
+    except ModuleNotFoundError as error:
+        if error.name != "stateframe":
+            raise
+        return False
+    if not enabled():
+        return False
+    if __package__:
+        from .kernel_tool_tape import replay_mode_active
+    else:
+        from kernel_tool_tape import replay_mode_active
+    return not replay_mode_active()
+
+
+def plain_wire(body: Mapping[str, object], *, snapshot: bool = False) -> bytes | WireSnapshot:
+    """Encode default JSON, optionally taking a fresh immutable wire snapshot."""
+    if snapshot:
+        wire = json.dumps(body).encode()
+        return WireSnapshot(wire, hashlib.sha256(wire).hexdigest())
     entry = _entry(body)
     if entry is None:
         return json.dumps(body).encode()

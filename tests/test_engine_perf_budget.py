@@ -147,6 +147,18 @@ def test_send_measurement_reuses_the_prepared_wire(monkeypatch):
 
 
 def test_final_wire_preparation_serializes_transport_body_once(monkeypatch):
+    monkeypatch.setenv("STATEFRAME_SEND1_WAVE4", "off")
+    assert _count_final_wire_serializations(monkeypatch) == 1
+
+
+def test_pilot_final_wire_preparation_reuses_serialized_body(monkeypatch):
+    monkeypatch.setenv("STATEFRAME_SEND1_WAVE4", "on")
+    assert _count_final_wire_serializations(monkeypatch) == 0
+
+
+def _count_final_wire_serializations(monkeypatch):
+    from kernel_body_serialization_memo import plain_wire
+
     body = _body()
     meter = RequestTokenMeter(tokenizer=lambda _text: 10)
     meter.bind_request("perf-r1", "perf-r1")
@@ -162,6 +174,7 @@ def test_final_wire_preparation_serializes_transport_body_once(monkeypatch):
     )
     monkeypatch.setattr(kernel_request_budget, "_request_token_meter",
                         lambda *_args, **_kwargs: meter)
+    expected_wire = plain_wire(body)
     dumps_of_body = 0
     original_dumps = json.dumps
 
@@ -172,11 +185,10 @@ def test_final_wire_preparation_serializes_transport_body_once(monkeypatch):
         return original_dumps(value, *args, **kwargs)
 
     monkeypatch.setattr(json, "dumps", counted_dumps)
-    reconcile_frozen_budget(capture, SimpleNamespace(), body)
+    receipt = reconcile_frozen_budget(capture, SimpleNamespace(), body)
 
-    # This send seam creates one transport snapshot. Measurement and source
-    # delivery consume that same immutable byte string.
-    assert dumps_of_body == 1
+    assert receipt["body_sha256"] == "sha256:" + hashlib.sha256(expected_wire).hexdigest()
+    return dumps_of_body
 
 
 def test_frozen_candidate_measurement_reuses_prepared_wire_size(monkeypatch):

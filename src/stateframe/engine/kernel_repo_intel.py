@@ -612,9 +612,13 @@ def bound_repo_map(repo_map: str, *, target_path: str = "", symbol: str = "",
     return "\n".join(rendered)[:cap]
 
 
+def _normalized_focus(target_path: str) -> str:
+    return str(target_path or "").strip().replace("\\", "/").lstrip("./")
+
+
 def _ensure_focus_entry(repo_root: Path, repo_map: str, target_path: str) -> str:
     """Add the requested file when the upstream global file cap omitted it."""
-    normalized = str(target_path or "").strip().replace("\\", "/").lstrip("./")
+    normalized = _normalized_focus(target_path)
     if not normalized or normalized in repo_map:
         return repo_map
     candidate = repo_root / normalized
@@ -631,6 +635,127 @@ def _ensure_focus_entry(repo_root: Path, repo_map: str, target_path: str) -> str
     if not entry:
         return repo_map
     return f"{repo_map}\n{entry}" if repo_map else entry
+
+
+def _observe_intake_focus(root: Path, normalized: str) -> tuple[
+        Path, bytes | None, _repo_map_module.IntakeMapObservation]:
+    focused = _repo_map_module.IntakeMapObservation(root)
+    focus = root / normalized
+    data = None
+    if normalized and focus.suffix.lower() in _repo_map_module._LANG_MAP:
+        if not focus.is_relative_to(root) or focus.resolve() != focus:
+            raise _repo_map_module.IntakeObservationUnavailable
+        try:
+            focus.lstat()
+        except FileNotFoundError:
+            focused.missing(focus)
+        else:
+            data = focused.source(focus)
+    return focus, data, focused
+
+
+def _observed_intake_map(root: Path, target_path: str, symbol: str, *, seed=False) -> tuple[str, dict] | None:
+    """Use a stored ranked map only after observing its current source frontier."""
+    import sys
+
+    # The recorded child handoff imports the cache when the pilot is on.
+    cache = sys.modules.get("stateframe.send1_probe_cache")
+    if cache is None or not cache.enabled():
+        return None
+
+    import hashlib
+    import os
+    from itertools import islice
+
+    tape = sys.modules.get("kernel_tool_tape")
+    if os.environ.get("STATEFRAME_CHECKPOINT_RESTORE") or (tape is not None and tape.replay_mode_active()):
+        return None
+    observation_type = _repo_map_module.IntakeMapObservation
+    policy = observation_type.policy()
+    if policy is None or not root.is_absolute():
+        return None
+    if not seed and not getattr(cache, "reads_available", lambda: True)():
+        from stateframe.startup_cache_writes import defer
+
+        defer("intake-map", lambda: _observed_intake_map(root, target_path, symbol, seed=True))
+        return None
+    # The store key locates a bounded frontier hint. The digest in the hint
+    # also binds the ordered candidate names, their bytes and the focused input.
+    fingerprint = hashlib.sha256(json.dumps(
+        ["ranked-map/1", sys.implementation.name, list(sys.version_info), policy, MAX_MAP_CHARS,
+         str(target_path or ""), str(symbol or "")],
+        ensure_ascii=True, separators=(",", ":"),
+    ).encode("ascii")).hexdigest()
+    kind = "intake-map"
+    try:
+        hint = None if seed else cache.lookup(kind, fingerprint, validate=_intake_map_hint_valid)
+    except OSError:
+        return None
+
+    try:
+        if root.resolve(strict=True) != root:
+            return None
+        normalized = _normalized_focus(target_path)
+        if hint is not None:
+            observation = observation_type(root)
+            candidates = _repo_map_module._map_candidates(root, observation)
+            count = hint["candidates"]
+            capped = hint["files"] == _repo_map_module._MAX_FILES
+            for path in islice(candidates, count):
+                observation.source(path)
+            if (observation.count == count and observation.digest.hexdigest() == hint["frontier"]
+                    and (capped or next(candidates, None) is None)):
+                focus, _, focused = _observe_intake_focus(root, normalized)
+                if (focused.digest.hexdigest() == hint["focus"] and observation.current()
+                        and focused.current() and focus.resolve() == focus):
+                    files = hint["files"]
+                    return hint["map"], {"source": "generated", "files": files, "tree_sitter": 0,
+                                         "text_scan": files, "parse_failures": 0, "failure_reasons": {}}
+
+        observation = observation_type(root)
+        repo_map, stats = _repo_map_module._generate_repo_map_with_stats(str(root), observation=observation)
+        focus, focus_data, focused = _observe_intake_focus(root, normalized)
+        if focus_data is not None and normalized not in repo_map:
+            entry, _mode, failure = _repo_map_module._file_entry_with_mode(
+                focus, root, source_bytes=focus_data, observed=True)
+            if failure:
+                return None
+            if entry:
+                repo_map = f"{repo_map}\n{entry}" if repo_map else entry
+        bounded = bound_repo_map(repo_map, target_path=target_path, symbol=symbol)
+        if not observation.current() or not focused.current() or focus.resolve() != focus:
+            return None
+    except (OSError, ValueError, RuntimeError, _repo_map_module.IntakeObservationUnavailable):
+        return None
+
+    if not stats["tree_sitter"] and not stats["parse_failures"]:
+        from stateframe.startup_cache_writes import defer
+
+        def publish_map():
+            cache.publish(kind, fingerprint, {
+                "map": bounded, "files": stats["files"], "candidates": observation.count,
+                "frontier": observation.digest.hexdigest(), "focus": focused.digest.hexdigest(),
+            }, validate=_intake_map_hint_valid)
+
+        try:
+            defer(kind, publish_map)
+        except OSError:
+            if seed:
+                raise
+    return bounded, {"source": "generated", **stats}
+
+
+def _intake_map_hint_valid(hint: object) -> bool:
+    if type(hint) is not dict or hint.keys() != {"map", "files", "candidates", "frontier", "focus"}:
+        return False
+    files, candidates = hint["files"], hint["candidates"]
+    return (
+        type(files) is int and type(candidates) is int
+        and 0 <= files <= min(candidates, _repo_map_module._MAX_FILES)
+        and 0 <= candidates <= _repo_map_module.IntakeMapObservation.max_candidates
+        and isinstance(hint["map"], str) and 0 < len(hint["map"]) <= MAX_MAP_CHARS
+        and all(isinstance(hint[key], str) and len(hint[key]) == 64 for key in ("frontier", "focus"))
+    )
 
 
 def intake_orientation(root: Path, *, target_path: str = "", symbol: str = "",
@@ -655,10 +780,17 @@ def intake_orientation(root: Path, *, target_path: str = "", symbol: str = "",
         return render_intake_orientation(root, selectors, repo_map=bounded)
     commit = (get_current_commit_sha(str(root), journal=journal) if journal is not None
               else get_current_commit_sha(str(root)))
-    # Intake sees mutable run workspaces and should stay content-deterministic without a cache scan.
-    repo_map, map_stats = build_repo_map_with_stats(str(root), commit_sha=commit, use_cache=False)
-    repo_map = _ensure_focus_entry(root, repo_map, target_path)
-    bounded = bound_repo_map(repo_map, target_path=target_path, symbol=symbol)
+    # The child only loads the receipt store for the recorded pilot.
+    import sys
+
+    observed = (_observed_intake_map(root, target_path, symbol)
+                if "stateframe.send1_probe_cache" in sys.modules else None)
+    if observed is None:
+        repo_map, map_stats = build_repo_map_with_stats(str(root), commit_sha=commit, use_cache=False)
+        repo_map = _ensure_focus_entry(root, repo_map, target_path)
+        bounded = bound_repo_map(repo_map, target_path=target_path, symbol=symbol)
+    else:
+        bounded, map_stats = observed
     _journal_repo_map_receipt(map_stats, map_chars=len(bounded))
     from kernel_nav_basics import render_intake_orientation
     orientation = render_intake_orientation(root, selectors, repo_map=bounded)

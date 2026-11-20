@@ -15,6 +15,7 @@ import os
 import re
 import sys
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -1149,6 +1150,7 @@ def _request_token_meter(
 ) -> RequestTokenMeter:
     from kernel_request_diet import (
         RequestTokenMeter, request_tokenizer_credentials, resolve_tokenize_url, tokenizer_contract,
+        wave4_token_counts_enabled,
     )
 
     resolved_endpoint = resolve_tokenize_url(
@@ -1212,6 +1214,9 @@ def _request_token_meter(
     )
     meter.bind_tokenizer_auth(*request_tokenizer_credentials(capture))
     meter.provider_identity = tokenizer_contract(runtime, capture)
+    if wave4_token_counts_enabled():
+        meter.route_allow_remote = bool(capture.frame_route.settings.get("allow_remote")) if routed else None
+        meter._persistent_provider_identity = tokenizer_contract(runtime, capture, persistent=True)
     if unit_policy is not None:
         meter.subframe_cap_calibration = getattr(
             getattr(unit_policy, "spec", None), "subframe_cap_calibration", None)
@@ -2631,129 +2636,113 @@ def _apply_budget_with_diet(
                 if read_available:
                     from kernel_completion_owner import _current_tool_admission
                     read_available = _current_tool_admission(runtime, "read")[0]
-                capacity_paths = ()
-                if optional_inputs is not None and read_available and (
-                    _wire_bytes(body) > selected_budget.max_request_bytes
-                    or token_meter.measure(body)[0] > ENDPOINT_PROMPT_TOKEN_BUDGET
-                ):
-                    capacity_paths = tuple(dict.fromkeys(
+
+                def source_deferral_candidate(paths, plan):
+                    plan["deferred_paths"] = list(paths)
+                    candidate_body = copy.deepcopy(body)
+                    candidate_messages = candidate_body.get("messages")
+                    if not isinstance(candidate_messages, list):
+                        raise TypeError("source deferral candidate requires messages")
+                    _remove_deferred_source_excerpts(
+                        candidate_messages, paths,
+                        preserve_stateframe=_contains_framefit5_stateframe(candidate_messages),
+                        protected_messages=getattr(capture, "_framefit5_newest_user_suffix", ()),
+                    )
+                    upsert_deferred_source_notice(candidate_messages, paths)
+                    before_blank_settlement = paths
+                    paths = _settle_blank_source_paths(
+                        plan, candidate_messages, paths,
+                    )
+                    if paths != before_blank_settlement:
+                        _remove_deferred_source_excerpts(
+                            candidate_messages, paths,
+                            preserve_stateframe=_contains_framefit5_stateframe(candidate_messages),
+                            protected_messages=getattr(capture, "_framefit5_newest_user_suffix", ()),
+                        )
+                        upsert_deferred_source_notice(
+                            candidate_messages, paths,
+                        )
+                    return candidate_body, paths
+
+                from kernel_request_diet import RequestTokenMeter, _replaying_counts, wave4_token_counts_enabled
+
+                independent = ()
+                first_trial = None
+                if (optional_inputs is not None and read_available
+                        and (partial_paths or omission_paths or failed_paths)
+                        and wave4_token_counts_enabled() and type(token_meter) is RequestTokenMeter
+                        and token_meter._deadline is None
+                        and not _replaying_counts()
+                        and _wire_bytes(body) <= selected_budget.max_request_bytes):
+                    known_paths = tuple(dict.fromkeys((
+                        *deferred_source_paths, *partial_paths, *omission_paths, *failed_paths,
+                    )))
+                    # Only the first capacity path can affect this candidate.
+                    # If pressure would change the ordered paths, measure serially.
+                    first_capacity_path = next((
                         str(unit["path"]) for unit in candidate_plan.get("units", ())
                         if isinstance(unit, Mapping) and unit.get("path")
-                    ))
-                if read_available and (partial_paths or omission_paths or failed_paths or capacity_paths):
-                    deferred_paths = tuple(dict.fromkeys((
-                        *deferred_source_paths, *partial_paths, *omission_paths, *failed_paths,
-                        *capacity_paths[:1],
-                    )))
-                    candidate_plan["deferred_paths"] = list(deferred_paths)
-                    try:
-                        from kernel_request_diet import RequestDietDeferred, apply_diet
+                    ), None)
+                    if first_capacity_path is None or first_capacity_path in known_paths:
+                        detached_plan = copy.deepcopy(candidate_plan)
+                        try:
+                            trial, settled_paths = source_deferral_candidate(known_paths, detached_plan)
+                        except (OSError, TypeError, ValueError):
+                            pass  # The ordinary selection reports construction failures.
+                        else:
+                            independent = (body, trial)
+                            first_trial = (trial, settled_paths, detached_plan)
+                overlap = (
+                    token_meter.overlap_http_counts(
+                        independent, pilot_only=True, max_request_bytes=selected_budget.max_request_bytes,
+                    ) if independent else nullcontext()
+                )
+                with overlap:
+                    capacity_paths = ()
+                    if optional_inputs is not None and read_available and (
+                        _wire_bytes(body) > selected_budget.max_request_bytes
+                        or token_meter.measure(body)[0] > ENDPOINT_PROMPT_TOKEN_BUDGET
+                    ):
+                        capacity_paths = tuple(dict.fromkeys(
+                            str(unit["path"]) for unit in candidate_plan.get("units", ())
+                            if isinstance(unit, Mapping) and unit.get("path")
+                        ))
+                    if read_available and (partial_paths or omission_paths or failed_paths or capacity_paths):
+                        deferred_paths = tuple(dict.fromkeys((
+                            *deferred_source_paths, *partial_paths, *omission_paths, *failed_paths,
+                            *capacity_paths[:1],
+                        )))
+                        try:
+                            from kernel_request_diet import RequestDietDeferred, apply_diet
 
-                        candidate_limit = len(candidate_plan.get("units", ())) + 2
-                        seen_candidates: set[tuple[str, ...]] = set()
-                        for _candidate_pass in range(candidate_limit):
-                            signature = tuple(deferred_paths)
-                            if signature in seen_candidates:
-                                break
-                            seen_candidates.add(signature)
-                            # Rebuild from the same bounded request each time; a
-                            # verified partial receipt can reveal paths eligible
-                            # for deferral only after the first missing ranges are
-                            # removed from the wire.
-                            candidate_body = copy.deepcopy(body)
-                            candidate_messages = candidate_body.get("messages")
-                            if not isinstance(candidate_messages, list):
-                                raise TypeError("source deferral candidate requires messages")
-                            _remove_deferred_source_excerpts(
-                                candidate_messages, deferred_paths,
-                                preserve_stateframe=_contains_framefit5_stateframe(candidate_messages),
-                                protected_messages=getattr(capture, "_framefit5_newest_user_suffix", ()),
-                            )
-                            upsert_deferred_source_notice(candidate_messages, deferred_paths)
-                            before_blank_settlement = deferred_paths
-                            deferred_paths = _settle_blank_source_paths(
-                                candidate_plan, candidate_messages, deferred_paths,
-                            )
-                            if deferred_paths != before_blank_settlement:
-                                _remove_deferred_source_excerpts(
-                                    candidate_messages, deferred_paths,
-                                    preserve_stateframe=_contains_framefit5_stateframe(candidate_messages),
-                                    protected_messages=getattr(capture, "_framefit5_newest_user_suffix", ()),
-                                )
-                                upsert_deferred_source_notice(
-                                    candidate_messages, deferred_paths,
-                                )
-                            candidate_pretrimmed = _graceful_trim_optional_messages(
-                                candidate_body, protected_contents=protected_contents,
-                                protected_messages=protected_messages,
-                                required_source_paths=required_source_paths,
-                                max_request_bytes=selected_budget.max_request_bytes,
-                                max_request_tokens=ENDPOINT_PROMPT_TOKEN_BUDGET,
-                                measure_request_tokens=lambda: token_meter.measure(candidate_body)[0],
-                                token_meter=token_meter,
-                            )
-                            try:
-                                candidate_audit = apply_diet(
-                                    candidate_body,
-                                    stage=diet_stage,
-                                    max_request_bytes=selected_budget.max_request_bytes,
-                                    protected_contents=protected_contents,
-                                    protected_messages=protected_messages,
-                                    required_source_paths=required_source_paths,
-                                    required_source_order=required_source_order,
-                                    deferred_source_paths=deferred_paths,
-                                    token_budget=ENDPOINT_PROMPT_TOKEN_BUDGET,
-                                    token_meter=token_meter,
-                                    allocation_plan=(
-                                        copy.deepcopy(owner_first_plan)
-                                        if isinstance(owner_first_plan, dict) else None
-                                    ),
-                                )
-                            except RequestDietDeferred as candidate_error:
-                                candidate_audit = dict(candidate_error.detail)
-                                _log_diet_deferred(candidate_audit, stage=stage, level="INFO",
-                                                   cause_prefix="candidate_diet_deferred")
-                                candidate_audit["candidate_diet_deferred"] = True
-                            candidate_audit["dropped_sections"] = (
-                                list(candidate_pretrimmed)
-                                + list(candidate_audit.get("dropped_sections", ()))
-                            )
-                            candidate_messages = candidate_body.get("messages")
-                            candidate_tools = candidate_body.get("tools", [])
-                            if not isinstance(candidate_messages, list):
-                                raise TypeError("source deferral candidate requires messages")
-                            candidate_projection_count = _project_or_assemble_request_messages(
-                                candidate_messages,
-                                candidate_plan,
-                                runtime=runtime,
-                                capture=capture,
-                                allocation_plan=(
-                                    copy.deepcopy(owner_first_plan)
-                                    if isinstance(owner_first_plan, dict) else None
-                                ),
-                                sources=source_contents,
-                            )
-                            candidate_tokens, _candidate_measure_method = token_meter.measure(
-                                candidate_body,
-                            )
-                            candidate_over_budget = (
-                                _wire_bytes(candidate_body) > selected_budget.max_request_bytes
-                                or candidate_tokens > ENDPOINT_PROMPT_TOKEN_BUDGET
-                            )
-                            if candidate_over_budget:
-                                candidate_trimmed = _graceful_trim_optional_messages(
-                                    candidate_body,
-                                    protected_contents=protected_contents,
+                            candidate_limit = len(candidate_plan.get("units", ())) + 2
+                            seen_candidates: set[tuple[str, ...]] = set()
+                            for _candidate_pass in range(candidate_limit):
+                                signature = tuple(deferred_paths)
+                                if signature in seen_candidates:
+                                    break
+                                seen_candidates.add(signature)
+                                # Rebuild from the same bounded request each time; a
+                                # verified partial receipt can reveal paths eligible
+                                # for deferral only after the first missing ranges are
+                                # removed from the wire.
+                                if first_trial is None:
+                                    candidate_body, deferred_paths = source_deferral_candidate(
+                                        deferred_paths, candidate_plan,
+                                    )
+                                else:
+                                    candidate_body, deferred_paths, candidate_plan = first_trial
+                                    first_trial = None
+                                candidate_pretrimmed = _graceful_trim_optional_messages(
+                                    candidate_body, protected_contents=protected_contents,
                                     protected_messages=protected_messages,
                                     required_source_paths=required_source_paths,
                                     max_request_bytes=selected_budget.max_request_bytes,
                                     max_request_tokens=ENDPOINT_PROMPT_TOKEN_BUDGET,
-                                    measure_request_tokens=lambda: token_meter.measure(
-                                        candidate_body,
-                                    )[0],
+                                    measure_request_tokens=lambda: token_meter.measure(candidate_body)[0],
                                     token_meter=token_meter,
                                 )
-                                if candidate_trimmed:
+                                try:
                                     candidate_audit = apply_diet(
                                         candidate_body,
                                         stage=diet_stage,
@@ -2770,122 +2759,183 @@ def _apply_budget_with_diet(
                                             if isinstance(owner_first_plan, dict) else None
                                         ),
                                     )
-                                    candidate_messages = candidate_body.get("messages")
-                                    if not isinstance(candidate_messages, list):
-                                        raise TypeError(
-                                            "trimmed source candidate requires messages",
-                                        )
-                                    candidate_projection_count = (
-                                        _project_or_assemble_request_messages(
-                                            candidate_messages,
-                                            candidate_plan,
-                                            runtime=runtime,
-                                            capture=capture,
+                                except RequestDietDeferred as candidate_error:
+                                    candidate_audit = dict(candidate_error.detail)
+                                    _log_diet_deferred(candidate_audit, stage=stage, level="INFO",
+                                                       cause_prefix="candidate_diet_deferred")
+                                    candidate_audit["candidate_diet_deferred"] = True
+                                candidate_audit["dropped_sections"] = (
+                                    list(candidate_pretrimmed)
+                                    + list(candidate_audit.get("dropped_sections", ()))
+                                )
+                                candidate_messages = candidate_body.get("messages")
+                                candidate_tools = candidate_body.get("tools", [])
+                                if not isinstance(candidate_messages, list):
+                                    raise TypeError("source deferral candidate requires messages")
+                                candidate_projection_count = _project_or_assemble_request_messages(
+                                    candidate_messages,
+                                    candidate_plan,
+                                    runtime=runtime,
+                                    capture=capture,
+                                    allocation_plan=(
+                                        copy.deepcopy(owner_first_plan)
+                                        if isinstance(owner_first_plan, dict) else None
+                                    ),
+                                    sources=source_contents,
+                                )
+                                candidate_tokens, _candidate_measure_method = token_meter.measure(
+                                    candidate_body,
+                                )
+                                candidate_over_budget = (
+                                    _wire_bytes(candidate_body) > selected_budget.max_request_bytes
+                                    or candidate_tokens > ENDPOINT_PROMPT_TOKEN_BUDGET
+                                )
+                                if candidate_over_budget:
+                                    candidate_trimmed = _graceful_trim_optional_messages(
+                                        candidate_body,
+                                        protected_contents=protected_contents,
+                                        protected_messages=protected_messages,
+                                        required_source_paths=required_source_paths,
+                                        max_request_bytes=selected_budget.max_request_bytes,
+                                        max_request_tokens=ENDPOINT_PROMPT_TOKEN_BUDGET,
+                                        measure_request_tokens=lambda: token_meter.measure(
+                                            candidate_body,
+                                        )[0],
+                                        token_meter=token_meter,
+                                    )
+                                    if candidate_trimmed:
+                                        candidate_audit = apply_diet(
+                                            candidate_body,
+                                            stage=diet_stage,
+                                            max_request_bytes=selected_budget.max_request_bytes,
+                                            protected_contents=protected_contents,
+                                            protected_messages=protected_messages,
+                                            required_source_paths=required_source_paths,
+                                            required_source_order=required_source_order,
+                                            deferred_source_paths=deferred_paths,
+                                            token_budget=ENDPOINT_PROMPT_TOKEN_BUDGET,
+                                            token_meter=token_meter,
                                             allocation_plan=(
                                                 copy.deepcopy(owner_first_plan)
                                                 if isinstance(owner_first_plan, dict) else None
                                             ),
-                                            sources=source_contents,
                                         )
-                                    )
-                            deferred_paths = _settle_blank_source_paths(
-                                candidate_plan, candidate_messages, deferred_paths,
-                            )
-                            candidate_receipt = verify_final_source_delivery(
-                                candidate_plan,
-                                candidate_messages,
-                                payload={
-                                    "messages": candidate_messages,
-                                    "tools": candidate_tools,
-                                },
-                                sources=source_contents or None,
-                            )
-                            candidate_tokens, _candidate_measure_method = token_meter.measure(
-                                candidate_body,
-                            )
-                            candidate_satisfied = (
-                                source_delivery_satisfied(candidate_receipt)
-                                and _wire_bytes(candidate_body) <= selected_budget.max_request_bytes
-                                and candidate_tokens <= ENDPOINT_PROMPT_TOKEN_BUDGET
-                            )
-                            if candidate_satisfied:
-                                break
-                            newly_deferable = tuple(
-                                path for path in partial_source_paths_for_deferred_delivery(
-                                    candidate_plan, candidate_receipt,
+                                        candidate_messages = candidate_body.get("messages")
+                                        if not isinstance(candidate_messages, list):
+                                            raise TypeError(
+                                                "trimmed source candidate requires messages",
+                                            )
+                                        candidate_projection_count = (
+                                            _project_or_assemble_request_messages(
+                                                candidate_messages,
+                                                candidate_plan,
+                                                runtime=runtime,
+                                                capture=capture,
+                                                allocation_plan=(
+                                                    copy.deepcopy(owner_first_plan)
+                                                    if isinstance(owner_first_plan, dict) else None
+                                                ),
+                                                sources=source_contents,
+                                            )
+                                        )
+                                deferred_paths = _settle_blank_source_paths(
+                                    candidate_plan, candidate_messages, deferred_paths,
                                 )
-                                if path not in deferred_paths
-                            )
-                            if not newly_deferable:
+                                candidate_receipt = verify_final_source_delivery(
+                                    candidate_plan,
+                                    candidate_messages,
+                                    payload={
+                                        "messages": candidate_messages,
+                                        "tools": candidate_tools,
+                                    },
+                                    sources=source_contents or None,
+                                )
+                                candidate_tokens, _candidate_measure_method = token_meter.measure(
+                                    candidate_body,
+                                )
+                                candidate_satisfied = (
+                                    source_delivery_satisfied(candidate_receipt)
+                                    and _wire_bytes(candidate_body) <= selected_budget.max_request_bytes
+                                    and candidate_tokens <= ENDPOINT_PROMPT_TOKEN_BUDGET
+                                )
+                                if candidate_satisfied:
+                                    break
                                 newly_deferable = tuple(
-                                    path for path in capacity_paths if path not in deferred_paths
-                                )[:1]
-                            if not newly_deferable:
-                                break
-                            deferred_paths = tuple(dict.fromkeys((
-                                *deferred_paths, *newly_deferable,
-                            )))
-                            candidate_plan["deferred_paths"] = list(deferred_paths)
-
-                        if _record_source_delivery_candidate(
-                            emit,
-                            request_id,
-                            step,
-                            deferred_paths,
-                            candidate_plan,
-                            candidate_receipt,
-                            candidate_satisfied,
-                        ):
-                            body.clear()
-                            body.update(candidate_body)
-                            source_plan.clear()
-                            source_plan.update(candidate_plan)
-                            deferred_source_paths = deferred_paths
-                            setattr(runtime, "_request_deferred_source_paths", deferred_paths)
-                            _remember_dropped_ranges_notice(runtime, candidate_audit)
-                            source_delivery = candidate_receipt
-                            final_messages = candidate_messages
-                            final_tools = candidate_tools
-                            if capture is not None:
-                                setattr(capture, "request_budget_exceeded", False)
-                                setattr(capture, "request_budget_contract_status", "VALID")
-                                setattr(
-                                    capture,
-                                    "request_source_model_projection_count",
-                                    candidate_projection_count,
+                                    path for path in partial_source_paths_for_deferred_delivery(
+                                        candidate_plan, candidate_receipt,
+                                    )
+                                    if path not in deferred_paths
                                 )
-                            boundary["hard_limit"] = {
-                                "blocked": False,
-                                "status": "READY",
-                            }
-                            if capture is not None:
-                                setattr(capture, "request_budget_boundary_receipt", boundary)
-                    except (ImportError, OSError, RequestDietDeferred, TypeError, ValueError) as error:
-                        # Keep the exact partial receipt. The downstream wire gate
-                        # will hold it unless its deferred notice is fully proven.
-                        # Preserve only a bounded failure class/reason so an
-                        # unavailable deferral is diagnosable without journaling
-                        # source excerpts or provider payloads.
-                        detail = getattr(error, "detail", None)
-                        reason = detail.get("reason") if isinstance(detail, Mapping) else None
-                        reason_code = reason[:80] if isinstance(reason, str) else "none"
-                        # cause_key = exception class only (bounded); the reason text goes in why.
-                        emit_reason(
-                            "fallback", f"source_delivery_candidate:{type(error).__name__}",
-                            "request_budget", "source delivery candidate failed; partial receipt kept",
-                            f"{type(error).__name__} ({reason_code}); downstream wire gate holds the partial receipt",
-                            level="WARN", journal=False)
-                        if emit is not None:
-                            emit(
-                                "request_source_delivery_candidate_failed",
-                                producer="kernel_request_budget",
-                                request_id=request_id,
-                                step=step,
-                                failure_class=type(error).__name__,
-                                reason_code=(reason[:80] if isinstance(reason, str) else None),
-                                candidate_path_count=len(deferred_paths),
-                                dispatch=False,
-                            )
+                                if not newly_deferable:
+                                    newly_deferable = tuple(
+                                        path for path in capacity_paths if path not in deferred_paths
+                                    )[:1]
+                                if not newly_deferable:
+                                    break
+                                deferred_paths = tuple(dict.fromkeys((
+                                    *deferred_paths, *newly_deferable,
+                                )))
+                                candidate_plan["deferred_paths"] = list(deferred_paths)
+
+                            if _record_source_delivery_candidate(
+                                emit,
+                                request_id,
+                                step,
+                                deferred_paths,
+                                candidate_plan,
+                                candidate_receipt,
+                                candidate_satisfied,
+                            ):
+                                body.clear()
+                                body.update(candidate_body)
+                                source_plan.clear()
+                                source_plan.update(candidate_plan)
+                                deferred_source_paths = deferred_paths
+                                setattr(runtime, "_request_deferred_source_paths", deferred_paths)
+                                _remember_dropped_ranges_notice(runtime, candidate_audit)
+                                source_delivery = candidate_receipt
+                                final_messages = candidate_messages
+                                final_tools = candidate_tools
+                                if capture is not None:
+                                    setattr(capture, "request_budget_exceeded", False)
+                                    setattr(capture, "request_budget_contract_status", "VALID")
+                                    setattr(
+                                        capture,
+                                        "request_source_model_projection_count",
+                                        candidate_projection_count,
+                                    )
+                                boundary["hard_limit"] = {
+                                    "blocked": False,
+                                    "status": "READY",
+                                }
+                                if capture is not None:
+                                    setattr(capture, "request_budget_boundary_receipt", boundary)
+                        except (ImportError, OSError, RequestDietDeferred, TypeError, ValueError) as error:
+                            # Keep the exact partial receipt. The downstream wire gate
+                            # will hold it unless its deferred notice is fully proven.
+                            # Preserve only a bounded failure class/reason so an
+                            # unavailable deferral is diagnosable without journaling
+                            # source excerpts or provider payloads.
+                            detail = getattr(error, "detail", None)
+                            reason = detail.get("reason") if isinstance(detail, Mapping) else None
+                            reason_code = reason[:80] if isinstance(reason, str) else "none"
+                            # cause_key = exception class only (bounded); the reason text goes in why.
+                            emit_reason(
+                                "fallback", f"source_delivery_candidate:{type(error).__name__}",
+                                "request_budget", "source delivery candidate failed; partial receipt kept",
+                                f"{type(error).__name__} ({reason_code}); downstream wire gate holds the partial receipt",
+                                level="WARN", journal=False)
+                            if emit is not None:
+                                emit(
+                                    "request_source_delivery_candidate_failed",
+                                    producer="kernel_request_budget",
+                                    request_id=request_id,
+                                    step=step,
+                                    failure_class=type(error).__name__,
+                                    reason_code=(reason[:80] if isinstance(reason, str) else None),
+                                    candidate_path_count=len(deferred_paths),
+                                    dispatch=False,
+                                )
     allocation_host_limit: dict[str, object] | None = None
     measured_prompt_tokens: int | None = None
     measure_method: str | None = None

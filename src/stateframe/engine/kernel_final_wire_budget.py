@@ -211,6 +211,7 @@ def _stateframe_json_failures(body: Mapping[str, object]) -> tuple[str, ...]:
 
 
 def reconcile_frozen_budget(capture, runtime, body, *, frozen_inputs=None):
+    from kernel_body_serialization_memo import plain_wire, qualification_reuse_enabled
     from kernel_completion_owner import dispatch_tool_call
     from kernel_continuation_journal import journal_safe_fields
     from kernel_pass_gates_contract import validate_final_surface
@@ -266,7 +267,8 @@ def reconcile_frozen_budget(capture, runtime, body, *, frozen_inputs=None):
             receipt.pop("max_request_bytes", None)
         else:
             receipt["max_request_bytes"] = frozen_inputs["max_request_bytes"]
-    wire = json.dumps(body).encode()
+    reuse = qualification_reuse_enabled()
+    wire = plain_wire(body) if reuse else json.dumps(body).encode()
     receipt.update({
         "schema": "stateframe-request-wire/1", "phase": "frozen_transport_revalidation",
         "request_bytes": len(wire),
@@ -288,7 +290,10 @@ def reconcile_frozen_budget(capture, runtime, body, *, frozen_inputs=None):
     from kernel_frame_allocation_capture import final_request_tokens
     meter = _request_token_meter(runtime, capture)
     request_id = str(getattr(capture, "request_id", ""))
-    tokens, method = final_request_tokens(body, meter, capture)
+    if reuse:
+        tokens, method = final_request_tokens(body, meter, capture, wire_bytes=len(wire))
+    else:
+        tokens, method = final_request_tokens(body, meter, capture)
     exact_rejection = None
     if (method == "calibrated_bytes"
             and getattr(capture, "_frame_candidate_fallback_fit", False) is True):

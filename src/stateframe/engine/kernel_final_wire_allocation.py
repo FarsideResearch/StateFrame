@@ -206,34 +206,52 @@ def _finalize_provider_request_body(capture, body, capabilities):
     return selected
 
 
+def _validate_qualified_product_body(runtime, candidate, body, *, reuse):
+    from kernel_stateframe_framefit5 import validate_final_product_boundary
+
+    optional_inputs = candidate._frame_candidate_inputs["optional_inputs"]
+    if reuse:
+        selection = {"optional_inputs": optional_inputs}
+    else:
+        from kernel_cache_layout_view import semantic_messages
+        from kernel_frame_optional_allocation import selection_from_frame
+        from kernel_host_authorship import ledger_of, row_kinds, structural_class
+        from kernel_request_seal import FrameSelectionProposal
+        from kernel_stateframe_framefit5 import _state_payload
+
+        messages = semantic_messages(body["messages"])
+        ledger = ledger_of(candidate) or ledger_of(runtime)
+        authored_kinds = row_kinds(ledger, messages, capture=candidate)
+        state_rows = [message for message, kind in zip(messages, authored_kinds, strict=True)
+                      if kind == "state"]
+        if not state_rows:
+            from kernel_stable_wire_ownership import request_frame_index
+
+            frame_index = request_frame_index(messages, capture=candidate)
+            if structural_class(messages, frame_index, capture=candidate) == "frame":
+                state_rows = [messages[frame_index]]
+        frame = _state_payload(state_rows[0])[1]["framefit5"]
+        optional, inventory = selection_from_frame(*optional_inputs, frame)
+        selection = {"frame_selection": FrameSelectionProposal(freeze(optional), freeze(inventory), b"{}")}
+    return validate_final_product_boundary(
+        runtime, body["messages"], body.get("tools"), refresh_sources=False,
+        refresh_headcarry=False, **selection,
+    )
+
+
 def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=None):
     """Complete, fit and prove detached state, then publish one coherent record."""
     from kernel_request_kind import classify, gate_required, validate_adapter, RequestKindError
     if not classify(capture, runtime, body):
         raise RequestKindError("builder_requires_primary_request")
     validate_adapter(capture)
-    from kernel_context import token_estimate
-    from kernel_context_capacity import enforce_context_capacity
-    from kernel_frame_allocation_capture import finalize_frame_candidate, capture_candidate
-    from kernel_final_wire_budget import reconcile_frozen_budget, snapshot_revalidation_inputs
-    from kernel_launch_identity_cost import enforce_provider_body, reasoning_profile
-    from kernel_read_reuse_visibility import prepare_final_visibility
-    from kernel_request_candidate import (
-        detached_context, render_candidate, stabilize_host_fields,
-        render_visibility_sources,
-    )
-    from kernel_request_visibility import qualify_visibility
-    from kernel_request_reprepare import PreparationInput
-    from kernel_request_tool_surface import author_final_tool_surface
-    from kernel_stateframe_framefit5 import validate_final_product_boundary
-    from kernel_tool_schema_lint import lint_tools, ToolSchemaContractError
-    from kernel_wire_truth_gate import (
-        WireTruthBlocked, capture_context, add_fact_messages, check_wire, enabled,
-    )
 
     input_digest = hashlib.sha256(freeze({"body": body, "endpoint": endpoint})).hexdigest()
     previous = getattr(capture, "qualified_request", None)
     if previous is not None:
+        if getattr(capture, "_working_set_certificate", None) is not None:
+            from kernel_working_set_proof import discard_qualification_proof
+            discard_qualification_proof(capture.request_id)
         if input_digest != previous.input_digest:
             log_seal_violation("retry input differs from sealed request")
             raise RequestSealError("retry input differs from sealed request")
@@ -248,6 +266,49 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
     if working_set_enabled():
         from kernel_stable_wire import require_allocator_compatibility
         require_allocator_compatibility(capture)
+    from kernel_body_serialization_memo import qualification_reuse_enabled
+
+    reuse = qualification_reuse_enabled()
+    if reuse and working_set_enabled():
+        from kernel_working_set_proof import qualification_proof
+        old_allocation = (getattr(capture, "_replacement_allocation", None)
+                          or getattr(capture, "frame_request_allocation", None))
+        if old_allocation is None:
+            lineage = str(getattr(capture, "_replacement_lineage", None) or capture.request_id)
+            generation = 0
+        else:
+            identity = old_allocation.identity
+            lineage = identity["request_lineage"]
+            generation = identity["generation"] + 1
+        with qualification_proof(capture.request_id, lineage, generation):
+            return _build_qualified_request(capture, runtime, body, endpoint=endpoint,
+                                            key=key, deadline=deadline, reuse=True,
+                                            input_digest=input_digest)
+    return _build_qualified_request(capture, runtime, body, endpoint=endpoint, key=key,
+                                    deadline=deadline, reuse=reuse, input_digest=input_digest)
+
+
+def _build_qualified_request(capture, runtime, body, *, endpoint, key, deadline, reuse, input_digest):
+    from kernel_context import token_estimate
+    from kernel_context_capacity import enforce_context_capacity
+    from kernel_frame_allocation_capture import finalize_frame_candidate, capture_candidate
+    from kernel_final_wire_budget import reconcile_frozen_budget, snapshot_revalidation_inputs
+    from kernel_launch_identity_cost import enforce_provider_body, reasoning_profile
+    from kernel_read_receipts import enabled as working_set_enabled
+    from kernel_read_reuse_visibility import prepare_final_visibility
+    from kernel_request_candidate import (
+        detached_context, render_candidate, stabilize_host_fields,
+        render_visibility_sources,
+    )
+    from kernel_request_visibility import qualify_visibility
+    from kernel_request_reprepare import PreparationInput
+    from kernel_request_tool_surface import author_final_tool_surface
+    from kernel_tool_schema_lint import lint_tools, ToolSchemaContractError
+    from kernel_wire_truth_gate import (
+        WireTruthBlocked, capture_context, add_fact_messages, assembly_reuse_enabled,
+        check_wire, enabled,
+    )
+
     # Availability is a logical-request service, not detached candidate
     # authority. Even a failed first candidate must consume the same retries.
     from kernel_request_budget import _request_token_meter
@@ -263,12 +324,22 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
         body = add_fact_messages(body, truth, append_only=False)
         from kernel_release_wire_claims import READ_PREFIX, read_contract_capsule
         capsule, fields = read_contract_capsule(context)
+        previous_capsule = getattr(candidate, "read_contract_wire_capsule", None)
         candidate.read_contract_wire_capsule = capsule
         candidate.read_contract_wire_fields = fields
         if capsule is not None:
-            body["messages"] = [message for message in body["messages"]
-                                if not str(message.get("content", "")).startswith(READ_PREFIX)]
-            body["messages"].append({"role": "user", "content": capsule})
+            row = {"role": "user", "content": capsule}
+            if assembly_reuse_enabled():
+                # Preserve evidence that quotes the rendered contract's header.
+                previous_rows = [row]
+                if previous_capsule is not None and previous_capsule != capsule:
+                    previous_rows.append({"role": "user", "content": previous_capsule})
+                body["messages"] = [message for message in body["messages"]
+                                    if message not in previous_rows]
+            else:
+                body["messages"] = [message for message in body["messages"]
+                                    if not str(message.get("content", "")).startswith(READ_PREFIX)]
+            body["messages"].append(row)
     from kernel_read_once import append_final_message
     body["messages"] = append_final_message(context, body["messages"])
     # Edit protocol (handles only): this request's [CURRENT SOURCE] map, placed before
@@ -362,7 +433,8 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
             getattr(candidate, "_framefit5_newest_user_suffix", ()))
         projection_recovered = False
     else:
-        before_fit_bytes = len(json.dumps(body).encode())
+        if not reuse:
+            before_fit_bytes = len(json.dumps(body).encode())
         body = finalize_frame_candidate(context, candidate, body, frame_counter=token_estimate)
         fitted_body = copy.deepcopy(body)
         fitted_counter = candidate._frame_candidate_counter
@@ -406,17 +478,7 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
     extensions = candidate._request_capture_pre_wire_extensions(
         body, endpoint, key, deadline=deadline, runtime=context, read_only=True,
     )
-    from kernel_frame_optional_allocation import selection_from_frame
-    from kernel_request_seal import FrameSelectionProposal
-    from kernel_stateframe_framefit5 import _state_payload
-    frame = next(_state_payload(message)[1]["framefit5"] for message in semantic_messages(body["messages"])
-                 if str(message.get("content", "")).startswith("[StateFrame]\n"))
-    optional, inventory = selection_from_frame(
-        *candidate._frame_candidate_inputs["optional_inputs"], frame)
-    selection = FrameSelectionProposal(freeze(optional), freeze(inventory), b"{}")
-    product_validation = validate_final_product_boundary(
-        context, body["messages"], body.get("tools"), refresh_sources=False,
-        refresh_headcarry=False, frame_selection=selection)
+    product_validation = _validate_qualified_product_body(context, candidate, body, reuse=reuse)
     # Output normalization can change body identity and prompt reserves. It
     # precedes the final receipt, whose measurement is carried into the seal.
     if allocated is None:
@@ -443,15 +505,7 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
         # projection. Rebind both against the canonical recovered body.
         extensions = candidate._request_capture_pre_wire_extensions(
             body, endpoint, key, deadline=deadline, runtime=context, read_only=True)
-        frame = next(_state_payload(message)[1]["framefit5"]
-                     for message in semantic_messages(body["messages"])
-                     if str(message.get("content", "")).startswith("[StateFrame]\n"))
-        optional, inventory = selection_from_frame(
-            *candidate._frame_candidate_inputs["optional_inputs"], frame)
-        selection = FrameSelectionProposal(freeze(optional), freeze(inventory), b"{}")
-        product_validation = validate_final_product_boundary(
-            context, body["messages"], body.get("tools"), refresh_sources=False,
-            refresh_headcarry=False, frame_selection=selection)
+        product_validation = _validate_qualified_product_body(context, candidate, body, reuse=reuse)
     budget = dict(getattr(candidate, "request_budget_final_wire", None) or {})
     budget["max_request_bytes"] = candidate._frame_candidate_inputs["byte_ceiling"]
     candidate.request_budget_final_wire = budget
@@ -477,10 +531,15 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
         measurement_identity=budget["measure_method"],
     )
     body = wire_body
-    wire = json.dumps(body).encode()
+    if reuse:
+        from kernel_body_serialization_memo import plain_wire
+        wire, wire_digest = plain_wire(body, snapshot=True)
+    else:
+        wire = json.dumps(body).encode()
+        wire_digest = None
     if (getattr(candidate, "_capacity_retry_compact_tool_prose", False)
             and candidate._request_measurement.body_sha256
-            != "sha256:" + hashlib.sha256(wire).hexdigest()):
+            != "sha256:" + (wire_digest or hashlib.sha256(wire).hexdigest())):
         budget = reconcile_frozen_budget(
             candidate, context, body,
             frozen_inputs=snapshot_revalidation_inputs(candidate, context, body),
@@ -497,6 +556,8 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
         )
     if allocated is not None:
         assert_certified_body(body, allocated)
+        if wire != allocated.wire:
+            wire_digest = None
         wire = allocated.wire
     candidate._assert_wire_string_hygiene(wire)
     if allocated is not None:
@@ -510,7 +571,7 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
     from kernel_continuation_journal import journal_safe_fields
     candidate.journal.emit("request_source_final_wire", request_id=candidate.request_id,
                            original_request_id=getattr(capture, "_replacement_lineage", candidate.request_id),
-                           body_sha256="sha256:" + hashlib.sha256(wire).hexdigest(),
+                           body_sha256="sha256:" + (wire_digest or hashlib.sha256(wire).hexdigest()),
                            source_delivery=journal_safe_fields(candidate.request_source_final_delivery),
                            dispatch=False)
     candidate.journal.emit("read_reuse_visibility_checked", producer="kernel_read_reuse_visibility",
@@ -580,7 +641,7 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
         metadata["working_set_assignment_digest"] = allocated.assignment_digest
     record = QualifiedRequest(
         request_id=capture.request_id, wire=wire,
-        body_digest=hashlib.sha256(wire).hexdigest(), allocation=allocation,
+        body_digest=wire_digest or hashlib.sha256(wire).hexdigest(), allocation=allocation,
         metadata=freeze(metadata), binding=freeze(runtime.binding()),
         input_digest=input_digest, owner_presentation=candidate.owner_presentation,
         deadline=deadline, lineage=allocation.identity["request_lineage"],

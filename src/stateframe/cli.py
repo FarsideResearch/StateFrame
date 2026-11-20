@@ -7,9 +7,13 @@ import os
 import sys
 from pathlib import Path
 
-from . import __version__, profiles
+from . import __version__, _startup_optimization_enabled, profiles
 from .endpoint import CHAT_SUFFIX, Endpoint, EndpointError
-from .inspect_run import InspectError, overview, show_send
+
+_defer_subcommand_imports = _startup_optimization_enabled()
+if not _defer_subcommand_imports:
+    from . import inspect_run
+
 from .resume import ResumeRefused
 from .runner import RunError, RunOptions, resume_run, run
 from . import routes
@@ -18,7 +22,10 @@ from .workcopy import WorkCopyError
 from .engine.kernel_tool_settings import ToolSettings, ToolSettingsError
 from .engine.kernel_parallel_records import PARALLEL_LIMIT_OPTIONS, display_limit_name
 from . import instructions as project_instructions
-from .skills import install as install_skill, list_installed, remove as remove_skill
+
+if not _defer_subcommand_imports:
+    from . import skills
+
 from datetime import datetime, timezone
 
 from .engine.kernel_safe_paths import safe_expanduser, safe_home
@@ -592,12 +599,18 @@ def main(argv: list[str] | None = None) -> int:
             from . import mutations_cli
             return mutations_cli.dispatch(args)
         if args.command == "inspect":
-            if args.send is None:
-                print(overview(args.run_dir.resolve()))
-                return 0
-            what = "frame" if args.frame else "bytes" if args.bytes else \
-                "messages" if args.messages else "summary"
-            out = show_send(args.run_dir.resolve(), args.send, what=what)
+            from .inspect_run import InspectError, overview, show_send
+
+            try:
+                run_dir = args.run_dir.resolve()
+                if args.send is None:
+                    out = overview(run_dir)
+                else:
+                    what = ("frame" if args.frame else "bytes" if args.bytes else
+                            "messages" if args.messages else "summary")
+                    out = show_send(run_dir, args.send, what=what)
+            except InspectError as error:
+                return _report_error(args, f"stateframe: error: {error}")
             if isinstance(out, bytes):
                 sys.stdout.buffer.write(out)
                 sys.stdout.flush()
@@ -665,14 +678,16 @@ def main(argv: list[str] | None = None) -> int:
                 _print_summary(summary)
             return summary["exit_code"]
         if args.command == "skill":
+            from . import skills
+
             if args.skill_action == "install":
-                skill = install_skill(args.path, force=args.force)
+                skill = skills.install(args.path, force=args.force)
                 print(f"installed {skill.name} ({skill.skill_md_sha256[:12]})")
             elif args.skill_action == "list":
-                for skill in list_installed():
+                for skill in skills.list_installed():
                     print(f"{skill.name}\t{skill.description}\ttools={'yes' if skill.tools_json_sha256 else 'no'}\t{skill.skill_md_sha256}")
             else:
-                remove_skill(args.name)
+                skills.remove(args.name)
                 print(f"removed {args.name}")
             return 0
         endpoint = Endpoint.from_args(args.endpoint, args.model, args.api_key_env)
@@ -691,7 +706,7 @@ def main(argv: list[str] | None = None) -> int:
         return summary["exit_code"]
     except ResumeRefused as error:
         return _report_error(args, f"stateframe: cannot resume: {error}")
-    except (EndpointError, RunError, TaskRowError, WorkCopyError, InspectError, ValueError, OSError) as error:
+    except (EndpointError, RunError, TaskRowError, WorkCopyError, ValueError, OSError) as error:
         return _report_error(args, f"stateframe: error: {error}")
     except KeyboardInterrupt:
         return _report_error(args, "stateframe: interrupted", 130)

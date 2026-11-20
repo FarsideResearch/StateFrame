@@ -1727,6 +1727,15 @@ class _Pickler(pickle.Pickler):
 
     def persistent_id(self, obj):
         ctx = self.ctx
+        if ((type(obj).__module__, type(obj).__qualname__)
+                == ("stateframe.startup_cache_writes", "StartupCacheWriter")):
+            # This service is installed before restore. Save only its binding,
+            # never its queue, context, reader handles, or writer thread.
+            from stateframe.startup_cache_writes import active_writer
+
+            if active_writer() is not obj:
+                raise pickle.PicklingError("startup cache checkpoint has no current host binding")
+            return ("host-startup-cache-writer",)
         if isinstance(obj, types.ModuleType):
             return ("mod", obj.__name__)
         if (_workspace_objects_on() and (type(obj).__module__, type(obj).__qualname__)
@@ -1884,6 +1893,16 @@ class _Unpickler(pickle.Unpickler):
 
     def persistent_load(self, pid):
         kind = pid[0]
+        if kind == "host-startup-cache-writer":
+            if len(pid) != 1:
+                raise CheckpointError("invalid startup cache checkpoint binding")
+            from stateframe.startup_cache_writes import active_writer
+
+            writer = active_writer()
+            if ((type(writer).__module__, type(writer).__qualname__)
+                    != ("stateframe.startup_cache_writes", "StartupCacheWriter")):
+                raise CheckpointError("restored startup cache binding is unavailable")
+            return writer
         if kind == "host-shell-tool":
             if len(pid) != 2 or not isinstance(pid[1], str):
                 raise CheckpointError("invalid shell checkpoint binding")
@@ -2047,6 +2066,90 @@ def dump_to(stream, payload, ctx, protocol=5) -> None:
 
 
 _PATH_NODE_LIMIT = 500_000
+
+
+def _serialization_field_path(root) -> str:
+    """Find a known non-serializable field without including mapping keys or values."""
+    from collections import deque
+
+    unsupported = (contextvars.Context, types.GeneratorType, types.CoroutineType,
+                   types.AsyncGeneratorType, types.FrameType, threading.Thread)
+    seen: set[int] = set()
+    queue = deque([(root, "payload")])
+    while queue and len(seen) < _PATH_NODE_LIMIT:
+        obj, where = queue.popleft()
+        if id(obj) in seen:
+            continue
+        seen.add(id(obj))
+        if isinstance(obj, unsupported):
+            return where[:500]
+        if isinstance(obj, (str, bytes, int, float, type, types.ModuleType,
+                            types.FunctionType, contextvars.ContextVar)):
+            continue
+        if isinstance(obj, dict):
+            queue.extend((value, f"{where}.mapping_value[{index}]")
+                         for index, value in enumerate(obj.values()))
+        elif isinstance(obj, (list, tuple, set, frozenset)):
+            queue.extend((value, f"{where}.sequence_item[{index}]")
+                         for index, value in enumerate(obj))
+        else:
+            fields = getattr(obj, "__dict__", None)
+            if isinstance(fields, dict):
+                queue.extend((value, f"{where}.{name}") for name, value in fields.items())
+    return "unresolved"
+
+
+def _mark_serialization_failure(error: BaseException, payload: object) -> None:
+    """Attach only a fixed exception kind and a value-free field path to the exception."""
+    if isinstance(error, pickle.PicklingError):
+        error_type = "PicklingError"
+    elif type(error) in {TypeError, AttributeError, RecursionError}:
+        error_type = type(error).__name__
+    else:
+        return
+    try:
+        BaseException.__setattr__(error, "_stateframe_serialization_error_type", error_type)
+        BaseException.__setattr__(error, "_stateframe_serialization_field_path",
+                                  _serialization_field_path(payload))
+    except BaseException:
+        pass
+
+
+def _serialization_failure_fields(error: BaseException) -> dict[str, str]:
+    try:
+        error_type = BaseException.__getattribute__(error, "_stateframe_serialization_error_type")
+        field_path = BaseException.__getattribute__(error, "_stateframe_serialization_field_path")
+    except BaseException:
+        return {}
+    if (type(error_type) is not str or not error_type.isidentifier() or len(error_type) > 80
+            or type(field_path) is not str or not field_path or len(field_path) > 500):
+        return {}
+    return {"serialization_error_type": error_type,
+            "serialization_field_path": field_path}
+
+
+def _safe_error_type(error: BaseException) -> str:
+    if isinstance(error, pickle.PicklingError):
+        return "PicklingError"
+    import builtins
+
+    error_class = type(error)
+    if (error_class.__module__ == "builtins" and error_class.__name__.isidentifier()
+            and len(error_class.__name__) <= 80
+            and vars(builtins).get(error_class.__name__) is error_class):
+        return error_class.__name__
+    for known in (TypeError, ValueError, AttributeError, KeyError, IndexError, RuntimeError,
+                  OSError, MemoryError):
+        if type(error) is known:
+            return known.__name__
+    return "OtherError"
+
+
+def _log_serialization_failure(fields: dict[str, str]) -> None:
+    if fields:
+        print("checkpoint: serialization failed "
+              f"({fields['serialization_error_type']} at {fields['serialization_field_path']})",
+              file=sys.stderr, flush=True)
 
 
 def _process_bound_path(root) -> str:
@@ -3862,9 +3965,8 @@ def _save_into(payload, ctx, step, run_dir, root, final, tmp, clocks, started, c
             try:
                 dump_to(writer, payload, ctx)
                 return dict(_SAVE.get("index_out", {}))
-            except (TypeError, pickle.PicklingError) as error:
-                # One failed save, not a probe loop: name where the unpicklable object sits.
-                error.add_note("object path: " + _process_bound_path(payload))
+            except Exception as error:  # noqa: BLE001 - identify failures at the serializer boundary
+                _mark_serialization_failure(error, payload)
                 raise
             finally:
                 _SAVE.clear()
@@ -3911,7 +4013,7 @@ def _save_into(payload, ctx, step, run_dir, root, final, tmp, clocks, started, c
 
     try:
         if background:
-            _fork_writer(run_dir, step, final, write, tmp)
+            _fork_writer(run_dir, step, final, write, tmp, diagnostic_payload=payload)
         else:
             write()
     except BaseException:
@@ -4097,7 +4199,8 @@ def _pid_alive(pid: int) -> bool:
     return pid_alive(pid)
 
 
-def _fork_writer(run_dir: Path, step: int, final: Path, write, tmp: Path) -> None:
+def _fork_writer(run_dir: Path, step: int, final: Path, write, tmp: Path,
+                 *, diagnostic_payload=None) -> None:
     sys.stdout.flush()
     sys.stderr.flush()
     forked = time.perf_counter()
@@ -4122,8 +4225,15 @@ def _fork_writer(run_dir: Path, step: int, final: Path, write, tmp: Path) -> Non
         except BaseException as error:  # noqa: BLE001 - recorded, then exit
             _cleanup_checkpoint_transaction(tmp.parent, tmp)
             reason = _failure_reason(error)
+            if (diagnostic_payload is not None and not _serialization_failure_fields(error)
+                    and (isinstance(error, pickle.PicklingError)
+                         or type(error) in {TypeError, AttributeError, RecursionError})):
+                _mark_serialization_failure(error, diagnostic_payload)
+            diagnostics = _serialization_failure_fields(error)
             _record(run_dir, event="checkpoint_failed", step=step, background=True,
-                    error=reason, failure_reason=reason)
+                    error=reason, failure_reason=reason, writer_error_type=_safe_error_type(error),
+                    **diagnostics)
+            _log_serialization_failure(diagnostics)
         finally:
             os._exit(code)
     _STATE["child"], _STATE["child_tmp"], _STATE["child_run_dir"] = pid, tmp, run_dir
@@ -4314,7 +4424,9 @@ def _save_point(frame, step: int, poc, entered: float) -> None:
                     _STATE["last_sends"] = previous_sends
                 reason = _failure_reason(error)
                 _record(run_dir, event="checkpoint_failed", step=step,
-                        error=reason, failure_reason=reason, **_capture_stage(error))
+                        error=reason, failure_reason=reason, **_capture_stage(error),
+                        **_serialization_failure_fields(error))
+                _log_serialization_failure(_serialization_failure_fields(error))
                 _note_failure(run_dir, reason)
                 return
         finally:
@@ -4339,7 +4451,9 @@ def _save_point(frame, step: int, poc, entered: float) -> None:
             _STATE["last_sends"] = previous_sends  # nothing was saved: the next boundary may retry
         reason = _failure_reason(error)
         _record(run_dir, event="checkpoint_failed", step=step,
-                error=reason, failure_reason=reason, **_capture_stage(error))
+                error=reason, failure_reason=reason, **_capture_stage(error),
+                **_serialization_failure_fields(error))
+        _log_serialization_failure(_serialization_failure_fields(error))
         _note_failure(run_dir, reason)
 
 

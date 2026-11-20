@@ -15,10 +15,10 @@ import hashlib
 import os
 import re
 import stat
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
-from functools import cache
+from functools import cached_property
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
@@ -109,6 +109,7 @@ _INTERFACE_RE = re.compile(
     re.IGNORECASE,
 )
 _MISSING = object()
+_ROW_POLICY_VERSION = 1
 
 
 @dataclasses.dataclass(frozen=True)
@@ -239,8 +240,8 @@ def _file_lookup(root: Path) -> _FileLookup:
     if projection is not None:
         return projection.files
     scoped = _COVERAGE_FILES.get()
-    if scoped is not None and scoped[0] == root:
-        return scoped[1]()
+    if scoped is not None and scoped.root == root:
+        return scoped.files
     return CoverageFileCache().lookup(root)
 
 
@@ -260,6 +261,9 @@ def snapshot_workspace(root: Path) -> dict[str, str | None]:
 
 
 def _snapshot_files(files: Mapping[str, Path]) -> dict[str, str | None]:
+    observation = _file_observation(files)
+    if observation is not None and _reuse_current_rows():
+        return {relative: observation.read(path).digest for relative, path in files.items()}
     result: dict[str, str | None] = {}
     for relative, path in files.items():
         try:
@@ -380,12 +384,19 @@ def _definition_pattern(name: str) -> re.Pattern[str]:
         rf"^\s*{re.escape(name)}\s*[:=]", re.MULTILINE)
 
 
-def _defines(path: Path, name: str) -> bool | None:
+def _defines(path: Path, name: str, observation: _FileObservation | None = None) -> bool | None:
     """True/False when the file was read; None when it could not be read."""
-    try:
-        text = path.read_text(encoding="utf-8", errors="strict")
-    except (OSError, UnicodeError):
-        return None
+    if observation is None:
+        try:
+            text = path.read_text(encoding="utf-8", errors="strict")
+        except (OSError, UnicodeError):
+            return None
+    else:
+        text = observation.read(path).text
+        if text is None:
+            return None
+        if name not in text:
+            return False
     # L112: the verdict is a pure function of (name, text); memoized by content hash.
     return _parse_cache.derived_source(
         ("named_layer_coverage.defines", name), text, "",
@@ -405,19 +416,43 @@ def _symbol_binding(lookup: Mapping[str, Path], symbol: str) -> tuple[list[str],
     module = "/".join(parts[:-1])
     if isinstance(lookup, _ProjectedFiles):
         return lookup.projection.symbol_binding(module, leaf)
+    observation = _file_observation(lookup)
+    indexed = observation is not None and observation.reuse_rows
+    candidates = observation.candidates(module) if indexed else lookup.items()
     files: list[str] = []
     read_failed = False
-    for relative, path in lookup.items():
-        if module:
-            module_path = relative.rsplit(".", 1)[0]
-            if module_path != module and not module_path.endswith("/" + module):
-                continue
-        found = _defines(path, leaf)
+    for relative, path in candidates:
+        if not indexed and module and not _in_module(relative, module):
+            continue
+        found = _defines(path, leaf, observation) if indexed else _defines(path, leaf)
         if found is None:
             read_failed = True
         elif found:
             files.append(relative)
     return files, read_failed
+
+
+def _in_module(relative: str, module: str) -> bool:
+    module_path = relative.rsplit(".", 1)[0]
+    return module_path == module or module_path.endswith("/" + module)
+
+
+def _reuse_current_rows() -> bool:
+    try:
+        from stateframe import _startup_optimization_enabled as enabled
+    except ModuleNotFoundError as error:
+        if error.name != "stateframe":
+            raise
+        return False
+    return enabled()
+
+
+def _row_policy() -> tuple[object, ...]:
+    return (
+        _ROW_POLICY_VERSION, _LAYER_RULES, tuple(_LAYER_ALIASES.items()), _FILE_EXTENSIONS,
+        _EXTENSION_RE, _QUOTED_RE, _CALL_RE,
+        _NEGATION_RE, _UNCERTAIN_SCOPE_RE, _CONDITION_WORD_RE,
+    )
 
 
 # A declaration can span lines in the legacy matcher. Look ahead so that a
@@ -491,7 +526,9 @@ def _directory_stamp(path: Path) -> tuple[int, int, int, int] | None:
 
 
 class CoverageFileCache:
-    """Reuse path membership while the scanned directories are unchanged."""
+    """Reuse admitted path membership and the last verified set of report rows."""
+
+    _report: tuple[_FileLookup, tuple[object, ...], tuple[LayerRow, ...]] | None = None
 
     def __init__(self) -> None:
         self._saved: tuple[Path, _FileLookup, dict[Path, tuple[int, int, int, int]]] | None = None
@@ -499,15 +536,50 @@ class CoverageFileCache:
     def __getstate__(self) -> dict[str, object]:
         return {"_saved": None}
 
+    def _membership_current(self, root: Path, files: _FileLookup) -> bool:
+        if self._saved is None:
+            return False
+        saved_root, saved_files, stamps = self._saved
+        return (root == saved_root and files is saved_files
+                and all(_directory_stamp(path) == stamp for path, stamp in stamps.items()))
+
     def lookup(self, root: Path) -> _FileLookup:
-        if self._saved is not None:
-            saved_root, files, stamps = self._saved
-            if root == saved_root and all(_directory_stamp(path) == stamp
-                                          for path, stamp in stamps.items()):
-                return files
+        if self._saved is not None and self._membership_current(root, self._saved[1]):
+            return self._saved[1]
         files, stamps = self._scan(root)
         self._saved = (root, files, stamps) if stamps else None
+        if self._report is not None:
+            self._report = None
         return files
+
+    def report_rows(self, observation: _FileObservation, ticket: str, scoped: str,
+                    layers: tuple[str, ...], start: dict[str, str | None],
+                    current: dict[str, str | None]) -> tuple[LayerRow, ...]:
+        files = observation.files
+        # A supplied snapshot is a diff input. Only bytes read through this
+        # observation can prove a symbol lookup, including failed reads.
+        modules = dict.fromkeys(
+            symbol.rpartition(".")[0].replace(".", "/")
+            for symbol in _explicit_symbols(scoped)
+        )
+        scopes = ("",) if "" in modules else modules
+        sources = tuple(
+            (relative, observation.read(path).digest)
+            for module in scopes
+            for relative, path in observation.candidates(module)
+        )
+        key = (_row_policy(), ticket, scoped, layers, start, current, sources)
+        cached = self._report
+        rows = (cached[2] if cached is not None and cached[0] is files and cached[1] == key
+                else tuple(row for layer in layers for row in
+                           _compute_layer_rows(layer, scoped, observation.root, files, start, current)))
+        if not self._membership_current(observation.root, files) or not observation.sources_current():
+            self._report = None
+            fresh, _ = self._scan(observation.root)
+            return tuple(row for layer in layers for row in
+                         _compute_layer_rows(layer, scoped, observation.root, fresh, start, current))
+        self._report = (files, key, rows)
+        return rows
 
     @staticmethod
     def _scan(root: Path) -> tuple[_FileLookup, dict[Path, tuple[int, int, int, int]]]:
@@ -556,6 +628,78 @@ class CoverageFileCache:
             pending.extend(reversed(subdirectories))
         files.paths = tuple(paths)
         return files, stamps if reusable else {}
+
+
+class _ObservedFile:
+    def __init__(self, path: Path) -> None:
+        self.stamp = self.file_stamp(path)
+        try:
+            self._data = path.read_bytes()
+        except (OSError, UnicodeError):
+            self._data = None
+        self.digest = hashlib.sha256(self._data).hexdigest() if self._data is not None else None
+
+    @staticmethod
+    def file_stamp(path: Path) -> tuple[int, ...] | None:
+        try:
+            info = path.stat()
+        except OSError:
+            return None
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_size,
+                info.st_mtime_ns, info.st_ctime_ns)
+
+    @cached_property
+    def text(self) -> str | None:
+        data, self._data = self._data, None
+        if data is None:
+            return None
+        try:
+            return data.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+        except UnicodeError:
+            return None
+
+
+class _FileObservation:
+    reuse_rows = False
+    """Share source reads for the lifetime of one coverage operation."""
+
+    def __init__(self, root: Path, file_cache: CoverageFileCache) -> None:
+        self.root = root
+        self._file_cache = file_cache
+        self._sources: dict[Path, _ObservedFile] = {}
+
+    @cached_property
+    def _candidates(self) -> dict[str, tuple[tuple[str, Path], ...]]:
+        return {}
+
+    @cached_property
+    def files(self) -> _FileLookup:
+        return self._file_cache.lookup(self.root)
+
+    def read(self, path: Path) -> _ObservedFile:
+        if path not in self._sources:
+            self._sources[path] = _ObservedFile(path)
+        return self._sources[path]
+
+    def sources_current(self) -> bool:
+        return all(source.stamp is not None and source.file_stamp(path) == source.stamp
+                   for path, source in self._sources.items())
+
+    def candidates(self, module: str) -> Iterable[tuple[str, Path]]:
+        if not module:
+            return self.files.items()
+        candidates = self._candidates.get(module)
+        if candidates is None:
+            candidates = tuple((relative, path) for relative, path in self.files.items()
+                               if _in_module(relative, module))
+            self._candidates[module] = candidates
+        return candidates
+
+    def report_rows(self, ticket: str, scoped: str, layers: tuple[str, ...],
+                    start: dict[str, str | None],
+                    current: dict[str, str | None]) -> tuple[LayerRow, ...]:
+        self.reuse_rows = True
+        return self._file_cache.report_rows(self, ticket, scoped, layers, start, current)
 
 
 class CoverageProjection:
@@ -713,18 +857,23 @@ class CoverageProjection:
 _ALL_LAYER_ALIASES = frozenset().union(*_LAYER_ALIASES.values())
 _COVERAGE_PROJECTION: ContextVar[CoverageProjection | None] = ContextVar(
     "coverage_workspace_projection", default=None)
-_COVERAGE_FILES: ContextVar[tuple[Path, Callable[[], _FileLookup]] | None] = ContextVar(
+_COVERAGE_FILES: ContextVar[_FileObservation | None] = ContextVar(
     "coverage_file_lookup", default=None)
 
 
-@contextmanager
-def use_file_cache(root: Path, file_cache: CoverageFileCache) -> Iterator[None]:
-    """Share a single lookup within a coverage operation."""
-    @cache
-    def lookup() -> _FileLookup:
-        return file_cache.lookup(root)
+def _file_observation(files: Mapping[str, Path]) -> _FileObservation | None:
+    observation = _COVERAGE_FILES.get()
+    return observation if observation is not None and observation.files is files else None
 
-    token = _COVERAGE_FILES.set((root, lookup))
+
+@contextmanager
+def use_file_cache(root: Path, file_cache: CoverageFileCache | None = None) -> Iterator[None]:
+    """Share path membership and source reads within a coverage operation."""
+    observation = _COVERAGE_FILES.get()
+    if file_cache is None and observation is not None and observation.root == root:
+        yield
+        return
+    token = _COVERAGE_FILES.set(_FileObservation(root, file_cache or CoverageFileCache()))
     try:
         yield
     finally:
@@ -980,20 +1129,28 @@ def build_report(ticket: object, root: Path, *,
     text = public_ticket(ticket)
     root = Path(root).resolve()
     projection = projection_for_snapshot(root, current_snapshot)
-    if projection is not None and start_snapshot is not None:
-        start = projection.normalized_start(start_snapshot)
-        current = projection.hashes
-        lookup = projection.files
-    else:
-        lookup = _file_lookup(root)
-        start = normalise_snapshot(
-            _snapshot_files(lookup) if start_snapshot is None else start_snapshot)
-        current = normalise_snapshot(
-            _snapshot_files(lookup) if current_snapshot is None else current_snapshot)
-    # review8 #1: rows (the only completion evidence) come from affirmative clauses only.
-    scoped = affirmative_ticket(text)
-    rows = tuple(row for layer in extract_named_layers(scoped)
-                 for row in _rows_for_layer(layer, scoped, root, lookup, start, current))
+    reuse_rows = (projection is None and start_snapshot is not None
+                  and current_snapshot is not None and _reuse_current_rows())
+    with use_file_cache(root) if reuse_rows else nullcontext():
+        if projection is not None and start_snapshot is not None:
+            start = projection.normalized_start(start_snapshot)
+            current = projection.hashes
+            lookup = projection.files
+        else:
+            lookup = _file_lookup(root)
+            start = normalise_snapshot(
+                _snapshot_files(lookup) if start_snapshot is None else start_snapshot)
+            current = normalise_snapshot(
+                _snapshot_files(lookup) if current_snapshot is None else current_snapshot)
+        # Rows (the only completion evidence) come from affirmative clauses only.
+        scoped = affirmative_ticket(text)
+        layers = extract_named_layers(scoped)
+        observation = _file_observation(lookup) if reuse_rows else None
+        if observation is not None:
+            rows = observation.report_rows(text, scoped, layers, start, current)
+        else:
+            rows = tuple(row for layer in layers
+                         for row in _rows_for_layer(layer, scoped, root, lookup, start, current))
     challenges = _challenge_rows(rows)
     statuses = tuple(dict.fromkeys(
         status for context in _status_contexts(text) for status in context["statuses"]))

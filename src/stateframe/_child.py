@@ -194,8 +194,10 @@ def _runner_home_identity_pin() -> str | None:
     return _RUNNER_HOME_IDENTITY_PIN
 
 
-def install_environment(spec: dict) -> None:
+def install_environment(spec: dict, lifetime: ExitStack | None = None) -> None:
     _runner_home_identity_pin()
+    pilot = lifetime is not None and spec.get("send1_wave4") is True
+    probe_store_missing = pilot and os.environ.pop("STATEFRAME_STARTUP_PROBE_STORE_MISSING", None) == "1"
     checkpoint_off = os.environ.get("STATEFRAME_CHECKPOINT", "").strip().lower() in {"off", "0"}
     routed_keys: dict[str, str] = {}
     if isinstance(spec.get("routes"), dict):
@@ -208,6 +210,21 @@ def install_environment(spec: dict) -> None:
             del os.environ[key]
     os.environ.pop("SF_PROMPT_CACHE_PIN_DEGRADED_REASON", None)
     os.environ.update({str(k): str(v) for k, v in spec["environment"].items()})
+    # The probe pilot is a host setting. The child uses the recorded choice
+    # without exposing it as an engine switch or checkpoint participant.
+    os.environ.pop("STATEFRAME_SEND1_WAVE4", None)
+    if pilot:
+        try:
+            from stateframe.send1_probe_cache import child_scope
+        except ModuleNotFoundError as error:
+            if error.name != "stateframe.send1_probe_cache":
+                raise
+        else:
+            from stateframe.startup_cache_writes import writer_scope
+
+            scope = child_scope(store_missing=True) if probe_store_missing else child_scope()
+            lifetime.enter_context(scope)
+            lifetime.enter_context(writer_scope(emit, child=True))
     # Legacy fixture authority is never available to runner-created children.
     os.environ.pop("STATEFRAME_CHECKPOINT_LEGACY_DIRECT_ENGINE", None)
     os.environ.pop(RUNNER_HOME_IDENTITY_ENV, None)
@@ -353,7 +370,8 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
                           routed_endpoints: set[str] | None = None, hook_wiring=None,
                           *, send_ledger=None, send_cap: int | None = None,
                           launch_started_ns: int | None = None,
-                          repository_context: dict | None = None) -> None:
+                          repository_context: dict | None = None,
+                          startup_cache: bool = False) -> None:
     """Record every physical chat send: exact identity bytes, response bytes, usage.
 
     On ``stateframe resume`` a send the interrupted attempt already completed is answered from its
@@ -476,6 +494,7 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
         return result
 
     def recorded(wire: bytes, endpoint: str, key: str, **kwargs):
+        nonlocal startup_cache
         route = kwargs.pop("route_meta", None)
         if send_ledger is None and routed_endpoints is None and endpoint != chat_url:
             return original(wire, endpoint, key, **kwargs)
@@ -617,6 +636,16 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
             replay_total = len(replayer.tape) if replayer is not None else None
             if dependencies is not None:
                 dependencies.advance(repository_context.get("root"))
+            if startup_cache and replayed is None:
+                from stateframe.startup_cache_writes import active_writer
+
+                # The live request passed qualification and its exact wire
+                # bytes are durable. A preflight record alone cannot release writes.
+                startup_cache = False
+                writer = active_writer()
+                if writer is not None:
+                    emit("request_sealed", send=index)
+                    writer.seal()
         authorized_ids: list[str] = []
         def before_attempt(attempt_index: int) -> None:
             if send_cap is None:
@@ -952,7 +981,8 @@ def _copy_shared_context_file(source: Path, destination: Path, *, mode: int) -> 
 def install_repo_context(rr, parent: Path, *, shared_snapshot: Path | None = None,
                          snapshot_manifest_digest: str | None = None,
                          source_manifest_digest: str | None = None,
-                         excluded_paths: tuple[str, ...] = ()) -> None:
+                         excluded_paths: tuple[str, ...] = (),
+                         admitted: bool = False) -> None:
     """Put the whole repository into the engine's sandbox, not only the declared files.
 
     The engine's multi-file branch builds a fresh root from the declared files and public tests.
@@ -988,12 +1018,16 @@ def install_repo_context(rr, parent: Path, *, shared_snapshot: Path | None = Non
                for path in excluded_paths):
             raise RuntimeError("shared subframe context exclusions contain an unsafe path")
     excluded = frozenset(excluded_paths)
+    admitted_snapshot = None
+    if admitted and shared_snapshot is None:
+        from stateframe import workspace_start_snapshot as admitted_snapshot
 
     original = rr._materialize_public_tests
     done: dict[str, Path] = {}
     HOST_STATE["repo_context"] = done
 
     def materialize(root, fileset, row):
+        context = None
         raw_root = Path(root)
         if shared_manifest is not None and raw_root.is_symlink():
             raise RuntimeError("shared subframe context sandbox root is a symlink")
@@ -1057,20 +1091,29 @@ def install_repo_context(rr, parent: Path, *, shared_snapshot: Path | None = Non
                 done["shared_snapshot"] = shared_root
                 done["shared_snapshot_digest"] = shared_manifest.digest
             else:
-                for source in sorted(parent.rglob("*")):
-                    rel = source.relative_to(parent)
-                    if source.is_symlink() or not source.is_file() or CAPTURE_SKIP_PARTS & set(rel.parts):
-                        continue
-                    destination = root / rel
-                    if destination.exists():
-                        continue
-                    destination.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(source, destination)
-                    # The engine rewrites public tests in its own sandbox copy; a read-only source file (A10
-                    # fixtures ship protected tests as 0444) must not make that copy unwritable. Sandbox only.
-                    destination.chmod(destination.stat().st_mode | stat.S_IWUSR)
+                if admitted_snapshot is not None:
+                    context = admitted_snapshot.materialize_worker(parent, root, fileset, row)
+                if context is None:
+                    for source in sorted(parent.rglob("*")):
+                        rel = source.relative_to(parent)
+                        if (source.is_symlink() or not source.is_file()
+                                or CAPTURE_SKIP_PARTS & set(rel.parts)):
+                            continue
+                        destination = root / rel
+                        if destination.exists():
+                            continue
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(source, destination)
+                        # Protected tests are writable only in the worker so
+                        # the original materializer can apply its public overlay.
+                        destination.chmod(destination.stat().st_mode | stat.S_IWUSR)
             done["root"] = root
-        return original(root, fileset, row)
+        if context is None and admitted_snapshot is not None:
+            admitted_snapshot.revoke_startup_observation()
+        written = original(root, fileset, row)
+        if context is not None:
+            admitted_snapshot.finalize_worker(context, written)
+        return written
 
     rr._materialize_public_tests = materialize
 
@@ -1619,6 +1662,11 @@ def _finish_mutation_runtime(mutation_runtime, result: dict, status: int, emit_e
 
 
 def main(argv: list[str], *, teardown: EngineTeardown | None = None) -> int:
+    with ExitStack() as lifetime:
+        return _main(argv, lifetime, teardown=teardown)
+
+
+def _main(argv: list[str], lifetime: ExitStack, *, teardown: EngineTeardown | None) -> int:
     if len(argv) != 2:
         print("usage: _child.py <run-dir>", file=sys.stderr)
         return 2
@@ -1650,7 +1698,10 @@ def main(argv: list[str], *, teardown: EngineTeardown | None = None) -> int:
         replayer = _replay_tape_module().Replayer(
             resume.get("tape") or [], resume.get("model_swap"),
             pending=resume.get("pending"), route_changes=resume.get("route_changes"))
-    install_environment(spec)
+    if spec.get("send1_wave4") is True:
+        install_environment(spec, lifetime)
+    else:
+        install_environment(spec)
     # Keep all engine urlopen calls direct, including those outside the primary transport.
     _install_direct_opener()
     _install_primary_api_key_env(spec)
@@ -1872,8 +1923,11 @@ def main(argv: list[str], *, teardown: EngineTeardown | None = None) -> int:
         rr.MODEL = spec["model"]
         rr.KEY = key
         rr.REPOS["build"] = Path(spec["parent_snapshot"])
+        admitted = (spec.get("send1_wave4") is True and resume is None and unit_spec is None
+                    and hook_wiring is None and not spec.get("mutations")
+                    and spec.get("parallel_mode", "off") == "off")
         if unit_spec is None:
-            install_repo_context(rr, Path(spec["parent_snapshot"]))
+            install_repo_context(rr, Path(spec["parent_snapshot"]), admitted=admitted)
         else:
             shared_snapshot = run.parents[1] / "snapshots" / f"g{unit_spec.start_generation}"
             public_tests = spec["public_row"].get("public_tests", {})
@@ -1893,6 +1947,7 @@ def main(argv: list[str], *, teardown: EngineTeardown | None = None) -> int:
         install_wire_recorder(run, spec["chat_url"], replayer, routed_endpoints, hook_wiring,
                               send_ledger=send_ledger, send_cap=send_cap,
                               repository_context=HOST_STATE["repo_context"],
+                              startup_cache=spec.get("send1_wave4") is True,
                               **({"launch_started_ns": launch_record["prepare_started_ns"]}
                                  if launch_record is not None else {}))
         previous_checks = Path(resume["previous_attempt"]) / "checks" if resume is not None else None
@@ -1902,6 +1957,26 @@ def main(argv: list[str], *, teardown: EngineTeardown | None = None) -> int:
                             live_slot=live_slot, replayer=replayer,
                             managed_slot=unit_spec is not None)
         install_test_log(rr)
+        if admitted:
+            from functools import wraps
+            from stateframe.workspace_start_snapshot import revoke_startup_observation
+
+            ask_tools, run_tests = rr.ask_tools, rr.run_tests
+
+            @wraps(ask_tools)
+            def ask_then_revoke(*args, **kwargs):
+                try:
+                    return ask_tools(*args, **kwargs)
+                finally:
+                    # The reply can dispatch an action with an opaque write footprint.
+                    revoke_startup_observation()
+
+            @wraps(run_tests)
+            def revoke_then_test(*args, **kwargs):
+                revoke_startup_observation()
+                return run_tests(*args, **kwargs)
+
+            rr.ask_tools, rr.run_tests = ask_then_revoke, revoke_then_test
         register_host_state(required=checkpoint is not None, secret=key)
         if routed_endpoints is not None:
             import kernel_checkpoint

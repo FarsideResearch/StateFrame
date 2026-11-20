@@ -626,6 +626,30 @@ def _read_journal_blob(journal_path: str | os.PathLike[str], blob_hash: str) -> 
     return data
 
 
+def startup_pilot_enabled() -> bool:
+    try:
+        from stateframe import _startup_optimization_enabled
+    except ModuleNotFoundError as error:
+        if error.name != "stateframe":
+            raise
+        return False
+    return _startup_optimization_enabled()
+
+
+def _loose_blob_identity(path: Path) -> tuple[int, ...] | None:
+    try:
+        info = path.lstat()
+        run = path.parent.parent.lstat()
+        store = path.parent.lstat()
+    except OSError:
+        return None
+    if stat.S_ISDIR(run.st_mode) and stat.S_ISDIR(store.st_mode) and stat.S_ISREG(info.st_mode):
+        return (run.st_dev, run.st_ino, run.st_ctime_ns,
+                store.st_dev, store.st_ino, store.st_ctime_ns,
+                info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    return None
+
+
 def _write_journal_blob(journal_path: str | os.PathLike[str], blob_hash: str,
                         logical_data: bytes, stored_data: bytes,
                         cache: dict[str, int] | None) -> None:
@@ -638,8 +662,9 @@ def _write_journal_blob(journal_path: str | os.PathLike[str], blob_hash: str,
         return
     blob_dir = _ensure_journal_blob_directory(journal_path)
     blob_path = blob_dir / f"{blob_hash}.zlib"
+    identity = _loose_blob_identity(blob_path) if startup_pilot_enabled() else None
     try:
-        _read_journal_blob(journal_path, blob_hash)
+        encoded = _read_journal_blob(journal_path, blob_hash)
     except FileNotFoundError:
         fd, temporary_name = tempfile.mkstemp(prefix=".blob-", dir=blob_dir)
         try:
@@ -670,8 +695,15 @@ def _write_journal_blob(journal_path: str | os.PathLike[str], blob_hash: str,
             except FileNotFoundError:
                 pass
     else:
-        existing = resolve_journal_blob_refs(
-            {"$blob": blob_hash, "bytes": size}, journal_path)
+        reference = {"$blob": blob_hash, "bytes": size}
+        # Reuse the initial read only while the loose entry still names the
+        # same file. The resolver still verifies the logical digest and children.
+        if identity is not None and _loose_blob_identity(blob_path) == identity:
+            existing = resolve_journal_blob_refs(reference, journal_path, _encoded=encoded)
+            if _loose_blob_identity(blob_path) != identity:
+                existing = resolve_journal_blob_refs(reference, journal_path)
+        else:
+            existing = resolve_journal_blob_refs(reference, journal_path)
         if canonical_bytes(existing) != logical_data:
             raise ValueError("journal blob content collision")
     if cache is not None:
@@ -737,7 +769,8 @@ def externalize_journal_fields(fields: Mapping[str, object],
 
 
 def _resolve_journal_blob_value(value: object, journal_path: str | os.PathLike[str],
-                                cache: dict[str, object], active: set[str]) -> object:
+                                cache: dict[str, object], active: set[str],
+                                encoded: bytes | None = None) -> object:
     reference = _blob_reference(value)
     if reference is None and isinstance(value, Mapping) and "$blob" in value:
         raise ValueError("malformed journal blob reference")
@@ -753,7 +786,8 @@ def _resolve_journal_blob_value(value: object, journal_path: str | os.PathLike[s
             raise ValueError("journal blob references contain a cycle")
         active.add(blob_hash)
         try:
-            encoded = _read_journal_blob(journal_path, blob_hash)
+            if encoded is None:
+                encoded = _read_journal_blob(journal_path, blob_hash)
             decoded = json.loads(encoded)
             if canonical_bytes(decoded) != encoded:
                 raise ValueError("journal blob payload is not canonical JSON")
@@ -780,10 +814,11 @@ def _resolve_journal_blob_value(value: object, journal_path: str | os.PathLike[s
 
 def resolve_journal_blob_refs(value: object,
                               journal_path: str | os.PathLike[str],
-                              cache: dict[str, object] | None = None) -> object:
+                              cache: dict[str, object] | None = None, *,
+                              _encoded: bytes | None = None) -> object:
     """Hydrate verified blob references relative to their per-run journal."""
     return _resolve_journal_blob_value(
-        value, journal_path, cache if cache is not None else {}, set()
+        value, journal_path, cache if cache is not None else {}, set(), _encoded
     )
 
 

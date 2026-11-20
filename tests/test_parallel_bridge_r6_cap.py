@@ -100,7 +100,7 @@ def test_persistent_directory_fsync_failure_is_bounded_and_fails_closed(
 def test_child_cleanup_reports_typed_handoff_failure_without_closing_lease() -> None:
     tree = ast.parse(Path(_child.__file__).read_text(encoding="utf-8"))
     main = next(node for node in tree.body
-                if isinstance(node, ast.FunctionDef) and node.name == "main")
+                if isinstance(node, ast.FunctionDef) and node.name == "_main")
     outer = next(node for node in main.body
                  if isinstance(node, ast.Try)
                  and any(isinstance(child, ast.Try) for child in node.finalbody))

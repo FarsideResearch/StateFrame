@@ -538,9 +538,12 @@ def _strip_regenerated_tail_fact(
     return copied
 
 
+_FrameSections = tuple[dict[str, object], tuple[dict[str, object], ...], int, int]
+
+
 def _task_and_latest_turn(
         messages: Sequence[Mapping[str, object]],
-) -> tuple[dict[str, object], tuple[dict[str, object], ...], int, int]:
+) -> _FrameSections:
     user_rows = [
         (index, message) for index, message in enumerate(messages)
         if message.get("role") == "user"
@@ -572,6 +575,16 @@ def _task_and_latest_turn(
             latest_rows.append(regenerated)
     latest = tuple(latest_rows)
     return copy.deepcopy(dict(task_message)), latest, task_index, last_action_index
+
+
+def _reuse_frame_sections() -> bool:
+    try:
+        from stateframe import _startup_optimization_enabled as enabled
+    except ModuleNotFoundError as error:
+        if error.name != "stateframe":
+            raise
+        return False
+    return enabled()
 
 
 def index_safe_message(message: Mapping[str, object]) -> bool:
@@ -2123,6 +2136,7 @@ def compose_frame_only(
         frame_request_allocation: FrameRequestAllocation | None = None,
         structured_sources: bool = False,
         volatile_micrograph: bool = False,
+        _source_sections: _FrameSections | None = None,
 ) -> list[dict[str, object]]:
     """Assemble the StateFrame, current user blocks, newest exchange, and volatile tail."""
     systems = [copy.deepcopy(dict(message)) for message in prepared
@@ -2131,7 +2145,9 @@ def compose_frame_only(
         systems = [copy.deepcopy(dict(message)) for message in source_messages
                    if message.get("role") == "system"]
     if frame_request_allocation is None:
-        task, newest, _task_index, _last_action_index = _task_and_latest_turn(source_messages)
+        sections = (_source_sections if _source_sections is not None
+                    else _task_and_latest_turn(source_messages))
+        task, newest, _task_index, _last_action_index = sections
         if isinstance(task_message, Mapping):
             if (task_message.get("role") != "user"
                     or not index_safe_message(task_message)):
@@ -2302,8 +2318,10 @@ def assemble_framefit5_request(
     # ON, which is what delivers owned source to unallocated children (UNITVIS-073).
     legacy_path = _legacy_source_path(frame_request_allocation, allocator_on, runtime)
     prepared_for_composition: Sequence[Mapping[str, object]] = prepared
+    source_sections = None
     if unallocated:
-        _task, original_newest, _task_index, _action_index = _task_and_latest_turn(source_messages)
+        source_sections = _task_and_latest_turn(source_messages)
+        original_newest = source_sections[1]
     else:
         # Allocated assembly must consume its captured ownership, including
         # callers that intentionally supply no mutable transcript at all.
@@ -2354,6 +2372,10 @@ def assemble_framefit5_request(
         frame_request_allocation=frame_request_allocation,
         structured_sources=isinstance(source_plan, Mapping),
         volatile_micrograph=getattr(runtime, "micrograph_wire", None) is not None,
+        # Both readers consume the same ordered transcript during this call.
+        # Legacy source preparation can consult live state, so render it eagerly.
+        _source_sections=(source_sections if source_sections is not None
+                          and not legacy_path and _reuse_frame_sections() else None),
     )
     projected_count = 0
     if legacy_path and isinstance(source_plan, Mapping):
@@ -3485,6 +3507,7 @@ def validate_product_request(
         tools: object = None, *, refresh_headcarry: bool = True,
         frame_request_allocation: FrameRequestAllocation | None = None,
         frame_selection: object = None,
+        optional_inputs: tuple[Mapping[str, object], Mapping[str, object]] | None = None,
 ) -> dict[str, object]:
     """Verify frame-only shape, newest tool pairing, task identity, and candidate bytes."""
     from kernel_frame_allocation_validation import (
@@ -3536,6 +3559,13 @@ def validate_product_request(
         raise FrameFit5Error("frame-only request contains an F4 decision handoff")
     _payload, state = _state_payload(state_message)
     framefit5 = state["framefit5"]
+    if optional_inputs is not None:
+        # Bind selection to the typed frame in the host's slot in the semantic layout.
+        from kernel_frame_optional_allocation import selection_from_frame
+        from kernel_request_seal import FrameSelectionProposal, freeze
+
+        optional, inventory = selection_from_frame(*optional_inputs, framefit5)
+        frame_selection = FrameSelectionProposal(freeze(optional), freeze(inventory), b"{}")
     task_state = framefit5.get("task")
     if (not isinstance(task_state, Mapping)
             or task_state.get("sha256") != _sha256(
@@ -3848,6 +3878,7 @@ def validate_final_product_boundary(
         refresh_headcarry: bool = True,
         frame_request_allocation: FrameRequestAllocation | None = None,
         frame_selection: object = None,
+        optional_inputs: tuple[Mapping[str, object], Mapping[str, object]] | None = None,
 ) -> dict[str, object]:
     """Validate final dispatch messages; optional refreshes must precede assembly."""
     from kernel_context import token_estimate
@@ -3877,6 +3908,7 @@ def validate_final_product_boundary(
                     refresh_headcarry=refresh_headcarry,
                     frame_request_allocation=frame_request_allocation,
                     frame_selection=frame_selection,
+                    optional_inputs=optional_inputs,
                 )
                 last_change = None
                 break
@@ -3892,6 +3924,7 @@ def validate_final_product_boundary(
             refresh_headcarry=refresh_headcarry,
             frame_request_allocation=frame_request_allocation,
             frame_selection=frame_selection,
+            optional_inputs=optional_inputs,
         )
 
     estimate = token_estimate({"messages": messages, "tools": tools})
