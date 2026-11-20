@@ -333,6 +333,39 @@ def test_interrupted_replay_reports_its_failures_before_a_later_single_append(tm
         assert _accounted(failures) == 23
 
 
+def test_interrupted_audit_cursor_preserves_prior_replay_failures_on_resume(tmp_path):
+    task = "observer-audit-cursor-interrupted"
+    with ContinuationJournal(tmp_path, task, {}) as journal:
+        journal.subscribe("seed", _reject, kinds=(_EVENT,))
+        probes = journal.emit_batch([(_EVENT, {})] * 22, atomic=True)
+        previous_reports = _failures_on_disk(journal)
+        delivered = []
+
+        def reject(row):
+            delivered.append(row["sequence"])
+            _reject(row)
+
+        def interrupt_cursor(_sequence):
+            raise RuntimeError("audit cursor could not advance")
+
+        with pytest.raises(RuntimeError, match="audit cursor could not advance"):
+            journal.subscribe("replay", reject, kinds=(_EVENT,), advance_audit=interrupt_cursor)
+        assert delivered == [row["sequence"] for row in probes]
+        path, head = journal.path, journal.head
+
+    with ContinuationJournal.resume(path, task_id=task, manifest={}, expected_head=head) as journal:
+        reports = _failures_on_disk(journal)
+        assert reports[:len(previous_reports)] == previous_reports
+        details = reports[len(previous_reports):-1]
+        assert [row["event_sequence"] for row in details] == delivered[:20]
+        assert all(row["subscriber"] == "replay" for row in details)
+        overflow = reports[-1]
+        assert overflow["first_event_sequence"] == delivered[20]
+        assert overflow["last_event_sequence"] == delivered[21]
+        assert overflow["dropped_count"] == 2
+        assert journal.cached_records()[-1]["previous_hash"] == overflow["record_hash"]
+
+
 def test_no_failure_batch_and_single_append_are_byte_identical_after_replay_and_resume(tmp_path, monkeypatch):
     monkeypatch.setattr(journal_module, "uuid", SimpleNamespace(
         uuid4=lambda: SimpleNamespace(hex="a" * 32)))
