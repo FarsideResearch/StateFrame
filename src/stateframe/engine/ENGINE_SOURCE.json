@@ -845,7 +845,7 @@
   "protected_tree_guard.py": "bd5bec6033b7f4e0bfaaf108e40a4686c36e0d5e5f4a9429aa33975c0af17846",
   "realtask_benchmark.py": "76bb5bca535d77fc6fb2b07409265bb56228b0cf0a7d7cd55592a2e6b329d328",
   "realtask_worker_receipts.py": "7f358362d2b839957f2541961ce11b6e65bcb26fa60e5f3d28de22144d47421f",
-  "release-manifest.json": "bf081cfcca87d28c301ce43e995c18e7bca5a1098f3b8c588f2a018baedec8ee",
+  "release-manifest.json": "1c8b81d63462d8461124767d6b1289f5451fff2ea7abc7e06be3122f09499477",
   "repo_intel_core/__init__.py": "bec64b1a78edf7b15926245f1051f7cf0171e79f126467874208f464de8f324e",
   "repo_intel_core/background.py": "0bf87ace08aefd8b80c1ff1ef5f268df6242cede454988b25940edce5ec5b61e",
   "repo_intel_core/call_graph.py": "16f6908e7043c60acf82229294a3745b4563904ce19dec1956ae8ab1460c79b3",
@@ -863,7 +863,7 @@
   "spec_exec.py": "0a80d5488bc812718b4608e086c12c1b8999604cd075f01217eb9bf172424768",
   "swarm/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "swarm/client2.py": "fa141060de5346b46678660fe770c8adcef6b30f579417a52c013d3219d08c70",
-  "switch-registry.json": "59920ebaf0e7427bdf7ca8f567b8ae33a75bdbd177920b376e1e7395f17656a0",
+  "switch-registry.json": "082f48398bb7244683f21caf44acc62e3fa8971cc946105d6bd16957cebedb7e",
   "symbol_registry.py": "b03fed71ae8c40c9e4ea51a01f4393105ddcc64cbf197d0a0fbddfc997f0a6e3",
   "sys1/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "sys1/adapter.py": "633e61b3fcd43dc6a07d628a3c8eb4d4d1e54e53de078cbe9dd74ed677847ab1",
@@ -4825,7 +4825,7 @@
  "release_listed_but_absent_in_source": [],
  "release_manifest": "37f11a29d4ceccbc5ea3aa95d1e60249e41b93974fe1da74e347ccfad28f1374",
  "schema": "stateframe-engine-source/1",
- "shipped_hash": "763327148fdc9d66959f42677ae6da9a9da3e9dc762b5611b3837c782c00eb3a",
+ "shipped_hash": "306d8e067fed82c759b8fd7e77174952d6a276a5f83c5fea82e668d11f605305",
  "source_hash": "1a75f27c6197deed9df5acd441902846aced5fd358729dab308577e184a077c4",
  "source_tree": "37f11a29d4ceccbc5ea3aa95d1e60249e41b93974fe1da74e347ccfad28f1374"
 }
