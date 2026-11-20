@@ -1056,8 +1056,10 @@ def archive_attempt(state: dict[str, object], engine_dir: Path, *, use_checkpoin
             except (JournalError, OSError) as error:
                 raise ResumeRefused("journal publication could not be recovered") from error
     external = _tool_safety(run, spec, replay_external=replay_external) if restart_live else []
-    interrupted_archive_tape = _interrupted_archive_tape(run, spec) if not restart_live else None
     interrupted_worker = _interrupted_archive_worker(run, spec) if not restart_live else None
+    # If only the worker moved, the original wire still proves the first attempt's in-flight request.
+    interrupted_archive_tape = (None if restart_live or interrupted_worker is not None
+                                else _interrupted_archive_tape(run, spec))
     number = int(state["attempt"])
     folder = run / "attempts" / str(number)
     folder.mkdir(parents=True)
