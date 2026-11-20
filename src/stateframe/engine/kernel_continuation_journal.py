@@ -54,6 +54,7 @@ MAX_FRAMEFIT_RECEIPT_FIELD_CHARS = 1024
 GROUP_COMMIT_ENV = "SF_JOURNAL_GROUP_COMMIT"
 BATCHABLE_TELEMETRY_KINDS = frozenset({"turn_timing", "action_envelope_metrics"})
 CHECKPOINT_KIND = "continuation_worker_checkpoint"
+_OBSERVER_FAILURE_DETAIL_LIMIT = 20
 # One journal kind per check execution. A re-record that dedup suppresses writes no check_receipt row, so it
 # journals CHECK_RECEIPT_UNCHANGED instead (emitted only in dedup "on" mode; off-mode bytes never change).
 CHECK_RECEIPT_UNCHANGED_KIND = "check_receipt_unchanged"
@@ -88,6 +89,10 @@ def framefit5_journal_origin_mode(environ: Mapping[str, str] | None = None) -> s
     source = os.environ if environ is None else environ
     value = (source.get(FRAMEFIT5_JOURNAL_ORIGIN_ENV, "off") or "off").strip().lower()
     return value if value in {"off", "shadow", "on"} else "off"
+
+
+def _is_observer_failure_overflow(record: Mapping[str, object]) -> bool:
+    return record.get("kind") == "journal_observer_failed" and "dropped_count" in record
 
 
 RESERVED = frozenset({
@@ -789,6 +794,7 @@ class ContinuationJournal(AuditJournal):
         # 10-08 (L126e 928/929 died at assert_owner with no cause): why the writer is unusable.
         self._poison_cause: str | None = None
         self._observer_failures: list[dict[str, object]] = []
+        self._observer_failure_overflow: tuple[int, int, int] | None = None
         self._reporting_observer_failures = False
         self._sequence = 0
         self._head: str | None = None
@@ -1185,7 +1191,8 @@ class ContinuationJournal(AuditJournal):
                         # not filter, deliver, or copy those already committed rows.
                         if legacy_mode and sequence <= resume_cursor:
                             continue
-                        if selected is not None and record.get("kind") not in selected:
+                        if (_is_observer_failure_overflow(record)
+                                or (selected is not None and record.get("kind") not in selected)):
                             continue
                         self.assert_owner()
                         # Match live fanout: ordinary observer exceptions are
@@ -1205,7 +1212,7 @@ class ContinuationJournal(AuditJournal):
                 self._subscriber_kinds[name] = selected
             finally:
                 self._notifying = False
-        self._report_observer_failures()
+            self._report_observer_failures()
 
     def subscriber_cursor(self, name: str) -> int:
         with self._lock:
@@ -2322,7 +2329,7 @@ class ContinuationJournal(AuditJournal):
                              f"{self._sequence}: {str(error)[:160]}")
                 raise
             self._report_observer_failures()
-            if identity_fire:
+            if identity_fire and not _is_observer_failure_overflow(record):
                 from kernel_verdict_identity import journal_identity_fired
                 journal_identity_fired(self, kind)
             return record
@@ -2361,8 +2368,11 @@ class ContinuationJournal(AuditJournal):
             self._index_receipt_record(record)
             self._receipt_generation = record["sequence"]
             self._notifying = True
+            # The summary is terminal audit data. Delivering it could produce
+            # another observer failure and require another summary indefinitely.
+            audit_only = _is_observer_failure_overflow(record)
             generated = getattr(self, "generated_artifacts", None)
-            if generated is not None:
+            if generated is not None and not audit_only:
                 self._notify_isolated(
                     "generated_artifacts", generated.observe, record,
                     on_unobserved=generated.mark_unobserved)
@@ -2372,7 +2382,7 @@ class ContinuationJournal(AuditJournal):
                         raise JournalError("subscriber sequence gap")
                     self._subscriber_cursors[name] = record["sequence"]
                     selected = self._subscriber_kinds.get(name)
-                    if selected is None or record.get("kind") in selected:
+                    if not audit_only and (selected is None or record.get("kind") in selected):
                         self._publication_stats["published"] += 1
                         self._publication_stats["deep_copies"] += 1
                         self._notify_isolated(name, observer, record)
@@ -2399,35 +2409,45 @@ class ContinuationJournal(AuditJournal):
         try:
             observer(copy.deepcopy(record))
         except Exception as error:  # noqa: BLE001 - isolated, then journaled
-            self._publication_stats["observer_failures"] = (
-                self._publication_stats.get("observer_failures", 0) + 1)
-            failure = {
-                "subscriber": str(name), "event_kind": str(record.get("kind")),
-                "event_sequence": record.get("sequence"), "error_type": type(error).__name__,
-                "error": str(error)[:200],
-            }
-            self._observer_failures.append(failure)
+            error_type, message = type(error).__name__, str(error)[:200]
+            self._record_observer_failure(name, record, error_type, message)
             if callable(on_unobserved):
                 try:
-                    on_unobserved(
-                        record, error_type=failure["error_type"], error=failure["error"])
+                    on_unobserved(record, error_type=error_type, error=message)
                 except Exception as marker_error:  # noqa: BLE001 - preserve the original failure
-                    self._observer_failures.append({
-                        "subscriber": f"{name}_unobserved_marker",
-                        "event_kind": str(record.get("kind")),
-                        "event_sequence": record.get("sequence"),
-                        "error_type": type(marker_error).__name__,
-                        "error": str(marker_error)[:200],
-                    })
+                    self._record_observer_failure(
+                        f"{name}_unobserved_marker", record,
+                        type(marker_error).__name__, str(marker_error)[:200])
+
+    def _record_observer_failure(self, name: str, record: Mapping[str, object],
+                                 error_type: str, message: str) -> None:
+        self._publication_stats["observer_failures"] = (
+            self._publication_stats.get("observer_failures", 0) + 1)
+        sequence = int(record["sequence"])
+        if (not self._reporting_observer_failures
+                and len(self._observer_failures) < _OBSERVER_FAILURE_DETAIL_LIMIT):
+            self._observer_failures.append({
+                "subscriber": str(name), "event_kind": str(record["kind"]),
+                "event_sequence": sequence, "error_type": error_type, "error": message,
+            })
+        else:
+            first, last, count = self._observer_failure_overflow or (sequence, sequence, 0)
+            self._observer_failure_overflow = min(first, sequence), max(last, sequence), count + 1
 
     def _report_observer_failures(self) -> None:
-        if not self._observer_failures or self._reporting_observer_failures:
+        if (self._reporting_observer_failures
+                or (not self._observer_failures and self._observer_failure_overflow is None)):
             return
         failures, self._observer_failures = self._observer_failures, []
         self._reporting_observer_failures = True
         try:
-            for failure in failures[:20]:
+            for failure in failures:
                 self.emit("journal_observer_failed", **failure)
+            if self._observer_failure_overflow is not None:
+                first, last, count = self._observer_failure_overflow
+                self.emit("journal_observer_failed", first_event_sequence=first,
+                          last_event_sequence=last, dropped_count=count)
+                self._observer_failure_overflow = None
         finally:
             self._reporting_observer_failures = False
 

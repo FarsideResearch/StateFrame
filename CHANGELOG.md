@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Journal observer failures beyond the detail limit now leave a durable summary with the exact omitted count and affected sequence range, including during batched writes.
 ## 0.8.5 (2026-11-20)
 
 - Parallel validation normalizes the documented legacy `outcome` field before schema checks; the advertised schema and shipped example use canonical `goal` fields.

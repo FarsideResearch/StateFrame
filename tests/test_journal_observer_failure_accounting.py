@@ -5,11 +5,9 @@ import json
 from collections import Counter
 from types import SimpleNamespace
 
-import pytest
-
 import kernel_continuation_journal as journal_module
+import pytest
 from kernel_continuation_journal import ContinuationJournal
-
 
 _EVENT = "observer_probe"
 _FAILURE = "journal_observer_failed"
