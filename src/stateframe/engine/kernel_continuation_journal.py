@@ -1316,7 +1316,11 @@ class ContinuationJournal(AuditJournal):
                         if _is_observer_failure_overflow(record):
                             if advance_audit is not None:
                                 self.assert_owner()
-                                advance_audit(sequence)
+                                try:
+                                    advance_audit(sequence)
+                                except Exception as error:
+                                    interruption = error
+                                    raise
                                 self._subscriber_cursors[name] = sequence
                             continue
                         if selected is not None and record.get("kind") not in selected:
