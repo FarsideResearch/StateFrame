@@ -869,7 +869,7 @@ class ContinuationJournal(AuditJournal):
         self._poison_cause: str | None = None
         self._observer_failures: list[dict[str, object]] = []
         self._observer_failure_overflow: tuple[int, int, int] | None = None
-        self._reporting_observer_failures = False
+        self._reporting_observer_failures: _ObserverFailureReport | None = None
         self._sequence = 0
         self._head: str | None = None
         self._size = 0
@@ -2532,15 +2532,22 @@ class ContinuationJournal(AuditJournal):
         self._publication_stats["observer_failures"] = (
             self._publication_stats.get("observer_failures", 0) + 1)
         sequence = int(record["sequence"])
-        if (not self._reporting_observer_failures
-                and len(self._observer_failures) < _OBSERVER_FAILURE_DETAIL_LIMIT):
+        report = self._reporting_observer_failures
+        if not report and len(self._observer_failures) < _OBSERVER_FAILURE_DETAIL_LIMIT:
             self._observer_failures.append({
                 "subscriber": str(name), "event_kind": str(record["kind"]),
                 "event_sequence": sequence, "error_type": error_type, "error": message,
             })
+            return
+        overflow = report.overflow if report else self._observer_failure_overflow
+        first, last, count = overflow or (sequence, sequence, 0)
+        updated = min(first, sequence), max(last, sequence), count + 1
+        if report:
+            # A later callback may interrupt delivery of this already durable row.
+            report.overflow = updated
+            report.save(self.path.parent / _OBSERVER_FAILURE_INTENT)
         else:
-            first, last, count = self._observer_failure_overflow or (sequence, sequence, 0)
-            self._observer_failure_overflow = min(first, sequence), max(last, sequence), count + 1
+            self._observer_failure_overflow = updated
 
     def _report_observer_failures(self) -> None:
         if (self._reporting_observer_failures
@@ -2569,16 +2576,10 @@ class ContinuationJournal(AuditJournal):
     def _finish_observer_failure_report(self, intent: Path, report: _ObserverFailureReport,
                                         *, committed_details: int = 0,
                                         summary_committed: bool = False) -> None:
-        self._observer_failure_overflow = report.overflow
-        self._reporting_observer_failures = True
+        self._reporting_observer_failures = report
         try:
             for index in range(committed_details, len(report.details)):
-                try:
-                    self.emit(_OBSERVER_FAILURE_KIND, **report.detail(index, self.path))
-                finally:
-                    if report.overflow != self._observer_failure_overflow:
-                        report.overflow = self._observer_failure_overflow
-                        report.save(intent)
+                self.emit(_OBSERVER_FAILURE_KIND, **report.detail(index, self.path))
             summary = report.summary()
             if summary is not None and not summary_committed:
                 self.emit(_OBSERVER_FAILURE_KIND, **summary)
@@ -2586,7 +2587,7 @@ class ContinuationJournal(AuditJournal):
             _sync_directory(self.path.parent)
             self._observer_failure_overflow = None
         finally:
-            self._reporting_observer_failures = False
+            self._reporting_observer_failures = None
 
     def _resume_observer_failure_report(self) -> None:
         intent = self.path.parent / _OBSERVER_FAILURE_INTENT
