@@ -172,7 +172,7 @@ def test_parallel_binds_share_one_tokenizer_with_bounded_workers(tmp_path, monke
         assert not any(worker.is_alive() for worker in workers)
 
 
-@pytest.mark.parametrize("stall", ["resolution", "first-address"])
+@pytest.mark.parametrize("stall", ["resolution", "first-address", "tls-context"])
 def test_expired_schema_worker_does_not_start_a_connection(tmp_path, monkeypatch, stall):
     import kernel_request_diet
     from kernel_provider_dialect import LLAMA_CPP, RUN_CAPABILITY_CACHE, ProviderCapabilities, origin_of
@@ -184,9 +184,12 @@ def test_expired_schema_worker_does_not_start_a_connection(tmp_path, monkeypatch
     release = Event()
     workers = []
     connections = []
+    resolutions = []
 
     with tokenizer(trickle=True) as (endpoint, _):
         port = urlsplit(endpoint).port
+        if stall == "tls-context":
+            endpoint = endpoint.replace("http:", "https:", 1)
         monkeypatch.setitem(RUN_CAPABILITY_CACHE, origin_of(endpoint), ProviderCapabilities(dialect=LLAMA_CPP))
 
         def wait_for_bind():
@@ -198,8 +201,11 @@ def test_expired_schema_worker_does_not_start_a_connection(tmp_path, monkeypatch
             addresses = original_resolve(host, service, *args, **kwargs)
             if (host, service) != ("127.0.0.1", port):
                 return addresses
+            resolutions.append((host, service))
             if stall == "resolution":
                 wait_for_bind()
+                return addresses
+            if stall == "tls-context":
                 return addresses
             family, kind, protocol, canonical, _ = addresses[0]
             return [(family, kind, protocol, canonical, ("127.0.0.2", port)), *addresses]
@@ -214,6 +220,17 @@ def test_expired_schema_worker_does_not_start_a_connection(tmp_path, monkeypatch
 
         monkeypatch.setattr(socket, "getaddrinfo", resolve)
         monkeypatch.setattr(socket.socket, "connect", connect)
+        if stall == "tls-context":
+            from ssl import PROTOCOL_TLS_CLIENT, SSLContext
+
+            monkeypatch.setattr("urllib.request.getproxies", lambda: {})
+            context = SSLContext(PROTOCOL_TLS_CLIENT)
+
+            def prepare_context(_meter):
+                wait_for_bind()
+                return context
+
+            monkeypatch.setattr(kernel_request_diet.RequestTokenMeter, "_get_http_ssl_context", prepare_context)
         shell = SimpleNamespace(spec={"chat_url": endpoint + "/chat/completions"},
                                 run_dir=tmp_path, settings=ToolSettings())
         start = time.monotonic()
@@ -229,6 +246,8 @@ def test_expired_schema_worker_does_not_start_a_connection(tmp_path, monkeypatch
                 worker.join(timeout=1)
         assert not any(worker.is_alive() for worker in workers)
         assert connections == []
+        if stall == "tls-context":
+            assert resolutions == []
 
 
 def test_stuck_address_resolution_does_not_hold_interpreter_open(tmp_path):
