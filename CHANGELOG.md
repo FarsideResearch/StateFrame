@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Tests: fail-loud triage tests use neutral fixture names.
 ## 0.8.2 (2026-11-19)
 
 - Add `STATEFRAME_PROMPT_CACHE_UNPINNED=on` to let llama.cpp select each request's slot while retaining `cache_prompt:true`; the default preserves pinned request bytes.
