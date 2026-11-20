@@ -17,6 +17,7 @@ import json
 import math
 import os
 import re
+import socket
 import ssl
 import stat
 import sys
@@ -454,6 +455,14 @@ class _TokenizeRedirects(urllib.request.HTTPRedirectHandler):
         return redirected
 
 
+def _tokenize_remaining(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        _log_tokenizer_deadline()
+        raise TimeoutError("tokenizer request deadline expired")
+    return remaining
+
+
 class _TokenizeDeadlineReader(io.RawIOBase):
     """Check the deadline before each socket read, including HTTP framing."""
 
@@ -467,11 +476,7 @@ class _TokenizeDeadlineReader(io.RawIOBase):
         return True
 
     def readinto(self, buffer):
-        remaining = self._deadline - time.monotonic()
-        if remaining <= 0:
-            _log_tokenizer_deadline()
-            raise TimeoutError("tokenizer request deadline expired")
-        self._socket.settimeout(min(self._timeout, remaining))
+        self._socket.settimeout(min(self._timeout, _tokenize_remaining(self._deadline)))
         return self._raw.readinto(buffer)
 
     def close(self):
@@ -488,18 +493,37 @@ def _tokenize_response(deadline, sock, *args, **kwargs):
     return response
 
 
+def _connect_tokenizer_socket(deadline, address, timeout, source_address=None):
+    """Spend the remaining deadline across address resolution and connection attempts."""
+    host, port = address
+    last_error = OSError("getaddrinfo returns an empty list")
+    for family, kind, protocol, _, target in socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM):
+        remaining = _tokenize_remaining(deadline)
+        sock = None
+        try:
+            sock = socket.socket(family, kind, protocol)
+            sock.settimeout(min(timeout, remaining))
+            if source_address:
+                sock.bind(source_address)
+            sock.connect(target)
+            sock.settimeout(min(timeout, _tokenize_remaining(deadline)))
+        except OSError as error:
+            last_error = error
+            if sock is not None:
+                sock.close()
+        else:
+            return sock
+    raise last_error
+
+
 def _tokenize_connection(connection_type, request):
     deadline = getattr(request, "_stateframe_tokenize_deadline", None)
     if deadline is None:
         return connection_type
 
     def connect(host, **kwargs):
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            _log_tokenizer_deadline()
-            raise TimeoutError("tokenizer request deadline expired")
-        kwargs["timeout"] = min(kwargs["timeout"], remaining)
         connection = connection_type(host, **kwargs)
+        connection._create_connection = functools.partial(_connect_tokenizer_socket, deadline)
         connection.response_class = functools.partial(_tokenize_response, deadline)
         return connection
 
@@ -615,11 +639,7 @@ def _http_tokenize(content: str, url: str, *, deadline: float | None = None,
         * TOKENIZE_RELAY_REFERENCE_SECONDS * len(payload) / TOKENIZE_RELAY_REFERENCE_BYTES,
     ))
     if deadline is not None:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            _log_tokenizer_deadline()
-            raise TimeoutError("tokenizer request deadline expired")
-        timeout = min(timeout, remaining)
+        timeout = min(timeout, _tokenize_remaining(deadline))
     opener = opener or _build_tokenize_opener()
     with opener.open(request, timeout=timeout) as response:
         raw = response.read(_MAX_TOKENIZE_RESPONSE_BYTES + 1)
