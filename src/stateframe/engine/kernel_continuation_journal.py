@@ -100,6 +100,11 @@ def _is_observer_failure_overflow(record: Mapping[str, object]) -> bool:
     return record.get("kind") == _OBSERVER_FAILURE_KIND and "dropped_count" in record
 
 
+def _observer_failure_message(error: Exception) -> str:
+    # Filesystem errors may include surrogate-escaped filename bytes.
+    return str(error)[:200].encode("utf-8", errors="backslashreplace").decode("utf-8")[:200]
+
+
 RESERVED = frozenset({
     "schema", "kind", "run_id", "task_id", "event_id", "sequence",
     "timestamp_ns", "journal_format", "previous_hash", "record_hash",
@@ -2571,7 +2576,7 @@ class ContinuationJournal(AuditJournal):
         try:
             observer(copy.deepcopy(record))
         except Exception as error:  # noqa: BLE001 - isolated, then journaled
-            error_type, message = type(error).__name__, str(error)[:200]
+            error_type, message = type(error).__name__, _observer_failure_message(error)
             self._record_observer_failure(name, record, error_type, message)
             if callable(on_unobserved):
                 try:
@@ -2579,7 +2584,7 @@ class ContinuationJournal(AuditJournal):
                 except Exception as marker_error:  # noqa: BLE001 - preserve the original failure
                     self._record_observer_failure(
                         f"{name}_unobserved_marker", record,
-                        type(marker_error).__name__, str(marker_error)[:200])
+                        type(marker_error).__name__, _observer_failure_message(marker_error))
 
     def _record_observer_failure(self, name: str, record: Mapping[str, object],
                                  error_type: str, message: str) -> None:
