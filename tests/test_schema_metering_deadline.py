@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from http.server import ThreadingHTTPServer
 from pathlib import Path
-from threading import Barrier, Event, Thread, current_thread, local
+from threading import Barrier, Event, Lock, Thread, current_thread, local
 from types import SimpleNamespace
 from urllib.parse import urlsplit
 
@@ -31,21 +31,25 @@ pytestmark = pytest.mark.host_sandbox
 
 
 @contextmanager
-def tokenizer(*, trickle, trickle_posts=1):
+def tokenizer(*, trickle, trickle_posts=1, posts_received=None):
     script = Script(json.loads((ROOT / "examples/discount_bug.script.json").read_text()))
     schema_posts = []
+    posts_lock = Lock()
 
     class Handler(make_handler(script)):
         def _tokenize(self, raw):
             content = json.loads(json.loads(raw)["content"])
             if content.get("messages") != [] or not content.get("tools"):
                 return super()._tokenize(raw)
-            schema_posts.append(content)
+            with posts_lock:
+                schema_posts.append(content)
+                post_count = len(schema_posts)
+                if posts_received is not None and post_count == trickle_posts:
+                    posts_received.set()
             if trickle == "after-exact" and content["tools"][0]["function"]["name"] == "shell":
-                time.sleep(CAP / 3)
                 self._send(200, {"tokens": [1, 2, 3]})
                 return
-            if not trickle or len(schema_posts) > trickle_posts:
+            if not trickle or post_count > trickle_posts:
                 self._send(200, {"tokens": [1, 2, 3]})
                 return
             # Each byte arrives within the socket timeout, but the full body takes over a second.
@@ -117,8 +121,9 @@ def test_bind_bounds_schema_metering_and_keeps_fast_counts(tmp_path, monkeypatch
 @pytest.mark.parametrize("cached_capabilities", [True, False], ids=["warm", "cold"])
 def test_parallel_binds_share_one_tokenizer_with_bounded_workers(tmp_path, monkeypatch, trickle,
                                                                 cached_capabilities):
+    import kernel_provider_dialect
     import kernel_request_diet
-    from kernel_provider_dialect import LLAMA_CPP, RUN_CAPABILITY_CACHE, ProviderCapabilities, origin_of
+    from kernel_provider_dialect import LLAMA_CPP, ProviderCapabilities, origin_of
 
     staggered = trickle == "staggered"
     cap = 0.5 if staggered else CAP
@@ -126,22 +131,33 @@ def test_parallel_binds_share_one_tokenizer_with_bounded_workers(tmp_path, monke
     original_tokenize = kernel_request_diet._http_tokenize
     requests = []
     first_request = Event()
+    posts_received = Event()
+    probes = []
+    capability_cache = {}
 
     def record_worker(*args, **kwargs):
         requests.append((current_thread(), kwargs["deadline"]))
         first_request.set()
         return original_tokenize(*args, **kwargs)
 
+    def probe(origin, _key, path, *, deadline):
+        # Supply a successful response so this case tests the shared proof
+        # and schema POSTs. Slow provider probes have separate coverage.
+        probes.append((origin, path))
+        return 200, {"default_generation_settings": {"n_ctx": 65536}}
+
     monkeypatch.setattr(kernel_request_diet, "_http_tokenize", record_worker)
+    monkeypatch.setattr(kernel_provider_dialect, "bounded_json_probe", probe)
+    monkeypatch.setattr(kernel_provider_dialect, "RUN_CAPABILITY_CACHE", capability_cache)
     fallback = measure_schemas()
     callers = 4
     posts_per_bind = 2 if trickle == "after-exact" else 1
     ready = Barrier(callers)
-    with tokenizer(trickle=trickle, trickle_posts=callers * posts_per_bind) as (endpoint, schema_posts):
+    with tokenizer(trickle=trickle, trickle_posts=callers * posts_per_bind,
+                   posts_received=posts_received) as (endpoint, schema_posts):
+        origin = origin_of(endpoint)
         if cached_capabilities:
-            monkeypatch.setitem(RUN_CAPABILITY_CACHE, origin_of(endpoint), ProviderCapabilities(dialect=LLAMA_CPP))
-        else:
-            monkeypatch.delitem(RUN_CAPABILITY_CACHE, origin_of(endpoint), raising=False)
+            capability_cache[origin] = ProviderCapabilities(dialect=LLAMA_CPP)
 
         def bind(index):
             run_dir = tmp_path / str(index)
@@ -155,6 +171,7 @@ def test_parallel_binds_share_one_tokenizer_with_bounded_workers(tmp_path, monke
             start = time.monotonic()
             tools = AgentTools(shell, CustomToolSet((), "empty"), defer_schema_budget=True)
             tools.bind()
+            assert tools.startup_schema_budget["reason"] == "deadline"
             return time.monotonic() - start, tools.schema_budget
 
         with ThreadPoolExecutor(max_workers=callers) as pool:
@@ -163,23 +180,25 @@ def test_parallel_binds_share_one_tokenizer_with_bounded_workers(tmp_path, monke
                 if staggered:
                     assert elapsed >= cap - 0.05
                 assert counts == fallback
-        assert len(schema_posts) == len(requests) == callers * posts_per_bind
         workers = {worker for worker, _ in requests}
+        cleanup_deadline = time.monotonic() + 0.35
+        for worker in workers:
+            worker.join(timeout=max(0, cleanup_deadline - time.monotonic()))
+        assert not any(worker.is_alive() for worker in workers)
+        posts_received.wait(timeout=2)
+        assert len(schema_posts) == len(requests) == callers * posts_per_bind
         assert len(workers) == callers
         for worker in workers:
             assert len({deadline for caller, deadline in requests if caller is worker}) == 1
         if staggered:
             deadlines = [deadline for _, deadline in requests]
             assert max(deadlines) - min(deadlines) >= cap / 2
-        cleanup_deadline = time.monotonic() + 0.35
-        for worker in workers:
-            worker.join(timeout=max(0, cleanup_deadline - time.monotonic()))
-        assert not any(worker.is_alive() for worker in workers)
+        assert probes == ([] if cached_capabilities else [(origin, "/props")])
 
 
-@pytest.mark.parametrize("probe_times_out", [True, False], ids=["probe-deadline", "unsupported"])
+@pytest.mark.parametrize("probe_outcome", ["probe-deadline", "transport-deadline", "unsupported"])
 def test_parallel_cold_binds_record_fallback_when_no_schema_can_post(
-        tmp_path, monkeypatch, probe_times_out):
+        tmp_path, monkeypatch, probe_outcome):
     import kernel_agent_tools
     import kernel_provider_dialect
     import kernel_request_diet
@@ -195,14 +214,17 @@ def test_parallel_cold_binds_record_fallback_when_no_schema_can_post(
 
     def probe(_origin, _key, path, *, deadline):
         probes.append(path)
-        if probe_times_out:
+        if probe_outcome == "probe-deadline":
             # Model a probe descheduled until its slice expires. The bind's
             # absolute deadline still has time left when the retries run out.
             probe_clock.now = deadline
+        if probe_outcome != "unsupported":
             return None
         return 404, None
 
     monkeypatch.setattr(kernel_provider_dialect, "bounded_json_probe", probe)
+    if probe_outcome == "transport-deadline":
+        monkeypatch.setattr(kernel_provider_dialect, "last_probe_error", lambda: "TimeoutExpired")
     fallback = measure_schemas()
     callers = 4
     ready = Barrier(callers)
@@ -223,7 +245,7 @@ def test_parallel_cold_binds_record_fallback_when_no_schema_can_post(
 
         assert schema_posts == []
     assert probes and set(probes) == {"/props"}
-    reason = "deadline" if probe_times_out else "completed"
+    reason = "completed" if probe_outcome == "unsupported" else "deadline"
     assert records == [{"reason": reason, "counts": fallback}] * callers
 
 

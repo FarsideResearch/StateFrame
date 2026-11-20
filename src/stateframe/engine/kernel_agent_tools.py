@@ -16,6 +16,7 @@ from kernel_agent_schemas import (
     BUILTIN_SCHEMAS,
     JOB_NAMES,
     OBSERVATION_NAMES,
+    SchemaMeteringTimeout,
     prepare_schema_measurement,
 )
 from kernel_exec_session import ExecSessionError
@@ -178,7 +179,7 @@ class AgentTools:
             result = pending.result(timeout=max(0, deadline - time.monotonic()))
         except TimeoutError:
             result = None
-        if result is None or result[0] >= deadline:
+        if result is None or result[0] >= deadline or isinstance(result[2], SchemaMeteringTimeout):
             pending.cancel()
             counts = measure(estimate=True)
             reason = "deadline"

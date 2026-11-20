@@ -55,6 +55,8 @@ def test_completed_probe_survives_ready_pipe_and_child_exit_timeouts(monkeypatch
     for _ in range(3):
         assert probe() == (200, proof[1])
     assert probe() is None, "partial JSON must never prove capabilities or health"
+    if kind == "dialect":
+        assert http.last_probe_error() == "TimeoutExpired"
     monkeypatch.setattr(http, "_MAX_PROBE_RESPONSE_BYTES", 1)
     assert probe() is None, "expiry recovery must remain bounded"
     assert len(cleaned) == 5 and not outputs

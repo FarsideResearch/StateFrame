@@ -614,11 +614,13 @@ def _http_tokenize(content: str, url: str, *, deadline: float | None = None,
     if deadline is not None and time.monotonic() >= deadline:
         _log_tokenizer_deadline()
         raise TimeoutError("tokenizer request deadline expired")
-    if (probe_deadline is not None and time.monotonic() >= probe_deadline
-            and capabilities.props_status is None and capabilities.slots_status is None
-            and not capabilities.continuation):
-        _log_tokenizer_deadline()
-        raise TimeoutError("tokenizer request deadline expired")
+    if (probe_deadline is not None and capabilities.props_status is None
+            and capabilities.slots_status is None and not capabilities.continuation):
+        degradation = capabilities.probe_degradation
+        if (time.monotonic() >= probe_deadline or (degradation is not None
+                and degradation.last_error_type in {"TimeoutError", "TimeoutExpired"})):
+            _log_tokenizer_deadline()
+            raise TimeoutError("tokenizer request deadline expired")
     require_feature(capabilities, "request tokenization")
 
     payload = json.dumps({
