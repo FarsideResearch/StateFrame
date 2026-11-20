@@ -14,7 +14,10 @@ AUTHORED_CHECK_CONTEXT_ATTR = "_authored_check_context"
 AUTHORED_CHECK_SCRATCH_AUTHORITY_ATTR = "_authored_check_scratch_authority"
 _FORBIDDEN_PARTS = frozenset({
     ".git", "backups", "evaluator", "evaluators", "hidden_tests", "reference_fix",
-    "reports", "journals", "operator", "belt_queue", "measurement-runs",
+    "reports", "journals", "operator", "measurement-runs",
+})
+_FORBIDDEN_PART_DIGESTS = frozenset({
+    "361b5c2d91e5976dc0b4bd5be0449a66ab8f2b4aab551586a82f1fb76cdaf096",
 })
 _IMPORT_RE = re.compile(r"^\s*(?:from\s+([\w.]+)|import\s+([\w.]+))", re.MULTILINE)
 
@@ -186,7 +189,9 @@ def _path(value: object) -> str:
     parts = raw.split("/")
     if not raw or raw.startswith("/") or any(part in {"", ".", ".."} for part in parts):
         raise ContextError(f"invalid public context path: {raw!r}")
-    if any(part.casefold() in _FORBIDDEN_PARTS for part in parts):
+    if any(part.casefold() in _FORBIDDEN_PARTS
+           or hashlib.sha256(part.casefold().encode("utf-8", "surrogatepass")).hexdigest()
+           in _FORBIDDEN_PART_DIGESTS for part in parts):
         raise ContextError("public context path is outside the solver allowlist")
     return raw
 
