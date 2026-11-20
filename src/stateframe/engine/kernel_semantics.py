@@ -492,7 +492,7 @@ class NamespaceFacts:
     matrix: tuple[NamespaceCase, ...] = ()
     namespace_role: str = "name"
     authority_roles: tuple[str, ...] = ("backend", "host", "port")
-    base_name: str = "mission_control_test_f2"
+    base_name: str = "sample_test_f2"
     port: int | None = None
 
     def to_dict(self) -> dict[str, object]:
@@ -2139,7 +2139,7 @@ def _namespace_analysis(ctx: _SourceContext, function: _FunctionInfo | None) -> 
     prefix_value = constants.get("F2_DATABASE_NAME_PREFIX")
     if not isinstance(prefix_value, str):
         prefix_value = constants.get("F2_DATABASE_NAME")
-    prefix = str(prefix_value) if isinstance(prefix_value, str) else "mission_control_test_f2"
+    prefix = str(prefix_value) if isinstance(prefix_value, str) else "sample_test_f2"
     port_value = constants.get("F2_DATABASE_PORT")
     port = int(port_value) if isinstance(port_value, int) and not isinstance(port_value, bool) else None
     if function is None:
