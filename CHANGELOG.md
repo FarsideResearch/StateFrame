@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Opt-in workspace objects (`STATEFRAME_WORKSPACE_OBJECTS=on`, default off): reliability fixes for subframe workers, unsandboxed shells, registry permissions and finished-run cleanup.
 ## 0.8.3 (2026-11-20)
 
 - Tests: fail-loud triage tests use neutral fixture names.
