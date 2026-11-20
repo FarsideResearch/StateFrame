@@ -189,6 +189,9 @@ APPROVED_TEST_SIGNALS: dict[tuple[str, str, str], tuple[int, str]] = {
     ("test_workspace_state_fences.py", "test_cross_process_writer_blocks_pin_and_reconciles_after_exit",
      "writer.kill()"):
         (1, "bounds cleanup of this test's synthetic cross-process writer"),
+    ("test_workspace_object_contention.py", "test_workspace_object_read_write_contention_is_bounded",
+     "worker.kill()"):
+        (1, "stops only helper workers launched by this contention test after its deadline"),
 }
 
 
