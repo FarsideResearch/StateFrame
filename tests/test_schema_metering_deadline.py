@@ -306,8 +306,10 @@ def test_replay_refuses_a_journal_without_startup_counts(tmp_path, monkeypatch):
     assert calls == []
 
 
-@pytest.mark.parametrize("archive_interrupted", [False, True], ids=["normal", "interrupted-archive"])
-def test_startup_fallback_is_journaled_and_replayed_byte_for_byte(tmp_path, monkeypatch, archive_interrupted):
+@pytest.mark.parametrize("archive_moved", [(), ("worker",), ("worker", "wire"),
+                                          ("worker", "wire", "requests", "sends.jsonl")],
+                         ids=["normal", "after-worker", "after-wire", "after-sends"])
+def test_startup_fallback_is_journaled_and_replayed_byte_for_byte(tmp_path, monkeypatch, archive_moved):
     from kernel_journal_store import open_journal
     from kernel_measurement import resolve_journal_blob_refs
     from stateframe import cli, runner
@@ -362,12 +364,14 @@ raise SystemExit(engine["_run_cli"](sys.argv))
         assert posts_after_live == 1
         # Reclassify the completed first exchange as interrupted so resume replays it.
         (run / "engine-result.json").write_text(json.dumps({"result": {"result": "CANCELLED"}}))
-        if archive_interrupted:
-            # Resume creates the archive and moves the journal before moving the wire tape.
+        if archive_moved:
+            # Resume moves attempt files before publishing the new run spec.
             partial = run / "attempts" / "1"
             partial.mkdir(parents=True)
             shutil.copy2(run / "spec.json", partial / "spec.json")
-            (run / "worker").rename(partial / "worker")
+            for name in archive_moved:
+                if (run / name).exists():
+                    (run / name).rename(partial / name)
         assert cli.main(["resume", str(run), "--quiet"]) == 1
         assert json.loads((run / "sends.jsonl").read_text().splitlines()[0])["replayed"] is True
         assert wire.read_bytes() == live
