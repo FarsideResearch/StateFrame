@@ -613,7 +613,7 @@ _PUBLICATION_SWITCH = "STATEFRAME_TURN_ATOMIC_PUBLICATION"
 
 
 def _recover_publication(path: Path, fd: int) -> None:
-    """Recover only an explicitly marked, unacknowledged batch under the writer lease."""
+    """Recover a marked append under the writer lease."""
     intent = path.parent / _PUBLICATION_INTENT
     try:
         with os.fdopen(os.open(intent, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as stream:
@@ -622,19 +622,38 @@ def _recover_publication(path: Path, fd: int) -> None:
             raw = stream.read(1025)
     except FileNotFoundError:
         return
+    complete_row = False
     try:
-        size, start, tail_hash = json.loads(raw)
+        size, start, tail_hash, *pending_row = json.loads(raw)
+        file_size = os.fstat(fd).st_size
         if (len(raw) > 1024 or type(size) is not int or type(start) is not int
-                or not 0 <= start < size <= os.fstat(fd).st_size
+                or not 0 <= start < size <= file_size
                 or size - start > MAX_RECORD_BYTES or not isinstance(tail_hash, str)):
             raise ValueError("invalid rollback span")
         tail = os.pread(fd, size - start, start)
         if (len(tail) != size - start
                 or hashlib.sha256(tail).hexdigest() != tail_hash):
             raise ValueError("journal rollback prefix does not match")
+        if pending_row:
+            row_size, row_hash = pending_row
+            suffix_size = file_size - size
+            if (type(row_size) is not int or not 1 <= row_size <= MAX_RECORD_BYTES
+                    or suffix_size > row_size or not isinstance(row_hash, str)
+                    or re.fullmatch(r"[0-9a-f]{64}", row_hash) is None):
+                raise ValueError("invalid pending journal row")
+            suffix = os.pread(fd, suffix_size, size)
+            if len(suffix) != suffix_size:
+                raise ValueError("pending journal row changed")
+            complete_row = suffix_size == row_size
+            if complete_row:
+                if hashlib.sha256(suffix).hexdigest() != row_hash:
+                    raise ValueError("pending journal row does not match")
+            elif b"\n" in suffix:
+                raise ValueError("short pending journal row contains a line break")
     except (ValueError, TypeError) as error:
         raise JournalError("invalid journal publication intent") from error
-    os.ftruncate(fd, size)
+    if not complete_row:
+        os.ftruncate(fd, size)
     os.fsync(fd)
     intent.unlink()
     _sync_directory(path.parent)
@@ -2404,7 +2423,7 @@ class ContinuationJournal(AuditJournal):
                 with self.host_spans.measure("append_fsync", sequence=record["sequence"]):
                     # Keep interrupted report writes recoverable, including a
                     # partial final summary. Release the intent before fanout.
-                    intent = self._begin_publication() if self._reporting_observer_failures else None
+                    intent = self._begin_publication(complete_line=line) if self._reporting_observer_failures else None
                     while view:
                         count = os.write(self._fd, view)
                         if count <= 0:
@@ -2660,7 +2679,7 @@ class ContinuationJournal(AuditJournal):
                 return [self.emit(kind, **fields) for kind, fields in normalized]
             return self._emit_atomic_batch(normalized)
 
-    def _begin_publication(self) -> Path:
+    def _begin_publication(self, *, complete_line: bytes | None = None) -> Path:
         if __package__:
             from .kernel_turn_publication import atomic_file
         else:
@@ -2680,7 +2699,12 @@ class ContinuationJournal(AuditJournal):
         # A legacy telemetry-only suffix can precede this boundary. Flush it before
         # pointing the rollback intent at it so recovery always has a durable base.
         self.sync()
-        atomic_file(intent, canonical_bytes([size, start, hashlib.sha256(tail).hexdigest()]))
+        metadata: list[int | str] = [size, start, hashlib.sha256(tail).hexdigest()]
+        # Preserve a complete report row if the writer stopped before it could
+        # clear the intent. Ordinary batches still roll back as a unit.
+        if complete_line is not None:
+            metadata.extend((len(complete_line), hashlib.sha256(complete_line).hexdigest()))
+        atomic_file(intent, canonical_bytes(metadata))
         return intent
 
     def _emit_atomic_batch(self, events: list[tuple[str, dict]]) -> list[dict]:
