@@ -322,7 +322,9 @@ def test_first_archive_killed_after_wire_move_replays_without_pending(tmp_path, 
     assert resumed["pending_check"] == {"status": "skipped", "reason": "interrupted_archive"}
 
 
-def test_first_archive_killed_after_worker_move_keeps_the_in_flight_request(tmp_path, monkeypatch):
+@pytest.mark.parametrize("interrupted_move", ["worker", "wire"])
+def test_first_archive_killed_before_wire_move_keeps_the_in_flight_request(tmp_path, monkeypatch,
+                                                                         interrupted_move):
     from kernel_agent_schemas import measure_schemas
     from kernel_agent_tools import AgentTools
     from kernel_continuation_journal import ContinuationJournal
@@ -340,13 +342,13 @@ def test_first_archive_killed_after_worker_move_keeps_the_in_flight_request(tmp_
     _write_send(run / "wire", 1, completed=False)
     real_replace = resume.os.replace
 
-    def killed_after_worker(src, dst):
-        if Path(src) == run / "wire":
-            raise KeyboardInterrupt("killed before moving wire")
+    def killed_during_archive(src, dst):
+        if Path(src) == run / interrupted_move:
+            raise KeyboardInterrupt(f"killed before moving {interrupted_move}")
         real_replace(src, dst)
 
     with monkeypatch.context() as patch:
-        patch.setattr(resume.os, "replace", killed_after_worker)
+        patch.setattr(resume.os, "replace", killed_during_archive)
         with pytest.raises(KeyboardInterrupt):
             resume.archive_attempt({"run": run, "spec": spec, "attempt": 1, "max_turns": 8}, tmp_path,
                                    use_checkpoint=False)
