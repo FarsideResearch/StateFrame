@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- The long-task continuation test no longer depends on an unknown environment setting. A regression test verifies that an unknown setting is refused at startup with a recorded refusal, before any continuation transition or model request.
 - Pin `stable_tool_head` and `final_cache_layout` in checkpoint and mutation parity comparisons and distinguish synthetic read-receipt helpers from comparison runners.
 
 ## 0.8.7 (2026-11-20)
