@@ -210,9 +210,12 @@ def _interrupted_archive(run: Path, spec: dict) -> Path | None:
     """Find the unfinished archive of the attempt still named by the live spec."""
     attempts = run / "attempts"
     seed = spec.get("run_identity_seed")
+    resume = spec.get("resume")
     if not isinstance(seed, str) or not attempts.is_dir():
         return None
-    active_attempt = (spec.get("resume") or {}).get("attempt", 1)
+    if resume is not None and not isinstance(resume, dict):
+        return None
+    active_attempt = (resume or {}).get("attempt", 1)
     if type(active_attempt) is not int:
         return None
     folders = sorted((p for p in attempts.iterdir() if p.name.isdecimal()
