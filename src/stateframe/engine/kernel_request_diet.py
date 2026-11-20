@@ -497,6 +497,7 @@ def _connect_tokenizer_socket(deadline, address, timeout, source_address=None):
     """Spend the remaining deadline across address resolution and connection attempts."""
     host, port = address
     last_error = OSError("getaddrinfo returns an empty list")
+    _tokenize_remaining(deadline)
     for family, kind, protocol, _, target in socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM):
         remaining = _tokenize_remaining(deadline)
         sock = None
