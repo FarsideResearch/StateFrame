@@ -2,7 +2,11 @@
 from __future__ import annotations
 
 import json
+import signal
+import subprocess
+import sys
 from collections import Counter
+from pathlib import Path
 from types import SimpleNamespace
 
 import kernel_continuation_journal as journal_module
@@ -164,6 +168,71 @@ def _create_intention(executive):
                     dependencies={"workspace": "sha256:" + "a" * 64}, turns=2,
                     acceptance={"kind": "no_public_checks", "selectors": []})
     assert "root" in executive.state.intentions
+
+
+_STOP_DURING_FAILURE_REPORT = """
+import os
+import signal
+import sys
+from pathlib import Path
+
+from kernel_continuation_journal import ContinuationJournal
+
+def reject(_row):
+    raise RuntimeError("observer rejected row")
+
+journal = ContinuationJournal(Path(sys.argv[1]), "observer-crash-recovery", {})
+print(journal.path, flush=True)
+journal.subscribe("rejecting", reject, kinds=("observer_probe", "journal_observer_failed"))
+emit = journal.emit
+stop_after = int(sys.argv[2])
+written = 0
+
+def interrupt(kind, **fields):
+    global written
+    if kind == "journal_observer_failed" and written == stop_after:
+        os.kill(os.getpid(), signal.SIGKILL)
+    row = emit(kind, **fields)
+    if kind == "journal_observer_failed":
+        written += 1
+        if written == stop_after == 21:
+            os.kill(os.getpid(), signal.SIGKILL)
+    return row
+
+journal.emit = interrupt
+journal.emit_batch([("observer_probe", {})] * 32, atomic=True)
+"""
+
+
+@pytest.mark.parametrize("stop_after", [1, 20, 21])
+def test_resume_finishes_an_interrupted_failure_report_exactly_once(tmp_path, stop_after):
+    crashed = subprocess.run([sys.executable, "-c", _STOP_DURING_FAILURE_REPORT,
+                              str(tmp_path), str(stop_after)],
+                             capture_output=True, text=True, timeout=45, check=False)
+    assert crashed.returncode == -signal.SIGKILL, crashed.stderr
+    path = Path(crashed.stdout.strip())
+    before = [json.loads(line) for line in path.read_bytes().splitlines()]
+    probes = [row["sequence"] for row in before if row["kind"] == _EVENT]
+    written_failures = [row for row in before if row["kind"] == _FAILURE]
+    assert len(probes) == 32
+    assert len(written_failures) == stop_after
+    observed_details = written_failures[:20]
+
+    with ContinuationJournal.resume(path, task_id="observer-crash-recovery", manifest={},
+                                    expected_head=before[-1]["record_hash"]) as journal:
+        head = journal.head
+        reports = _failures_on_disk(journal)
+        assert [row["event_sequence"] for row in reports if "dropped_count" not in row] == probes[:20]
+        overflow, = [row for row in reports if "dropped_count" in row]
+        assert _accounted(reports) == len(probes) + len(observed_details)
+        assert overflow["first_event_sequence"] == probes[20]
+        assert overflow["last_event_sequence"] == observed_details[-1]["sequence"]
+        assert journal.cached_records()[-1]["previous_hash"] == overflow["record_hash"]
+        assert journal.cached_records()[-1]["kind"] == "continuation_writer_resumed"
+
+    with ContinuationJournal.resume(path, task_id="observer-crash-recovery", manifest={},
+                                    expected_head=head) as journal:
+        assert _failures_on_disk(journal) == reports
 
 
 def test_no_failure_batch_and_single_append_are_byte_identical_after_replay_and_resume(tmp_path, monkeypatch):
