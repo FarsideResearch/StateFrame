@@ -889,8 +889,8 @@ class ContinuationJournal(AuditJournal):
         self._poisoned = False
         # 10-08 (L126e 928/929 died at assert_owner with no cause): why the writer is unusable.
         self._poison_cause: str | None = None
-        self._observer_failures: list[dict[str, object]] = []
-        self._observer_failure_overflow: tuple[int, int, int] | None = None
+        self._pending_observer_failure_report: _ObserverFailureReport | None = None
+        self._observer_batch_head: tuple[int, str] | None = None
         self._reporting_observer_failures: _ObserverFailureReport | None = None
         self._sequence = 0
         self._head: str | None = None
@@ -1943,7 +1943,7 @@ class ContinuationJournal(AuditJournal):
                     self._poison("journal replaced while opening reader")
                     raise JournalError("journal replaced while opening reader")
                 sequence, previous, task_id = 0, None, None
-                observed_through = self._sequence if getattr(self, "_observing_publication", False) else None
+                observed_through = self._sequence if self._observer_batch_head is not None else None
                 while observed_through is None or sequence < observed_through:
                     offset = handle.tell()
                     line = handle.readline(MAX_RECORD_BYTES + 1)
@@ -2583,43 +2583,42 @@ class ContinuationJournal(AuditJournal):
         self._publication_stats["observer_failures"] = (
             self._publication_stats.get("observer_failures", 0) + 1)
         sequence = int(record["sequence"])
-        report = self._reporting_observer_failures
-        if not report and len(self._observer_failures) < _OBSERVER_FAILURE_DETAIL_LIMIT:
-            self._observer_failures.append({
-                "subscriber": str(name), "event_kind": str(record["kind"]),
-                "event_sequence": sequence, "error_type": error_type, "error": message,
-            })
-            return
-        overflow = report.overflow if report else self._observer_failure_overflow
-        first, last, count = overflow or (sequence, sequence, 0)
-        updated = min(first, sequence), max(last, sequence), count + 1
-        if report:
-            # A later callback may interrupt delivery of this already durable row.
-            report.overflow = updated
-            report.save(self.path.parent / _OBSERVER_FAILURE_INTENT)
-        else:
-            self._observer_failure_overflow = updated
-
-    def _report_observer_failures(self) -> None:
-        if (self._reporting_observer_failures
-                or (not self._observer_failures and self._observer_failure_overflow is None)):
-            return
-        failures, self._observer_failures = self._observer_failures, []
+        active_report = self._reporting_observer_failures
+        report = active_report or self._pending_observer_failure_report
         intent = self.path.parent / _OBSERVER_FAILURE_INTENT
         try:
-            self.assert_owner()
-            if self._head is None or os.path.lexists(intent):
-                raise JournalError("cannot start observer failure report")
-            # The pending report is anchored to a durable journal prefix and
-            # retains only the bounded details and the aggregate it will append.
-            self.sync()
-            report = _ObserverFailureReport(
-                self._sequence, self._head,
-                [externalize_journal_fields(failure, self.path, self._blob_cache) for failure in failures],
-                self._observer_failure_overflow,
-            )
+            if report is None:
+                # A batch's full prefix is durable before its first callback,
+                # even though the projection cursor is still moving through it.
+                base, head = self._observer_batch_head or (self._sequence, self._head)
+                if head is None or os.path.lexists(intent):
+                    raise JournalError("cannot start observer failure report")
+                self.sync()
+                report = _ObserverFailureReport(base, head, [], None)
+                self._pending_observer_failure_report = report
+            if active_report is None and len(report.details) < _OBSERVER_FAILURE_DETAIL_LIMIT:
+                detail = {
+                    "subscriber": str(name), "event_kind": str(record["kind"]),
+                    "event_sequence": sequence, "error_type": error_type, "error": message,
+                }
+                report.details.append(externalize_journal_fields(detail, self.path, self._blob_cache))
+            else:
+                first, last, count = report.overflow or (sequence, sequence, 0)
+                report.overflow = min(first, sequence), max(last, sequence), count + 1
+            # Commit before any later callback can interrupt fanout or replay.
             report.save(intent)
-            self._finish_observer_failure_report(intent, report)
+        except BaseException:
+            self._poison("observer failure report requires recovery")
+            raise
+
+    def _report_observer_failures(self) -> None:
+        report = self._pending_observer_failure_report
+        if self._reporting_observer_failures is not None or report is None:
+            return
+        try:
+            self.assert_owner()
+            self._finish_observer_failure_report(self.path.parent / _OBSERVER_FAILURE_INTENT, report)
+            self._pending_observer_failure_report = None
         except BaseException:
             self._poison("observer failure report requires recovery")
             raise
@@ -2636,7 +2635,6 @@ class ContinuationJournal(AuditJournal):
                 self.emit(_OBSERVER_FAILURE_KIND, **summary)
             intent.unlink()
             _sync_directory(self.path.parent)
-            self._observer_failure_overflow = None
         finally:
             self._reporting_observer_failures = None
 
@@ -2753,12 +2751,12 @@ class ContinuationJournal(AuditJournal):
             del self._publication_batch
         self._sequence, self._head = before
         try:
-            self._observing_publication = True
+            self._observer_batch_head = rows[-1]["sequence"], rows[-1]["record_hash"]
             try:
                 for record, offset, encoded_size, _ in pending:
                     self._publish_record(record, offset, encoded_size)
             finally:
-                del self._observing_publication
+                self._observer_batch_head = None
             self._report_observer_failures()
             if any(fire for _, _, _, fire in pending):
                 from kernel_verdict_identity import journal_identity_fired
