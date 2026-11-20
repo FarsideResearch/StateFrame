@@ -464,3 +464,33 @@ def open_run_store(run: Path) -> WorkspaceObjects:
 
 def workspace_run_id(run: Path) -> str:
     return _run_binding(run)[2]
+
+
+def collect_run_objects(run: Path) -> int:
+    """Retire every authenticated root for a finished run, then sweep its namespace."""
+    run = Path(run)
+    if not (run / RUN_BINDING).is_file():
+        return 0
+    store = open_run_store(run)
+    run_id = workspace_run_id(run)
+    with store.lease() as lease:
+        with _registry(lease) as registry:
+            try:
+                with _child_directory(registry, run_id) as run_fd:
+                    _private_directory(run_fd)
+                    for kind in os.listdir(run_fd):
+                        if not _COMPONENT.fullmatch(kind):
+                            continue
+                        with _child_directory(run_fd, kind) as roots:
+                            _private_directory(roots)
+                            for name in os.listdir(roots):
+                                if (_TEMP.fullmatch(name) or name.startswith(".lock-")
+                                        or not _COMPONENT.fullmatch(name)):
+                                    continue
+                                key = RootKey(run_id, kind, name)
+                                ref = read_root(lease, key)
+                                if ref is not None:
+                                    retire_root(lease, key, expected=ref)
+            except FileNotFoundError:
+                pass
+    return store.collect(lambda _lease: ())
