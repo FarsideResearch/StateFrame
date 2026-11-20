@@ -1,7 +1,7 @@
 """FRONT DOOR v1 — a vague utterance becomes a typed task contract, deterministically.
 
-The committed design (``sol_answers/a_frontdoor.md``) calls this a *state-grounded
-contract compiler, not a classifier*:
+The committed design calls this a *state-grounded contract compiler, not a
+classifier*:
 
     utterance -> referent extraction -> state resolution -> candidate contracts
               -> ambiguity gate -> verdict (PROCEED | ASK_ONE | AMBIGUOUS)
@@ -9,9 +9,9 @@ contract compiler, not a classifier*:
 Zero model calls. Everything here is regex, set arithmetic and the retrieval
 machinery we already own (``func_index``, ``chains.seam_violations``).
 
-THE ANTI-FALSE-CLOSURE RULE (``sol_answers/w8/a_intent_engine.md``, "low-margin
-atoms become ``unknown``, not guesses"): a contract may NOT be trusted merely
-because the alternatives scored lower. Winning a weak field is not evidence. So
+THE ANTI-FALSE-CLOSURE RULE (low-margin atoms become ``unknown``, not guesses):
+a contract may NOT be trusted merely because the alternatives scored lower.
+Winning a weak field is not evidence. So
 every contract carries ``confidence_basis`` — the *positive* evidence for the
 reading (a matched cue phrase, a unique symbol hit, a matched seam violation) —
 and a top contract with an EMPTY basis can never PROCEED, however far ahead it

@@ -1,7 +1,7 @@
 """DETREASON SKEPTIC (v2) — the adversarial trust-nothing engine.
 
-Design authority: sol_answers/a_skeptic.md (Q1 suspicion allocator, Q2 attack
-move library, Q3 governance), detreason/kernel.py (Certificate shapes).
+Design: suspicion allocator (Q1), attack move library (Q2), and governance
+(Q3); detreason/kernel.py defines the Certificate shapes.
 
 Two halves, mirroring the kernel's sense/judge split:
 

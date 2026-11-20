@@ -3,7 +3,7 @@
 Folds an archived ReAct transcript (results/react_transcripts*/<fn>.json) into a
 sequence of deterministic StateFrame snapshots — one per turn — persisted as JSONL
 and NEVER shown to the model. This is the shadow-first half of the StateFrame Loop
-verdict (sol_answers/stateframe_1.md): prove the kernel can reconstruct useful
+design: prove the kernel can reconstruct useful
 state from recorded evidence before any of it becomes part of the live contract.
 
 Hard boundaries (visibility contract):

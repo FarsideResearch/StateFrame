@@ -1,9 +1,9 @@
 """CASE_MEMORY — the solved-case base with replay (memory engine v1).
 
-Implements the case-base half of the committed design in
-``sol_answers/w8/a_memory_engine.md`` (Q1 class 1 "solved-task certificates",
-Q2 case-based reuse, Q3 poisoning defenses). The other five memory classes in
-that taxonomy (competence/calibration, blacklists, codebase facts, menu-order
+Implements the case-base half of the committed design: solved-task
+certificates (Q1), case-based reuse (Q2), and poisoning defenses (Q3).
+The other five memory classes in that taxonomy (competence/calibration,
+blacklists, codebase facts, menu-order
 preferences, DecisionEvent history) are OUT OF SCOPE here and are named in
 ``OUT_OF_SCOPE`` so a reader never has to guess whether a gap is a bug.
 

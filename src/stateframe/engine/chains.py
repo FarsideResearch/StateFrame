@@ -2,9 +2,8 @@
 
 The single-file `fixer.run` is proven. Real changes touch 2-3 files coherently
 (definition + consumer). This module is the bounded, transactional graph walk
-committed in sol_answers/m6_multifile_a.md (v1 spec) on top of the parent design
-in sol_answers/g3_multifile_a.md (producer->consumer ordering, expand/migrate/
-contract, salvage-not-abandon).
+for producer->consumer ordering, expand/migrate/contract changes, and
+salvage-not-abandon behavior.
 
 Three pieces, all deterministic except the per-edit executor:
 

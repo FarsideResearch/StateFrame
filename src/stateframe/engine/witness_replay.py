@@ -1,6 +1,6 @@
 """WITNESS REPLAY — code decides boolean fixes; the model only breaks ties.
 
-Design authority: sol_answers/a_wobble.md Q3.
+Design: witness replay for boolean fixes (Q3).
 
     "Replay each candidate against the captured witness plus a tiny boundary set:
      true/false combinations, null, empty, zero, and missing values. If exactly one

@@ -13,7 +13,7 @@ family, executes every candidate AND the original against them in an isolated
 namespace with a frozen clock and an instruction budget, and reports which
 candidate — if any — is uniquely consistent with the symptom's stated direction.
 
-THE THREE HONESTY RULES (from the committed design, sol_answers/w8/a_test_synth.md)
+THE THREE HONESTY RULES (from the committed design)
 1. DISCRIMINATION.  A synthesized case is USEFUL only if at least two candidates
    disagree on it. A case everyone agrees on teaches nothing and is not counted
    as evidence.

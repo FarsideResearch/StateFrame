@@ -1,7 +1,6 @@
 """DETREASON PRIORS (memory/consolidation + self-model) — the nightly distiller.
 
-Design authority: sol_answers/a_faculties.md section 1 (MEMORY/CONSOLIDATION) and
-section 2 (SELF-MODEL/CALIBRATION).
+Design: memory/consolidation and self-model/calibration.
 
   §1  "A prior registry keyed by module, atom-family, frame, context, and version.
        ... Nightly replay certificates, outcomes, selective errors, disagreements,

@@ -1,9 +1,8 @@
 """U-LEDGER — the uncertainty engine's shared bus (trunk faculty).
 
-Design authority: sol_answers/a_deliberation.md Q5 (typed U-vector, accounting
-discipline, closure only by evidence) and sol_answers/a_brain_census.md Q3 item 1
-(U-ledger as every engine's bus: append-only typed events + firewalled working
-memory).
+Design: typed U-vector, accounting discipline, and closure only by evidence;
+the U-ledger is every engine's bus for append-only typed events and firewalled
+working memory.
 
 The three load-bearing commitments, in code:
 

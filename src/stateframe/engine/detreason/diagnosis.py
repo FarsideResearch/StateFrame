@@ -1,9 +1,9 @@
 """Diagnosis engine — automated failure attribution over pipeline ledger rows.
 
-Design authority: ``sol_answers/a_faculties.md`` §3 (diagnosis engine) and the ~20
-manual autopsies recorded in ``FINDINGS.md`` E27-E29.
+Design: diagnosis engine informed by ~20 manual autopsies recorded in
+``FINDINGS.md`` E27-E29.
 
-The contract, restated from a_faculties §3 and honoured literally here:
+The contract, honoured literally here:
 
   * Replay the recorded trace against the adjudicated outcome.
   * Assign the EARLIEST causal failure, plus contributing failures.

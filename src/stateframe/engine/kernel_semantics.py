@@ -7,8 +7,7 @@ This module is deliberately a read-only conversion surface:
 It does not import application code, execute source, run a command, create a
 patch, or decide whether a hypothesis is correct.  Source facts are extracted
 with :mod:`ast`; observations are accepted only from structured receipt fields.
-The four producers are the small, task-family witnesses identified in
-``sol_answers/l19_presolve.md``:
+The four producers are small, task-family witnesses:
 
 * ACK lifecycle predecessor and lookup-key witness;
 * F2 namespace/authority differential matrix;
