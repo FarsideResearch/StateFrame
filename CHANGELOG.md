@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.8.5 (2026-11-20)
 
 - Parallel validation normalizes the documented legacy `outcome` field before schema checks; the advertised schema and shipped example use canonical `goal` fields.
