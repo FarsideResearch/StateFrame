@@ -3,7 +3,7 @@
  "case_id": "hosted-read-squeeze",
  "origin": "hosted run, provider without /tokenize, 82,026-byte request cap",
  "task": "Add read-only support for finished StateFrame journals (events.jsonl.xz and packed blobs) while preserving loose events.jsonl support. Add regression tests for both layouts.",
- "test_cmd": "python3 -B -m unittest tests.test_framelab",
+ "test_cmd": "python3 -B -m unittest discover -t . -s tests -p \"test_f*.py\"",
  "recorded_turns": 38,
  "first_protected_over_cap_request": 37
 }
