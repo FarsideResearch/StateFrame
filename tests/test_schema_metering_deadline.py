@@ -426,10 +426,27 @@ def test_replay_refuses_a_journal_without_startup_counts(tmp_path, monkeypatch):
     assert calls == []
 
 
+@pytest.fixture(scope="module")
+def expected_startup_fallback():
+    # A fresh engine measures before the composed tool menu decorates shared schemas.
+    # Other tests may already have loaded that menu in this pytest process.
+    counts = subprocess.check_output(
+        [sys.executable, "-I", "-c",
+         "import json, sys\n"
+         "sys.path[:0] = sys.argv[1:]\n"
+         "from kernel_agent_schemas import measure_schemas\n"
+         "print(json.dumps(measure_schemas()))",
+         str(ROOT / "src"), str(ROOT / "src/stateframe/engine")],
+        text=True, timeout=30,
+    )
+    return {"reason": "deadline", "counts": json.loads(counts)}
+
+
 @pytest.mark.parametrize("archive_moved", [(), ("worker",), ("worker", "wire"),
                                           ("worker", "wire", "requests", "sends.jsonl")],
                          ids=["normal", "after-worker", "after-wire", "after-sends"])
-def test_startup_fallback_is_journaled_and_replayed_byte_for_byte(tmp_path, monkeypatch, archive_moved):
+def test_startup_fallback_is_journaled_and_replayed_byte_for_byte(
+        tmp_path, monkeypatch, archive_moved, expected_startup_fallback):
     from kernel_journal_store import open_journal
     from kernel_measurement import resolve_journal_blob_refs
     from stateframe import cli, runner
@@ -483,7 +500,7 @@ raise SystemExit(engine["_run_cli"](sys.argv))
         wire = next((run / "wire").glob("*.request.json"))
         live = wire.read_bytes()
         record = startup_record()
-        assert record == {"reason": "deadline", "counts": measure_schemas()}
+        assert record == expected_startup_fallback
         posts_received.wait(timeout=2)
         posts_after_live = len(schema_posts)
         assert posts_after_live == 1
