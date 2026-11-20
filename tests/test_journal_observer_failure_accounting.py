@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import kernel_continuation_journal as journal_module
 import pytest
+from kernel_continuation_executive import ContinuationExecutive
 from kernel_continuation_journal import ContinuationJournal
 from kernel_generated_context import GeneratedContext
 
@@ -139,6 +140,30 @@ def test_overflow_keeps_the_live_artifact_index_in_step_with_single_appends(tmp_
         assert overflow["dropped_count"] == 1
         assert overflow["first_event_sequence"] == overflow["last_event_sequence"] == second[-1]["sequence"]
         assert overflow["sequence"] + 1 == artifact["sequence"]
+
+
+@pytest.mark.parametrize("attach_after_overflow", [False, True])
+def test_overflow_preserves_continuation_transitions(tmp_path, attach_after_overflow):
+    task = "observer-continuation-sequence"
+    with ContinuationJournal(tmp_path, task, {}) as journal:
+        if not attach_after_overflow:
+            executive = ContinuationExecutive(journal)
+        journal.subscribe("rejecting", _reject, kinds=(_EVENT,))
+        journal.emit_batch([(_EVENT, {})] * 21, atomic=True)
+        path, head = journal.path, journal.head
+        if not attach_after_overflow:
+            _create_intention(executive)
+
+    if attach_after_overflow:
+        with ContinuationJournal.resume(path, task_id=task, manifest={}, expected_head=head) as resumed:
+            _create_intention(ContinuationExecutive(resumed))
+
+
+def _create_intention(executive):
+    executive.apply("create", new_id="root", objective="inspect", pending_decision="inspect",
+                    dependencies={"workspace": "sha256:" + "a" * 64}, turns=2,
+                    acceptance={"kind": "no_public_checks", "selectors": []})
+    assert "root" in executive.state.intentions
 
 
 def test_no_failure_batch_and_single_append_are_byte_identical_after_replay_and_resume(tmp_path, monkeypatch):
