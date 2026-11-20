@@ -3,14 +3,16 @@ from __future__ import annotations
 
 import json
 import shutil
+import socket
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from http.server import ThreadingHTTPServer
 from pathlib import Path
-from threading import Barrier, Thread, current_thread
+from threading import Barrier, Event, Thread, current_thread
 from types import SimpleNamespace
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -137,6 +139,53 @@ def test_parallel_binds_share_one_tokenizer_with_bounded_workers(tmp_path, monke
         for worker in workers:
             worker.join(timeout=max(0, cleanup_deadline - time.monotonic()))
         assert not any(worker.is_alive() for worker in workers)
+
+
+def test_expired_schema_worker_does_not_connect_after_resolution(tmp_path, monkeypatch):
+    import kernel_request_diet
+    from kernel_provider_dialect import LLAMA_CPP, RUN_CAPABILITY_CACHE, ProviderCapabilities, origin_of
+
+    monkeypatch.setattr(kernel_request_diet, "TOKENIZE_REQUEST_TIMEOUT_CAP_SECONDS", CAP)
+    original_resolve = socket.getaddrinfo
+    original_connect = socket.socket.connect
+    started = Event()
+    release = Event()
+    workers = []
+    connections = []
+
+    with tokenizer(trickle=True) as (endpoint, _):
+        port = urlsplit(endpoint).port
+        monkeypatch.setitem(RUN_CAPABILITY_CACHE, origin_of(endpoint), ProviderCapabilities(dialect=LLAMA_CPP))
+
+        def resolve(host, service, *args, **kwargs):
+            if (host, service) == ("127.0.0.1", port):
+                workers.append(current_thread())
+                started.set()
+                assert release.wait(5), "test did not release address resolution"
+            return original_resolve(host, service, *args, **kwargs)
+
+        def connect(sock, address):
+            if address == ("127.0.0.1", port):
+                connections.append(address)
+            return original_connect(sock, address)
+
+        monkeypatch.setattr(socket, "getaddrinfo", resolve)
+        monkeypatch.setattr(socket.socket, "connect", connect)
+        shell = SimpleNamespace(spec={"chat_url": endpoint + "/chat/completions"},
+                                run_dir=tmp_path, settings=ToolSettings())
+        start = time.monotonic()
+        tools = AgentTools(shell, CustomToolSet((), "empty"), defer_schema_budget=True)
+        try:
+            assert started.wait(1)
+            tools.bind()
+            assert time.monotonic() - start < CAP + 0.35
+            assert tools.schema_budget == measure_schemas()
+        finally:
+            release.set()
+            for worker in workers:
+                worker.join(timeout=1)
+        assert not any(worker.is_alive() for worker in workers)
+        assert connections == []
 
 
 def test_resume_before_first_send_can_start_without_a_journal(tmp_path, monkeypatch):
