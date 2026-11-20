@@ -2603,6 +2603,9 @@ def _prepared_tool_contract(prepared: object, fallback: object) -> list[dict]:
 def _contract_errors(tools: object, tool_name: str, arguments: object,
                      *, arguments_parse_error: bool = False) -> list[str]:
     """Validate against the same final menu that was presented to the model."""
+    if tool_name == "parallel" and isinstance(arguments, Mapping):
+        from kernel_parallel import normalize_goal_aliases
+        arguments, _ = normalize_goal_aliases(arguments)
     from kernel_completion_owner import validate_tool_arguments as owner_validate_tool_arguments
     errors = list(owner_validate_tool_arguments(tools, tool_name, arguments))
     names = [
@@ -3184,7 +3187,7 @@ def _tools_for_probe_modes(*, probe_gate_on: bool,
 
 def _execute_parent_parallel(measurement, bolt, root, created_this_run,
                              baseline_tests, sandbox_deadline, tool_call_id,
-                             args, artifact_root, *, schema_errors=()):
+                             args, artifact_root, *, schema_errors=(), input_expansions=()):
     from kernel_parallel import context as parallel_context, execute_parallel
 
     context = parallel_context(
@@ -3196,7 +3199,7 @@ def _execute_parent_parallel(measurement, bolt, root, created_this_run,
         call_name = "call_" + hashlib.sha256(call_name.encode()).hexdigest()[:40]
     result = execute_parallel(
         context, args, host=None, store_root=artifact_root / "parallel" / call_name,
-        schema_errors=tuple(schema_errors))
+        schema_errors=tuple(schema_errors), input_expansions=tuple(input_expansions))
     return call_name, result
 
 
@@ -9411,7 +9414,8 @@ def work(d, *, resume=None):
             queue_advisory(measurement, trigger)
             return True
 
-        def _dispatch_parent_parallel(tool_call_id, arguments, *, schema_errors=()):
+        def _dispatch_parent_parallel(tool_call_id, arguments, *, schema_errors=(),
+                                      input_expansions=()):
             # Retirement is per plan: the tool stays offered so a new plan can still run.
             retirement_on = _parallel_plan_retirement_enabled()
             replay_refusal = parallel_retirement.refusal_for(
@@ -9423,7 +9427,8 @@ def work(d, *, resume=None):
             call_name, result = _execute_parent_parallel(
                 measurement, bolt, root, created_this_run,
                 baseline_tests, _sandbox_deadline, tool_call_id,
-                arguments, POC.parent, schema_errors=schema_errors)
+                arguments, POC.parent, schema_errors=schema_errors,
+                input_expansions=input_expansions)
             observation = result.observation
             bolt.receipt("parallel", "parallel", call_name,
                          "APPLIED" if result.txn_order else "REFUSED", observation)
@@ -9433,7 +9438,7 @@ def work(d, *, resume=None):
                 enabled=retirement_on)
             return observation
 
-        def _parallel_schema_refusal(tool_call_id, arguments, errors):
+        def _parallel_schema_refusal(tool_call_id, arguments, errors, *, input_expansions=()):
             """Seal a schema-rejected parallel call as a typed refusal receipt, so the fold never meets a bare reject."""
             from kernel_parallel import available as parallel_available, writable_workspace
             if not parallel_available() or not writable_workspace():
@@ -9441,7 +9446,9 @@ def work(d, *, resume=None):
                 bolt.receipt("parallel", "parallel", "disabled", "REFUSED", observation)
                 measurement.observe("parallel", observation)
                 return observation
-            return _dispatch_parent_parallel(tool_call_id, arguments, schema_errors=errors)
+            return _dispatch_parent_parallel(
+                tool_call_id, arguments, schema_errors=errors,
+                input_expansions=input_expansions)
 
         def _hook_gate(name, arguments, call_id):
             if _hook_wiring_for_run is None:
@@ -9826,15 +9833,21 @@ def work(d, *, resume=None):
                     # can temporarily hide parallel before the first provider request;
                     # the shared parallel executor still performs normal admission.
                     _forced_dispatch_tools = tool_surface
+                    _forced_schema_args = _forced_args
+                    _forced_input_expansions = ()
+                    if isinstance(_forced_args, Mapping):
+                        from kernel_parallel import normalize_goal_aliases
+                        _forced_schema_args, _forced_input_expansions = normalize_goal_aliases(
+                            _forced_args)
                     _forced_schema_errors = _contract_errors(
-                        _forced_dispatch_tools, "parallel", _forced_args)
+                        _forced_dispatch_tools, "parallel", _forced_schema_args)
                     if not _forced_schema_errors:
                         from kernel_completion_owner import (
                             RequestActionContractError, dispatch_tool_call,
                         )
                         try:
                             dispatch_tool_call(
-                                _forced_dispatch_tools, "parallel", _forced_args)
+                                _forced_dispatch_tools, "parallel", _forced_schema_args)
                         except RequestActionContractError as _dispatch_error:
                             _forced_schema_errors = (str(_dispatch_error),)
                     if _forced_schema_errors:
@@ -9859,10 +9872,12 @@ def work(d, *, resume=None):
                           and (action_schema_mode or contract_enabled() or native_tool_batches)
                           and _forced_schema_errors):
                         _forced_observation = _parallel_schema_refusal(
-                            _forced_call_id, _forced_args, _forced_schema_errors)
+                            _forced_call_id, _forced_schema_args, _forced_schema_errors,
+                            input_expansions=_forced_input_expansions)
                     else:
                         _forced_observation = _dispatch_parent_parallel(
-                            _forced_call_id, _forced_args)
+                            _forced_call_id, _forced_schema_args,
+                            input_expansions=_forced_input_expansions)
                 if _forced_observation is not None:
                     msgs.append(_tool_reply_for_call(msgs, _forced_call_id,
                                                      _forced_observation))
@@ -10410,8 +10425,13 @@ def work(d, *, resume=None):
                         if _continuity_delta is not None:
                             measurement.ingest_decision_continuity_delta(_continuity_delta)
                         bolt.last_why = str(_args.get("why") or "")[:160]
+                        _validated_args = _args
+                        _input_expansions = ()
+                        if _name == "parallel" and isinstance(_args, Mapping):
+                            from kernel_parallel import normalize_goal_aliases
+                            _validated_args, _input_expansions = normalize_goal_aliases(_args)
                         _schema_errors = _contract_errors(
-                            _request_tools, _name, _args,
+                            _request_tools, _name, _validated_args,
                             arguments_parse_error=_args_parse_error)
                         _dispatch_variant = None
                         if not _args_parse_error:
@@ -10421,7 +10441,7 @@ def work(d, *, resume=None):
                             )
                             try:
                                 _validated_dispatch = dispatch_tool_call(
-                                    _request_tools, _name, _args)
+                                    _request_tools, _name, _validated_args)
                             except RequestActionContractError as _dispatch_error:
                                 if not _schema_errors:
                                     _schema_errors = (str(_dispatch_error),)
@@ -10649,8 +10669,9 @@ def work(d, *, resume=None):
                                 # Every parallel exchange leaves a receipt, including schema rejects.
                                 msgs.append(_tool_reply_for_call(msgs, tool_call_id,
                                     _parallel_schema_refusal(
-                                        tool_call_id, _args,
-                                        _schema_errors or ("workspace changed since the proposal's state",))))
+                                        tool_call_id, _validated_args,
+                                        _schema_errors or ("workspace changed since the proposal's state",),
+                                        input_expansions=_input_expansions)))
                                 continue
                             _reject_text = _render_contract_rejection(
                                 _name, _schema_errors,
@@ -10970,7 +10991,8 @@ def work(d, *, resume=None):
                                 msgs.append(_tool_reply_for_call(msgs, tool_call_id, _parallel_observation))
                                 continue
                             _parallel_observation = _dispatch_parent_parallel(
-                                tool_call_id, _args)
+                                tool_call_id, _validated_args,
+                                input_expansions=_input_expansions)
                             msgs.append(_tool_reply_for_call(msgs, tool_call_id, _parallel_observation))
                             continue
                         if (_name == "work"

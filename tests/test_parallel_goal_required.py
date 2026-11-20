@@ -1,14 +1,17 @@
-"""The parallel schema advertises the goal short form; the runtime validator still accepts legacy outcome contracts."""
+"""The parallel schema requires goal while admission preserves the documented outcome alias."""
 from __future__ import annotations
 
 import copy
+import json
 import re
+from pathlib import Path
 
 import pytest
 
 from stateframe.engine.kernel_parallel import (PARALLEL_TOOL, ParallelInputError, _UNIT,
                                                _complete_arguments, _request)
 from stateframe.engine.kernel_parallel_admission import DirectorySnapshot
+from stateframe.engine.probes.react_repair import _contract_errors
 
 
 def _repo(tmp_path):
@@ -58,6 +61,57 @@ def test_legacy_full_contract_is_accepted_at_runtime_through_completion(tmp_path
     ]}
     request = _parse_expanded(args, _repo(tmp_path))
     assert {unit.id: unit.outcome for unit in request.units} == {"a": "Change a", "b": "Change b"}
+
+
+def test_outcome_alias_passes_schema_and_missing_goal_is_refused(tmp_path):
+    args = {"subframes": [
+        {"id": "a", "outcome": "Change a", "owns": ["a.py"], "creates": []},
+        {"id": "b", "outcome": "Change b", "owns": ["b.py"], "creates": []},
+    ]}
+    schema_errors = _contract_errors((PARALLEL_TOOL,), "parallel", args)
+    assert not schema_errors, "documented outcome alias was rejected: " + "; ".join(schema_errors)
+
+    from stateframe.engine.kernel_parallel import normalize_goal_aliases
+    normalized, expansions = normalize_goal_aliases(args)
+    assert [unit["goal"] for unit in normalized["subframes"]] == ["Change a", "Change b"]
+    assert all("outcome" not in unit for unit in normalized["subframes"])
+    assert all("goal" not in unit for unit in args["subframes"])
+    assert [(item["field"], item["action"], item["source"], item["reason_code"])
+            for item in expansions] == [
+                ("goal", "expanded_field", "outcome", "GOAL_SENTENCE"),
+                ("goal", "expanded_field", "outcome", "GOAL_SENTENCE"),
+            ]
+    goal_args = {"subframes": [{"id": "a", "goal": "Change a", "owns": ["a.py"]}]}
+    normalized_goal_args, goal_expansions = normalize_goal_aliases(goal_args)
+    assert normalized_goal_args == goal_args
+    assert not goal_expansions
+    snapshot = _repo(tmp_path)
+    completed, recorded_expansions = _complete_arguments(
+        normalized, snapshot, input_expansions=expansions)
+    assert recorded_expansions[:len(expansions)] == expansions
+    request = _request(completed, "call", "2")
+    assert {unit.id: unit.outcome for unit in request.units} == {
+        "a": "Change a", "b": "Change b"}
+
+    missing = {"subframes": [
+        {"id": "a", "owns": ["a.py"], "creates": []},
+        {"id": "b", "goal": "Change b", "owns": ["b.py"], "creates": []},
+    ]}
+    missing_errors = _contract_errors((PARALLEL_TOOL,), "parallel", missing)
+    assert any("goal" in error for error in missing_errors)
+    with pytest.raises(ParallelInputError) as refusal:
+        _request(missing, "call", "2")
+    assert refusal.value.field == "goal"
+
+
+def test_shipped_parallel_example_uses_goal_for_every_subframe():
+    root = Path(__file__).resolve().parents[1]
+    script = json.loads((root / "examples" / "parallel_fixes.script.json").read_text())
+    parent_plan = next(step["arguments"] for step in script["parent"]
+                       if step.get("tool") == "parallel")
+    subframes = parent_plan["subframes"]
+    assert subframes
+    assert all("goal" in unit and "outcome" not in unit for unit in subframes)
 
 
 def test_unit_without_goal_or_outcome_is_refused_on_goal(tmp_path):

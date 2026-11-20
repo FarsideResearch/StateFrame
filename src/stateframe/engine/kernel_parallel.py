@@ -79,6 +79,33 @@ class ParallelReceiptMissing(ParallelError):
 _REQUIRED_PROPERTY = re.compile(r"'([A-Za-z_][A-Za-z0-9_]{0,63})' is a required property")
 
 
+def normalize_goal_aliases(args: Mapping) -> tuple[dict, tuple[dict, ...]]:
+    """Expand the documented outcome spelling before validating the advertised schema."""
+    units = args.get("subframes")
+    if not isinstance(units, list):
+        return dict(args), ()
+    alias_indexes = [index for index, unit in enumerate(units)
+                     if isinstance(unit, dict) and "goal" not in unit and "outcome" in unit]
+    if not alias_indexes:
+        return dict(args), ()
+    normalized = copy.deepcopy(dict(args))
+    units = normalized["subframes"]
+    expansions = []
+    for index in alias_indexes:
+        unit = units[index]
+        unit["goal"] = unit.pop("outcome")
+        unit_id = unit.get("id") if isinstance(unit.get("id"), str) else str(index)
+        expansions.append({
+            "subframe": unit_id,
+            "field": "goal",
+            "action": "expanded_field",
+            "producer": None,
+            "reason_code": "GOAL_SENTENCE",
+            "source": "outcome",
+        })
+    return normalized, tuple(expansions)
+
+
 def schema_input_error(args: Mapping, errors: Sequence[str]) -> ParallelInputError:
     """Translate a tool-schema rejection into the typed refusal the model can act on."""
     subframes = args.get("subframes") if isinstance(args, Mapping) else None
@@ -601,13 +628,17 @@ def _normalize_check(value: object, unit_id: str) -> dict[str, list[str]]:
 
 
 def _complete_arguments(args: Mapping, snapshot: DirectorySnapshot,
-                        limits: ParallelLimits | None = None) -> tuple[dict, tuple[dict, ...]]:
-    """Complete only references determined by the current plan and admitted source tree."""
+                        limits: ParallelLimits | None = None, *,
+                        input_expansions: Sequence[dict] = ()) -> tuple[dict, tuple[dict, ...]]:
+    """Normalize documented aliases and complete references determined by plan and source."""
     if not isinstance(args, Mapping) or not isinstance(args.get("subframes"), list):
         return dict(args) if isinstance(args, Mapping) else args, ()
-    completed = copy.deepcopy(dict(args))
+    completed, alias_expansions = normalize_goal_aliases(args)
+    if not alias_expansions:
+        completed = copy.deepcopy(completed)
     units = completed["subframes"]
-    actions: list[dict] = []
+    actions: list[dict] = list(input_expansions)
+    actions.extend(action for action in alias_expansions if action not in actions)
 
     for index, unit in enumerate(units):
         if isinstance(unit, dict) and "check" in unit:
@@ -3061,7 +3092,8 @@ def _recorded_input_refusal(context: ParallelContext, args: Mapping, record,
 
 
 def execute_parallel(context: ParallelContext, args: Mapping, *, host: HostClientProtocol,
-                     store_root: Path, schema_errors: Sequence[str] = ()) -> ParallelResult:
+                     store_root: Path, schema_errors: Sequence[str] = (),
+                     input_expansions: Sequence[dict] = ()) -> ParallelResult:
     """Admit, run, validate and publish one parent-owned subframe call.
 
     schema_errors carries a rejection from the advertised tool schema. It is
@@ -3126,7 +3158,8 @@ def execute_parallel(context: ParallelContext, args: Mapping, *, host: HostClien
         return _input_refusal(context, args, schema_input_error(args, schema_errors),
                               call_id, raw_call_id, call_root)
     try:
-        completed_args, plan_actions = _complete_arguments(args, pre_snapshot, context.limits)
+        completed_args, plan_actions = _complete_arguments(
+            args, pre_snapshot, context.limits, input_expansions=input_expansions)
         request = _request(completed_args, call_id, context.mode, requirements=context.requirements)
         planner_requirements = _planner_clauses(completed_args, context.requirements)
     except ParallelInputError as error:

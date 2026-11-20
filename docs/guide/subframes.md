@@ -65,7 +65,7 @@ The model-facing fields are:
 | Field | Meaning |
 |---|---|
 | `id` | Unique identifier, up to 24 lowercase letters, digits, or underscores, starting with a letter. |
-| `goal` | A short description of the work, up to 300 characters. Required; `outcome` is accepted as an older spelling. |
+| `goal` | A short description of the work, up to 300 characters. Required by the advertised schema; legacy `outcome` input is normalized to `goal`. |
 | `owns` | Existing files this subframe may change. |
 | `creates` | New files it must create. |
 | `exports` | Interfaces it promises, with an id, path, symbol, and optional signature. Existing Python signatures can be inferred from source. |
