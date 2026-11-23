@@ -2413,15 +2413,15 @@ def _probe_routes(options: RunOptions, printer=print, *, resume_roles: dict | No
     selected_profile = reasoning_profile(environ=provider_environment)
     assert options.endpoint is not None
     from .engine.kernel_provider_dialect import require_routed_static_slot
-    base_provider_capabilities = _provider_capabilities_for(
-        options.endpoint.chat_url, options.endpoint.api_key(), options,
-    )
     mismatched = [role for role, settings in table.roles.items()
                   if routes.uses_other_model(role, settings["model"], options.endpoint.model)
                   and table.sources[role].get("tokenizer", "default") == "default"]
     if os.environ.get("LLAMA_CPP_TOKENIZE_URL") and mismatched:
         raise RunError(f"LLAMA_CPP_TOKENIZE_URL is set while route {mismatched[0]} uses another model; set "
                        f"{mismatched[0]}.tokenizer or unset LLAMA_CPP_TOKENIZE_URL")
+    base_provider_capabilities = _provider_capabilities_for(
+        options.endpoint.chat_url, options.endpoint.api_key(), options,
+    )
     checked: set[tuple[str, str, str | None]] = set()
     slots_by_endpoint: dict[str, object] = {}
     provider_routes: dict[str, dict[str, str]] = {}
