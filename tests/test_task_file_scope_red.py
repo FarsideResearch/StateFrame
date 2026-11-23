@@ -83,6 +83,21 @@ def test_workspace_policy_refuses_paths_outside_task_scope():
 
 
 def test_out_of_task_scope_paths_returns_sorted_candidates_not_in_scope():
+    import hashlib
     from stateframe.runner import _out_of_task_scope_paths
-    candidate = {"answer.json": b"1", "README.md": b"x", "gone.txt": None}
-    assert _out_of_task_scope_paths(candidate, ["answer.json"]) == ["README.md", "gone.txt"]
+    candidate = {
+        "answer.json": b"1",
+        "README.md": b"x",
+        "gone.txt": None,
+    }
+    baseline = {
+        "gone.txt": hashlib.sha256(b"before deletion").hexdigest(),
+    }
+    assert _out_of_task_scope_paths(candidate, {"answer.json"}, baseline) == {
+        "README.md", "gone.txt"
+    }
+    candidate["unchanged.txt"] = b"same"
+    baseline["unchanged.txt"] = hashlib.sha256(b"same").hexdigest()
+    assert "unchanged.txt" not in _out_of_task_scope_paths(
+        candidate, {"answer.json"}, baseline
+    )

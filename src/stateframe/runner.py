@@ -259,6 +259,7 @@ def _keep_committed_mutation_effects(run_dir: Path, candidate: dict[str, bytes |
 
 DELIVERY_REFUSED = "DELIVERY_REFUSED"
 CANDIDATE_CHECKS_STALE_ERROR = "candidate changed while host checks ran; checks are stale"
+TASK_SCOPE_ERROR = "sealed candidate changed files outside the task's file scope"
 
 
 def _apply_sealed_candidate(work: workcopy.WorkCopy, candidate: dict[str, bytes | None],
@@ -304,10 +305,13 @@ def _refuse_submitted_delivery(summary: dict) -> None:
     summary["engine_result"] = DELIVERY_REFUSED
 
 
-def _out_of_task_scope_paths(candidate: dict[str, bytes | None], scope) -> list[str]:
-    """Candidate paths (writes and deletes) that a task's file-scope rule does not allow."""
-    allowed = set(scope)
-    return sorted(path for path in candidate if path not in allowed)
+def _out_of_task_scope_paths(candidate: dict[str, bytes | None], scope: set[str],
+                             baseline: dict[str, str]) -> set[str]:
+    """Compare the sealed bytes (or absence) with the immutable baseline."""
+    return {
+        path for path, data in candidate.items() if path not in scope
+        and (None if data is None else hashlib.sha256(data).hexdigest()) != baseline.get(path)
+    }
 
 
 def checkpoint_resume_off(spec: dict) -> bool:
@@ -4023,7 +4027,7 @@ def succeeded(summary: dict[str, object]) -> bool:
     return outcomes.exit_code(summary) == 0
 
 
-def candidate_digest(root: Path) -> str:
+def candidate_digest(root: Path, *, file_digests: dict[str, str] | None = None) -> str:
     """Bind host checks to the materialized candidate, including unchanged context files."""
     # Tool litter the checks themselves write (.pytest_cache, __pycache__) is not candidate content.
     manifest = {}
@@ -4048,6 +4052,8 @@ def candidate_digest(root: Path) -> str:
             except OSError as error:
                 raise workcopy.WorkCopyScanError(f"cannot read candidate file {path}: {error}") from error
             manifest[rel.as_posix()] = hashlib.sha256(data).hexdigest()
+    if file_digests is not None:
+        file_digests.update(manifest)
     return hashlib.sha256(json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
@@ -4984,6 +4990,7 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
     terminal = outcomes.terminal_receipt(run_dir)
     cancelled = cancelled or child_exit in (130, -2) or terminal.get("result") in ("CANCELLED", "CANCELED")
     declared = set(spec["public_row"]["files"])
+    task_scope = set(spec["public_row"].get("task_file_scope") or ())
     candidate, written, candidate_error = None, [], None
     dropped_paths: list[str] = []
     artifact_digest = None
@@ -4991,6 +4998,8 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
         candidate = final_candidate(run_dir)
         if candidate is not None:
             artifact_digest = _artifact_digest(candidate)
+            out_of_task_scope = (_out_of_task_scope_paths(candidate, task_scope, work.baseline)
+                                 if task_scope else set())
             if edit_scope_widened(spec):
                 declared.update(_admitted_candidate_paths(run_dir, spec, work, candidate))
             # Committed mutation edits are authorized by the mutation write grant, not the edit scope.
@@ -4998,19 +5007,27 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
             declared.update(mutation_kept)
             # Preserve detected scope violations even if applying retained files raises.
             dropped_paths = _dropped_existing_candidate_paths(work, candidate, declared)
-            task_scope = spec["public_row"].get("task_file_scope")
-            out_of_task_scope = _out_of_task_scope_paths(candidate, task_scope) if task_scope else []
-            if out_of_task_scope:
-                dropped_paths = sorted(set(dropped_paths) | set(out_of_task_scope))
+            if task_scope:
+                out_of_task_scope.update(workcopy.changed_files(work).keys() - task_scope)
+                if mutation_kept:
+                    out_of_task_scope.update(_out_of_task_scope_paths(candidate, task_scope, work.baseline))
+                # Outside entries matching the baseline are context and must not overwrite retry work.
+                candidate = {path: data for path, data in candidate.items() if path in task_scope}
+                dropped_paths = sorted(out_of_task_scope.union(dropped_paths))
             written, _, candidate_error = _apply_sealed_candidate(
                 work, candidate, declared, printer, dropped_paths=dropped_paths)
             if out_of_task_scope:
-                candidate_error = "sealed candidate changed files outside the task's file scope"
+                candidate_error = TASK_SCOPE_ERROR
     except RunDeadlineExceeded:
         raise
     except (RunError, workcopy.WorkCopyError, OSError, ValueError) as error:
         candidate_error = str(error)
-    digest = candidate_digest(work.copy) if candidate is not None and not candidate_error else None
+    candidate_file_digests: dict[str, str] | None = {} if options.in_place or task_scope else None
+    digest = (candidate_digest(work.copy, file_digests=candidate_file_digests)
+              if candidate is not None and not candidate_error else None)
+    promotion_changes = None
+    if digest and candidate_file_digests is not None:
+        promotion_changes = workcopy.changes_from_digests(work.baseline, candidate_file_digests)
     after = {"command": test_cmd, "exit_code": None, "passed": None, "tail": "checks not run"}
     if (digest and not cancelled and test_cmd is not None
             and terminal.get("result") != "TEST_REPORTED_WRONG"):
@@ -5021,16 +5038,41 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
                                  pytest_plugins=options.pytest_plugins, deadline=options._deadline,
                                  check_settings=check_settings, test_python=_outer_test_python(options), runner_kind=options.runner_kind,
                                   capture_output=True)
-            if candidate_digest(work.copy) == digest:
+            post_check_digests = {} if candidate_file_digests is not None else None
+            post_check_digest = candidate_digest(work.copy, file_digests=post_check_digests)
+            post_check_outside = (
+                workcopy.changes_from_digests(candidate_file_digests, post_check_digests).keys() - task_scope
+                if task_scope and candidate_file_digests is not None and post_check_digests is not None else set())
+            if post_check_outside:
+                dropped_paths = sorted(set(dropped_paths).union(post_check_outside))
+                candidate_error = TASK_SCOPE_ERROR
+            if (not candidate_error and post_check_digest == digest
+                    and (post_check_digests is None or post_check_digests == candidate_file_digests)):
                 after["candidate_sha256"] = digest
-            else:
+                if candidate_file_digests is not None:
+                    promotion_changes = workcopy.changes_from_digests(work.baseline, candidate_file_digests)
+            elif not candidate_error:
                 candidate_error = CANDIDATE_CHECKS_STALE_ERROR
         except KeyboardInterrupt:
             cancelled = True
-    changed_files = workcopy.changed_files(work)
-    diff_export_error = _export_final_diff(work, run_dir, options._stateframe_home_identity)
+    diff_export_error, test_changes = None, None
+    try:
+        diff_export_error = _export_final_diff(work, run_dir, options._stateframe_home_identity)
+        changed_files = workcopy.changed_files(work)
+        if options.protect_tests in {"task", "off"}:
+            test_changes = inspect_test_changes(work)
+    except (OSError, workcopy.WorkCopyScanError) as error:
+        if promotion_changes is None:
+            raise
+        # The reporting reads are independent of the verified buffers collected by apply.
+        changed_files = promotion_changes
+        printer(f"working copy report incomplete: {error}")
     if diff_export_error:
         printer(f"final.diff export refused: {diff_export_error}")
+    scope_changes = promotion_changes if promotion_changes is not None else changed_files
+    if candidate is not None and task_scope and (outside := scope_changes.keys() - task_scope):
+        dropped_paths = sorted(outside.union(dropped_paths))
+        candidate_error, digest = TASK_SCOPE_ERROR, None
     commits = None
     if (run_dir / "commits.jsonl").is_file():
         from .commit_export import CommitExportError, export_commits
@@ -5079,8 +5121,7 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
         "engine_source_hash": spec["engine_source"].get("source_hash"),
         "engine_shipped_hash": spec["engine_source"].get("shipped_hash"),
     })
-    if options.protect_tests in {"task", "off"}:
-        test_changes = inspect_test_changes(work)
+    if test_changes is not None:
         test_paths = {item["path"] for item in test_changes}
         summary["test_files_changed"] = test_changes
         summary["product_files_changed"] = sorted(set(summary["files_changed"]) - test_paths)
@@ -5089,23 +5130,26 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
     if isinstance(spec.get("resume"), dict):
         summary["resume"] = _resume_record(run_dir, spec["resume"], summary)
     atomic_bytes(run_dir / "tests-after.txt", after["tail"].encode("utf-8"))
-    summary.update(outcomes.project(
-        summary, cancelled=cancelled, timed_out=child_exit == 124,
+    projection_args = dict(
+        cancelled=cancelled, timed_out=child_exit == 124,
         check_output=str(after.get("output") or after.get("tail") or ""),
         check_repo=work.copy,
         declared_test_command=declared_test_evidence(
-            options.test_cmd, options.check_cmd, options.check_source, options.runner_kind)))
+            options.test_cmd, options.check_cmd, options.check_source, options.runner_kind))
+    summary.update(outcomes.project(summary, **projection_args))
     summary["exit_code"] = outcomes.exit_code(summary)
     summary["succeeded"] = succeeded(summary)
     _refuse_submitted_delivery(summary)
     if summary.get("engine_result") == DELIVERY_REFUSED:
         printer(f"delivery refused: {summary['delivery_refusal']['reason_code']}: "
                 f"{summary['delivery_refusal']['detail']}")
-    if options.in_place and changed_files:
+    if options.in_place and (changed_files or promotion_changes):
         if summary["succeeded"]:
             try:
                 merged_in_place: list[str] = []
-                summary["applied_in_place"] = workcopy.apply_in_place(work, merged=merged_in_place)
+                summary["applied_in_place"] = workcopy.apply_in_place(
+                    work, merged=merged_in_place, changed=promotion_changes,
+                    candidate_file_digests=candidate_file_digests)
                 if merged_in_place:
                     summary["merged_in_place"] = merged_in_place
             except RunDeadlineExceeded as error:

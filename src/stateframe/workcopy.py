@@ -19,7 +19,7 @@ import tokenize
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Mapping
 
 from . import _startup_optimization_enabled
 from .engine.kernel_edit_merge import ConflictHunk, MergeApplied, MergeConflict, merge_texts
@@ -218,6 +218,13 @@ def changed_files(work: WorkCopy) -> dict[str, str]:
     for rel in work.baseline:
         if rel not in current:
             changes[rel] = "deleted"
+    return dict(sorted(changes.items()))
+
+
+def changes_from_digests(baseline: Mapping[str, str], digests: Mapping[str, str]) -> dict[str, str]:
+    changes = {path: "deleted" for path in baseline.keys() - digests.keys()}
+    changes.update({path: "added" if path not in baseline else "modified" for path, digest in digests.items()
+                    if path not in baseline or baseline[path] != digest})
     return dict(sorted(changes.items()))
 
 
@@ -614,14 +621,47 @@ def _merge_outside_edits(work: WorkCopy, changes: dict[str, bytes | None],
     return merged_changes, merged_baseline, merged_paths
 
 
-def apply_in_place(work: WorkCopy, *, merged: list[str] | None = None) -> list[str]:
+def apply_in_place(work: WorkCopy, *, merged: list[str] | None = None,
+                   changed: dict[str, str] | None = None,
+                   candidate_file_digests: Mapping[str, str] | None = None) -> list[str]:
     """Copy changed files back to the original repository, guarded against concurrent edits.
 
     With COLLAB-DRIFT on, a file the user edited meanwhile is three-way merged (start snapshot as base) instead of
     refused. Merged paths are appended to ``merged`` only after the whole apply succeeds.
+    If supplied, ``changed`` is the host-approved change list for this promotion.
     """
-    changes = {rel: (None if kind == "deleted" else (work.copy / rel).read_bytes())
-               for rel, kind in changed_files(work).items()}
+    if changed is None:
+        changed = changed_files(work)
+    changes: dict[str, bytes | None] = {}
+    for rel, kind in changed.items():
+        source = work.copy / rel
+        if candidate_file_digests is not None and kind == "deleted":
+            try:
+                # Match the digest scan's view of regular files without following symlinks.
+                if (not any((work.copy / part).is_symlink() for part in reversed(Path(rel).parents))
+                        and stat.S_ISREG(source.lstat().st_mode)):
+                    raise WorkCopyError(f"candidate changed after host verification: {rel}")
+            except (FileNotFoundError, NotADirectoryError):
+                pass
+            except OSError as error:
+                raise WorkCopyError(f"candidate changed after host verification: {rel}") from error
+            data = None
+        else:
+            try:
+                if kind == "deleted" or candidate_file_digests is None:
+                    data = None if kind == "deleted" else source.read_bytes()
+                else:
+                    with _parent_fd(work.copy, rel) as parent:
+                        data, _ = _read_at(parent, source.name)
+            except (OSError, WorkCopyError) as error:
+                if candidate_file_digests is None:
+                    raise
+                raise WorkCopyError(f"candidate changed after host verification: {rel}") from error
+        if candidate_file_digests is not None and (
+                (data is None and rel in candidate_file_digests)
+                or (data is not None and candidate_file_digests.get(rel) != _sha(data))):
+            raise WorkCopyError(f"candidate changed after host verification: {rel}")
+        changes[rel] = data
     baseline: dict[str, str] = work.baseline
     merged_paths: list[str] = []
     if _drift_merge_enabled():

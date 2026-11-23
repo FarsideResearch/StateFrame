@@ -605,6 +605,13 @@ def prepare_worker(spec: UnitSpec, spec_path: Path, run_dir: Path, start_snapsho
         raise WorkerPreparationError(f"cannot build the public subframe task: {error}") from error
     if not isinstance(public_row, dict):
         raise WorkerPreparationError("subframe task builder did not return a public row")
+    parent_row = parent_spec.get("public_row")
+    if isinstance(parent_row, dict) and "task_file_scope" in parent_row:
+        task_scope = parent_row["task_file_scope"]
+        if not isinstance(task_scope, list) or any(not isinstance(path, str) or not path for path in task_scope):
+            raise WorkerPreparationError("parent task file scope is invalid")
+        if task_scope:
+            public_row["task_file_scope"] = list(task_scope)
     settings = _worker_settings(parent_spec)
     settings_path = run_dir / "tool-settings.json"
     # The baseline scanner requires a real directory, and resume rebuilds workspace/ from parent/.

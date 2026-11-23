@@ -133,8 +133,10 @@ EXPECTED_ENTRIES = (
     ("tests/test_no_mcp_release_comparison.py::test_nested_sandbox_refusal_is_infrastructure_not_parity", "all"),
     ("tests/test_offmode_compatibility.py::test_parity_command_compares_raw_bytes_and_exercises_resume", "all"),
     ("tests/test_parallel_shell_parity.py::test_off_mode_shell_directory_is_not_tracked_as_created_file", "all"),
+    ("tests/test_parallel_worker_prep.py::test_default_off_result_parity_checks_the_published_exit_status", "all"),
     ("tests/test_parallel_worker_prep.py::test_engine_venv_installs_bypass_shared_pip_cache", "all"),
     ("tests/test_parallel_worker_prep_digest_guard.py::test_release_parity_checks_wire_before_reading_artifacts", "all"),
+    ("tests/test_parallel_worker_prep.py::test_unscoped_worker_projection_is_byte_identical_to_base", "all"),
     ("tests/test_parallel_worker_prep.py::test_wire_parity_reports_first_send_byte_and_component", "all"),
     ("tests/test_powerups_parity.py::test_feature_off_raw_request_parity", "requires:host_sandbox"),
     ("tests/test_provider_body.py::test_shipped_profile_llama_body_is_byte_identical_to_unmodified_parent_code", "all"),
@@ -463,10 +465,14 @@ EXPECTED_ASSERTIONS = {
         "assert calls == [(tree, example, resume) for example, resume in [(name, False) for name in parity.EXAMPLES] + [('discount_bug', True)] for tree in (baseline, candidate)]",
     "tests/test_parallel_shell_parity.py::test_off_mode_shell_directory_is_not_tracked_as_created_file":
         "assert receipts[0][1]['effects'] == ({'path': 'new-directory', 'change': 'created'}, {'path': 'new-file.py', 'change': 'created'})",
+    "tests/test_parallel_worker_prep.py::test_default_off_result_parity_checks_the_published_exit_status":
+        "assert type(released.get('exit_status')) is type(candidate.get('exit_status')) is int",
     "tests/test_parallel_worker_prep.py::test_engine_venv_installs_bypass_shared_pip_cache":
         "assert len(installs) == 2",
     "tests/test_parallel_worker_prep_digest_guard.py::test_release_parity_checks_wire_before_reading_artifacts":
         'assert "component messages[0].content" in str(error.value)',
+    "tests/test_parallel_worker_prep.py::test_unscoped_worker_projection_is_byte_identical_to_base":
+        'assert canonical_json(prepared["public_row"]) == canonical_json(expected)',
     "tests/test_parallel_worker_prep.py::test_wire_parity_reports_first_send_byte_and_component":
         "assert f'byte {offset}' in message",
     "tests/test_powerups_parity.py::test_feature_off_raw_request_parity":
