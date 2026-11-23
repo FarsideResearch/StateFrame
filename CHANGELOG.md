@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.8.26 (2026-11-23)
 
 - Removed resource-release statements from the suggested edit menus: they could add a close or release call where one is not wanted.
