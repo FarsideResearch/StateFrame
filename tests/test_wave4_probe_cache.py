@@ -3,11 +3,13 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
+import errno
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -164,6 +166,42 @@ def test_off_and_replay_keep_the_probe_cache_closed(install, monkeypatch):
     assert runner._provider_probe(options, cache.enabled) is True
     options._resuming = True
     assert runner._provider_probe(options, cache.enabled) is False
+
+
+@pytest.mark.parametrize("scan", ["site-packages", "sitecustomize"])
+def test_failed_second_dependency_scan_invalidates_interpreter_fingerprint(tmp_path, monkeypatch, scan):
+    # Path.iterdir lists through os.scandir or os.listdir depending on the Python version.
+    real = {"scandir": os.scandir, "listdir": os.listdir}
+    attempted = []
+
+    def refuse(name):
+        def listing(path):
+            if path in {tmp_path, str(tmp_path)}:
+                attempted.append(path)
+                raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), path)
+            return real[name](path)
+
+        return listing
+
+    def interpreter_dependencies(_python):
+        dependencies = SimpleNamespace(inputs={"prior-tree-scan": "complete"})
+        if scan == "site-packages":
+            cache._site_dependencies(tmp_path, dependencies)
+        else:
+            cache._no_sitecustomize(tmp_path)
+        return dependencies
+
+    for name in real:
+        monkeypatch.setattr(os, name, refuse(name))
+    monkeypatch.setattr(cache, "sys", SimpleNamespace(
+        platform="linux", implementation=SimpleNamespace(name="cpython"), version_info=sys.version_info))
+    monkeypatch.setattr(cache, "host_fingerprint", lambda: "host")
+    monkeypatch.setattr(cache, "_interpreter_dependencies", interpreter_dependencies)
+    for name in tuple(os.environ):
+        if name.startswith("LD_"):
+            monkeypatch.delenv(name)
+    assert cache.interpreter_fingerprint(sys.executable) is None
+    assert len(attempted) == 1
 
 
 def test_hit_rechecks_version_and_loses_stale_sandbox_authority(install, monkeypatch):
