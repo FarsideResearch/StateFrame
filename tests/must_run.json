@@ -2373,7 +2373,11 @@
         "tests/test_wave4_probe_provider.py::test_cross_process_static_work_and_wire_parity"
       ],
       "jobs": {
-        "darwin": "RUN",
+        "darwin": {
+          "disposition": "NA_PLATFORM",
+          "platform": "linux",
+          "reason": "persistent provider proofs require a Linux time namespace"
+        },
         "linux": "RUN"
       },
       "prerequisites": [],

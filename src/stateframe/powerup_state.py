@@ -234,28 +234,29 @@ def trust(repo: Path, *, remove: bool = False) -> list[str]:
             for path in directory.iterdir()
             if path.is_dir() and not path.is_symlink() and NAME.fullmatch(path.name)
         )
-    entries = hook_host._read_trust_store()
-    source_names = {str(path) for path in sources}
-    project_prefix = str(directory) + os.sep
-    kept = [
-        row
-        for row in entries
-        if not (
-            row["repo"] == str(root)
-            and (row["file"] in source_names or row["file"].startswith(project_prefix))
-        )
-    ]
-    if not remove:
-        for source in sources:
-            if source.is_file() or source.is_dir():
-                if source.is_file():
-                    _read(source)
-                digest = (
-                    tree_digest(source) if source.is_dir() else tree_digest_file(source)
-                )
-                kept.append({"repo": str(root), "file": str(source), "digest": digest})
-    kept.sort(key=lambda row: (row["repo"], row["file"], row["digest"]))
-    hook_host._write_trust_store(kept)
+    with hook_host._trust_store_lock():
+        entries = hook_host._read_trust_store()
+        source_names = {str(path) for path in sources}
+        project_prefix = str(directory) + os.sep
+        kept = [
+            row
+            for row in entries
+            if not (
+                row["repo"] == str(root)
+                and (row["file"] in source_names or row["file"].startswith(project_prefix))
+            )
+        ]
+        if not remove:
+            for source in sources:
+                if source.is_file() or source.is_dir():
+                    if source.is_file():
+                        _read(source)
+                    digest = (
+                        tree_digest(source) if source.is_dir() else tree_digest_file(source)
+                    )
+                    kept.append({"repo": str(root), "file": str(source), "digest": digest})
+        kept.sort(key=lambda row: (row["repo"], row["file"], row["digest"]))
+        hook_host._write_trust_store(kept)
     return [
         row["file"]
         for row in kept

@@ -57,6 +57,12 @@ import itertools
 import logging
 import re
 import textwrap
+from dataclasses import dataclass
+
+try:
+    from kernel_reason_log import emit_reason
+except ImportError:
+    from .kernel_reason_log import emit_reason
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +79,12 @@ WITNESS_VALUES = (None, 0, 1, "", [], True, False, -1, "x", [1])
 # ------------------------------------------------------------------ exceptions
 class Unsupported(Exception):
     """The candidate is outside the evaluable subset. It SURVIVES."""
+
+
+@dataclass(frozen=True)
+class SpanFactsUnavailable:
+    """The span-facts provider could not be loaded or evaluated."""
+    phase: str
 
 
 # ------------------------------------------------- 1. condition extraction
@@ -513,15 +525,25 @@ def _matches_class(cls, shape, old_node, new_node):
 # The fail-open law still holds: a witness that cannot decide returns (False, "")
 # meaning "does not apply", and the candidate carries on to the existing logic.
 
+_SPAN_FACTS_DEFECT = "unsupported: span facts defect: the witness cannot judge this candidate"
+
+
+def _span_facts_unavailable(phase):
+    emit_reason("degrade", "witness_replay:span_facts_unavailable", "witness_replay",
+                "span facts unavailable", "provider import or execution failed",
+                journal=False, phase=phase)
+    return SpanFactsUnavailable(phase)
+
+
 def _span_facts(span_lines):
     try:
         from mutations import span_facts
-    except Exception:                       # mutations unavailable -> no opinion
-        return None
+    except Exception:                       # provider failure is not a no-facts result
+        return _span_facts_unavailable("import")
     try:
         return span_facts(span_lines)
     except Exception:
-        return None
+        return _span_facts_unavailable("execution")
 
 
 _KEYWORDS = frozenset((
@@ -824,6 +846,8 @@ def family_witness(span_lines, mut):
     if base is None:
         return False, False, ""
     facts = _span_facts(span_lines)
+    if isinstance(facts, SpanFactsUnavailable):
+        return False, False, _SPAN_FACTS_DEFECT
     try:
         if "\n" in new_line:
             return _guard_witness(facts, base, old_line, new_line)
@@ -1383,10 +1407,22 @@ def _judge(cls, mut, span_lines=()):
     # dominance-checked rename. A verdict here is authoritative in both
     # directions; "does not apply" falls through to the boolean machinery.
     applies, ok, why = family_witness(span_lines, mut)
+    if why == _SPAN_FACTS_DEFECT:
+        # The boolean judges need no span facts, so they still speak for a
+        # single-line condition. Everything else stays alive, with the reason.
+        verdict = None if "\n" in new_line else _judge_boolean(cls, old_line, new_line, dict(base))
+        if verdict is not None and verdict["supported"]:
+            return verdict
+        base["reason"] = _SPAN_FACTS_DEFECT
+        return base
     if applies:
         base.update(supported=True, family_witness=ok, survived=ok, reason=why,
                     shape="contact_family")
         return base
+    return _judge_boolean(cls, old_line, new_line, base)
+
+
+def _judge_boolean(cls, old_line, new_line, base):
     try:
         old_node, _ = extract_condition(old_line)
         new_node, _ = extract_condition(new_line)

@@ -156,7 +156,7 @@ EXPECTED_ENTRIES = (
     ("tests/test_unit_coalesce.py::test_r2_n8_parity_and_contract_pins_are_identified", "all"),
     ("tests/test_unit_planner_v2.py::test_switch_off_is_byte_identical_to_v059_planner", "all"),
     ("tests/test_view_ladder_integration.py::test_frozen_selection_re_renders_byte_identically_across_requests", "all"),
-    ("tests/test_wave4_probe_provider.py::test_cross_process_static_work_and_wire_parity", "all"),
+    ("tests/test_wave4_probe_provider.py::test_cross_process_static_work_and_wire_parity", "linux"),
     ("tests/test_working_set_off_parity_base.py::test_off_parity_direct_callers_share_trace_results", "all"),
     ("tests/test_must_run_gate.py::test_must_run_manifest_matches_reviewed_inventory", "all"),
     ("tests/test_must_run_gate.py::test_planted_controls_reject_unqualified_runs", "all"),
@@ -261,6 +261,8 @@ _PLATFORM_REASONS = {
     "tests/test_uv_venv_sandbox.py::test_linux_binds_the_uv_install_and_its_link_hop": "requires Linux bwrap behavior",
     "tests/test_uv_venv_sandbox.py::test_linux_check_command_with_home_removed_under_unknown_uid": "requires Linux uid/passwd behavior",
     "tests/test_uv_venv_sandbox.py::test_live_uv_venv_runs_under_the_check_sandbox": "needs macOS with uv and a uv-managed Python",
+    "tests/test_wave4_probe_provider.py::test_cross_process_static_work_and_wire_parity":
+        "persistent provider proofs require a Linux time namespace",
 }
 
 
@@ -696,6 +698,7 @@ def _make_project(
     (project / "test_required.py").write_text(required_source, encoding="utf-8")
     (project / "test_other.py").write_text("def test_other():\n    assert True\n", encoding="utf-8")
     (project / ".gitignore").write_text("__pycache__/\n.pytest_cache/\n", encoding="utf-8")
+    (project / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
     plugin_list = "('must_run_plugin', 'xdist.plugin')" if load_serial_lane_hooks else "('must_run_plugin',)"
     conftest = (
         "import os, sys\n"
@@ -1246,6 +1249,7 @@ def test_aggregator_rejects_missing_and_stale_job_evidence(tmp_path):
         'def test_required():\n    result = "complete"\n    assert result == "complete"\n', encoding="utf-8"
     )
     (project / ".gitignore").write_text("__pycache__/\n.pytest_cache/\n", encoding="utf-8")
+    (project / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
     _git(project, "init", "--quiet")
     _git(project, "add", "-A")
     _git(project, "-c", "user.name=Gate Control", "-c", "user.email=gate@example.invalid",
