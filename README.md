@@ -143,7 +143,7 @@ Add `--instructions` to `run` or `chat` to give the agent your repository's own 
 
 ## Closing requirement check
 
-Set `STATEFRAME_REQUIREMENT_RECHECK=on` in the shell or a custom profile to get one check against the task's own sentences when the model first says it is done. StateFrame returns those sentences as a numbered checklist and asks the model to check them before finishing. The setting is off by default, makes no extra model call, and leaves request bytes unchanged when off. It does not run when the task has fewer than two sentences or fewer than two model steps remain. See [Running](docs/guide/running.md#closing-check-requirement-recheck) for measurements and details.
+Set `STATEFRAME_REQUIREMENT_RECHECK=on` in the shell or a custom profile to get one check against the task's own sentences when the model first says it is done. StateFrame returns those sentences as a numbered checklist and asks the model to check them before finishing. The setting is off by default and makes no separate evaluator call, but the refusal can add model steps and requests. Request bytes are unchanged when the setting is off. It does not run when the task has fewer than two sentences or fewer than two model steps remain. See [Running](docs/guide/running.md#closing-check-requirement-recheck) for measurements and details.
 
 ## What the agent can do
 
@@ -199,7 +199,7 @@ The [agent tools guide](docs/guide/tools.md) lists the tool arguments, command p
 | `STATEFRAME_CHECKPOINT_KEEP` | `2` | How many checkpoints to keep; older ones are deleted after each save. |
 | `STATEFRAME_CHECKPOINT_MIN_FREE_BYTES` | automatic | Minimum free bytes required before a save. The automatic floor is the greater of 1 GiB and three times the latest saved state size; before the first save it uses three times a conservative process-memory estimate. Set an integer byte count to override it, or `0` to disable the check. |
 
-Checkpoint restore applies to runs with and without the shell; runs with hooks or per-step models resume by replay.
+Checkpoint restore applies to compatible runs with and without the shell; runs with hooks, per-step models or widened edit scope resume by replay.
 On a scripted 120-request run, the 121 saves paused the engine 0.10 s each (median; 0.14 s at the 95th
 percentile), 13.4 s in total. Each checkpoint's state was 22.6 MB, the checkpoint folder peaked at 236 MB
 with two kept, and the run folder peaked at 323 MB versus 80 MB with checkpoints off. A save that fails,
@@ -209,8 +209,8 @@ it resumes saving when space recovers. The check cannot reserve disk space, so a
 fill the disk during a save. The run continues if the free-space check itself fails.
 In the measured resume runs, state files were 3-21 MB each, checkpoint
 directories were 3-53 MB, and the checkpoint root reached about 175 MB with the default retention.
-On a larger repository, earlier measurements found 430-460 MB of engine state per checkpoint and
-about 1.1 GB with two kept, briefly about 1.7 GB during a save. Set `STATEFRAME_CHECKPOINT=off`
+On a larger repository, earlier pre-compression measurements found 430-460 MB of engine state per checkpoint and
+about 1.1 GB with two kept, briefly about 1.7 GB during a save. These are historical figures, not a current size promise; new state files use zlib level 1 (see [run storage](docs/guide/storage.md)). Set `STATEFRAME_CHECKPOINT=off`
 to avoid that checkpoint disk cost and use full replay on resume. When a run finishes for good, StateFrame removes its
 checkpoints; `--keep-checkpoints` (or `STATEFRAME_KEEP_CHECKPOINTS=1`) keeps them.
 Checkpoints are signed with a per-install key in `~/.stateframe/checkpoint.key` (a private file); a checkpoint
@@ -233,7 +233,7 @@ Check it before a run: send the same text to `/tokenize` on both servers and com
 ## Requirements
 
 - macOS on Apple silicon (sandbox-exec, built in) or Linux x86_64 (tested on Ubuntu 22.04; needs bubblewrap: `sudo apt install bubblewrap`). Python 3.11+. Docker is not supported.
-- Free disk: a few GB per long run. Measured on a large repository: a run directory uses about 3 MB per request (about 550-750 MB for a 209-request run), plus checkpoints while the run is live if you turn them on (see Checkpoint settings).
+- Free disk: a few GB per long run. Measured on a large repository: a run directory uses about 3 MB per request (about 550-750 MB for a 209-request run), plus checkpoints saved by default while the run is live (see Checkpoint settings).
 - Python 3.11 or newer, with `venv` and `ensurepip`. Python 3.14.1 is not supported: a required dependency (networkx 3.6.1) excludes that one release; any other 3.14.x works.
 - A local OpenAI-compatible chat server with tool calling, configured with a context slot of 65,536 tokens. Size the server's cache RAM to your machine; to use a different slot size, see [Context size](docs/guide/running.md#context-size). These are the sizes we built and measured with: a single 48 GB GPU (RTX A6000 class) running Qwen3.6-35B-A3B, a mixture-of-experts model (35B total, about 3B active per token), 4-bit UD-Q4_K_XL, under llama.cpp, with one server sharing a 262,144-token cache across 4 slots (`-np 4 -c 262144 --kv-unified`), so 65,536 tokens per run. A stock 24 GB card was not tested. They are the defaults; both can be changed for bigger or smaller servers (see [Context size](docs/guide/running.md#context-size)). Many runs can share one server: a request that is still waiting for a free slot keeps its place in the server's queue as long as the server answers its health check. A request has no time limit unless you set one (`STATEFRAME_PER_REQUEST_TIMEOUT_S`); a response that sends no bytes for 300 seconds is treated as stalled. The engine sets no queue wait limit of its own; the run's own deadline still applies. To cap the wait, set `STATEFRAME_QUEUE_WAIT_MAX_S`. A server that stops answering its health check is still caught by the 90-second liveness probe. The run prints one warning when a request waited in the queue. An upload that stops moving for `STATEFRAME_SEND_STALL_S` (default 90 s) is retried on a fresh connection instead of waiting on a connection that has stopped.
 - A model that handles tool calls well. The results above were measured with Qwen3.6-35B-A3B, a mixture-of-experts model (35B total, about 3B active per token), 4-bit UD-Q4_K_XL, under llama.cpp on a single 48 GB GPU (RTX A6000 class); other models and smaller GPUs are untested.
@@ -258,7 +258,7 @@ Check it before a run: send the same text to `/tokenize` on both servers and com
 
 ## Real repositories
 
-In a repository with more than 200 source files, say which files the change may touch: `--target` names the starting file and each `--edit` adds another editable file. The whole repository stays available as read-only context. Without them, StateFrame chooses up to 12 files from paths named by the task and imports from up to 8 selected checks; with more than 8 selected checks, only task-named paths steer the scope. Root-level filenames count. It prints the list and stops to request `--target`/`--edit` if nothing matches an existing product file. An edit to an existing file outside that set is refused before anything is written, and the model is told which flag would allow it (`--edit PATH`, or `--edit-scope widen`).
+In a repository with more than 200 source files, say which files the change may touch: `--target` names the starting file and each `--edit` adds another editable file. The whole repository stays available as read-only context. Without them, StateFrame chooses up to 12 files from paths named by the task and imports from up to 8 selected checks; with more than 8 selected checks, only task-named paths steer the scope. Root-level filenames count. It prints the list and stops to request `--target`/`--edit` if ordinary inference finds no match to an existing product file. An edit to an existing file outside that set is refused before anything is written, and the model is told which flag would allow it (`--edit PATH`, or `--edit-scope widen`).
 
 ```bash
 stateframe run --repo ~/code/shop --task "Discounts above 50% are rejected; allow up to 100%." \
@@ -279,7 +279,7 @@ If the test environment can import StateFrame, `stateframe.checks` provides stri
 
 ## Repo map
 
-The engine gives the model a short map of the repository's functions and classes. The default install adds tree-sitter grammars, each from its own MIT-licensed package. The engine reads 12 languages with them: Python, JavaScript, TypeScript, TSX, Go, Rust, Java, Ruby, PHP, C, C++ and C#. For HTML, CSS, JSON, TOML and YAML files it reads structure instead (element ids and headings, selectors and at-rules, keys, tables), from five more grammar packages, so the installer reports 17 languages. Other languages fall back to a simpler text scan. `./install.sh --no-repomap` skips the grammar packages.
+The engine gives the model a short map of the repository's functions and classes. The default install adds individual MIT-licensed tree-sitter grammar packages. The engine has 17 parser entries backed by 16 packages: 12 code-language entries (Python, JavaScript, TypeScript, TSX, Go, Rust, Java, Ruby, PHP, C, C++ and C#) and five structured-file entries (HTML, CSS, JSON, TOML and YAML). TypeScript and TSX share a package. Other languages fall back to a simpler text scan. `./install.sh --no-repomap` skips the grammar packages.
 
 ## Known limitations
 

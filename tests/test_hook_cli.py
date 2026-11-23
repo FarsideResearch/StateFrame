@@ -1,5 +1,9 @@
 import json
 import os
+import subprocess
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -221,3 +225,164 @@ def test_profile_rejects_hook_switches(tmp_path):
     }), encoding="utf-8")
     with pytest.raises(ValueError, match="STATEFRAME_HOOKS"):
         profiles.load(str(profile))
+
+
+def test_trust_review_write_failure_preserves_existing_trust(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _hook_file(repo)
+    assert cli.main(["hooks", "trust", "--repo", str(repo)]) == 0
+    store = tmp_path / "home" / ".stateframe" / "trusted-hooks.json"
+    previous = store.read_bytes()
+    (repo / ".stateframe" / "context.py").write_text("print('changed')\n", encoding="utf-8")
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+    read_fd, write_fd = os.pipe()
+    os.close(read_fd)
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "stateframe", "hooks", "trust", "--repo", str(repo)],
+            cwd=Path(__file__).resolve().parents[1], env=environment, stdout=write_fd,
+            stderr=subprocess.PIPE, text=True, pass_fds=(write_fd,),
+        )
+    finally:
+        os.close(write_fd)
+
+    assert result.returncode == 2
+    assert store.read_bytes() == previous
+    assert not list(store.parent.glob(".trusted-hooks-*.tmp"))
+    assert result.stderr == (
+        "stateframe: error: cannot write project hook review; trust was not saved\n"
+    )
+
+
+def test_trust_review_flush_precedes_store_commit(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _hook_file(repo)
+    events = []
+
+    class Output:
+        def flush(self):
+            events.append("flush")
+
+    monkeypatch.setattr(sys, "stdout", Output())
+    original_write = hook_host._write_trust_store
+
+    def record_commit(entries, *, before_replace=None):
+        assert events[-1] == "flush"
+        assert all(isinstance(item, tuple) for item in events[:-1])
+        assert ("review", f"hookset sha256: {entries[0]['digest']}") in events
+        original_write(entries, before_replace=before_replace)
+
+    monkeypatch.setattr(hook_host, "_write_trust_store", record_commit)
+    hook_host.trust_project_hooks(repo, printer=lambda line: events.append(("review", line)))
+
+    assert events[-1][0] == "review"
+    assert "trusted project hooks" in events[-1][1]
+
+
+def test_trust_rejects_project_hook_change_after_review(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _hook_file(repo)
+    assert cli.main(["hooks", "trust", "--repo", str(repo)]) == 0
+    store = tmp_path / "home" / ".stateframe" / "trusted-hooks.json"
+    previous = store.read_bytes()
+    resource = repo / ".stateframe" / "context.py"
+    resource.write_text("print('reviewed')\n", encoding="utf-8")
+    original = hook_host.trust_project_hooks
+
+    def change_during_review(target, *, remove=False, printer=print):
+        def review(line):
+            printer(line)
+            if line.startswith("  file "):
+                resource.write_text("print('changed after review')\n", encoding="utf-8")
+
+        return original(target, remove=remove, printer=review)
+
+    monkeypatch.setattr(hook_host, "trust_project_hooks", change_during_review)
+    result = cli.main(["hooks", "trust", "--repo", str(repo)])
+
+    assert result == 2
+    assert store.read_bytes() == previous
+    assert not list(store.parent.glob(".trusted-hooks-*.tmp"))
+    assert capsys.readouterr().err == (
+        "stateframe: error: project hooks changed after review; trust not saved\n"
+    )
+
+
+def test_interrupted_trust_commit_keeps_previous_store(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _hook_file(repo)
+    assert cli.main(["hooks", "trust", "--repo", str(repo)]) == 0
+    store = tmp_path / "home" / ".stateframe" / "trusted-hooks.json"
+    previous = store.read_bytes()
+    resource = repo / ".stateframe" / "context.py"
+    resource.write_text("print('changed')\n", encoding="utf-8")
+
+    def interrupt(*_args, **_kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(hook_host.os, "replace", interrupt)
+    result = cli.main(["hooks", "trust", "--repo", str(repo)])
+
+    assert result == 130
+    assert store.read_bytes() == previous
+    assert not list(store.parent.glob(".trusted-hooks-*.tmp"))
+    assert capsys.readouterr().err == "stateframe: interrupted\n"
+
+
+def test_concurrent_project_trust_keeps_all_entries(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    repos = []
+    for index in range(6):
+        repo = tmp_path / f"repo-{index}"
+        repo.mkdir()
+        _hook_file(repo)
+        repos.append(repo)
+    start = threading.Barrier(len(repos) + 1)
+
+    def trust(repo):
+        start.wait()
+        hook_host.trust_project_hooks(repo, printer=lambda *_: None)
+
+    with ThreadPoolExecutor(max_workers=len(repos)) as workers:
+        futures = [workers.submit(trust, repo) for repo in repos]
+        start.wait()
+        for future in futures:
+            future.result()
+
+    store = tmp_path / "home" / ".stateframe" / "trusted-hooks.json"
+    entries = json.loads(store.read_text(encoding="utf-8"))["entries"]
+    assert {entry["repo"] for entry in entries} == {str(repo.resolve()) for repo in repos}
+
+
+def test_every_trust_store_writer_waits_for_the_store_lock(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+
+    from stateframe import hook_host, powerup_state
+
+    events = []
+
+    @contextmanager
+    def lock():
+        events.append("lock")
+        yield
+        events.append("unlock")
+
+    monkeypatch.setattr(hook_host, "_trust_store_lock", lock)
+    monkeypatch.setattr(hook_host, "_read_trust_store", lambda: events.append("read") or [])
+    monkeypatch.setattr(hook_host, "_write_trust_store", lambda *_a, **_k: events.append("write"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    powerup_state.trust(repo)
+    assert events == ["lock", "read", "write", "unlock"]
+    events.clear()
+    hook_host.trust_project_hooks(repo, remove=True, printer=lambda _line: None)
+    assert events == ["lock", "read", "unlock"]

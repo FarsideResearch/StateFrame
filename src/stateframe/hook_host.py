@@ -1,12 +1,16 @@
 """Host-side hook configuration, project trust, and runner lifecycle."""
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 import re
 import secrets
 import shlex
 import stat
+import sys
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from .state_dirs import private_directory
@@ -97,6 +101,21 @@ def _trust_path(*, create_directory: bool = False) -> Path | None:
     return directory / "trusted-hooks.json" if directory is not None else None
 
 
+@contextlib.contextmanager
+def _trust_store_lock():
+    path = _trust_path(create_directory=True)
+    if path is None:
+        raise HookTrustError("cannot locate hook trust store")
+    try:
+        descriptor = os.open(path.with_name(".trusted-hooks.lock"), os.O_RDWR | os.O_CREAT
+                             | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    except OSError as error:
+        raise HookTrustError("cannot lock hook trust store") from error
+    with os.fdopen(descriptor, "rb") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        yield
+
+
 def _validate_store(value: object) -> list[dict[str, str]]:
     if (type(value) is not dict or set(value) != {"schema", "entries"}
             or value.get("schema") != TRUST_SCHEMA or type(value.get("entries")) is not list):
@@ -158,7 +177,8 @@ def _read_trust_store() -> list[dict[str, str]]:
     return _validate_store(document)
 
 
-def _write_trust_store(entries: list[dict[str, str]]) -> None:
+def _write_trust_store(entries: list[dict[str, str]], *,
+                       before_replace: Callable[[], None] | None = None) -> None:
     if len(entries) > 4096:
         raise HookTrustError("trusted-hooks.json contains too many entries")
     path = _trust_path(create_directory=True)
@@ -187,6 +207,8 @@ def _write_trust_store(entries: list[dict[str, str]]) -> None:
             os.fsync(file_descriptor)
         finally:
             os.close(file_descriptor)
+        if before_replace is not None:
+            before_replace()
         os.replace(temporary, path.name, src_dir_fd=descriptor, dst_dir_fd=descriptor)
         os.fsync(descriptor)
     except HookTrustError:
@@ -307,45 +329,59 @@ def _definition_lines(hooks: HookSet, file_path: Path, digest: str) -> list[str]
     return lines
 
 
+def _trust_project_hooks(root: Path, path: Path, printer) -> str:
+    with _trust_store_lock():
+        records = _read_trust_store()
+        hooks = load_project_hook_file(root, shell_network="full")
+        if hooks is None:
+            raise HookConfigError(f"project hook file not found: {path}")
+        digest = hookset_trust_digest(hooks)
+        try:
+            for line in _definition_lines(hooks, path, digest):
+                printer(line)
+            sys.stdout.flush()
+        except (OSError, ValueError) as error:
+            if isinstance(error, BrokenPipeError):
+                with contextlib.suppress(OSError, ValueError, AttributeError):
+                    with open(os.devnull, "w") as sink:
+                        os.dup2(sink.fileno(), sys.stdout.fileno())
+            raise HookTrustError("cannot write project hook review; trust was not saved") from error
+        kept = [entry for entry in records
+                if (entry["repo"], entry["file"]) != (str(root), str(path))]
+        kept.append({"repo": str(root), "file": str(path), "digest": digest})
+        kept.sort(key=lambda entry: (entry["repo"], entry["file"], entry["digest"]))
+
+        def verify_reviewed() -> None:
+            try:
+                current = load_project_hook_file(root, shell_network="full")
+                if current is None or hookset_trust_digest(current) != digest:
+                    raise HookTrustError("project hooks changed after review; trust not saved")
+            except HookConfigError:
+                raise HookTrustError("project hooks changed after review; trust not saved") from None
+
+        _write_trust_store(kept, before_replace=verify_reviewed)
+        printer(f"trusted project hooks for {root}; trust store: {_trust_path()}")
+        return digest
+
+
 def trust_project_hooks(repo: Path, *, remove: bool = False, printer=print) -> str | None:
     """Trust the exact project hook digest, or withdraw trust for its path."""
     root, path = _project_path(repo)
-    if path is None:
-        if remove:
-            expected = str(root / ".stateframe" / "hooks.json")
+    if remove:
+        removed = path if path is not None else root / ".stateframe" / "hooks.json"
+        with _trust_store_lock():
             records = _read_trust_store()
             filtered = [entry for entry in records
-                        if (entry["repo"], entry["file"]) != (str(root), expected)]
+                        if (entry["repo"], entry["file"]) != (str(root), str(removed))]
             if len(filtered) != len(records):
                 _write_trust_store(filtered)
-                printer(f"removed project hook trust for {expected}")
-            else:
-                printer(f"no project hook trust found for {expected}")
-            return None
-        raise HookConfigError(f"project hook file not found: {root / _TRUST_RELATIVE.parent / 'hooks.json'}")
-    records = _read_trust_store()
-    if remove:
-        filtered = [entry for entry in records
-                    if (entry["repo"], entry["file"]) != (str(root), str(path))]
-        if len(filtered) != len(records):
-            _write_trust_store(filtered)
-            printer(f"removed project hook trust for {path}")
-        else:
-            printer(f"no project hook trust found for {path}")
+        found = len(filtered) != len(records)
+        printer(f"removed project hook trust for {removed}" if found
+                else f"no project hook trust found for {removed}")
         return None
-    hooks = load_project_hook_file(root, shell_network="full")
-    if hooks is None:
-        raise HookConfigError(f"project hook file not found: {path}")
-    digest = hookset_trust_digest(hooks)
-    kept = [entry for entry in records
-            if (entry["repo"], entry["file"]) != (str(root), str(path))]
-    kept.append({"repo": str(root), "file": str(path), "digest": digest})
-    kept.sort(key=lambda entry: (entry["repo"], entry["file"], entry["digest"]))
-    _write_trust_store(kept)
-    for line in _definition_lines(hooks, path, digest):
-        printer(line)
-    printer(f"trusted project hooks for {root}; trust store: {_trust_path()}")
-    return digest
+    if path is None:
+        raise HookConfigError(f"project hook file not found: {root / _TRUST_RELATIVE.parent / 'hooks.json'}")
+    return _trust_project_hooks(root, path, printer)
 
 
 def load_hooks(paths: tuple[Path, ...], *, repo: Path, shell_network: str,

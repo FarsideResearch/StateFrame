@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from _source_subprocess_env import source_subprocess_env
 import kernel_continuation_journal as journal_module
 import pytest
+import kernel_reason_log
 from kernel_continuation_executive import ContinuationExecutive
 from kernel_continuation_journal import ContinuationJournal
 from kernel_generated_context import GeneratedContext
@@ -38,6 +39,12 @@ def _write_probes(journal, *, batch):
     if batch:
         return journal.emit_batch(events, atomic=True)
     return [journal.emit(kind, **fields) for kind, fields in events]
+
+
+@pytest.fixture
+def _isolated_reason_log(monkeypatch):
+    # Journal close flushes process-wide reasons; give this parity check isolated state.
+    monkeypatch.setattr(kernel_reason_log, "_STATE", kernel_reason_log._fresh())
 
 
 def test_all_32_batched_observer_failures_are_accounted_for(tmp_path):
@@ -896,7 +903,8 @@ def test_interrupted_report_save_recovers_exactly_the_published_failures(tmp_pat
             assert restored["subscriber"] == "π" * 3000
 
 
-def test_no_failure_batch_and_single_append_are_byte_identical_after_replay_and_resume(tmp_path, monkeypatch):
+def test_no_failure_batch_and_single_append_are_byte_identical_after_replay_and_resume(
+        tmp_path, monkeypatch, _isolated_reason_log):
     monkeypatch.setattr(journal_module, "uuid", SimpleNamespace(
         uuid4=lambda: SimpleNamespace(hex="a" * 32)))
     monkeypatch.setattr(journal_module, "time", SimpleNamespace(time_ns=lambda: 123))

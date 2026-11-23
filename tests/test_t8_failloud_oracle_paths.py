@@ -12,7 +12,7 @@ func_index.load_repo_files, intent_oracle.extract and evaluate, witness_replay.f
 witness_replay._apply_intent_oracle and is_mirror_candidate (_apply_intent_oracle also records the failure on
 surviving evidence rows). ALREADY-COVERED or DEGRADE-OK: check_selection.overlay_fix_tests (prints and logs),
 intent_oracle._load, run_call's Exception and BaseException clauses, discriminate, witness_replay._row_key,
-_span_facts (both documented "no opinion" fallbacks), and _call_capture (both sites). intent_oracle.run_call's
+_span_facts (typed provider-unavailable outcomes with reason logging), and _call_capture (both sites). intent_oracle.run_call's
 BaseException clause keeps SystemExit from candidate code as a typed outcome; KeyboardInterrupt (Ctrl-C, and SIGTERM
 in the engine child) re-raises before it. DEAD: intent_oracle._docstring. PARSER-BOUNDARY: intent_oracle._literal
 and _build_example. AMBIGUOUS (no test, owner question): func_index.rank_name_phrase_anchors._feasible,
@@ -79,10 +79,10 @@ TRIAGED: dict[BroadExceptSite, str] = {
         "ALREADY-COVERED",
     BroadExceptSite("witness_replay", "_row_key", "Exception", "0a067200d8be"):
         "ALREADY-COVERED",
-    BroadExceptSite("witness_replay", "_span_facts", "Exception", "52d4e98dfef8"):
-        "DEGRADE-OK: documented no-opinion fallback",
-    BroadExceptSite("witness_replay", "_span_facts", "Exception", "b6276c81048c"):
-        "DEGRADE-OK: documented no-opinion fallback",
+    BroadExceptSite("witness_replay", "_span_facts", "Exception", "3fd66c847d89"):
+        "DEGRADE-OK: typed unavailable result and reason log",
+    BroadExceptSite("witness_replay", "_span_facts", "Exception", "69dcb1b027b8"):
+        "DEGRADE-OK: typed unavailable result and reason log",
     BroadExceptSite("witness_replay", "family_witness", "Exception", "bd07a5223c14"):
         "CRASH-HIDER: now fixed and asserted loud",
     BroadExceptSite("witness_replay", "_define_fn", "Exception", "c5ff3682421e"):
@@ -146,8 +146,8 @@ def test_oracle_tags_point_at_broad_except_sites() -> None:
         BroadExceptSite("func_index", "load_repo_files", "Exception", "5001c9b0a2da"),
         BroadExceptSite("intent_oracle", "extract", "Exception", "a1079c3c75c5"),
         BroadExceptSite("intent_oracle", "evaluate", "Exception", "d5e990b120da"),
-        BroadExceptSite("witness_replay", "_span_facts", "Exception", "52d4e98dfef8"),
-        BroadExceptSite("witness_replay", "_span_facts", "Exception", "b6276c81048c"),
+        BroadExceptSite("witness_replay", "_span_facts", "Exception", "3fd66c847d89"),
+        BroadExceptSite("witness_replay", "_span_facts", "Exception", "69dcb1b027b8"),
         BroadExceptSite("witness_replay", "family_witness", "Exception", "bd07a5223c14"),
         BroadExceptSite("witness_replay", "_apply_intent_oracle", "Exception", "c01eb6b16bcf"),
         BroadExceptSite("witness_replay", "is_mirror_candidate", "Exception", "3033a7e62428"),
@@ -446,15 +446,15 @@ def test_unrunnable_witness_call_returns_sentinel() -> None:
 
 
 def test_missing_mutations_module_is_no_opinion(monkeypatch: pytest.MonkeyPatch) -> None:
-    """SITE[witness_replay|_span_facts|Exception|52d4e98dfef8] (DEGRADE-OK): mutations unavailable -> None, the documented "no opinion"."""
+    """SITE[witness_replay|_span_facts|Exception|3fd66c847d89] (DEGRADE-OK): import failure returns typed unavailable."""
     import witness_replay as wr
 
     monkeypatch.setitem(sys.modules, "mutations", None)
-    assert wr._span_facts(["x = a < b"]) is None
+    assert isinstance(wr._span_facts(["x = a < b"]), wr.SpanFactsUnavailable)
 
 
 def test_span_facts_runtime_failure_is_no_opinion(monkeypatch: pytest.MonkeyPatch) -> None:
-    """SITE[witness_replay|_span_facts|Exception|b6276c81048c] (DEGRADE-OK): a span_facts crash -> None, so the witness does not apply."""
+    """SITE[witness_replay|_span_facts|Exception|69dcb1b027b8] (DEGRADE-OK): execution failure returns typed unavailable."""
     import mutations
     import witness_replay as wr
 
@@ -465,7 +465,7 @@ def test_span_facts_runtime_failure_is_no_opinion(monkeypatch: pytest.MonkeyPatc
         raise RuntimeError("forced: span facts failed")
 
     monkeypatch.setattr(mutations, "span_facts", refusing)
-    assert wr._span_facts(["x = a < b"]) is None
+    assert isinstance(wr._span_facts(["x = a < b"]), wr.SpanFactsUnavailable)
     assert calls == [["x = a < b"]]
 
 
