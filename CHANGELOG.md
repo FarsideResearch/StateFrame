@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.17 (2026-11-22)
 
 - Tests: the startup journal parity check is no longer affected by problems logged by earlier tests.
 
