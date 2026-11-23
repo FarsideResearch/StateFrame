@@ -3469,8 +3469,7 @@ def final_candidate(run: Path) -> dict[str, bytes | None] | None:
         # do not identify a submitted artifact and must never select its export.
         root = run / "worker/results/react_done_submissions"
         artifacts = list(root.glob(f"*/{digest.removeprefix('sha256:')}.json"))
-        if not artifacts and not captures:
-            return None
+        # Even a no-change submission has a stored artifact.
         if len(artifacts) != 1:
             raise RunError("sealed candidate artifact missing or ambiguous; candidate remains partial")
         path = artifacts[0]

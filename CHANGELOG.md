@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.16 (2026-11-22)
+
+- A submitted run whose stored result is missing is now refused with exit code 2 and leaves the repository unchanged. It was previously reported as submitted.
+
 ## 0.8.15 (2026-11-20)
 
 - Set `STATEFRAME_SEND1_WAVE4=on` to speed up the first model request by reusing verified startup work and deferring cache writes until the request is sealed. The switch defaults to off.
