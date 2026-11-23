@@ -15,6 +15,9 @@ REVIEWED_SIGNALS = {
     ("stateframe/engine/kernel_pid_liveness.py", "os.kill(pid, 0)"):
         "Signal zero is a liveness query and delivers no signal; checkpoint and env-seed temp sweeps "
         "share it. ESRCH or a Linux State-Z /proc entry counts as dead.",
+    ("stateframe/engine/kernel_check_watchdog.py", "os.kill(pid, 0)"):
+        "Signal zero delivers nothing: success only leaves a missing-row liveness result unknown; "
+        "ProcessLookupError proves the PID is gone.",
     ("stateframe/engine/kernel_pid_liveness.py", "os.killpg(pgid, 0)"):
         "Signal zero probes group existence; Linux /proc distinguishes zombie-only groups from live groups.",
     ("stateframe/engine/kernel_exec_supervisor.py", "os.kill(row.pid, signal.SIGKILL)"):
@@ -146,6 +149,17 @@ def _calls(source: str, relative: str) -> tuple[int, list[tuple[int, str]]]:
     return checked, violations
 
 
+def _reviewed_occurrences(source: str, relative: str) -> Counter:
+    found = Counter()
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call):
+            continue
+        key = (relative, ast.unparse(node))
+        if key in REVIEWED_SIGNALS:
+            found[key] += 1
+    return found
+
+
 def test_every_production_signal_has_reviewed_authority():
     total = 0
     found = Counter()
@@ -156,16 +170,36 @@ def test_every_production_signal_has_reviewed_authority():
         examined, errors = _calls(source, relative)
         total += examined
         violations.extend((relative, line, detail) for line, detail in errors)
-        for node in ast.walk(ast.parse(source)):
-            if isinstance(node, ast.Call):
-                key = (relative, ast.unparse(node))
-                if key in REVIEWED_SIGNALS:
-                    found[key] += 1
+        found.update(_reviewed_occurrences(source, relative))
     assert total > 0
     assert not violations, violations
     expected = Counter({key: 2 if key[0] == "stateframe/outer_checks.py" else 1
                         for key in REVIEWED_SIGNALS})
     assert found == expected, found
+
+
+def test_watchdog_signal_zero_authority_is_exact_and_singleton():
+    relative = "stateframe/engine/kernel_check_watchdog.py"
+    key = (relative, "os.kill(pid, 0)")
+    expected = Counter({key: 1})
+    exact = "import os\nos.kill(pid, 0)\n"
+
+    assert _calls(exact, relative) == (1, [])
+    assert _reviewed_occurrences(exact, relative) == expected
+    for mutant in (
+        "import os\nos.kill(pid, 1)\n",
+        "import os\nos.kill(other_pid, 0)\n",
+        "import os\nos.killpg(pid, 0)\n",
+    ):
+        examined, violations = _calls(mutant, relative)
+        assert examined == 1
+        assert violations
+        assert _reviewed_occurrences(mutant, relative) != expected
+
+    duplicate = exact + "os.kill(pid, 0)\n"
+    assert _calls(duplicate, relative) == (2, [])
+    assert _reviewed_occurrences(duplicate, relative) == Counter({key: 2})
+    assert _reviewed_occurrences(duplicate, relative) != expected
 
 
 def test_signal_guard_rejects_planted_calls():
