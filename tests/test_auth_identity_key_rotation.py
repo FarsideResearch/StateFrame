@@ -11,6 +11,7 @@ import secrets
 import shutil
 from pathlib import Path
 
+import kernel_reason_log as reason_log
 import kernel_request_auth_identity as auth
 
 
@@ -67,8 +68,17 @@ def test_home_recreated_between_runs_initializes_a_fresh_identity(tmp_path):
 
 
 def test_fallback_salt_is_replaced_once_a_valid_key_appears(tmp_path, monkeypatch):
+    monkeypatch.setattr(reason_log, "_STATE", reason_log._fresh())
     home = tmp_path / "home"
-    monkeypatch.setattr(auth, "_create_secret", lambda path: None)
+
+    def no_secret(
+        _path: Path,
+        *,
+        failure_class: list[str] | None = None,
+    ) -> None:
+        return None
+
+    monkeypatch.setattr(auth, "_create_secret", no_secret)
     fallback = auth._installation_secret(home)
     assert fallback == auth._fallback_secret()
     assert auth._installation_secret(home) == fallback

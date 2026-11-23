@@ -1,8 +1,13 @@
 """Final cache layout keeps current authority on the submitted tail."""
 from __future__ import annotations
 
+import ast
 import copy
 import json
+import random
+import subprocess
+from collections.abc import Mapping
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -44,6 +49,55 @@ def _body(exchange=False):
     return {"messages": messages, "tools": []}
 
 
+def _git_base_projector():
+    import kernel_cache_layout_candidate as candidate
+
+    root = Path(__file__).resolve().parents[1]
+    source = subprocess.run(
+        ["git", "show", "4f162cba:src/stateframe/engine/kernel_cache_layout_candidate.py"],
+        cwd=root, check=True, capture_output=True, text=True,
+    ).stdout
+    tree = ast.parse(source)
+    wanted = {"_cacheable_frame_content", "_project_final_cache_layout",
+              "_checked_final_cache_projection"}
+    snippet = "\n\n".join(ast.get_source_segment(source, node) for node in tree.body
+                            if isinstance(node, ast.FunctionDef) and node.name in wanted)
+    namespace = {"copy": copy, "json": json, "Mapping": Mapping,
+                 "SOURCE_COVERAGE_PREFIX": candidate.SOURCE_COVERAGE_PREFIX,
+                 "FinalCacheLayoutProjectionError": candidate.FinalCacheLayoutProjectionError}
+    exec(compile(snippet, "git-show-4f162cba-kernel_cache_layout_candidate.py", "exec"),
+         namespace)
+    return namespace["_checked_final_cache_projection"]
+
+
+def _random_projection_body(rng, index):
+    body = _body(exchange=bool(index % 2))
+    frame = body["messages"][2]
+    payload = json.loads(frame["content"].split("\n", 1)[1])
+    framefit = payload["state"]["framefit5"]
+    framefit["evidence_pin"] = f"[EVIDENCEPIN]λ-{index}-雪[/EVIDENCEPIN]"
+    framefit["random_unicode"] = ["é", "λ", "雪", f"line\n{index}"]
+    frame["content"] = "[StateFrame]\n" + json.dumps(payload, ensure_ascii=False,
+                                                        sort_keys=True, separators=(",", ":"))
+
+    rows = [
+        {"role": "user", "content": f"note {index}: \"λ\" / 雪", "extra": {"n": index}},
+        {"role": "user", "content": "[Read lockout] current instruction \u03bb"},
+        {"role": "user", "content": "[Source coverage]\nhealed \u96ea"},
+    ]
+    if index % 3 == 0:
+        rows.append(copy.deepcopy(rows[0]))  # Duplicate rows remain positional.
+    if index % 4 == 0:
+        rows.pop(0)  # Exercise deletion between trials.
+    if index % 5 == 0:
+        rows.reverse()  # Exercise moved rows and rebuilt positional indexes.
+    split = rng.randrange(len(rows) + 1)
+    messages = body["messages"]
+    # Keep the frame's host ownership explicit while changing rows around it.
+    body["messages"] = messages[:2] + rows[:split] + [frame] + rows[split:] + messages[3:]
+    return body
+
+
 def _project(monkeypatch, exchange=False):
     monkeypatch.setenv("STATEFRAME_FINAL_CACHE_LAYOUT", "on")
     monkeypatch.setattr("kernel_request_source_window.verify_final_source_delivery",
@@ -57,6 +111,227 @@ def _project(monkeypatch, exchange=False):
         inputs={"token_ceiling": 1000, "byte_ceiling": 100000,
                 "source_plan": {}, "sources": {}, "receipt": None})
     return original, projected
+
+
+def test_projection_partition_runs_once_per_unchanged_frame_row_per_transaction(monkeypatch):
+    import kernel_cache_layout_candidate as candidate
+    import kernel_working_set_cache as render_cache
+
+    executions = []
+    original = render_cache.projection_row
+
+    def counted(function, row_content, inputs, compute):
+        def count_compute():
+            executions.append((function.__name__, row_content, inputs))
+            return compute()
+        return original(function, row_content, inputs, count_compute)
+
+    monkeypatch.setattr(render_cache, "projection_row", counted)
+    base = _body(exchange=True)
+    trials = [copy.deepcopy(base) for _ in range(4)]
+    trials[1]["messages"].insert(3, {"role": "user", "content": "duplicate λ"})
+    trials[2]["messages"][3]["content"] += " moved source text"
+    del trials[3]["messages"][3]
+
+    @render_cache.transaction
+    def run_trials():
+        for body in trials:
+            candidate._checked_final_cache_projection(body)
+        active = render_cache._ACTIVE.get()
+        assert active is not None
+        assert len(executions) == 2
+        assert {name for name, _row, _inputs in executions} == {
+            "_partition_authority", "_restore_and_partition"}
+        assert len(active.projections) == 2
+        assert active.projection_bytes <= render_cache.MAX_PROJECTION_BYTES
+
+    run_trials()
+    assert render_cache._ACTIVE.get() is None
+    candidate._checked_final_cache_projection(copy.deepcopy(base))
+    assert len(executions) == 4  # A new transaction recomputes both frame-row results.
+
+
+def test_projection_row_binds_content_inputs_and_returns_fresh_plain_results():
+    import kernel_working_set_cache as render_cache
+
+    calls = []
+
+    @render_cache.transaction
+    def exercise():
+        def step(label):
+            calls.append(label)
+            return {"nested": {"value": label, "items": [label]}}
+
+        one = render_cache.projection_row(step, "row λ", ((), True), lambda: step("final"))
+        two = render_cache.projection_row(step, "row λ", ((), False), lambda: step("legacy"))
+        three = render_cache.projection_row(step, "other row", ((), True), lambda: step("other"))
+        assert one["nested"]["value"] == "final"
+        assert two["nested"]["value"] == "legacy"
+        assert three["nested"]["value"] == "other"
+        assert type(one) is dict and type(one["nested"]["items"]) is list
+        one["nested"]["value"] = "caller-only"
+        one["nested"]["items"].append("caller-only")
+        again = render_cache.projection_row(
+            step, "row λ", ((), True), lambda: step("should-not-run"))
+        assert again == {"nested": {"value": "final", "items": ["final"]}}
+        assert again is not one and again["nested"] is not one["nested"]
+
+    exercise()
+    assert calls == ["final", "legacy", "other"]
+
+
+def test_projection_cache_eviction_and_oversize_skip_preserve_results(monkeypatch):
+    import kernel_working_set_cache as render_cache
+
+    monkeypatch.setattr(render_cache, "MAX_PROJECTION_ROWS", 1)
+    monkeypatch.setattr(render_cache, "MAX_PROJECTION_BYTES", 1024)
+    calls = []
+
+    @render_cache.transaction
+    def exercise():
+        def render(label):
+            calls.append(label)
+            return {"value": label}
+
+        first = render_cache.projection_row(render, "a", (), lambda: render("a"))
+        second = render_cache.projection_row(render, "b", (), lambda: render("b"))
+        first_again = render_cache.projection_row(render, "a", (), lambda: render("a"))
+        assert first["value"] == first_again["value"] == "a"
+        assert second["value"] == "b"
+        active = render_cache._ACTIVE.get()
+        assert len(active.projections) == 1
+        assert active.projection_bytes <= 1024
+
+        large = "x" * 2048
+        assert render_cache.projection_row(render, large, (), lambda: render("large"))["value"] == "large"
+        assert len(active.projections) == 1
+        assert all(key[1] != large for key in active.projections)
+        assert active.projection_bytes <= 1024
+
+    exercise()
+    assert calls == ["a", "b", "a", "large"]
+
+
+def test_projection_cache_checks_catch_planted_mutants():
+    import kernel_working_set_cache as render_cache
+
+    def key_probe(memo):
+        @render_cache.transaction
+        def run():
+            first = memo(dict, "same", ("final",), lambda: {"kind": "final"})
+            second = memo(dict, "same", ("legacy",), lambda: {"kind": "legacy"})
+            assert first["kind"] != second["kind"]
+        run()
+
+    def key_mutant(function, row, _inputs, compute):
+        return render_cache.projection_row(function, row, (), compute)
+
+    key_probe(render_cache.projection_row)
+    with pytest.raises(AssertionError):
+        key_probe(key_mutant)
+
+    def lifetime_probe(memo):
+        calls = []
+        for _ in range(2):
+            @render_cache.transaction
+            def run():
+                memo(dict, "same", (), lambda: calls.append(True) or {"ok": True})
+            run()
+        assert len(calls) == 2
+
+    lifetime_probe(render_cache.projection_row)
+    leaked = {}
+
+    def lifetime_mutant(function, row, inputs, compute):
+        key = (function, row, inputs)
+        if key not in leaked:
+            leaked[key] = compute()
+        return leaked[key]
+
+    with pytest.raises(AssertionError):
+        lifetime_probe(lifetime_mutant)
+
+    def mutation_probe(memo):
+        @render_cache.transaction
+        def run():
+            first = memo(dict, "same", (), lambda: {"nested": {"value": "clean"}})
+            try:
+                first["nested"]["value"] = "poison"
+            except TypeError:
+                return
+            second = memo(dict, "same", (), lambda: {"nested": {"value": "clean"}})
+            assert second["nested"]["value"] == "clean"
+        run()
+
+    mutation_probe(render_cache.projection_row)
+    shared = {}
+
+    def shared_mutable_mutant(function, row, inputs, compute):
+        key = (function, row, inputs)
+        if key not in shared:
+            shared[key] = compute()
+        return shared[key]
+
+    with pytest.raises(AssertionError):
+        mutation_probe(shared_mutable_mutant)
+
+
+def test_final_projection_matches_git_base_across_random_rows_and_mutations():
+    import kernel_cache_layout_candidate as candidate
+    from kernel_cache_layout_view import semantic_index_map, semantic_messages
+    from kernel_working_set_cache import transaction
+
+    old_project = _git_base_projector()
+    rng = random.Random(0x5F)
+    bodies = [_random_projection_body(rng, index) for index in range(36)]
+
+    @transaction
+    def compare_trials():
+        for case, body in enumerate(bodies):
+            try:
+                old = old_project(copy.deepcopy(body))
+            except ValueError as error:
+                pytest.fail(f"git base rejected randomized case {case}: {error}")
+            new = candidate._checked_final_cache_projection(copy.deepcopy(body))
+            assert json.dumps(new, ensure_ascii=False, separators=(",", ":")).encode() == \
+                   json.dumps(old, ensure_ascii=False, separators=(",", ":")).encode()
+            assert semantic_messages(new["messages"]) == body["messages"]
+            assert semantic_index_map(new["messages"]) == semantic_index_map(old["messages"])
+
+            # Mutating a caller's projected rows cannot alter the cached partition result
+            # or another projection in the same transaction.
+            new["messages"][0]["content"] = "mutated returned row"
+            new["messages"][-1]["content"] = "mutated overlay"
+            old_again = old_project(copy.deepcopy(body))
+            new_again = candidate._checked_final_cache_projection(copy.deepcopy(body))
+            assert new_again == old_again
+
+    compare_trials()
+
+
+@pytest.mark.parametrize("layout", ["final_cache", "stable_first"])
+def test_allocator_layouts_match_git_base_after_healed_index_rebuild(monkeypatch, layout):
+    import kernel_cache_layout_candidate as candidate
+    from kernel_working_set_allocator import FULL
+    from kernel_working_set_cache import transaction
+    from kernel_working_set_render import render_assignment
+    from test_working_set_render import snapshot, source
+
+    slot = source("memo", 'quoted " λ\n')
+    snap = snapshot(slot, body=_body(exchange=True), layouts=(layout,),
+                    current_revisions=((slot.identity.path, slot.identity.revision),))
+    assignment = {slot.key: FULL}
+    old_project = _git_base_projector()
+
+    @transaction
+    def compare():
+        optimized = render_assignment(snap, assignment, layout)
+        monkeypatch.setattr(candidate, "_checked_final_cache_projection", old_project)
+        baseline = render_assignment(snap, assignment, layout)
+        assert optimized.wire == baseline.wire
+        assert optimized.certificate == baseline.certificate
+
+    compare()
 
 
 @pytest.mark.parametrize("exchange", [False, True])

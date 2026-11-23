@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import multiprocessing
 import os
@@ -14,6 +15,7 @@ from types import SimpleNamespace
 import kernel_checkpoint
 import kernel_request_auth_identity
 import kernel_request_diet
+import kernel_reason_log
 import pytest
 from _timeouts import scaled
 from fixtures.process_signals import signal_multiprocessing_owned
@@ -210,6 +212,65 @@ def test_identity_key_mode_is_exact_under_zero_umask(tmp_path, monkeypatch):
         os.umask(previous_umask)
 
     assert stat.S_IMODE((state_home / "identity.key").stat().st_mode) == 0o600
+
+
+def test_identity_key_creation_failure_reports_process_local_fallback(
+        tmp_path, monkeypatch):
+    state_home = _set_isolated_home(monkeypatch, tmp_path, "fallback")
+    problems_path = tmp_path / "problems.jsonl"
+    diagnostic_stream = io.StringIO()
+    journal = SimpleNamespace(rows=[])
+    journal.emit = lambda event, **fields: journal.rows.append((event, fields))
+    monkeypatch.setattr(kernel_reason_log, "_STATE", kernel_reason_log._fresh())
+    kernel_reason_log.configure(
+        level="WARN", journal=journal, problems_path=problems_path,
+        stream=diagnostic_stream,
+    )
+
+    sensitive_message = "identity-create-sensitive-marker"
+    real_open = os.open
+
+    def deny_identity_key_creation(path, flags, *args, **kwargs):
+        candidate = Path(path)
+        if (candidate.parent == state_home and candidate.name.startswith(".identity.key.")
+                and flags & os.O_WRONLY):
+            raise PermissionError(sensitive_message)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", deny_identity_key_creation)
+    first_secret = kernel_request_auth_identity._installation_secret(state_home)
+    second_secret = kernel_request_auth_identity._installation_secret(state_home)
+    auth_value = "authentication-value-marker"
+    kernel_request_auth_identity.auth_binding_for_key(auth_value)
+
+    assert first_secret == second_secret
+    assert not (state_home / "identity.key").exists()
+    assert journal.rows == []
+
+    valid_home = _set_isolated_home(monkeypatch, tmp_path, "valid")
+    valid_home.mkdir(parents=True, exist_ok=True)
+    valid_key = valid_home / "identity.key"
+    valid_secret = b"v" * 32
+    valid_key.write_bytes(valid_secret)
+    valid_key.chmod(0o600)
+    assert kernel_request_auth_identity._installation_secret(valid_home) == valid_secret
+
+    diagnostics = diagnostic_stream.getvalue()
+    problems = problems_path.read_text(encoding="utf-8") if problems_path.exists() else ""
+    combined = diagnostics + problems
+    assert "PermissionError" in combined
+    assert diagnostics.count("process-local installation identity") == 1
+    assert len(diagnostics.splitlines()) == 1
+    assert len(diagnostics) <= kernel_reason_log.MAX_LINE_CHARS
+    assert problems.count("\n") == 1
+    assert journal.rows == []
+    for marker in (
+        str(state_home), sensitive_message, auth_value,
+        first_secret, first_secret.hex(),
+    ):
+        if isinstance(marker, bytes):
+            marker = marker.decode("ascii", errors="ignore")
+        assert marker not in combined
 
 
 def test_identity_key_bytes_are_registered_with_checkpoint_guard(tmp_path, monkeypatch):

@@ -10,6 +10,7 @@ journal event (journal positions are identity-bearing there).
 from __future__ import annotations
 
 import ast
+import builtins
 import json
 import os
 import re
@@ -30,6 +31,31 @@ MAX_LINE_CHARS = 400
 _WS = re.compile(r"\s+")
 _LOCK = threading.RLock()
 _STATE: dict = {}
+
+_SAFE_BUILTIN_EXCEPTION_NAMES: tuple[tuple[type[BaseException], str], ...] = (
+    (builtins.BlockingIOError, "BlockingIOError"),
+    (builtins.FileExistsError, "FileExistsError"),
+    (builtins.FileNotFoundError, "FileNotFoundError"),
+    (builtins.InterruptedError, "InterruptedError"),
+    (builtins.IsADirectoryError, "IsADirectoryError"),
+    (builtins.MemoryError, "MemoryError"),
+    (builtins.NotADirectoryError, "NotADirectoryError"),
+    (builtins.OSError, "OSError"),
+    (builtins.PermissionError, "PermissionError"),
+    (builtins.RuntimeError, "RuntimeError"),
+    (builtins.TimeoutError, "TimeoutError"),
+    (builtins.TypeError, "TypeError"),
+    (builtins.ValueError, "ValueError"),
+)
+
+
+def builtin_exception_name(error: BaseException) -> str:
+    """Return a reviewed builtin name, or ``other`` without inspecting custom names."""
+    error_type = type(error)
+    for builtin_type, name in _SAFE_BUILTIN_EXCEPTION_NAMES:
+        if error_type is builtin_type:
+            return name
+    return "other"
 
 
 def _fresh() -> dict:
@@ -346,7 +372,7 @@ def run_summary() -> dict:
         _bump_self_error()
         count = _STATE.get("self_errors")
         return {"total": 0, "by_cause": {}, "self_errors": count if isinstance(count, int) and count > 0 else 1,
-                "summary_error": type(exc).__name__}
+                "summary_error": builtin_exception_name(exc)}
 
 
 def flush_summary(journal: object | None = None) -> dict | None:

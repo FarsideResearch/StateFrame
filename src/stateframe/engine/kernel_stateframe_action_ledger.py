@@ -1591,9 +1591,12 @@ def build_action_context(
             "reason": "shell_execution_requires_current_source_read",
         }
     if workspace_root is not None and selected_site_locator is not None:
-        open_edit_site, refreshed_site_locator = _read_current_open_site(
-            workspace_root, selected_site_locator
-        )
+        try:
+            open_edit_site, refreshed_site_locator = _read_current_open_site(
+                workspace_root, selected_site_locator
+            )
+        except ActionLedgerError:
+            site_context = {"status": "UNVERIFIABLE", "reason": MISSING_EXACT_CURRENT_SITE}
     elif workspace_root is not None and site_action_seen:
         if not degrade_missing_exact_site:
             raise ActionLedgerError(

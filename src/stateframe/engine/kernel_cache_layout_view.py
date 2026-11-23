@@ -28,10 +28,40 @@ def is_cache_layout(messages: object) -> bool:
             and messages[-1].get("name") in {PAGE_LOG_FINAL_MESSAGE_NAME, FINAL_LAYOUT_NAME})
 
 
+def _restore_and_partition(base, fields, field_values):
+    """Return the restored payload and its canonicality result."""
+    from kernel_stateframe_page_log import _partition_authority, _restore_authority
+
+    restored = _restore_authority(base, fields)
+    repartitioned, canonical_fields = _partition_authority(restored, final=True)
+    canonical = (repartitioned == base
+                 and {json.dumps(row["path"]): row["value"] for row in canonical_fields}
+                 == field_values)
+    return restored, canonical
+
+
+def _memoized_restored_partition(base, fields, field_values, frame_content: str):
+    # Inputs read by _restore_and_partition are the parsed cacheable frame,
+    # parsed overlay fields, resolved overlay values, and final=True. Bind them
+    # as exact row text plus JSON encodings of the other two input structures;
+    # unrelated order metadata in the final row is deliberately not an input.
+    # Function identity binds the fixed restore/partition rules. The memo stores
+    # a serialized snapshot, so each caller receives a fresh payload it can use.
+    from kernel_working_set_cache import projection_row
+
+    encoded_fields = json.dumps(fields, ensure_ascii=False, separators=(",", ":"),
+                                allow_nan=False).encode("utf-8", errors="surrogatepass")
+    encoded_values = json.dumps(field_values, ensure_ascii=False, separators=(",", ":"),
+                                allow_nan=False).encode("utf-8", errors="surrogatepass")
+    return projection_row(
+        _restore_and_partition, frame_content, (encoded_fields, encoded_values, True),
+        lambda: _restore_and_partition(base, fields, field_values))
+
+
 def _final_layout(messages):
     """Validate and rebuild the original message order from the submitted wire."""
     from kernel_stateframe_page_log import (
-        _partition_authority, _payload_has_authority_keys, _restore_authority,
+        _partition_authority, _payload_has_authority_keys,
     )
     from kernel_stateframe_message_layout import STATEFRAME_PREFIX
     from kernel_stable_wire_ownership import CanonicalMessages
@@ -181,11 +211,9 @@ def _final_layout(messages):
         raise CacheLayoutError("final cache authority paths are malformed or duplicated")
     fields = [{"path": row["path"], "value": field_values[json.dumps(row["path"])]}
               for row in overlay["fields"]]
-    restored = _restore_authority(base, fields)
-    repartitioned, canonical_fields = _partition_authority(restored, final=True)
-    if (repartitioned != base
-            or {json.dumps(row["path"]): row["value"] for row in canonical_fields}
-            != field_values):
+    restored, canonical = _memoized_restored_partition(
+        base, fields, field_values, frame["content"])
+    if not canonical:
         raise CacheLayoutError("final cache authority overlay is not canonical")
 
     if order is None:

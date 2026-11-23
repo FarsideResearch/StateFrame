@@ -25,13 +25,13 @@ def annotate_rejection(observation: str, *, root: str | Path,
             or _MARKER in observation):
         return observation
 
-    root_path = Path(root).resolve()
-    candidate = Path(path)
-    candidate = (candidate if candidate.is_absolute() else root_path / candidate).resolve()
     try:
+        root_path = Path(root).resolve()
+        candidate = Path(path)
+        candidate = (candidate if candidate.is_absolute() else root_path / candidate).resolve()
         relative_path = candidate.relative_to(root_path).as_posix()
         source = candidate.read_bytes()
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, RuntimeError) as error:
         return observation.rstrip() + (
             "\n\n[Fresh current-file context unavailable: "
             f"{type(error).__name__}; source was not changed.]"

@@ -44,6 +44,8 @@ The run's history lives in the run directory on disk, not in process memory, and
 
 `stateframe resume <run-dir>` restores a signed checkpoint by default when one qualifies, verifies that the next request matches the recorded one byte for byte, and continues live. Checkpoint restore applies to runs with and without the shell; runs with hooks or per-step models resume by replay and never restore a checkpoint. If no checkpoint qualifies or the restore is unfaithful, it replays the recorded responses without new model calls. Set `STATEFRAME_CHECKPOINT=off` to skip checkpoint saves.
 
+When replay archives an earlier attempt, removing checkpoint payloads is best effort. An I/O failure prints one `checkpoint cleanup` diagnostic for the affected entry and resume continues; later entries are still compacted. A checkpoint whose state payload was partly removed is incomplete and cannot be selected for restore. Files left by a failed removal are not changed by that failure and can be removed by a later compaction attempt.
+
 The tool tape records intent before execution and completion afterward for shell, job, Git, web and custom calls. Native file operations follow the existing edit replay path. Read-only observations are served from the tape. Reproducible taped local effects are repeated and compared with their recorded exit, workspace and environment state. Outside effects require `--replay-external`; an incomplete taped operation or mismatch refuses resume, including during checkpoint fallback. Running background jobs are not relaunched.
 
 The parent-only `parallel` tool follows the same state rule: projected subframe proposals become authoritative only

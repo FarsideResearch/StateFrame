@@ -7,6 +7,11 @@ import os
 from collections.abc import Mapping, Sequence
 from statistics import median
 
+if __package__:
+    from .kernel_reason_log import builtin_exception_name
+else:
+    from kernel_reason_log import builtin_exception_name
+
 
 FLAG_ENV = "STATEFRAME_RUN_VITALS"
 SCHEMA = "stateframe-run-vitals/1"
@@ -426,13 +431,38 @@ def emit_run_vitals(journal: object) -> dict[str, object] | None:
     try:
         setattr(journal, "_run_vitals_emitted", True)
         observer_failed = bool(getattr(journal, "_run_vitals_observer_failed", False))
+        summary = accumulator.snapshot(observer_failed=observer_failed)
+        checkpoint_summary = _checkpoint_vitals()
+    except Exception:
+        return None
+    try:
         return emitter(
             "run_vitals",
             producer="kernel_run_vitals",
-            **accumulator.snapshot(observer_failed=observer_failed),
-            **_checkpoint_vitals(),
+            **summary,
+            **checkpoint_summary,
         )
-    except Exception:
+    except Exception as error:
+        try:
+            if __package__:
+                from .kernel_reason_log import emit_reason
+            else:
+                from kernel_reason_log import emit_reason
+
+            reason_code = "run_vitals_emit_failed"
+            emit_reason(
+                "fallback",
+                reason_code,
+                "kernel_run_vitals",
+                "terminal vitals write failed",
+                f"{reason_code} ({builtin_exception_name(error)})",
+                journal=False,
+            )
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            # A diagnostic failure must not change the completed run's outcome.
+            pass
         return None
 
 

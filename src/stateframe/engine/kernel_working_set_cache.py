@@ -7,6 +7,8 @@ exit, including failures. Independent certificate verification suspends it.
 from __future__ import annotations
 
 import json
+import pickle
+import sys
 from collections import OrderedDict
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -19,12 +21,14 @@ class _Cache:
     values: dict[tuple[object, ...], object] = field(default_factory=dict)
     renders: OrderedDict[tuple[object, ...], object] = field(default_factory=OrderedDict)
     messages: OrderedDict[tuple[object, ...], bytes] = field(default_factory=OrderedDict)
+    projections: OrderedDict[tuple[object, ...], tuple[bytes, int]] = field(default_factory=OrderedDict)
     envelopes: dict[int, tuple[tuple[str, bytes], ...]] = field(default_factory=dict)
     # Snapshot families: a derived snapshot whose provider bytes cannot differ
     # from its base (only the tokenizer identity changed) shares trial wires.
     bases: dict[int, object] = field(default_factory=dict)
     render_bytes: int = 0
     message_bytes: int = 0
+    projection_bytes: int = 0
 
 
 _ACTIVE: ContextVar[_Cache | None] = ContextVar("working_set_render_cache", default=None)
@@ -32,6 +36,52 @@ MAX_RENDERS = 128
 MAX_MESSAGES = 1024
 MAX_RENDER_BYTES = 16 * 1024 * 1024
 MAX_MESSAGE_BYTES = 4 * 1024 * 1024
+MAX_PROJECTION_ROWS = 512
+MAX_PROJECTION_BYTES = MAX_RENDER_BYTES
+
+
+def _projection_heap_size(value) -> int:
+    """Conservative object-size estimate for an acyclic projection key."""
+    size = sys.getsizeof(value)
+    if isinstance(value, dict):
+        return size + sum(_projection_heap_size(key) + _projection_heap_size(child)
+                          for key, child in value.items())
+    if isinstance(value, (list, tuple)):
+        return size + sum(_projection_heap_size(child) for child in value)
+    return size
+
+
+def projection_row(function, row_content: str, inputs: tuple[object, ...], compute):
+    """Memoize a pure row projection by exact row text and all explicit inputs.
+
+    The cache keeps a serialized snapshot and reconstructs a fresh result for
+    each caller, preserving the projection's original container types.
+    """
+    cache = _ACTIVE.get()
+    if cache is None:
+        return compute()
+    key = (function, row_content, inputs)
+    cached = cache.projections.get(key)
+    if cached is not None:
+        cache.projections.move_to_end(key)
+        return pickle.loads(cached[0])
+
+    value = compute()
+    try:
+        encoded = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+    except (pickle.PickleError, TypeError, AttributeError, RecursionError):
+        return value
+    # Count the key and serialized value, plus a fixed allowance for the
+    # tuple/OrderedDict entry. Repeated references are deliberately counted twice.
+    size = _projection_heap_size(key) + sys.getsizeof(encoded) + 256
+    if size <= MAX_PROJECTION_BYTES:
+        cache.projections[key] = (encoded, size)
+        cache.projection_bytes += size
+        while (len(cache.projections) > MAX_PROJECTION_ROWS
+               or cache.projection_bytes > MAX_PROJECTION_BYTES):
+            _, (_removed, removed_size) = cache.projections.popitem(last=False)
+            cache.projection_bytes -= removed_size
+    return pickle.loads(encoded)
 
 
 def transaction(function):

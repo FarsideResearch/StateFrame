@@ -10,6 +10,11 @@ import stat
 import sys
 import threading
 
+if __package__:
+    from .kernel_reason_log import builtin_exception_name
+else:
+    from kernel_reason_log import builtin_exception_name
+
 
 # key path -> (key file fingerprint at load, or None for the fallback salt, secret).
 _AUTH_BINDING_SECRET_CACHE: dict[str, tuple[tuple[int, ...] | None, bytes]] = {}
@@ -26,7 +31,7 @@ def _valid_secret_file(info: os.stat_result, *, uid: int) -> bool:
     )
 
 
-def _read_secret(path: Path) -> bytes | None:
+def _read_secret(path: Path, *, failure_class: list[str] | None = None) -> bytes | None:
     """Read only an owned, regular, exact-mode installation key."""
     descriptor = None
     try:
@@ -52,8 +57,10 @@ def _read_secret(path: Path) -> bytes | None:
         if len(secret) != 32 or not _valid_secret_file(os.fstat(descriptor), uid=uid):
             return None
         return secret
-    except Exception:
+    except Exception as error:
         # Storage and validation failures safely cause a remeasurement.
+        if failure_class is not None:
+            failure_class.append(_exception_class_name(error))
         return None
     finally:
         if descriptor is not None:
@@ -72,7 +79,16 @@ def _fsync_directory(directory: Path) -> None:
         os.close(descriptor)
 
 
-def _create_secret(path: Path) -> bytes | None:
+def _exception_class_name(error: Exception) -> str:
+    """Return only an allowlisted builtin exception name for a local diagnostic."""
+    return builtin_exception_name(error)
+
+
+def _create_secret(
+    path: Path,
+    *,
+    failure_class: list[str] | None = None,
+) -> bytes | None:
     """Publish a new installation key with no wider-mode visibility window."""
     temporary: Path | None = None
     try:
@@ -104,8 +120,10 @@ def _create_secret(path: Path) -> bytes | None:
         os.unlink(temporary)
         temporary = None
         _fsync_directory(path.parent)
-        return _read_secret(path)
-    except Exception:
+        return _read_secret(path, failure_class=failure_class)
+    except Exception as error:
+        if failure_class is not None:
+            failure_class.append(_exception_class_name(error))
         return None
     finally:
         if temporary is not None:
@@ -121,6 +139,23 @@ def _fallback_secret() -> bytes:
         if _AUTH_BINDING_FALLBACK_SECRET is None:
             _AUTH_BINDING_FALLBACK_SECRET = secrets.token_bytes(32)
         return _AUTH_BINDING_FALLBACK_SECRET
+
+
+def _report_process_local_fallback(cause: str) -> None:
+    """Report fallback without exposing identity paths, values, or exception messages."""
+    try:
+        if __package__:
+            from .kernel_reason_log import emit_reason
+        else:
+            from kernel_reason_log import emit_reason
+        emit_reason(
+            "fallback", "installation_identity_process_local", "request_auth_identity",
+            "using process-local installation identity",
+            f"persistent identity key unavailable ({cause})", level="WARN", journal=False,
+        )
+    except Exception:
+        # Diagnostics must never make request measurement unavailable.
+        pass
 
 
 def _register_checkpoint_secret(secret: bytes) -> None:
@@ -157,9 +192,14 @@ def _installation_secret(configured_home: str | Path | None = None) -> bytes:
     try:
         key_path = _installation_home(configured_home) / "identity.key"
         cache_key = os.fspath(key_path)
-    except Exception:
-        return _fallback_secret()
+    except Exception as error:
+        secret = _fallback_secret()
+        _report_process_local_fallback(_exception_class_name(error))
+        return secret
 
+    creation_failure: list[str] = []
+    read_failure: list[str] = []
+    used_fallback = False
     with _AUTH_BINDING_SECRET_LOCK:
         cached = _AUTH_BINDING_SECRET_CACHE.get(cache_key)
         # A path is not an identity: a long-lived process can see the key at the same path
@@ -169,17 +209,30 @@ def _installation_secret(configured_home: str | Path | None = None) -> bytes:
         if cached is not None and cached[0] == _key_fingerprint(key_path):
             _register_checkpoint_secret(cached[1])
             return cached[1]
-        secret = _read_secret(key_path)
+        secret = _read_secret(key_path, failure_class=read_failure)
         if secret is None:
-            secret = _create_secret(key_path)
+            secret = _create_secret(
+                key_path,
+                failure_class=creation_failure,
+            )
         fingerprint = _key_fingerprint(key_path) if secret is not None else None
-        if fingerprint is not None and _read_secret(key_path) != secret:
+        if (fingerprint is not None
+                and _read_secret(key_path, failure_class=read_failure) != secret):
             fingerprint = None  # replaced while loading: never matches a valid file, so reload
         if secret is None:
+            used_fallback = True
             secret = _fallback_secret()
         _AUTH_BINDING_SECRET_CACHE[cache_key] = (fingerprint, secret)
         _register_checkpoint_secret(secret)
-        return secret
+    if used_fallback:
+        read_cause = read_failure[-1] if read_failure else None
+        if read_cause == "FileNotFoundError":
+            read_cause = None  # Missing key is the normal first-use path.
+        cause = read_cause or (
+            creation_failure[-1] if creation_failure else "IdentityKeyUnavailable"
+        )
+        _report_process_local_fallback(cause)
+    return secret
 
 
 def _key_fingerprint(path: Path) -> tuple[int, ...] | None:
