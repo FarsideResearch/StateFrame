@@ -203,7 +203,7 @@ def test_print_install_requirements_respects_extra_opt_out(include_extras):
     assert result.returncode == 0, result.stderr
     pins = result.stdout.splitlines()
     assert "jsonschema==4.26.0" in pins
-    assert "pytest==9.0.2" in pins
+    assert "pytest==9.0.3" in pins
     extra_pins = set(builder._default_extra_roots())
     assert set(pins) & extra_pins == (extra_pins if include_extras else set())
     assert all("==" in pin and " " not in pin for pin in pins)

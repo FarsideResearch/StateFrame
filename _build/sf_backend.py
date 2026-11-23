@@ -27,14 +27,17 @@ SDIST_TOP_LEVEL = frozenset({"LICENSE", "NOTICE", "README.md", "install.sh", "py
 # Onboarding guide for developers and AI coding assistants (AGENTS.md and llms.txt point here).
 SDIST_DOCS = frozenset({f"docs/guide/{name}.md" for name in (
     "concepts", "request-lifecycle", "code-map", "running", "extending", "troubleshooting", "design")})
-SDIST_DOCS = SDIST_DOCS | {"docs/assets/stateframe-banner.webp"}  # README banner (relative link)
+SDIST_DOCS = SDIST_DOCS | {
+    "docs/assets/stateframe-banner.webp",  # README banner (relative link)
+    "docs/guide/contracts/offline-pytest.md",
+}
 # The installer verifies the bundled wheels with this standalone helper.
 SDIST_SCRIPTS = frozenset({"scripts/build_wheelhouse.py", "scripts/installed_smoke.sh"})
 # Product regression tests belong to the maintainer tree, not an installed release.
 SDIST_TESTS: frozenset[str] = frozenset()
 SDIST_WHEELHOUSE = frozenset({
     "wheelhouse/requirements.txt", "wheelhouse/SHA256SUMS",
-    "wheelhouse/pytest-9.0.2-py3-none-any.whl", "wheelhouse/pluggy-1.6.0-py3-none-any.whl",
+    "wheelhouse/pytest-9.0.3-py3-none-any.whl", "wheelhouse/pluggy-1.6.0-py3-none-any.whl",
     "wheelhouse/iniconfig-2.3.0-py3-none-any.whl", "wheelhouse/packaging-26.0-py3-none-any.whl",
     "wheelhouse/pygments-2.20.0-py3-none-any.whl", "wheelhouse/attrs-26.1.0-py3-none-any.whl",
     "wheelhouse/pyyaml-6.0.3-py3-none-any.whl", "wheelhouse/jedi-0.20.0-py3-none-any.whl",

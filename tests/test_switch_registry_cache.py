@@ -11,6 +11,7 @@ import os
 import subprocess
 import sys
 from collections import Counter
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -136,6 +137,17 @@ def test_shipped_registry_fingerprint_matches_the_real_engine_sources():
     shipped = json.loads((ENGINE / registry.REGISTRY_FILE).read_text())
     files = registry._declared_python_files(ENGINE)
     assert shipped["sources_sha256"] == registry._sources_fingerprint(ENGINE, files)
+
+
+def test_engine_source_seals_the_current_switch_registry():
+    source = json.loads((ENGINE / "ENGINE_SOURCE.json").read_bytes())
+    registry_bytes = (ENGINE / registry.REGISTRY_FILE).read_bytes()
+    expected = json.loads(registry_bytes)
+    files = registry._declared_python_files(ENGINE)
+    expected["sources_sha256"] = registry._sources_fingerprint(ENGINE, files)
+    expected_bytes = (json.dumps(expected, indent=1) + "\n").encode("utf-8")
+
+    assert source["files"][registry.REGISTRY_FILE] == sha256(expected_bytes).hexdigest()
 
 
 def test_the_real_engine_starts_without_parsing_its_sources(monkeypatch):

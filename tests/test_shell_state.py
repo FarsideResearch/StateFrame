@@ -3,7 +3,9 @@
 The process boundary here really runs the argv (without a sandbox), so the wrapper script, its exit trap
 and the state capture are exercised end to end; only sandboxing is substituted.
 """
+import os
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -13,6 +15,11 @@ from kernel_exec_session import CleanupReport, ExecResult
 from kernel_shell_tool import ShellTool
 from kernel_tool_settings import ToolSettings
 from kernel_tool_tape import ToolReplayRefused, configure_replay, tape_for_run
+
+
+def _paths_overlap(first, second):
+    first, second = Path(first).resolve(), Path(second).resolve()
+    return first == second or first in second.parents or second in first.parents
 
 
 class RealProcess:
@@ -32,11 +39,17 @@ class RealProcess:
 
 @pytest.fixture
 def setup(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    stateframe_home = tmp_path / "stateframe-home"
+    stateframe_home.mkdir()
     root = tmp_path / "workspace"
     root.mkdir()
     (root / "app.py").write_text("VALUE = 1\n")
     run = tmp_path / "run"
     run.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("STATEFRAME_HOME", str(stateframe_home))
     row = {"files": {"app.py": "VALUE = 1\n"}, "scoped_edits": False,
            "allowed_product_paths": ["app.py", "sub"], "new_file_roots": ["sub"]}
 
@@ -48,6 +61,18 @@ def setup(tmp_path, monkeypatch):
         configure_replay(run, active=False)
         return tool, process
     return make, root.resolve(), run
+
+
+def test_fixture_authority_roots_are_disjoint(setup):
+    _, root, run = setup
+    home = Path(os.environ["HOME"])
+    stateframe_home = Path(os.environ["STATEFRAME_HOME"])
+    assert not _paths_overlap(home, root), "fixture HOME overlaps the workspace authority root"
+    assert not _paths_overlap(stateframe_home, root), "StateFrame home overlaps the workspace authority root"
+    assert not _paths_overlap(home, stateframe_home), "fixture HOME overlaps StateFrame home"
+    assert not _paths_overlap(home, run), "fixture HOME overlaps run storage"
+    assert not _paths_overlap(stateframe_home, run), "StateFrame home overlaps run storage"
+    assert not _paths_overlap(run, root), "run storage overlaps the workspace authority root"
 
 
 def _output(reply):
@@ -180,17 +205,30 @@ def test_taped_replay_refuses_a_missing_state_record(setup):
 @pytest.mark.host_sandbox
 def test_state_persists_through_the_real_sandbox(tmp_path, monkeypatch):
     from kernel_exec_session import ExecSession
-    monkeypatch.setenv(kernel_shell_state.MODE_ENV, "on")
+
+    home = tmp_path / "home"
+    home.mkdir()
+    stateframe_home = tmp_path / "stateframe-home"
+    stateframe_home.mkdir()
     root = tmp_path / "workspace"
     (root / "sub").mkdir(parents=True)
     (root / "app.py").write_text("VALUE = 1\n")
     run = tmp_path / "run"
     run.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("STATEFRAME_HOME", str(stateframe_home))
+    monkeypatch.setenv(kernel_shell_state.MODE_ENV, "on")
+    assert not _paths_overlap(home, root)
+    assert not _paths_overlap(stateframe_home, root)
+    assert not _paths_overlap(home, stateframe_home)
     row = {"files": {"app.py": "VALUE = 1\n"}, "scoped_edits": False,
            "allowed_product_paths": ["app.py", "sub"], "new_file_roots": ["sub"]}
     with ExecSession(run) as session:
         tool = ShellTool(run, ToolSettings(run_env=False), {}, session)
         tool.bind(root, row, set())
+        for fixture_home in (home.resolve(), stateframe_home.resolve()):
+            assert fixture_home not in tool.capability.read_roots
+            assert fixture_home not in tool.capability.write_roots
         configure_replay(run, active=False)
         first = tool.execute({"command": "cd sub && export X=1"}, "call-1")
         second = tool.execute({"command": "pwd; echo \"X=$X\""}, "call-2")

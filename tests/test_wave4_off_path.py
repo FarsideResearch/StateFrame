@@ -211,11 +211,13 @@ def qualification_records(run):
 @pytest.mark.host_sandbox
 def test_disabled_qualification_and_receipts_match_release(release_tree, scripted_startup, tmp_path):
     launcher = ("-c", QUALIFICATION_LAUNCH)
-    run = scripted_startup(release_tree, "qualification", "off", launcher=launcher, turns=2)
+    run = scripted_startup(release_tree, "qualification", "off", launcher=launcher, turns=2,
+                           task="Inspect the sample.")
     release = qualification_records(run)
     release_run = tmp_path / "release"
     run.rename(release_run)
-    current_run = scripted_startup(ROOT, "qualification", "off", launcher=launcher, turns=2)
+    current_run = scripted_startup(ROOT, "qualification", "off", launcher=launcher, turns=2,
+                                   task="Inspect the sample.")
     assert qualification_records(current_run) == release
     release_wire = sorted((release_run / "wire").glob("*.request.json"))
     current_wire = sorted((current_run / "wire").glob("*.request.json"))

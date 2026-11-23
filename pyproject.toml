@@ -7,7 +7,7 @@ backend-path = ["_build"]
 
 [project]
 name = "stateframe"
-version = "0.8.21"
+version = "0.8.22"
 description = "StateFrame: an Open Agent Engine that sends a typed state frame instead of chat history. Preview release."
 readme = "README.md"
 license = "AGPL-3.0-only"  # dual: AGPLv3 or a commercial license (COMMERCIAL-LICENSE.md)
@@ -16,7 +16,7 @@ requires-python = ">=3.11"
 # Declared, not vendored. Exact pins with PyPI hashes live in requirements.txt (install.sh uses
 # `pip install --require-hashes -r requirements.txt`); these are the same top-level versions.
 dependencies = [
-    "pytest==9.0.2",         # MIT: runs the repository's checks
+    "pytest==9.0.3",         # MIT: runs the repository's checks
     "PyYAML==6.0.3",         # MIT
     "jsonschema==4.26.0",    # MIT: schema validation
     "jedi==0.20.0",          # MIT: repo intel

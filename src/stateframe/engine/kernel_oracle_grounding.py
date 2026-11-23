@@ -20,6 +20,7 @@ import dataclasses
 import json
 import os
 import re
+import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
 
 
@@ -34,6 +35,29 @@ _BULLET = re.compile(r"^\s*(?:[-+*]|•|\d+[.)])\s+")
 _FENCE = re.compile(r"^\s*(`{3,}|~{3,})")
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*")
 _NUMBER = re.compile(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)")
+# These forms introduce text that follows; their final period is internal.
+_ABBREVIATION = re.compile(
+    r"(?<![\w.])(?:a\.k\.a|w\.r\.t|p\.h\.d|ph\.d|u\.s\.a|a\.m|p\.m|e\.g|"
+    r"i\.e|u\.s|u\.k|e\.u|"
+    r"mrs|ms|mx|mr|dr|prof|rev|hon|sr|jr|st|gen|col|lt|capt|sgt|maj|cmdr|adm|"
+    r"pres|gov|sen|rep|etc|et\s+al|vs|cf|approx|dept|est|fig|"
+    r"incl|viz|inc|ltd|co|no(?=\.\s+\d)|vol|pp|p)\.",
+    re.IGNORECASE,
+)
+_DIRECTIONAL_QUOTES = {"“": "”", "‘": "’", "«": "»", "‹": "›", "「": "」", "『": "』"}
+_QUOTE_OPENERS = {closing: opening for opening, closing in _DIRECTIONAL_QUOTES.items()}
+_DIRECTIONAL_MARKS = "".join(_DIRECTIONAL_QUOTES) + "".join(_QUOTE_OPENERS)
+_BRACKET_CLOSERS = ")]}"
+_CLOSERS = _BRACKET_CLOSERS + "'\"" + "".join(_QUOTE_OPENERS)
+_URL = re.compile(r'(?i)\b(?:https?|ftp)://[^\s"`<>' + _DIRECTIONAL_MARKS + "]+")
+_PATH_DOTS = re.compile(
+    r"(?<![\w.])(?:\.\.?[/\\])+|(?<=[/\\])\.{1,2}(?=\.?(?:$|[\s,;:!?`"
+    + re.escape(_CLOSERS) + "]))"
+)
+_TERMINALS = frozenset(".!?")
+_BOUNDARY_CLOSERS = frozenset(_CLOSERS)
+_URL_TRAILING_PUNCTUATION = frozenset(".,!?;:)]}'")
+_URL_BRACKETS = {")": "(", "]": "[", "}": "{"}
 
 # These names describe the wire shape of a check.  They are not product
 # vocabulary and therefore are not themselves normative expected literals.
@@ -174,43 +198,288 @@ def _prose_text(records: Sequence[tuple[int, int, str]]) -> tuple[str, list[int]
     return "".join(normalized), normalized_locations
 
 
-def _opens_quote(text: str, index: int, char: str) -> bool:
-    if char != "'" or index == 0 or index + 1 >= len(text):
+def _backtick_spans(text: str) -> tuple[tuple[int, int, int, int], ...]:
+    """Return matched inline-code delimiters as source offsets."""
+    runs: list[tuple[int, int, bool]] = []
+    index = 0
+    while index < len(text):
+        if text[index] != "`":
+            index += 1
+            continue
+        start = index
+        while index < len(text) and text[index] == "`":
+            index += 1
+        before = start
+        while before > 0 and text[before - 1] == "\\":
+            before -= 1
+        runs.append((start, index, (start - before) % 2 == 1))
+
+    next_run: list[int | None] = [None] * len(runs)
+    nearest: dict[int, int] = {}
+    for run_index in range(len(runs) - 1, -1, -1):
+        start, end, escaped = runs[run_index]
+        width = end - start
+        # Escaping applies to the opener. A backslash inside code is literal.
+        next_run[run_index] = nearest.get(width - escaped)
+        nearest[width] = run_index
+
+    spans: list[tuple[int, int, int, int]] = []
+    run_index = 0
+    while run_index < len(runs):
+        closing_index = next_run[run_index]
+        if closing_index is None:
+            run_index += 1
+            continue
+        open_start, open_end, escaped = runs[run_index]
+        close_start, close_end, _escaped = runs[closing_index]
+        spans.append((open_start + escaped, open_end, close_start, close_end))
+        run_index = closing_index + 1
+    return tuple(spans)
+
+
+def _quoted_delimiters(
+    text: str,
+    backticks: Sequence[tuple[int, int, int, int]],
+    urls: Sequence[tuple[int, int]],
+) -> tuple[dict[int, tuple[int, int]], dict[int, tuple[int, int]]]:
+    """Pair supported quotes outside matched inline code and URLs."""
+    openings: dict[int, tuple[int, int]] = {}
+    closings: dict[int, tuple[int, int]] = {}
+    stack: list[tuple[str, int]] = []
+    code_index = 0
+    url_index = 0
+    backslash_run = 0
+    index = 0
+    while index < len(text):
+        while code_index < len(backticks) and index >= backticks[code_index][3]:
+            code_index += 1
+        if (
+            code_index < len(backticks)
+            and backticks[code_index][0] <= index < backticks[code_index][3]
+        ):
+            index = backticks[code_index][3]
+            code_index += 1
+            backslash_run = 0
+            continue
+
+        while url_index < len(urls) and index >= urls[url_index][1]:
+            url_index += 1
+        if url_index < len(urls) and urls[url_index][0] <= index:
+            index = urls[url_index][1]
+            url_index += 1
+            backslash_run = 0
+            continue
+
+        char = text[index]
+        if char == "\\":
+            backslash_run += 1
+            index += 1
+            continue
+        escaped = backslash_run % 2 == 1
+        backslash_run = 0
+        if not escaped and (char in "\"'" or char in _DIRECTIONAL_MARKS):
+            previous = text[index - 1] if index else ""
+            after_word = previous != "-" and _wordish(previous)
+            if char in "\"'":
+                apostrophe = (char == "'" and after_word and index + 1 < len(text)
+                              and _wordish(text[index + 1]))
+                if not apostrophe and stack and stack[-1][0] == char:
+                    _opening_char, opening_index = stack.pop()
+                    openings[opening_index] = (index, index + 1)
+                    closings[index] = (opening_index, index + 1)
+                elif not after_word:
+                    stack.append((char, index))
+            elif char in _DIRECTIONAL_QUOTES:
+                stack.append((char, index))
+            else:
+                apostrophe = (char == "’" and after_word and index + 1 < len(text)
+                              and _wordish(text[index + 1]))
+                expected = _QUOTE_OPENERS[char]
+                if not apostrophe and stack and stack[-1][0] == expected:
+                    _opening_char, opening_index = stack.pop()
+                    openings[opening_index] = (index, index + 1)
+                    closings[index] = (opening_index, index + 1)
+        index += 1
+    return openings, closings
+
+
+def _reference_periods(text: str) -> tuple[set[int], set[int], tuple[tuple[int, int], ...]]:
+    abbreviations = {
+        index for match in _ABBREVIATION.finditer(text)
+        for index in range(match.start(), match.end()) if text[index] == "."
+    }
+    path_segments = {
+        index for match in _PATH_DOTS.finditer(text)
+        for index in range(match.start(), match.end()) if text[index] == "."
+    }
+    urls: list[tuple[int, int]] = []
+    for match in _URL.finditer(text):
+        start = match.start()
+        end = match.end()
+        extra_closers: dict[str, int] = {}
+        while end > start and text[end - 1] in _URL_TRAILING_PUNCTUATION:
+            closer = text[end - 1]
+            if closer in _TERMINALS and text[end:end + 1] in (",", ";", ":"):
+                break
+            if closer in _URL_BRACKETS:
+                if closer not in extra_closers:
+                    extra_closers[closer] = (text.count(closer, start, end)
+                                             - text.count(_URL_BRACKETS[closer], start, end))
+                if extra_closers[closer] <= 0:
+                    break
+                extra_closers[closer] -= 1
+            end -= 1
+        urls.append((start, end))
+    return abbreviations, path_segments, tuple(urls)
+
+
+def _wordish(char: str) -> bool:
+    return bool(char) and (char.isalnum() or char in "_-$" or unicodedata.category(char)[0] == "M")
+
+
+def _sentence_closing_abbreviation(text: str, index: int) -> bool:
+    start = index - len("etc")
+    if (start < 0 or text[start:index].casefold() != "etc"
+            or (start > 0 and (text[start - 1] == "." or _wordish(text[start - 1])))):
+        return False
+    following = index + 1
+    while following < len(text) and text[following].isspace():
+        following += 1
+    return following > index + 1 and following < len(text) and text[following].isupper()
+
+
+def _internal_period(text: str, index: int, abbreviations: set[int],
+                     path_segments: set[int]) -> bool:
+    if index in abbreviations and not _sentence_closing_abbreviation(text, index):
         return True
-    return not (text[index - 1].isalnum() and text[index + 1].isalnum())
+    if index in path_segments:
+        return True
+    previous = text[index - 1] if index else ""
+    following = text[index + 1] if index + 1 < len(text) else ""
+    follows_name = _wordish(previous)
+    if follows_name or previous in (")", "]"):
+        if _wordish(following):
+            return True
+        if following == "#" and index + 2 < len(text) and _wordish(text[index + 2]):
+            return True
+    if (follows_name and following in ("/", "\\") and index + 2 < len(text)
+            and (_wordish(text[index + 2]) or text[index + 2] == ".")):
+        return True
+    return bool(
+        _wordish(following)
+        and (not previous or previous.isspace() or previous in "/\\(<[\"'`=:")
+    )
+
+
+def _terminal_end(text: str, index: int, limit: int) -> int:
+    end = index + 1
+    while end < limit and text[end] in _TERMINALS:
+        end += 1
+    return end
+
+
+def _quote_closure_end(text: str, active: Sequence[tuple[int, int]], end: int) -> int | None:
+    for close_start, close_end in reversed(active):
+        while end < close_start and text[end] in _BRACKET_CLOSERS + " ":
+            end += 1
+        if end != close_start:
+            return None
+        end = close_end
+    return end
+
+
+def _extend_boundary_closers(text: str, end: int, quote_openings: Mapping[int, object]) -> int:
+    while end < len(text) and end not in quote_openings:
+        if text[end] in _BOUNDARY_CLOSERS:
+            end += 1
+            continue
+        if text[end] in _TERMINALS:
+            end = _terminal_end(text, end, len(text))
+            continue
+        break
+    return end
+
+
+def _looks_like_sentence_start(text: str, index: int) -> bool:
+    while index < len(text) and text[index].isspace():
+        index += 1
+    if index >= len(text):
+        return True
+    char = text[index]
+    return (
+        char.isupper()
+        or (char.isalpha() and not char.islower())
+        or char.isdigit()
+        or char in "\"'(`"
+        or char in _DIRECTIONAL_QUOTES
+    )
 
 
 def _sentence_ranges(text: str) -> tuple[tuple[int, int], ...]:
     """Split normalized prose at sentence terminals, not soft wraps."""
+    backticks = _backtick_spans(text)
+    abbreviations, path_segments, urls = _reference_periods(text)
+    quote_openings, quote_closings = _quoted_delimiters(text, backticks, urls)
     ranges: list[tuple[int, int]] = []
     start = 0
-    in_backticks = False
-    quote = ""
+    active_quotes: list[tuple[int, int]] = []
+    code_index = 0
+    url_index = 0
     index = 0
     while index < len(text):
+        while code_index < len(backticks) and index >= backticks[code_index][3]:
+            code_index += 1
+        in_code = code_index < len(backticks) \
+            and backticks[code_index][0] <= index < backticks[code_index][3]
+        if not in_code:
+            opening = quote_openings.get(index)
+            if opening is not None:
+                active_quotes.append(opening)
+            if index in quote_closings and active_quotes and active_quotes[-1][0] == index:
+                active_quotes.pop()
+
+        while url_index < len(urls) and index >= urls[url_index][1]:
+            url_index += 1
+        in_url = url_index < len(urls) and urls[url_index][0] <= index < urls[url_index][1]
         char = text[index]
-        if char == "`":
-            in_backticks = not in_backticks
-        elif not in_backticks:
-            if quote:
-                if char == quote and (index == 0 or text[index - 1] != "\\"):
-                    quote = ""
-            elif char in "'\"" and _opens_quote(text, index, char):
-                quote = char
-            elif char in ".!?":
-                if (char == "." and index > 0 and index + 1 < len(text)
-                        and text[index - 1].isdigit() and text[index + 1].isdigit()):
-                    index += 1
-                    continue
-                end = index + 1
-                while end < len(text) and text[end] in ".!?":
-                    end += 1
-                if text[start:end].strip():
-                    ranges.append((start, end))
-                start = end
+        if char not in _TERMINALS or in_url:
+            index += 1
+            continue
+
+        limit = len(text)
+        code_end = None
+        if in_code:
+            _open_start, content_start, content_end, close_end = backticks[code_index]
+            if index < content_start or index >= content_end:
+                index += 1
+                continue
+            limit = content_end
+            code_end = close_end
+
+        if char == "." and _internal_period(text, index, abbreviations, path_segments):
+            index += 1
+            continue
+        end = _terminal_end(text, index, limit)
+
+        if in_code and end != limit:
+            index = end
+            continue
+        boundary_end = end if code_end is None else code_end
+        if active_quotes:
+            boundary_end = _quote_closure_end(text, active_quotes, boundary_end)
+            if boundary_end is None:
                 index = end
                 continue
-        index += 1
+        boundary_end = _extend_boundary_closers(text, boundary_end, quote_openings)
+        if (in_code or active_quotes) and not _looks_like_sentence_start(text, boundary_end):
+            index = end
+            continue
+        active_quotes.clear()
+
+        if text[start:boundary_end].strip():
+            ranges.append((start, boundary_end))
+        start = boundary_end
+        index = boundary_end
     if text[start:].strip():
         ranges.append((start, len(text)))
     return tuple(ranges)

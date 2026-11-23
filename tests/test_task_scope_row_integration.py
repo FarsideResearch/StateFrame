@@ -5,7 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from probes.react_repair import FileSet, _is_product_path
+from probes.react_repair import (
+    FileSet, _initial_task_content, _is_product_path, _render_multifile_list,
+)
 from stateframe.task_row import DECLARE_ALL_LIMIT, TaskRowError, build_row
 from stateframe.workcopy import WorkCopy, create
 
@@ -79,6 +81,48 @@ def test_no_rule_keeps_small_repository_unscoped(tmp_path, runner_kind):
     assert row["scope_source"] == "whole_repo"
     assert row["scoped_edits"] is False
     assert "task_file_scope" not in row
+
+
+@pytest.mark.parametrize("task", (
+    "Fix the bug by editing only src/app.py.",
+    "Only editing src/app.py is allowed.",
+))
+def test_gerund_rule_uses_existing_task_scope_row(tmp_path, runner_kind, task):
+    source = "VALUE = 1\n"
+    work = make_work(tmp_path, runner_kind, {
+        "src/app.py": source,
+        "src/other.py": "OTHER = 2\n",
+    })
+    row = build_row(work, task=task, runner_kind=runner_kind, test_command=("true",))
+
+    assert row["task_file_scope"] == ["src/app.py"]
+    assert row["scope_source"] == "task_text"
+    assert row["scoped_edits"] is True
+    assert row["msg"] == task
+    assert row["files"] == {"src/app.py": {"parent_src": source}}
+
+
+@pytest.mark.parametrize(("task", "scoped_paths", "visible_paths"), (
+    ("Fix the bug by editing only src/app.py.", ("src/app.py",), ("src/app.py",)),
+    ("Fix src/app.py.", None, ("src/app.py", "src/other.py")),
+))
+def test_scope_changes_only_the_initial_user_message_file_list(
+        tmp_path, runner_kind, task, scoped_paths, visible_paths):
+    work = make_work(tmp_path, runner_kind, {
+        "src/app.py": "VALUE = 1\n",
+        "src/other.py": "OTHER = 2\n",
+    })
+    row = build_row(work, task=task, runner_kind=runner_kind, test_command=("true",))
+    expected_list = "FILE LIST (declared source files):\n" + "\n".join(
+        f"- {path}" for path in visible_paths)
+    initial_message = _initial_task_content(
+        row["msg"], _render_multifile_list(FileSet.from_row(row)), "")
+
+    assert row.get("task_file_scope") == (list(scoped_paths) if scoped_paths else None)
+    assert initial_message in {
+        f"{label}: {task}\n\n{expected_list}\nBegin."
+        for label in ("Bug report", "Task")
+    }
 
 
 @pytest.mark.parametrize("selection", ("edit", "edit_with_target", "large_target"))

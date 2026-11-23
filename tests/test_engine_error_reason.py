@@ -153,7 +153,8 @@ REPLAY_REASON = "replay diverged at send 4: prompt bytes differ"
 @pytest.mark.parametrize("summary, expected", [
     ({"runtime_outcome": "engine_error", "engine_error_reason": "engine error: X: y",
       "engine_terminal": {"result": "ERR:X"}}, True),
-    ({"runtime_outcome": "engine_error", "engine_terminal": {"result": "ERR:X"}}, True),
+    ({"runtime_outcome": "engine_error",
+      "engine_terminal": {"result": "ERR:X", "error": {"message": "crashed"}}}, True),
     ({"runtime_outcome": "engine_error", "engine_error_reason": REPLAY_REASON,
       "engine_terminal": {"result": "ENGINE_ERROR", "error": "ReplayUnfaithful"}}, False),
     ({"runtime_outcome": "engine_error", "engine_terminal": {"result": "ENGINE_ERROR", "error": "ValueError"}}, True),
@@ -161,14 +162,49 @@ REPLAY_REASON = "replay diverged at send 4: prompt bytes differ"
       "engine_terminal": {"result": "FINALIZATION_ERROR"}}, False),
     ({"runtime_outcome": "engine_error", "engine_error_reason": "engine could not seal request 2: z",
       "engine_terminal": {"result": "HARNESS_CONTRACT"}}, False),
-    ({"runtime_outcome": "budget_stop", "engine_terminal": {"result": "BUDGET_EXHAUSTED"}}, True),
+    ({"runtime_outcome": "budget_stop",
+      "engine_terminal": {"result": "BUDGET_EXHAUSTED",
+                          "error": {"message": "step limit"}}}, True),
     ({"runtime_outcome": "budget_stop", "engine_error_reason": REPLAY_REASON, "engine_terminal": {}}, False),
+    ({"runtime_outcome": "cancelled",
+      "engine_terminal": {"result": "CANCELLED", "error": {"message": "interrupted"}}}, True),
     ({"runtime_outcome": "missing_result"}, True),
+    ({"runtime_outcome": "recovery_required",
+      "engine_terminal": {"result": "RECOVERY_REQUIRED"}}, True),
     ({"runtime_outcome": "completed", "engine_terminal": {"result": "ERR:X"}}, False),
     ({"runtime_outcome": "completed"}, False),
 ])
 def test_resume_hint_truth_table(summary, expected):
     assert outcomes.resume_hint_applies(summary) is expected
+
+
+@pytest.mark.parametrize("reason_code", ["CHECKS_STALE", "CANDIDATE_NOT_DELIVERED"])
+def test_submitted_delivery_refusal_does_not_offer_resume_hint(reason_code):
+    summary = {
+        "runtime_outcome": "engine_error",
+        "engine_result": "DELIVERY_REFUSED",
+        "delivery_refusal": {"engine_result": "SUBMITTED", "reason_code": reason_code},
+        "engine_terminal": {"result": "SUBMITTED"},
+    }
+    before = json.dumps(summary, sort_keys=True, separators=(",", ":")).encode()
+
+    assert not outcomes.resume_hint_applies(summary)
+    assert json.dumps(summary, sort_keys=True, separators=(",", ":")).encode() == before
+
+
+def test_submitted_out_of_scope_delivery_refusal_does_not_offer_resume_hint():
+    summary = {
+        "runtime_outcome": "engine_error",
+        "engine_result": "DELIVERY_REFUSED",
+        "delivery_refusal": {
+            "engine_result": "SUBMITTED", "reason_code": "CANDIDATE_OUT_OF_SCOPE",
+        },
+        "engine_terminal": {"result": "SUBMITTED"},
+    }
+    before = json.dumps(summary, sort_keys=True, separators=(",", ":")).encode()
+
+    assert not outcomes.resume_hint_applies(summary)
+    assert json.dumps(summary, sort_keys=True, separators=(",", ":")).encode() == before
 
 
 # ---- fixture envelope -> terminal receipt -> runner summary -> outcome projection ------------------

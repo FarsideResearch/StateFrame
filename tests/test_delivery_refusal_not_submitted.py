@@ -187,6 +187,32 @@ def test_exit_code_stays_nonzero_after_refusal() -> None:
     assert summary["engine_result"] == "DELIVERY_REFUSED"
 
 
+def test_budget_stop_hint_keeps_turn_limit_and_object_error(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    options, run, work, spec, _repo = _prepare_execution(tmp_path, monkeypatch, {})
+    terminal = {"result": "BUDGET_EXHAUSTED", "error": {"message": "step limit reached"}}
+
+    def drive(*_args):
+        (run / "engine-result.json").write_text(json.dumps({"result": terminal}))
+        return 0
+
+    monkeypatch.setattr(runner, "drive", drive)
+    monkeypatch.setattr(runner, "summarize", lambda *_args: {
+        "engine_terminal": terminal,
+        "engine_result": "BUDGET_EXHAUSTED",
+        "cached_share_display": "cache",
+    })
+    output: list[str] = []
+
+    summary = runner._execute(options, 0.0, output.append, run, work, spec)
+
+    assert summary["runtime_outcome"] == "budget_stop"
+    assert (f"stopped before finishing; continue it with: stateframe resume {run} "
+            "--max-turns <more>") in output
+    saved = json.loads((run / "summary.json").read_text(encoding="utf-8"))
+    assert saved["engine_terminal"]["error"] == {"message": "step limit reached"}
+
+
 def test_apply_failure_preserves_out_of_scope_evidence(tmp_path: Path,
                                                        monkeypatch: pytest.MonkeyPatch) -> None:
     candidate = {"sample.py": b"value = 2\n", "outside.py": b"outside = 2\n"}
@@ -229,3 +255,44 @@ def test_stale_host_check_has_distinct_refusal_and_skips_in_place(
     assert summary["exit_code"] == 2
     assert summary["applied_in_place"] == []
     assert (repo / "sample.py").read_bytes() == b"value = 1\n"
+
+
+def test_out_of_scope_classification_on_genuine_submission_has_no_resume_hint(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    candidate = {"sample.py": b"value = 2\n"}
+    options, run, work, spec, _repo = _prepare_execution(tmp_path, monkeypatch, candidate)
+
+    def fail_apply(*_args, **_kwargs):
+        raise OSError("disk full while applying")
+
+    monkeypatch.setattr(workcopy, "apply_files", fail_apply)
+    natural_refusal = runner._refuse_submitted_delivery
+
+    def inject_out_of_scope_classification(summary: dict[str, object]) -> None:
+        natural_refusal(summary)
+        assert summary["delivery_refusal"]["reason_code"] == "CANDIDATE_NOT_DELIVERED"
+        # No natural route in this scenario produces this code; inject it at the runner boundary.
+        summary["delivery_refusal"]["reason_code"] = "CANDIDATE_OUT_OF_SCOPE"
+
+    monkeypatch.setattr(
+        runner, "_refuse_submitted_delivery", inject_out_of_scope_classification,
+    )
+    output: list[str] = []
+
+    summary = runner._execute(options, 0.0, output.append, run, work, spec)
+
+    assert summary["runtime_outcome"] == "engine_error"
+    assert summary["engine_result"] == "DELIVERY_REFUSED"
+    assert summary["delivery_refusal"]["engine_result"] == "SUBMITTED"
+    assert summary["delivery_refusal"]["reason_code"] == "CANDIDATE_OUT_OF_SCOPE"
+    assert summary["engine_terminal"]["result"] == "SUBMITTED"
+    engine_result = json.loads(
+        (run / "engine-result.json").read_text(encoding="utf-8"),
+    )["result"]
+    assert engine_result["result"] == "SUBMITTED"
+    assert not any("stopped before finishing; continue it with:" in line for line in output)
+
+    saved_summary = (run / "summary.json").read_bytes()
+    assert not outcomes.resume_hint_applies(summary)
+    assert (run / "summary.json").read_bytes() == saved_summary
+    assert json.loads(saved_summary)["engine_terminal"]["result"] == "SUBMITTED"

@@ -25,3 +25,16 @@ When the parent calls `parallel`, that one tool step projects and launches bound
 are recorded in their own run directories. The parent validates and publishes each proposal through a durable
 transaction before returning to its next request. See [Subframes](subframes.md) for the full contract and recovery
 path.
+
+## Ticket sentence spans
+
+Ticket prose is split into sentence clauses after soft-wrapped lines are joined. Periods inside dotted names,
+versions, paths, URLs, and common abbreviations stay within the clause; a terminal period keeps its matching
+closing quote attached. Matched inline code does not expose its internal punctuation, while an unmatched backtick
+is treated as ordinary text. Lists and fenced code remain atomic, and blank lines or Markdown hard breaks still
+end a prose group. Returned offsets refer to Python character positions in the original ticket, including CRLF
+input, so callers can preserve exact source spans while the displayed clause text is normalized.
+
+The shipped profile enables sentence-derived clause and grounding content. Corrected boundaries can change
+generated user messages in the current request context. Profiles that disable both grounding and post-green
+clause extraction keep their existing request content.
