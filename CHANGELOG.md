@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.16 (2026-11-22)
 
 - A submitted run whose stored result is missing is now refused with exit code 2 and leaves the repository unchanged. It was previously reported as submitted.
 
