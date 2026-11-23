@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.22 (2026-11-23)
 
 - Fixed: a failed install can be run again. Each attempt uses its own private environment, an unfinished one from an earlier release is moved aside instead of deleted, and any other existing environment is left alone and refused.
 - Security: the pinned pytest is 9.0.3 for online and offline installs, which fixes CVE-2025-71176.
