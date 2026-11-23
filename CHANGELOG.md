@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.23 (2026-11-23)
 
 - Fixed: checkpoint failure warnings match the background write that failed and name reviewed exception classes without exposing exception messages. Background checkpoint outcome rows carry a step, a journal position and the writer's process id. Limits are listed in KNOWN_LIMITATIONS.
 - Fixed: with model routes configured, a `LLAMA_CPP_TOKENIZE_URL` that conflicts with a routed model is refused before any server is contacted. Earlier, probe requests were sent first. The refusal itself is unchanged.
