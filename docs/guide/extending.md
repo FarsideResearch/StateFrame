@@ -17,6 +17,12 @@ A new engine-owned capability still needs code. Work on an unpacked copy of the 
 
 Also register its admission, receipt and completion contracts so the tool survives menu filtering and its result reaches the next frame. Add a test that runs it end to end (the scripted endpoint below makes that possible without a model). Code-executing tools need an explicit execution capability and sandbox boundary; follow the existing agent-tool adapters. For workspace-writing commands, reconciliation refuses files over 16 MiB, more than 256 MiB of regular-file data or more than 20,000 entries. The sealed candidate cannot carry executable-bit changes, so those effects are restored. Execution replies are fitted to the measured request budget; retain engine-owned status and effect boundaries when adding a new reply. New engine modules belong in `release-manifest.json`.
 
+## Interpret edit normalization spans
+
+The normalizer trims the common byte prefix and suffix of the authorized edit. For complete-definition edits, it computes the diff within the resolved definition and reports offsets in the original file. If the two remaining lengths multiply to at most 65,536, it keeps a longest common subsequence and reports the gaps as changed spans. Ties consume a base byte first. Pure insertions and deletions need no diff table and are exact at any size.
+
+Above 65,536 cells, a single replacement covers the trimmed middle. Its preservation proof sets `span_precision` to `"coarse"` and `exact_bytes` to `false`. A coarse whole-file proof omits `unchanged_byte_count`. Both precision levels verify that applying the hunks reconstructs the candidate byte for byte.
+
 ## Add an engine switch
 
 Read the switch in engine code with a literal name, for example `os.environ.get("STATEFRAME_MY_SWITCH", "off")`, in a file listed in the engine's `release-manifest.json` (`src/stateframe/engine/release-manifest.json`; add your new module there). The switch registry finds readers by reading the source, so a name built at run time is not seen. Then set it in a profile.

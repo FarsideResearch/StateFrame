@@ -1,6 +1,6 @@
 """Mechanical, revision-bound normalization for faithful source edits.
 
-Normalization has one job: represent exactly what an authorized payload changes.
+Normalization preserves the exact bytes of an authorized payload.
 It does not repair semantics, choose a better hunk, format source, or infer a
 missing definition.  Publication remains the caller's responsibility and must
 continue through its existing authority, syntax, scope, destructive, and effect
@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import ast
 import base64
-import difflib
 import hashlib
 import re
 from collections.abc import Mapping, Sequence
@@ -19,6 +18,7 @@ from pathlib import Path
 
 
 NORMALIZATION_SCHEMA = "edit-normalization/1"
+_EXACT_DIFF_CELL_LIMIT = 65_536
 _DEFINITION_KINDS = frozenset({"class", "function", "method", "type", "namespace", "sfc-block"})
 _MISSING = object()
 
@@ -64,7 +64,7 @@ def _normal_text(value: object) -> str:
 
 @dataclass(frozen=True)
 class EditHunk:
-    """One exact base-byte replacement, including intentional deletions."""
+    """One base-byte replacement with its preimage, including intentional deletions."""
 
     start: int
     end: int
@@ -196,13 +196,53 @@ class _ParserUnavailable(ValueError):
     pass
 
 
-def _hunks(base: bytes, candidate: bytes) -> tuple[EditHunk, ...]:
-    matcher = difflib.SequenceMatcher(a=base, b=candidate, autojunk=False)
-    return tuple(
-        EditHunk(i1, i2, base[i1:i2], candidate[j1:j2])
-        for tag, i1, i2, j1, j2 in matcher.get_opcodes()
-        if tag != "equal"
-    )
+def _exact_hunks(old: bytes, new: bytes, offset: int) -> tuple[EditHunk, ...]:
+    """Keep a longest common subsequence of the already bounded middle."""
+    old_size, new_size = len(old), len(new)
+    scores = [[0] * (new_size + 1) for _ in range(old_size + 1)]
+    for i in range(old_size - 1, -1, -1):
+        row, below = scores[i], scores[i + 1]
+        byte = old[i]
+        for j in range(new_size - 1, -1, -1):
+            row[j] = 1 + below[j + 1] if byte == new[j] else max(below[j], row[j + 1])
+
+    hunks: list[EditHunk] = []
+    i = j = old_start = new_start = 0
+    while i < old_size and j < new_size:
+        if old[i] == new[j]:
+            if i != old_start or j != new_start:
+                hunks.append(EditHunk(offset + old_start, offset + i, old[old_start:i], new[new_start:j]))
+            i += 1
+            j += 1
+            old_start, new_start = i, j
+        elif scores[i + 1][j] >= scores[i][j + 1]:
+            # Prefer consuming a base byte when either choice preserves the same count.
+            i += 1
+        else:
+            j += 1
+    if old_start != old_size or new_start != new_size:
+        hunks.append(EditHunk(offset + old_start, offset + old_size, old[old_start:], new[new_start:]))
+    return tuple(hunks)
+
+
+def _hunks(base: bytes, candidate: bytes, *, offset: int = 0) -> tuple[tuple[EditHunk, ...], bool]:
+    """Trim equal edges and return the hunks and whether their precision is coarse."""
+    start = 0
+    base_end, candidate_end = len(base), len(candidate)
+    shared_length = min(base_end, candidate_end)
+    while start < shared_length and base[start] == candidate[start]:
+        start += 1
+    while base_end > start and candidate_end > start and base[base_end - 1] == candidate[candidate_end - 1]:
+        base_end -= 1
+        candidate_end -= 1
+
+    old, new = base[start:base_end], candidate[start:candidate_end]
+    if not old and not new:
+        return (), False
+    coarse = len(old) * len(new) > _EXACT_DIFF_CELL_LIMIT
+    if coarse or not old or not new:
+        return (EditHunk(offset + start, offset + base_end, old, new),), coarse
+    return _exact_hunks(old, new, offset + start), False
 
 
 def apply_hunks(base: bytes, hunks: Sequence[EditHunk]) -> bytes:
@@ -593,13 +633,13 @@ def _definition_result(
             )
     start, end = int(current["start"]), int(current["end"])
     candidate = base[:start] + replacement + base[end:]
-    hunks = _hunks(base, candidate)
+    hunks, coarse = _hunks(base[start:end], replacement, offset=start)
     if apply_hunks(base, hunks) != candidate:
         return Rejected("DIFF_ROUND_TRIP_FAILED", _segments(base, (current,)), path)
     exterior_before = base[:start] + base[end:]
     exterior_after = candidate[:start] + candidate[start + len(replacement):]
     proof = {
-        "exact_bytes": True,
+        "exact_bytes": not coarse,
         "round_trip": True,
         "exterior_unchanged": exterior_before == exterior_after,
         "exterior_digest": _digest(exterior_before),
@@ -608,6 +648,8 @@ def _definition_result(
         "owner": current.get("owner"),
         "signature": current.get("signature"),
     }
+    if coarse:
+        proof["span_precision"] = "coarse"
     if not bool(proof["exterior_unchanged"]):
         return Rejected("EXTERIOR_BYTES_CHANGED", _segments(base, (current,)), path)
     return NormalizedEdit(
@@ -676,21 +718,25 @@ def normalize_edit(
             path=path, base=base, replacement=candidate, payload=payload,
             authority=public_authority, target_site=target_site,
         )
-    hunks = _hunks(base, candidate)
+    hunks, coarse = _hunks(base, candidate)
     try:
         round_trip = apply_hunks(base, hunks)
     except ValueError as error:
         return Rejected(f"DIFF_ROUND_TRIP_FAILED: {error}", _segments(base), path, expected or actual)
     if round_trip != candidate:
         return Rejected("DIFF_ROUND_TRIP_FAILED", _segments(base), path, expected or actual)
-    equal_bytes = sum(i2 - i1 for tag, i1, i2, _j1, _j2 in difflib.SequenceMatcher(a=base, b=candidate, autojunk=False).get_opcodes() if tag == "equal")
     proof = {
-        "exact_bytes": True,
+        "exact_bytes": not coarse,
         "round_trip": True,
-        "all_hunks_retained": True,
-        "broad_change": len(hunks) > 1 or any(len(hunk.old_bytes) > 256 or len(hunk.replacement) > 256 for hunk in hunks),
-        "unchanged_byte_count": equal_bytes,
+        "all_hunks_retained": not coarse,
+        "broad_change": coarse or len(hunks) > 1 or any(
+            len(hunk.old_bytes) > 256 or len(hunk.replacement) > 256 for hunk in hunks
+        ),
     }
+    if coarse:
+        proof["span_precision"] = "coarse"
+    else:
+        proof["unchanged_byte_count"] = len(base) - sum(len(hunk.old_bytes) for hunk in hunks)
     return NormalizedEdit(
         "complete-file", path, expected or actual, _digest(candidate), hunks,
         tuple(ChangedSpan(hunk.start, hunk.end) for hunk in hunks), proof,

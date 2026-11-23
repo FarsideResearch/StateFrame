@@ -453,6 +453,7 @@ _MODULE_PATHS = (
     ENGINE / "kernel_fault_disposition.py",
     ENGINE / "kernel_probe.py",
     ENGINE / "kernel_reason_log.py",
+    ENGINE / "kernel_request_auth_identity.py",
     ENGINE / "kernel_run_vitals.py",
     ENGINE / "kernel_safe_probe.py",
 )
@@ -477,6 +478,12 @@ _TRIAGED: set[ExceptSite] = {
     ("kernel_probe", "_run_child", "except BaseException:", 1),
     ("kernel_probe", "ProbeRunner.run", "except Exception as error:", 1),
     ("kernel_probe", "ProbeRunner.run", "except Exception:", 1),
+    # kernel_request_auth_identity: DEGRADE-OK; key reads/creation return the safe fallback,
+    # and diagnostic failure must not make request measurement unavailable.
+    ("kernel_request_auth_identity", "_read_secret", "except Exception as error:", 1),
+    ("kernel_request_auth_identity", "_create_secret", "except Exception as error:", 1),
+    ("kernel_request_auth_identity", "_report_process_local_fallback", "except Exception:", 1),
+    ("kernel_request_auth_identity", "_installation_secret", "except Exception as error:", 1),
     # kernel_reason_log: DEGRADE-OK configure/bind_journal/emit_reason/emit_kill/emit_refusal/
     # emit_timeout/flush_summary(final), DEAD _bump_self_error, ALREADY-COVERED _journal_write/
     # _emit x2/flush_summary x2, FIXED (was CRASH-HIDER) run_summary (counted + typed summary_error).
@@ -497,6 +504,8 @@ _TRIAGED: set[ExceptSite] = {
     ("kernel_reason_log", "flush_summary", "except BaseException:", 1),
     # kernel_run_vitals: DEGRADE-OK
     ("kernel_run_vitals", "emit_run_vitals", "except Exception:", 1),
+    ("kernel_run_vitals", "emit_run_vitals", "except Exception as error:", 1),
+    ("kernel_run_vitals", "emit_run_vitals", "except Exception:", 2),
 }
 
 

@@ -2256,26 +2256,8 @@
     {
       "file": "src/stateframe/engine/kernel_request_auth_identity.py",
       "function": "_read_secret",
-      "except_clause": "except Exception:",
-      "fingerprint": "9245537598cdb39f9cd32d37",
-      "ordinal": 1,
-      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
-      "risk": "unclassified"
-    },
-    {
-      "file": "src/stateframe/engine/kernel_request_auth_identity.py",
-      "function": "_read_secret",
       "except_clause": "except OSError:",
       "fingerprint": "1fd32b44fff3589735336c6a",
-      "ordinal": 1,
-      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
-      "risk": "unclassified"
-    },
-    {
-      "file": "src/stateframe/engine/kernel_request_auth_identity.py",
-      "function": "_create_secret",
-      "except_clause": "except Exception:",
-      "fingerprint": "24091c7d009ebf9114a5780a",
       "ordinal": 1,
       "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
       "risk": "unclassified"
@@ -2296,6 +2278,15 @@
       "fingerprint": "8f0116f2447ef1fc948a70c8",
       "ordinal": 1,
       "reason": "missing or unreadable key file means no identity; documented None return",
+      "risk": "low"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_auth_identity.py",
+      "function": "_report_process_local_fallback",
+      "except_clause": "except Exception:",
+      "fingerprint": "2485c5b7879b28b3b2373ba4",
+      "ordinal": 1,
+      "reason": "Reviewed: diagnostic failure must not prevent request measurement from using the process-local identity.",
       "risk": "low"
     },
     {

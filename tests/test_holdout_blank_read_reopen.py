@@ -12,7 +12,7 @@ ENGINE = Path(__file__).resolve().parents[1] / "src" / "stateframe" / "engine"
 if str(ENGINE) not in sys.path:
     sys.path.insert(0, str(ENGINE))
 
-from kernel_stateframe_action_ledger import ActionLedgerError, build_action_context  # noqa: E402
+from kernel_stateframe_action_ledger import build_action_context  # noqa: E402
 
 
 def _read_messages(path: str, snapshot: str, start: int, end: int) -> list[dict[str, object]]:
@@ -68,9 +68,12 @@ def _current_site(context: dict[str, object], raw: bytes) -> dict[str, object]:
 def _refused_or_current(
     root: Path, path: str, messages: list[dict[str, object]],
 ) -> dict[str, object] | None:
-    try:
-        context = build_action_context(messages, workspace_root=root)
-    except ActionLedgerError:
+    context = build_action_context(messages, workspace_root=root)
+    if context["open_edit_site"] is None:
+        assert context["open_edit_site_locator"] is None
+        assert context["site_context"] == {
+            "status": "UNVERIFIABLE", "reason": "missing_exact_current_site",
+        }
         return None
     target = root / path
     assert target.is_file(), "a deleted read target must be refused"
@@ -158,6 +161,7 @@ def test_mixed_blank_and_text_clipped_window_keeps_current_behavior(tmp_path: Pa
     (
         "same-size-changed-bytes",
         "deleted-file",
+        "binary-file",
         "different-range",
         "different-revision",
         "crlf-against-lf",
@@ -165,7 +169,7 @@ def test_mixed_blank_and_text_clipped_window_keeps_current_behavior(tmp_path: Pa
         "empty-file",
     ),
 )
-def test_mismatched_read_is_refused_or_returns_only_current_bytes(
+def test_mismatched_read_returns_current_bytes_or_unverifiable(
     tmp_path: Path, case: str,
 ) -> None:
     path = "stale.py"
@@ -183,6 +187,8 @@ def test_mismatched_read_is_refused_or_returns_only_current_bytes(
         target.write_bytes(changed.encode("utf-8"))
     elif case == "deleted-file":
         target.unlink()
+    elif case == "binary-file":
+        target.write_bytes(b"\xff\x00")
     elif case == "different-range":
         target.write_bytes(("PREFIX = 0\n" + snapshot).encode("utf-8"))
     elif case == "different-revision":
@@ -197,6 +203,8 @@ def test_mismatched_read_is_refused_or_returns_only_current_bytes(
         raise AssertionError(f"unhandled case: {case}")
 
     site = _refused_or_current(tmp_path, path, messages)
+    if case in {"deleted-file", "binary-file"}:
+        assert site is None
     if site is not None and case == "different-range":
         assert site["lines"]["start"] == 3
     if site is not None and case == "different-revision":

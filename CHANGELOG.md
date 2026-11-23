@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.24 (2026-11-23)
+
+- Within one request build, an unchanged layout row is no longer split and restored again. Request bytes are unchanged.
+- Fixed: resume no longer stops when old checkpoint data of an archived attempt cannot be removed; the data stays and a later resume tries again.
+- Path-resolution failures while adding optional current-file context now preserve the original edit rejection and report typed unavailable context.
+- Faster edits: edit spans are computed within a fixed work limit. Larger replacements report one span marked coarse; pure insertions and deletions stay exact at any size. Every edit still rebuilds the file byte for byte, but the reported hunks and proof values can differ from earlier releases.
+- Request measurement now reports when a persistent identity key cannot be loaded or published and a process-local identity is used; diagnostics omit paths and error messages, skip the immediate journal row, and may count the fallback in the run-end summary.
+- A failed opt-in terminal vitals write now emits a sanitized host-local diagnostic without retrying or changing the run outcome.
+- Fixed: a run no longer stops when the file behind the open edit site was deleted or can no longer be read. The site is marked unverifiable and the next request is built.
+
 ## 0.8.23 (2026-11-23)
 
 - Fixed: checkpoint failure warnings match the background write that failed and name reviewed exception classes without exposing exception messages. Background checkpoint outcome rows carry a step, a journal position and the writer's process id. Limits are listed in KNOWN_LIMITATIONS.

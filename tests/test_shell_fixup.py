@@ -7,7 +7,7 @@ import uuid
 import pytest
 
 from kernel_exec_session import ExecSession
-from kernel_stateframe_action_ledger import ActionLedgerError, build_action_context
+from kernel_stateframe_action_ledger import build_action_context
 
 
 def exchange(name, arguments, output, call_id):
@@ -25,15 +25,18 @@ def read_exchange(content, call_id):
                     f"chars={len(content)} clip=none\ncurrent source\n{content}", call_id)
 
 
-@pytest.mark.parametrize("content", ["VALUE = 2\n", "", None])
+@pytest.mark.parametrize("content", [b"VALUE = 2\n", b"", None, pytest.param(b"\xff\x00", id="binary")])
 def test_shell_retires_unanchorable_read_site(tmp_path, content):
     path = tmp_path / "app.py"
     if content is not None:
-        path.write_text(content)
+        path.write_bytes(content)
     messages = [{"role": "user", "content": "Task: change the value"}]
     messages += read_exchange("VALUE = 1\n", "read-1")
-    with pytest.raises(ActionLedgerError):
-        build_action_context(messages, workspace_root=tmp_path)
+    context = build_action_context(messages, workspace_root=tmp_path)
+    assert context["open_edit_site"] is None
+    assert context["site_context"] == {
+        "status": "UNVERIFIABLE", "reason": "missing_exact_current_site",
+    }
     messages += exchange("shell", {"command": "python change.py"}, "exit code: 0", "shell-1")
     context = build_action_context(messages, workspace_root=tmp_path)
     assert context["open_edit_site"] is None

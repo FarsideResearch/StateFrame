@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import hashlib
 import json
 import math
 import time
@@ -15,6 +16,10 @@ from kernel_frame_allocation_capture import FrozenRequestCounter, final_request_
 from kernel_frame_request_allocation import FrameRequestAllocationError
 from kernel_final_wire_budget import reconcile_frozen_budget
 from kernel_request_diet import RequestTokenMeter
+from kernel_request_budget import ENDPOINT_PROMPT_TOKEN_BUDGET, HARD_MAX_REQUEST_BYTES
+
+
+SYNTHETIC_BYTE_CEILING = 82_000
 
 
 def test_both_framefit5_runtime_bindings_defer_prefit_proof():
@@ -63,6 +68,195 @@ def _proof(monkeypatch, body, meter, capture):
     monkeypatch.setattr("kernel_request_budget._request_token_meter",
                         lambda *_args, **_kwargs: meter)
     return reconcile_frozen_budget(capture, SimpleNamespace(), body)
+
+
+@pytest.fixture
+def production_boundary(tmp_path, monkeypatch):
+    from kernel_completion_owner import establish_lean_request_action_contract
+    from kernel_measurement import AuditJournal, RequestCapture
+    from kernel_provider_dialect import ProviderCapabilities
+    from kernel_stateframe_action_ledger import build_action_context
+    from kernel_stateframe_framefit5 import _serialize_state_message, build_typed_state
+
+    monkeypatch.setenv("STATEFRAME_WORKING_SET_ALLOCATOR", "off")
+    monkeypatch.setenv("STATEFRAME_FINAL_CACHE_LAYOUT", "off")
+    monkeypatch.setenv("STATEFRAME_STABLE_WIRE", "off")
+    monkeypatch.setenv("STATEFRAME_CONTEXT_PREFLIGHT", "off")
+    monkeypatch.setattr("kernel_provider_dialect.capabilities_for",
+                        lambda *args, **kwargs: ProviderCapabilities(dialect="llama.cpp"))
+    # Omit unrelated fact injection so the only late wire growth is under test.
+    monkeypatch.setattr("kernel_wire_truth_gate.capture_context", lambda *args, **kwargs: {})
+    monkeypatch.setattr("kernel_wire_truth_facts.require_fact_context", lambda value: value)
+    monkeypatch.setattr("kernel_wire_truth_gate.enabled", lambda: False)
+
+    journal = AuditJournal(tmp_path, "production-seal", {})
+    capture = RequestCapture(journal, 1, "snapshot")
+    task = {"role": "user", "content": "Task: create result.txt"}
+    plan = {"paths": [], "units": [], "source_contents": {}, "revisions": {},
+            "new_output_target": "result.txt",
+            "workspace_authorization": {"scope": "test", "generation": "test"}}
+    context = build_action_context([task], workspace_root=tmp_path)
+    context["journal_receipt_records"] = []
+    runtime = SimpleNamespace(
+        owner=SimpleNamespace(root=tmp_path, task_row={}, current_request_id=capture.request_id),
+        journal=journal, _framefit_action_context=context, _request_source_closure=plan,
+        _empirical_frame_sources={}, frame_ceiling=ENDPOINT_PROMPT_TOKEN_BUDGET,
+        retained=None, step_ledger=None, _frame_budget_request_count=1,
+        binding=lambda: {"product_revision": "fixture"}, current_request_id=capture.request_id,
+        _active_capture=capture,
+    )
+    runtime.prepared_binding = runtime.binding()
+    capture._framefit5_task_message = task
+    capture._request_source_closure_override = plan
+    frame = build_typed_state([task], context, runtime)
+    read_tool = {"type": "function", "function": {"name": "read", "description": "Read source",
+                 "parameters": {"type": "object", "properties": {"path": {"type": "string"}},
+                                "required": ["path"], "additionalProperties": False}}}
+    body = {"model": "local", "messages": [
+        {"role": "system", "content": "rules"},
+        task,
+        {"role": "user", "content": _serialize_state_message({"state": {"framefit5": frame}})},
+        {"role": "user", "content": "[WIRE VOLATILE TAIL]"},
+    ], "tools": [read_tool], "max_tokens": 24000}
+    capture.request_action_contract = establish_lean_request_action_contract(
+        runtime, body["messages"], body["tools"], request_id=capture.request_id)
+    return capture, runtime, body
+
+
+@pytest.mark.parametrize(("fit_override", "wire_size", "trim_at_cap"), [
+    pytest.param(None, HARD_MAX_REQUEST_BYTES, False, id="at-cap"),
+    pytest.param(None, HARD_MAX_REQUEST_BYTES + 1, False, id="cap-plus-one"),
+    pytest.param(SYNTHETIC_BYTE_CEILING, HARD_MAX_REQUEST_BYTES, False, id="fitted-ceiling"),
+    pytest.param(None, HARD_MAX_REQUEST_BYTES, True, id="trimmed"),
+])
+def test_production_request_bound_uses_wire_bytes_and_rebinds_trim(
+        monkeypatch, production_boundary, fit_override, wire_size, trim_at_cap):
+    import kernel_cache_layout_candidate as layout
+    import kernel_final_wire_allocation as qualification
+    import kernel_final_wire_budget as wire_budget
+    import kernel_frame_allocation_capture as allocation
+    from kernel_frame_optional_allocation import identity
+    from kernel_request_seal import RequestSealError
+
+    capture, runtime, body = production_boundary
+    fitted_limit = HARD_MAX_REQUEST_BYTES if fit_override is None else fit_override
+    late_growth = wire_size - fitted_limit
+    finalize = allocation.finalize_frame_candidate
+    provider_body = qualification._finalize_provider_request_body
+    reconcile = wire_budget.reconcile_frozen_budget
+    proofs = []
+    tokenizer_online = True
+
+    def tokenize(_text):
+        if not tokenizer_online:
+            raise OSError("scripted tokenizer outage")
+        return 20_000
+
+    meter = RequestTokenMeter(tokenizer=tokenize)
+    runtime._request_token_meter = meter
+
+    def fit(context, candidate, draft, *, frame_counter):
+        nonlocal tokenizer_online
+        # Pad the assembled request so its production JSON encoding lands on the bound.
+        message = draft["messages"][0]
+        assert message["role"] == "system"
+        message["content"] += " é "
+        padding = fitted_limit - len(json.dumps(draft).encode())
+        assert padding > 0
+        message["content"] += "x" * padding
+        calibration = copy.deepcopy(draft)
+        calibration["messages"][0]["content"] += "z"
+        assert (allocation.measured_request_tokens(calibration, meter)
+                == 20_000 + meter.template_overhead_tokens)
+        assert meter.measure_method == "tokenize"
+        tokenizer_online = False
+        fitted = finalize(context, candidate, draft, frame_counter=frame_counter,
+                          byte_ceiling=fit_override)
+        assert candidate._frame_candidate_inputs["byte_ceiling"] == fitted_limit
+        assert len(json.dumps(fitted).encode()) == fitted_limit
+        return fitted
+
+    def trim(candidate, _context, fitted, *, meter, inputs):
+        # Model a one-byte layout trim that retains the new content.
+        original_digest = candidate._frame_candidate_counter.body_digest
+        trimmed = copy.deepcopy(fitted)
+        message = trimmed["messages"][0]
+        assert message["content"].endswith("x")
+        message["content"] += "y"
+        assert len(json.dumps(trimmed).encode()) == HARD_MAX_REQUEST_BYTES + 1
+        message["content"] = message["content"][:-2] + "y"
+        wire = json.dumps(trimmed).encode()
+        assert len(wire) == HARD_MAX_REQUEST_BYTES
+        assert identity(trimmed) != original_digest
+        tokens, method = allocation.rebind_final_layout_trim(
+            trimmed, meter, candidate, byte_limit=inputs["byte_ceiling"],
+            token_limit=inputs["token_ceiling"], wire=wire,
+        )
+        assert candidate._frame_candidate_counter.body_digest == identity(trimmed)
+        assert candidate._frame_candidate_counter.tokens == tokens
+        assert method == candidate._frame_candidate_inputs["measurement_identity"] == "calibrated_bytes"
+        assert candidate._frame_candidate_fallback_fit is True
+        measurement = candidate._frame_candidate_measurement
+        assert measurement.body_sha256 == "sha256:" + hashlib.sha256(wire).hexdigest()
+        assert measurement.request_bytes == measurement.max_request_bytes == HARD_MAX_REQUEST_BYTES
+        assert measurement.prompt_tokens == tokens
+        return trimmed
+
+    def finalize_provider(cap, fitted, capabilities):
+        selected = provider_body(cap, fitted, capabilities)
+        # Inject growth after the last fit to exercise the final proof's byte ceiling.
+        selected["messages"][0]["content"] += "z" * late_growth
+        return selected
+
+    def observe(candidate, context, selected, **kwargs):
+        receipt = reconcile(candidate, context, selected, **kwargs)
+        proofs.append((selected, candidate._frame_candidate_counter.tokens, receipt))
+        return receipt
+
+    monkeypatch.setattr(allocation, "finalize_frame_candidate", fit)
+    monkeypatch.setattr(wire_budget, "reconcile_frozen_budget", observe)
+    if trim_at_cap:
+        monkeypatch.setattr(layout, "render_final_cache_candidate", trim)
+    if late_growth:
+        monkeypatch.setattr(qualification, "_finalize_provider_request_body", finalize_provider)
+
+    def seal():
+        return qualification.build_qualified_request(
+            capture, runtime, body, endpoint="http://local/v1", key="")
+
+    if late_growth:
+        with pytest.raises(RequestSealError, match="request_bytes_exceed_max_request_bytes"):
+            seal()
+        assert capture.qualified_request is None
+    else:
+        record = seal()
+
+    (selected, frozen_tokens, receipt), = proofs
+    wire = json.dumps(selected).encode()
+    assert len(wire) == wire_size
+    assert b"\\u00e9" in wire
+    assert len(json.dumps(selected, ensure_ascii=False).encode()) == len(wire) - 4
+    assert receipt["request_bytes"] == len(wire)
+    assert receipt["max_request_bytes"] == fitted_limit
+    assert receipt["max_prompt_tokens"] == ENDPOINT_PROMPT_TOKEN_BUDGET
+    live_tokens, live_method = meter.measure(selected)
+    assert live_method == "calibrated_bytes"
+    assert (frozen_tokens <= receipt["measured_prompt_tokens"]
+            <= receipt["max_prompt_tokens"] < live_tokens)
+    assert receipt["fallback_rejection_bound"] > receipt["max_prompt_tokens"]
+    assert receipt["measure_method"] == "calibrated_bytes"
+    assert receipt["fallback_estimate_fit"] is True
+
+    if late_growth:
+        assert receipt["status"] == "HOST_BLOCKED"
+        assert receipt["final_validation_failures"] == ["request_bytes_exceed_max_request_bytes"]
+    else:
+        assert receipt["status"] == "READY"
+        assert receipt["measured_prompt_tokens"] == frozen_tokens
+        assert capture._frame_candidate_counter.body_digest == identity(selected)
+        assert record is capture.qualified_request
+        assert record.wire == wire
+        assert qualification.qualify_final_wire_allocation(capture, runtime, selected, None) == selected
 
 
 def test_prefit_menu_binding_defers_final_proof_until_after_fit(monkeypatch):
@@ -217,7 +411,7 @@ def test_stable_wire_fit_and_reserve_use_frozen_count_after_tokenizer_failure(mo
     tokens, method = meter.measure(body)
     assert method == "tokenize"
     capture = _capture(body, meter, method=method, tokens=tokens)
-    inputs = {"token_ceiling": 33344, "byte_ceiling": 82000,
+    inputs = {"token_ceiling": 33344, "byte_ceiling": SYNTHETIC_BYTE_CEILING,
               "measurement_identity": "tokenize"}
     monkeypatch.setattr(meter, "_availability", "unavailable")
     assert meter.measure(body)[0] > inputs["token_ceiling"]  # Planted live-meter control.
@@ -266,7 +460,7 @@ def test_opt_in_layout_uses_frozen_counter_across_flip(monkeypatch, allocation_m
                            tokens=calibrated_estimate(body, meter))
         monkeypatch.setattr(meter, "_availability", "available")
     capture.journal = SimpleNamespace(emit=lambda *_args, **_kwargs: None)
-    inputs = {"token_ceiling": 33344, "byte_ceiling": 82000,
+    inputs = {"token_ceiling": 33344, "byte_ceiling": SYNTHETIC_BYTE_CEILING,
               "source_plan": {}, "sources": {}, "receipt": None}
     result = render_final_cache_candidate(capture, None, body, meter=meter, inputs=inputs)
     assert result is not body  # The frozen allocation admits a measured fallback projection.
@@ -291,7 +485,7 @@ def test_layout_exact_count_is_carried_through_later_outage(monkeypatch):
     capture = _capture(body, meter, method=method, tokens=tokens)
     projected = render_final_cache_candidate(
         capture, None, body, meter=meter,
-        inputs={"token_ceiling": 33344, "byte_ceiling": 82000,
+        inputs={"token_ceiling": 33344, "byte_ceiling": SYNTHETIC_BYTE_CEILING,
                 "source_plan": {}, "sources": {}, "receipt": None})
     assert projected is not body
     projected_tokens = capture._frame_candidate_counter.tokens
@@ -330,7 +524,7 @@ def test_permanent_outage_growth_is_rejected_by_layout_before_proof(monkeypatch)
     assert calibrated_estimate(raw, meter) > 33344
     capture = _capture(body, meter, method="calibrated_bytes", tokens=tokens)
     capture.journal = SimpleNamespace(emit=lambda *_args, **_kwargs: None)
-    inputs = {"token_ceiling": 33344, "byte_ceiling": 82000,
+    inputs = {"token_ceiling": 33344, "byte_ceiling": SYNTHETIC_BYTE_CEILING,
               "source_plan": {}, "sources": {}, "receipt": None}
     projected = render_final_cache_candidate(capture, None, body, meter=meter, inputs=inputs)
     assert projected is body
@@ -362,7 +556,7 @@ def test_final_layout_trim_rebinds_frozen_fallback_before_proof(monkeypatch):
     capture.request_source_final_delivery = {"status": "COMPLETE"}
     capture._frame_candidate_fallback_fit = False
     capture._frame_candidate_rejection_bound = -1
-    inputs = {"token_ceiling": 33344, "byte_ceiling": 82000,
+    inputs = {"token_ceiling": 33344, "byte_ceiling": SYNTHETIC_BYTE_CEILING,
               "source_plan": {}, "sources": {}, "receipt": {"status": "COMPLETE"},
               "measurement_identity": "calibrated_bytes"}
     capture._frame_candidate_inputs = inputs
@@ -379,7 +573,10 @@ def test_final_layout_trim_rebinds_frozen_fallback_before_proof(monkeypatch):
         assert token_reserve > 0 and byte_reserve >= 0
         body["messages"][3]["content"] = body["messages"][3]["content"][:-1000]
         trimmed_digest = identity(body)
-        rebind_final_layout_trim(body, meter, capture, byte_limit=82000, token_limit=33344)
+        rebind_final_layout_trim(
+            body, meter, capture, byte_limit=SYNTHETIC_BYTE_CEILING,
+            token_limit=33344,
+        )
         assert capture._frame_candidate_counter.body_digest == trimmed_digest
         assert capture._frame_candidate_fallback_fit is True
         assert capture._frame_candidate_rejection_bound == meter.measure(body)[0]
@@ -425,7 +622,7 @@ def test_permanent_outage_post_fit_growth_recovers_before_submission(monkeypatch
     capture = _capture(body, meter, method="calibrated_bytes", tokens=tokens)
     capture.request_source_final_delivery = {"status": "COMPLETE"}
     fitted_counter = capture._frame_candidate_counter
-    fitted_inputs = {"token_ceiling": 33344, "byte_ceiling": 82000,
+    fitted_inputs = {"token_ceiling": 33344, "byte_ceiling": SYNTHETIC_BYTE_CEILING,
                      "receipt": {"status": "COMPLETE"}}
     capture._frame_candidate_inputs = copy.deepcopy(fitted_inputs)
     recovered, changed = _recover_post_fit_growth(
@@ -463,7 +660,7 @@ def test_post_fit_recovery_does_not_restore_projection_trim_callback():
     meter.bind_request("seal-r1", "seal-r1")
     capture = _capture(body, meter, method="calibrated_bytes", tokens=meter.measure(body)[0])
     capture.request_source_final_delivery = {"status": "COMPLETE"}
-    fitted_inputs = {"token_ceiling": 33344, "byte_ceiling": 82000,
+    fitted_inputs = {"token_ceiling": 33344, "byte_ceiling": SYNTHETIC_BYTE_CEILING,
                      "receipt": {"status": "COMPLETE"},
                      "_final_layout_trim": lambda *_args: True}
     capture._frame_candidate_inputs = copy.deepcopy(fitted_inputs)
@@ -496,7 +693,7 @@ def test_late_rewrite_refits_with_the_frozen_counter(monkeypatch):
     count = calibrated_estimate(body, meter)
     capture = _capture(body, meter, method="calibrated_bytes", tokens=count)
     capture.request_source_final_delivery = {"status": "COMPLETE"}
-    inputs = {"token_ceiling": 33344, "byte_ceiling": 82000,
+    inputs = {"token_ceiling": 33344, "byte_ceiling": SYNTHETIC_BYTE_CEILING,
               "receipt": {"status": "COMPLETE"}}
     capture._frame_candidate_inputs = copy.deepcopy(inputs)
     grown = copy.deepcopy(body)

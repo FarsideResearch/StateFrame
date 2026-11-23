@@ -14,6 +14,7 @@ last attempt stopped for a reason that replay would only reproduce.
 """
 from __future__ import annotations
 
+import errno
 import fcntl
 import hashlib
 import json
@@ -1161,27 +1162,44 @@ def archive_attempt(state: dict[str, object], engine_dir: Path, *, use_checkpoin
         # A replayed attempt rebuilds its own lineage. Preserve checkpoint metadata and events for
         # diagnosis, but release state, run snapshots and pools so repeated resumes stay bounded.
         os.replace(run / "checkpoints", folder / "checkpoints")
-        _compact_archived_checkpoints(folder / "checkpoints")
+    _compact_archived_checkpoints(run / "attempts")
     _write_json_atomic(run / "spec.json", spec)
     return folder
 
 
 def _compact_archived_checkpoints(root: Path) -> None:
-    for child in root.iterdir():
-        if child.is_symlink() or not child.is_dir():
-            continue
-        if child.name.startswith(".") and child.name.endswith(".tmp"):
-            shutil.rmtree(child)
-        elif (child / "checkpoint.json").is_file():
-            for name in ("state.pkl", "run"):
-                payload = child / name
-                if payload.is_dir() and not payload.is_symlink():
-                    shutil.rmtree(payload)
-                elif payload.exists() or payload.is_symlink():
-                    payload.unlink()
-        elif child.name in {"blob-pool", "journal-cache"}:
-            shutil.rmtree(child)
-    (root / "LATEST").unlink(missing_ok=True)
+    if root.name == "attempts" and root.is_symlink():
+        return
+    try:
+        for attempt in root.iterdir() if root.name == "attempts" else (root,):
+            try:
+                if root.name == "attempts":
+                    if attempt.is_symlink() or not attempt.is_dir(): continue
+                    attempt = attempt / "checkpoints"
+                    if attempt.is_symlink() or not attempt.is_dir(): continue
+                for child in attempt.iterdir():
+                    try:
+                        if child.is_symlink() or not child.is_dir():
+                            continue
+                        if child.name.startswith(".") and child.name.endswith(".tmp"):
+                            shutil.rmtree(child)
+                        elif (child / "checkpoint.json").is_file():
+                            for name in ("state.pkl", "run"):
+                                payload = child / name
+                                if payload.is_dir() and not payload.is_symlink():
+                                    shutil.rmtree(payload)
+                                elif payload.exists() or payload.is_symlink():
+                                    payload.unlink()
+                        elif child.name in {"blob-pool", "journal-cache"}:
+                            shutil.rmtree(child)
+                    except OSError as error: _report_checkpoint_compaction_error(error)
+                (attempt / "LATEST").unlink(missing_ok=True)
+            except OSError as error: _report_checkpoint_compaction_error(error)
+    except OSError as error: _report_checkpoint_compaction_error(error)
+
+
+def _report_checkpoint_compaction_error(error: OSError) -> None:
+    print("checkpoint cleanup", type(error).__name__, errno.errorcode.get(error.errno, "?"), file=sys.stderr)
 
 
 def fresh_workcopy(run: Path, repo: Path, *, preserve_symlinks: bool = False) -> workcopy.WorkCopy:

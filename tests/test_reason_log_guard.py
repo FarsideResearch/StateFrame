@@ -280,6 +280,8 @@ def test_runtime_finish_flushes_the_summary_once(fresh):
                for c in ast.walk(finish))
     journal, out = _Journal(), io.StringIO()
     rl.configure(level="WARN", stream=out)
+    # journal=False suppresses the request-path reason_logged event. The separate run-end
+    # aggregate remains journaled once so the problems summary is visible after finalization.
     rl.emit_reason("fallback", "x", "c", "w", "y", journal=False)
     assert rl.flush_summary(journal) is not None
     assert rl.flush_summary(journal) is None  # idempotent: finish() and journal.close() may both call it

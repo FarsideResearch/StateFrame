@@ -429,7 +429,8 @@ def _cacheable_frame_content(original: str, cacheable: object) -> str:
                 trailing_start += 1
             trailing = text[trailing_start:end - 1]
             return "{" + leading + ",".join(members) + trailing + "}", end
-        if isinstance(source_value, list) and isinstance(target, list) and len(source_value) == len(target):
+        if (isinstance(source_value, list) and isinstance(target, list)
+                and len(source_value) == len(target)):
             cursor = start + 1
             leading_start = cursor
             while cursor < end and text[cursor].isspace():
@@ -481,7 +482,13 @@ def _project_final_cache_layout(body):
             or not str(messages[system_end].get("content", "")).startswith("Task:")):
         raise ValueError("final cache layout requires the canonical frame input")
     payload = json.loads(messages[state_index]["content"].split("\n", 1)[1])
-    cacheable, fields = _partition_authority(payload, final=True)
+    if __package__:
+        from .kernel_working_set_cache import projection_row
+    else:
+        from kernel_working_set_cache import projection_row
+    cacheable, fields = projection_row(
+        _partition_authority, messages[state_index]["content"], ((), True),
+        lambda: _partition_authority(payload, final=True))
     if _payload_has_authority_keys(cacheable, final=True):
         raise ValueError("final cache layout retained frame authority")
     if json.dumps(fields, ensure_ascii=False).count("[CONTINUATION LIMITS |") != 1:
