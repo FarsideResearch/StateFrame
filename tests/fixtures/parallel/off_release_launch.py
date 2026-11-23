@@ -46,7 +46,8 @@ def install_child_clock():
             return replace(run_command(self, *args, **kwargs), wall_seconds=0.25)
 
         ExecSession.run = run_with_duration
-        child["main"].__globals__["time"] = RunClock(child["main"])
+        # Newer children run and time their work in _main; older ones do it in main.
+        child["main"].__globals__["time"] = RunClock(child["main"], child.get("_main", child["main"]))
         raise SystemExit(child["_run_cli"](sys.argv))
 
     runpy.run_path = run_child

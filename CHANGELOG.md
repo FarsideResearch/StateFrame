@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Tests: the process-signal guard lists the check watchdog's existence probe, and the release parity test's fixed clock covers the current engine entry point.
+
 ## 0.8.19 (2026-11-23)
 
 - Fixed: with the opt-in `STATEFRAME_SEND1_WAVE4=on` (off by default), a repository directory that could not be read, or that disappeared during the startup copy, was left out of the workspace without an error. The run is now refused with the same message as with the switch off.
