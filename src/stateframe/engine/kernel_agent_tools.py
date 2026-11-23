@@ -196,19 +196,28 @@ class AgentTools:
         if waiting is None:
             return
         deadline, measure, pending = waiting
+        reason = "completed"
         try:
             result = pending.result(timeout=max(0, deadline - time.monotonic()))
         except TimeoutError:
             result = None
         if result is None or result[0] >= deadline or isinstance(result[2], SchemaMeteringTimeout):
             pending.cancel()
-            counts = measure(estimate=True)
             reason = "deadline"
         else:
             _, counts, error = result
             if error is not None:
-                raise error
-            reason = "completed"
+                from concurrent.futures import CancelledError
+
+                from kernel_custom_tools import CustomToolError
+
+                if isinstance(error, (CustomToolError, CancelledError)) or not isinstance(error, Exception):
+                    raise error
+                reason = "measurement_error"
+        if reason != "completed":
+            # Schema tokenization is advisory startup work. Preserve a usable
+            # byte estimate when the tokenizer is slow or unavailable.
+            counts = measure(estimate=True)
         self._write_schema_budget(counts)
         self.startup_schema_budget = {"reason": reason, "counts": counts}
         self._pending_schema_budget = None

@@ -7,7 +7,7 @@ import socket
 import subprocess
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import CancelledError, ThreadPoolExecutor
 from contextlib import contextmanager
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -28,6 +28,122 @@ from stateframe.scripted_endpoint import Script, make_handler
 CAP = 0.25
 ROOT = Path(__file__).resolve().parents[1]
 pytestmark = pytest.mark.host_sandbox
+
+
+def _large_valid_custom_toolset(tmp_path):
+    import json
+
+    from kernel_custom_tools import load_tool_files
+
+    # Host admission uses a low exact count; the child estimate of these
+    # valid, individually bounded schemas crosses the aggregate ceiling.
+    definitions = [{
+        "name": f"custom_tool_{index:02d}", "description": "x" * 300,
+        "parameters": {"type": "object", "properties": {}, "required": []},
+        "argv": ["/bin/sh", "-c", "true"], "network": "none", "writes": "none",
+        "replay": "local", "timeout_seconds": 5,
+    } for index in range(20)]
+    path = tmp_path / "admitted-tools.json"
+    path.write_text(json.dumps({"schema": "stateframe-tools/1", "tools": definitions}))
+    return load_tool_files([path], builtin_names=frozenset(), shell_network="none",
+                           tokenizer=lambda _rendered: 3)
+
+
+def test_deadline_estimate_above_aggregate_ceiling_does_not_refuse_admitted_tools(
+        tmp_path, monkeypatch):
+    from concurrent.futures import Future
+
+    import kernel_agent_tools
+    from kernel_agent_schemas import prepare_schema_measurement
+
+    # Keep constructor setup asynchronous but deterministic; the expired
+    # pending measurement below exercises the normal bind fallback path.
+    monkeypatch.setattr(AgentTools, "_prepare_schema_budget", lambda self, **_kw: lambda: {})
+    monkeypatch.setattr(kernel_agent_tools, "_active", None)
+    shell = SimpleNamespace(spec={"chat_url": "http://127.0.0.1:9/chat/completions"},
+                            run_dir=tmp_path, settings=ToolSettings())
+    custom = _large_valid_custom_toolset(tmp_path)
+    tools = AgentTools(shell, custom, defer_schema_budget=True)
+    measure = prepare_schema_measurement(tools.custom_schemas, endpoint=shell.spec["chat_url"],
+                                         tokenizer=lambda *_args, **_kwargs: [0] * 3,
+                                         deadline=time.monotonic())
+    estimate = measure(estimate=True)
+    assert estimate["custom_total"]["tokens"] > 1500
+    tools._pending_schema_budget = (time.monotonic() - 1, measure, Future())
+
+    tools.bind()
+
+    assert tools.startup_schema_budget["reason"] == "deadline"
+    assert tools.schema_budget == estimate
+
+
+def test_exact_aggregate_schema_count_above_legacy_ceiling_is_recorded(tmp_path):
+    import json
+
+    from kernel_agent_schemas import measure_schemas
+
+    custom = _large_valid_custom_toolset(tmp_path)
+
+    def tokenize(content, *_args, **_kwargs):
+        name = json.loads(content)["tools"][0]["function"]["name"]
+        return [0] * (1501 if name.startswith("custom_tool_") else 3)
+
+    report = measure_schemas(custom.schemas(), tokenizer=tokenize)
+    assert report["custom_total"] == {"tokens": 1501, "method": "tokenize"}
+
+
+def test_schema_measurement_failure_degrades_to_estimates_and_continues(tmp_path, monkeypatch):
+    from concurrent.futures import Future
+
+    import kernel_agent_tools
+    from kernel_agent_schemas import prepare_schema_measurement
+
+    monkeypatch.setattr(AgentTools, "_prepare_schema_budget", lambda self, **_kw: lambda: {})
+    monkeypatch.setattr(kernel_agent_tools, "_active", None)
+    shell = SimpleNamespace(spec={"chat_url": "http://127.0.0.1:9/chat/completions"},
+                            run_dir=tmp_path, settings=ToolSettings())
+    custom = _large_valid_custom_toolset(tmp_path)
+    tools = AgentTools(shell, custom, defer_schema_budget=True)
+    measure = prepare_schema_measurement(tools.custom_schemas, endpoint=shell.spec["chat_url"],
+                                         tokenizer=lambda *_args, **_kwargs: [0] * 3,
+                                         deadline=time.monotonic() + 60)
+    expected = measure(estimate=True)
+    pending = Future()
+    pending.set_result((time.monotonic(), None, RuntimeError("tokenizer unavailable")))
+    tools._pending_schema_budget = (time.monotonic() + 60, measure, pending)
+
+    tools.bind()
+
+    assert tools.startup_schema_budget["reason"] == "measurement_error"
+    assert tools.schema_budget == expected
+
+
+@pytest.mark.parametrize("error_type", [
+    pytest.param(CancelledError, id="future-cancellation"),
+    pytest.param(KeyboardInterrupt, id="interrupt"),
+])
+def test_interrupted_schema_measurement_propagates(tmp_path, monkeypatch, error_type):
+    import kernel_request_diet
+
+    interruption = error_type("schema measurement interrupted")
+
+    def measure(*, estimate=False):
+        if estimate:
+            return {}
+        raise interruption
+
+    monkeypatch.setattr(kernel_request_diet, "TOKENIZE_REQUEST_TIMEOUT_CAP_SECONDS", 60)
+    monkeypatch.setattr(AgentTools, "_prepare_schema_budget", lambda self, **_kw: measure)
+    shell = SimpleNamespace(spec={"chat_url": "http://127.0.0.1:9/chat/completions"},
+                            run_dir=tmp_path, settings=ToolSettings())
+    tools = AgentTools(shell, CustomToolSet((), "empty"), defer_schema_budget=True)
+
+    with pytest.raises(error_type) as caught:
+        tools.bind()
+
+    assert caught.value is interruption
+    assert tools.startup_schema_budget is None
+    assert not list(tmp_path.glob("tool-schema-budget-*.json"))
 
 
 @contextmanager

@@ -121,7 +121,7 @@ def _measure_schemas(builtin_schemas, additional_schemas, measure, *, configured
         if method != "tokenize":
             _log_schema_fallback(f"schema {name} measured without tokenizer",
                                  method, count, configured=configured)
-        if count > 1200:
+        if method == "tokenize" and count > 1200:
             raise CustomToolError(f"built-in {name} schema exceeds 1200 tokens: {count}")
 
     if overlap is None:
@@ -140,6 +140,4 @@ def _measure_schemas(builtin_schemas, additional_schemas, measure, *, configured
         if method != "tokenize":
             _log_schema_fallback("custom tool schemas measured without tokenizer", method, count,
                                  configured=configured)
-        if count > 1500:
-            raise CustomToolError(f"custom tool schemas: {count} tokens exceeds 1500")
     return result

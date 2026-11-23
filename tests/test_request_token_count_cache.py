@@ -149,7 +149,6 @@ print(json.dumps(meter.measure(body)))
 def test_builtin_schema_counts_are_exact_and_custom_admission_remains_exact(monkeypatch):
     import kernel_request_diet
     from kernel_agent_schemas import BUILTIN_SCHEMAS, measure_schemas, schema
-    from kernel_custom_tools import CustomToolError
 
     monkeypatch.delenv("STATEFRAME_EXACT_TOKEN_COUNT_CACHE", raising=False)
     names = [item["function"]["name"] for item in BUILTIN_SCHEMAS]
@@ -175,8 +174,8 @@ def test_builtin_schema_counts_are_exact_and_custom_admission_remains_exact(monk
     assert order[-1] == "custom"
 
     expected["custom"] = 1501
-    with pytest.raises(CustomToolError, match="1501 tokens exceeds 1500"):
-        measure_schemas(custom, endpoint=endpoint)
+    report = measure_schemas(custom, endpoint=endpoint)
+    assert report["custom_total"] == {"tokens": 1501, "method": "tokenize"}
 
 
 def test_prompt_count_overlaps_preparation_and_fitting_uses_the_result(monkeypatch):

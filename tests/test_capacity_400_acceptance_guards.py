@@ -55,7 +55,7 @@ class DegenerationEndpoint(CapacityEndpoint):
                     "id": "chatcmpl-degenerate",
                     "object": "chat.completion",
                     "model": "capacity-mock",
-                    "choices": [{"index": 0, "finish_reason": "stop", "message": {
+                    "choices": [{"index": 0, "finish_reason": "length", "message": {
                         "role": "assistant",
                         "content": "repeated provider output. " * 25,
                     }}],

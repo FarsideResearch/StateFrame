@@ -74,6 +74,27 @@ def test_schema_tokenization_overlaps_preparation_and_publishes_exact_report(tmp
     assert list(tmp_path.glob("tool-schema-budget-*.json")) == [tools.schema_budget_path]
 
 
+def test_deferred_schema_budget_keeps_estimates_advisory(tmp_path, monkeypatch):
+    import kernel_agent_tools
+    from kernel_custom_tools import CustomToolSet
+    from kernel_tool_settings import ToolSettings
+
+    monkeypatch.setattr(kernel_agent_tools, "_active", None)
+    endpoint = "http://127.0.0.1:9"
+    monkeypatch.setattr(RequestTokenMeter, "measure",
+                        lambda *_: (1201, "calibrated_bytes"))
+    monkeypatch.setattr(kernel_agent_tools.AgentTools, "_prepare_schema_budget",
+                        lambda self, **_kwargs: lambda **_options: measure_schemas())
+    shell = SimpleNamespace(spec={"chat_url": endpoint},
+                            run_dir=tmp_path, settings=ToolSettings())
+    kernel_agent_tools.configure(shell, CustomToolSet((), "empty"), defer_schema_budget=True)
+    kernel_agent_tools.project_menu([])
+    tools = kernel_agent_tools.service()
+    assert tools.schema_budget["shell"] == {"tokens": 1201, "method": "calibrated_bytes"}
+    assert json.loads(tools.schema_budget_path.read_text()) == tools.schema_budget
+    assert list(tmp_path.glob("tool-schema-budget-*.json")) == [tools.schema_budget_path]
+
+
 def test_deferred_schema_budget_still_refuses_an_oversized_schema(tmp_path, monkeypatch):
     import kernel_agent_tools
     import kernel_request_diet

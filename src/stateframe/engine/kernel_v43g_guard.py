@@ -1,13 +1,13 @@
 """V43G terminal-choice and degenerate-output guard.
 
-The guard is deliberately host-side and bounded.  It never limits ordinary
-reasoning; it only intervenes after a contiguous repeated span is provably
-degenerate, and it records usage for every provider attempt.
+The guard is deliberately host-side and bounded. It retries only a response
+that hit its token cap and ended in a repeated suffix, and it records usage for
+every provider attempt.
 """
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 import hashlib
 import math
 import os
@@ -18,11 +18,12 @@ DEGENERATION_ENV = "STATEFRAME_DEGENERATION_GUARD"
 TERMINAL_CHOICE_ENV = "STATEFRAME_TERMINAL_TOOL_CHOICE"
 TERMINAL_FORMAT_ENV = "STATEFRAME_TERMINAL_TOOL_CHOICE_FORMAT"
 SCHEMA = "stateframe-v43g-guard/1"
-TRAILING_WINDOW_CHARS = 4096
+TRAILING_WINDOW_CHARS = 131072
 MIN_REPEAT_SPAN_CHARS = 8
 MIN_REPETITIONS = 20
-MAX_REPEAT_SPAN_CHARS = 512
+MAX_REPEAT_SPAN_CHARS = 6144
 RETRY_TEMPERATURE = 0.6
+TOKEN_CAP_REASONS = ("length", "max_tokens", "max_output_tokens")
 
 
 def _mode(name: str, environ: Mapping[str, str] | None, default: str = "off") -> str:
@@ -81,6 +82,36 @@ class RepetitionFinding:
         }
 
 
+def _normalize_whitespace(text: str) -> tuple[str, list[int]]:
+    normalized: list[str] = []
+    offsets: list[int] = []
+    for index, char in enumerate(text):
+        if char.isspace():
+            if not normalized or normalized[-1] != " ":
+                normalized.append(" ")
+                offsets.append(index)
+        else:
+            normalized.append(char)
+            offsets.append(index)
+    offsets.append(len(text))
+    return "".join(normalized), offsets
+
+
+def _z_values(text: str) -> list[int]:
+    """Return prefix-match lengths for each suffix in linear work."""
+    values = [0] * len(text)
+    left = right = 0
+    for index in range(1, len(text)):
+        if index < right:
+            values[index] = min(right - index, values[index - left])
+        while (index + values[index] < len(text)
+               and text[values[index]] == text[index + values[index]]):
+            values[index] += 1
+        if index + values[index] > right:
+            left, right = index, index + values[index]
+    return values
+
+
 def _best_run(text: str, *, source: str, trailing_window: int,
               min_repetitions: int, min_span: int,
               max_span: int) -> RepetitionFinding | None:
@@ -88,74 +119,43 @@ def _best_run(text: str, *, source: str, trailing_window: int,
         return None
     window_start = max(0, len(text) - trailing_window)
     tail = text[window_start:]
-    if len(tail) < min_span * min_repetitions:
+    normalized, offsets = _normalize_whitespace(tail)
+    if len(normalized) < (min_repetitions - 1) * min_span + 1:
         return None
-    max_period = min(max_span, len(tail) // min_repetitions)
-    earliest: tuple[int, int, int, int, str] | None = None
-    # The observed loop alternates two long phrases, so a longer repeated span
-    # is frequent without forming one contiguous period.  Shorter non-contiguous
-    # n-grams are intentionally excluded: ordinary prose repeats 8-16 character
-    # fragments and must not trip the guard.
-    frequency_lengths = tuple(
-        length for length in (24, 32, 48, 64, 96, 128)
-        if min_span <= length <= max_period
-    )
-    for length in frequency_lengths:
-        positions: dict[str, list[int]] = {}
-        for start in range(len(tail) - length + 1):
-            span = tail[start:start + length]
-            if not span.strip() or len(set(span.replace(" ", ""))) < 3:
-                continue
-            positions.setdefault(span, []).append(start)
-        for span, occurrences in positions.items():
-            if len(occurrences) < min_repetitions:
-                continue
-            count = len(occurrences)
-            candidate = (
-                window_start + occurrences[min_repetitions - 1] + length,
-                -(count * length),
-                length,
-                count,
-                "sha256:" + hashlib.sha256(span.encode("utf-8")).hexdigest(),
-            )
-            if earliest is None or candidate < earliest:
-                earliest = candidate
+    if not normalized.strip():
+        return None
+    matches = _z_values(normalized[::-1])
+    max_period = min(max_span, (len(normalized) - 1) // (min_repetitions - 1))
+    best: tuple[int, int, int, int, int, int] | None = None
     for period in range(min_span, max_period + 1):
-        span = tail[-period:]
-        if not span.strip() or not any(not char.isspace() for char in span):
+        repeated_length = period + matches[period]
+        repetitions, partial = divmod(repeated_length, period)
+        if repetitions < min_repetitions and not (
+                repetitions == min_repetitions - 1 and partial > 0):
             continue
-        repetitions = 1
-        while repetitions * period <= len(tail):
-            begin = len(tail) - (repetitions + 1) * period
-            if begin < 0 or tail[begin:begin + period] != span:
-                break
-            repetitions += 1
-        if repetitions < min_repetitions:
+        start = len(normalized) - repeated_length
+        if not normalized[start:start + period].strip():
             continue
-        repeated_chars = repetitions * period
-        start = len(tail) - repeated_chars
-        stop = window_start + start + min_repetitions * period
-        candidate = (
-            stop,
-            -repeated_chars,
-            period,
-            repetitions,
-            "sha256:" + hashlib.sha256(span.encode("utf-8")).hexdigest(),
-        )
-        if earliest is None or candidate < earliest:
-            earliest = candidate
-    if earliest is None:
+        stop = window_start + offsets[min(len(normalized), start + min_repetitions * period)]
+        loop_start = window_start + offsets[start]
+        repeated_chars = len(text) - loop_start
+        span_chars = offsets[start + period] - offsets[start]
+        candidate = (stop, -repeated_chars, span_chars, repetitions, start, period)
+        if best is None or candidate < best:
+            best = candidate
+    if best is None:
         return None
-    stop, neg_repeated, period, repetitions, span_hash = earliest
+    stop, neg_repeated, span_chars, repetitions, start, period = best
+    span = normalized[start:start + period]
     return RepetitionFinding(
         source=source,
         total_chars=len(text),
         stop_chars=stop,
         trailing_window_chars=len(tail),
-        repeated_span_chars=period,
+        repeated_span_chars=span_chars,
         repetition_count=repetitions,
         repeated_chars=-neg_repeated,
-        span_hash=span_hash,
+        span_hash="sha256:" + hashlib.sha256(span.encode("utf-8", "surrogatepass")).hexdigest(),
     )
 
 
@@ -175,16 +175,16 @@ def detect_text(text: object, *, source: str = "text",
     )
 
 
-def _message_texts(response: Mapping[str, object]) -> tuple[str, str]:
+def _message_texts(response: Mapping[str, object]) -> tuple[str, str, tuple[str, ...]]:
     choices = response.get("choices")
     if not isinstance(choices, Sequence) or isinstance(choices, (str, bytes, bytearray)):
-        return "", ""
+        return "", "", ()
     choice = choices[0] if choices else None
     if not isinstance(choice, Mapping):
-        return "", ""
+        return "", "", ()
     message = choice.get("message")
     if not isinstance(message, Mapping):
-        return "", ""
+        return "", "", ()
 
     def text_value(value: object) -> str:
         if isinstance(value, str):
@@ -197,59 +197,47 @@ def _message_texts(response: Mapping[str, object]) -> tuple[str, str]:
             )
         return ""
 
-    return text_value(message.get("reasoning_content")), text_value(message.get("content"))
+    tool_arguments: list[str] = []
+    tool_calls = message.get("tool_calls")
+    if isinstance(tool_calls, Sequence) and not isinstance(tool_calls, (str, bytes, bytearray)):
+        for call in tool_calls:
+            function = call.get("function") if isinstance(call, Mapping) else None
+            arguments = function.get("arguments") if isinstance(function, Mapping) else None
+            if isinstance(arguments, str):
+                tool_arguments.append(arguments)
+    legacy_call = message.get("function_call")
+    legacy_arguments = legacy_call.get("arguments") if isinstance(legacy_call, Mapping) else None
+    if isinstance(legacy_arguments, str):
+        tool_arguments.append(legacy_arguments)
+
+    return (
+        text_value(message.get("reasoning_content")),
+        text_value(message.get("content")),
+        tuple(tool_arguments),
+    )
 
 
 def detect_response(response: Mapping[str, object]) -> RepetitionFinding | None:
-    """Inspect reasoning and content without retaining or returning their text."""
+    """Find a repeated suffix only on a token-capped response."""
     if not isinstance(response, Mapping):
         return None
-    reasoning, content = _message_texts(response)
+    choices = response.get("choices")
+    choice = (choices[0] if isinstance(choices, Sequence)
+              and not isinstance(choices, (str, bytes, bytearray)) and choices else None)
+    if not isinstance(choice, Mapping) or choice.get("finish_reason") not in TOKEN_CAP_REASONS:
+        return None
+    reasoning, content, tool_arguments = _message_texts(response)
     candidates = [
         finding for finding in (
             detect_text(reasoning, source="reasoning"),
             detect_text(content, source="content"),
             detect_text(reasoning + content, source="reasoning+content"),
+            *(detect_text(argument, source="tool_arguments") for argument in tool_arguments),
         ) if finding is not None
     ]
     if not candidates:
         return None
     return min(candidates, key=lambda finding: (finding.stop_chars, -finding.repeated_chars))
-
-
-class StreamingRepetitionGuard:
-    """Incremental guard for providers that expose SSE/delta chunks."""
-
-    def __init__(self, *, trailing_window: int = TRAILING_WINDOW_CHARS) -> None:
-        self.trailing_window = trailing_window
-        self._reasoning = ""
-        self._content = ""
-        self._total_chars = 0
-        self.finding: RepetitionFinding | None = None
-
-    def feed(self, *, reasoning: str = "", content: str = "") -> RepetitionFinding | None:
-        if not isinstance(reasoning, str) or not isinstance(content, str):
-            raise TypeError("stream chunks must be text")
-        self._total_chars += len(reasoning) + len(content)
-        self._reasoning = (self._reasoning + reasoning)[-self.trailing_window:]
-        self._content = (self._content + content)[-self.trailing_window:]
-        if self.finding is not None:
-            return self.finding
-        finding = detect_response({
-            "choices": [{"message": {
-                "role": "assistant", "reasoning_content": self._reasoning,
-                "content": self._content,
-            }}],
-        })
-        if finding is None:
-            return None
-        retained_chars = len(self._reasoning) + len(self._content)
-        prefix_chars = max(self._total_chars - retained_chars, 0)
-        self.finding = replace(
-            finding, total_chars=self._total_chars,
-            stop_chars=prefix_chars + finding.stop_chars,
-        )
-        return self.finding
 
 
 def usage_counts(response: Mapping[str, object]) -> dict[str, int | None]:
@@ -320,7 +308,7 @@ def response_journal_fields(finding: RepetitionFinding, response: Mapping[str, o
 
 __all__ = [
     "DEGENERATION_ENV", "MIN_REPEAT_SPAN_CHARS", "MIN_REPETITIONS",
-    "RepetitionFinding", "SCHEMA", "StreamingRepetitionGuard",
+    "RepetitionFinding", "SCHEMA",
     "TERMINAL_CHOICE_ENV", "TERMINAL_FORMAT_ENV", "detect_response", "detect_text",
     "degeneration_mode", "forced_done_tool_choice", "response_journal_fields",
     "retry_body", "terminal_choice_format", "terminal_choice_mode", "usage_counts",
