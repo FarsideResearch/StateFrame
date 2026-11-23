@@ -1252,6 +1252,7 @@ def resolve_exec_rpc_env() -> dict[str, str]:
 # reaches the engine (the child drops inherited ones), so the runner says so instead of ignoring it silently.
 SHELL_SETTINGS = frozenset({
     "STATEFRAME_ENDPOINT", "STATEFRAME_MODEL", "STATEFRAME_ALLOW_REMOTE_ENDPOINT", "STATEFRAME_KEEP_CHECKPOINTS",
+    "STATEFRAME_ENDPOINT_MAX_JSON_BYTES",
     "STATEFRAME_CONTEXT_TOKENS", "STATEFRAME_PROMPT_BUDGET", "STATEFRAME_ROUTES",
     "STATEFRAME_EXEC_RPC_SECONDS", "STATEFRAME_STARTUP_PROBE_SECONDS", PLAIN_WALL_SETTING,
     *PARALLEL_TIMING_SETTINGS,
@@ -1452,14 +1453,21 @@ else:
     repo_map = check("tree_sitter_language_pack", "tree-sitter-language-pack", "get_parser")
 if adapter:
     working = []
-    for name in ts_grammars.available_languages():
+    failed_parsers = []
+    languages = list(ts_grammars.available_languages())
+    for name in languages:
         try:
             ts_grammars.get_parser(name).parse(b"x")
             working.append(name)
-        except Exception:
-            pass
-    repo_map = ({"enabled": True, "detail": f"{len(working)} languages: " + ", ".join(working)} if working
-                else {"enabled": False, "detail": "no grammar package installed"})
+        except Exception as error:
+            failed_parsers.append({"name": name, "reason": type(error).__name__})
+    detail = (f"{len(working)} languages: " + ", ".join(working) if working
+              else "no grammar parser succeeded" if languages
+              else "no grammar package installed")
+    if failed_parsers:
+        detail += "; failed parsers: " + ", ".join(
+            f"{item['name']} ({item['reason']})" for item in failed_parsers)
+    repo_map = {"enabled": bool(working), "detail": detail, "failed_parsers": failed_parsers}
 if not repo_map["enabled"]:
     # Only the audited individual grammar packages are ever used (ts_grammars blocks both grammar bundles).
     repo_map["detail"] += "; text-scan fallback available"

@@ -146,11 +146,14 @@ def _run_forced_subframes(
         capture_output=True, text=True, timeout=180, check=False,
     )
     assert installation.returncode == 0, installation.stdout + installation.stderr
+    # Subframes lease provider slots under the user's home, so keep that home writable and isolated.
+    home = tmp_path / "home"
+    home.mkdir()
     environment = {name: value for name, value in os.environ.items()
                    if not name.startswith(("STATEFRAME_", "REACT_"))}
     environment.update(profile_environment or {})
     environment.update({
-        "PYTHONDONTWRITEBYTECODE": "1", "PYTHONHASHSEED": "0",
+        "HOME": str(home), "PYTHONDONTWRITEBYTECODE": "1", "PYTHONHASHSEED": "0",
         "STATEFRAME_HOME": str(tmp_path / "state-home"),
         "STATEFRAME_PARALLEL_FORCE_MANIFEST": str(manifest),
     })

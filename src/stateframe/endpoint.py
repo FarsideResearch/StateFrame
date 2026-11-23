@@ -23,6 +23,7 @@ CHAT_SUFFIX = "/chat/completions"
 
 
 MAX_JSON_BYTES = 4 * 1024 * 1024
+MAX_JSON_BYTES_ENV = "STATEFRAME_ENDPOINT_MAX_JSON_BYTES"
 SLOT_OBSERVATION_TTL = 1.0
 _PROVIDER_FACT_TTL = 30.0
 _PROVIDER_EPOCH_TIMEOUT = 0.25
@@ -30,6 +31,29 @@ _PROVIDER_EPOCH_TIMEOUT = 0.25
 
 class EndpointError(RuntimeError):
     """The endpoint is unusable for a run (bad URL, unreachable, auth refused)."""
+
+
+class EndpointProbeLimitError(EndpointError):
+    """A probe response exceeds its configured JSON byte limit."""
+
+    def __init__(self, path: str, limit: int) -> None:
+        self.path, self.limit = path, limit
+        super().__init__(f"endpoint GET {path} response exceeds {limit}-byte limit ({MAX_JSON_BYTES_ENV})")
+
+
+class EndpointProbeConfigError(EndpointError):
+    """The endpoint probe JSON byte limit is invalid."""
+
+
+def _max_json_bytes() -> int:
+    value = os.environ.get(MAX_JSON_BYTES_ENV, str(MAX_JSON_BYTES)).strip()
+    try:
+        limit = int(value)
+    except ValueError:
+        limit = 0
+    if not value.isascii() or not value.isdecimal() or limit < 1:
+        raise EndpointProbeConfigError(f"{MAX_JSON_BYTES_ENV} must be a positive integer")
+    return limit
 
 
 def _is_timeout(error: BaseException) -> bool:
@@ -50,13 +74,13 @@ def _report_timeout(what: str, deadline_s: float | None, elapsed_s: float | None
 
 
 def _read_bounded(response, deadline: float, limit: int = MAX_JSON_BYTES) -> bytes:
-    """At most MAX_JSON_BYTES of the body, raising TimeoutError once ``deadline`` passes."""
+    """Read at most one byte over the limit to distinguish a complete body from a clipped one."""
     data = bytearray()
     read = getattr(response, "read1", None) or response.read
-    while len(data) < limit:
+    while len(data) <= limit:
         if time.monotonic() > deadline:
             raise TimeoutError("server response exceeded the probe deadline")
-        chunk = read(min(65536, limit - len(data)))
+        chunk = read(min(65536, limit + 1 - len(data)))
         if not chunk:
             break
         data.extend(chunk)
@@ -286,6 +310,7 @@ class Endpoint:
     def __post_init__(self) -> None:
         object.__setattr__(self, "base_url", normalize_base_url(self.base_url))
         self.check_locality()
+        _max_json_bytes()
         if os.environ.get("STATEFRAME_ALLOW_REMOTE_ENDPOINT") == "1":
             print("WARNING: remote endpoint override enabled; source code will leave the machine "
                   "when using a remote endpoint. A loopback URL can still forward elsewhere.", file=sys.stderr)
@@ -330,6 +355,7 @@ class Endpoint:
         answer the next at once. Only a timeout is retried; an HTTP answer or a refused
         connection fails immediately.
         """
+        limit = _max_json_bytes()
         for attempt in (1, 2):
             request = urllib.request.Request(url, headers=self._headers(), method="GET")
             # The socket timeout bounds each wait, not the whole read: a server that trickles bytes
@@ -339,7 +365,11 @@ class Endpoint:
             deadline = time.monotonic() + self.timeout_s
             try:
                 with opener.open(request, timeout=self.timeout_s) as response:
-                    return json.loads(_read_bounded(response, deadline))
+                    body = _read_bounded(response, deadline, limit)
+                    if len(body) > limit:
+                        path = urllib.parse.urlsplit(url).path or "/"
+                        raise EndpointProbeLimitError(path, limit)
+                    return json.loads(body)
             except (TimeoutError, urllib.error.URLError) as error:
                 timed_out = isinstance(error, TimeoutError) or isinstance(getattr(error, "reason", None),
                                                                            TimeoutError)
@@ -490,6 +520,14 @@ class Endpoint:
         opener = build_credential_scoped_opener(proxy_mode="direct", handlers=(_LocalRedirects(),))
         try:
             payload = self._read_json(opener, url)
+        except EndpointProbeConfigError:
+            raise
+        except EndpointProbeLimitError as error:
+            if epoch is not None:
+                epoch.invalidate()
+            print(f"stateframe: warning: optional endpoint GET {error.path} response exceeds "
+                  f"{error.limit}-byte limit; ignoring probe", file=sys.stderr, flush=True)
+            return None
         except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError,
                 ConnectionError, OSError, EndpointError, json.JSONDecodeError, UnicodeError) as error:
             if epoch is not None:

@@ -555,7 +555,7 @@
   "kernel_rejection_template.py": "841bf118b1d4178bf2c5e8b41a136f25ec088ac62e095f60f2bbf6f9020b6e4a",
   "kernel_rejection_template_restrict.py": "5aa6fd94686ec3cb5548f4761b271255ca9156201f3b412c3dac2b418ba7eb4d",
   "kernel_release_host_prefix.py": "60ad6f62f683754111dcfc18bc1552f23a4285a50dc5acd05ffa627037f8ce0b",
-  "kernel_release_switch_registry.py": "5ccd8dd67bb4d86651381fe8814601b0c5d2d646cc57b42a79d1f43196e5400b",
+  "kernel_release_switch_registry.py": "f2c2afc65ed2d009ef6e953a520f78dce15408afcc19ad073e43c17a6ea41dbf",
   "kernel_release_wire_claims.py": "3ac668fe7431b94e6a9013459570b1a7eaa80a45ad0d11ba4a7d270c6f5e93e6",
   "kernel_remaining_sites.py": "25fd1de2cc2b1527441ffd95cdcbfa4ed968acb6ec80eb5c0838d29715ee19e4",
   "kernel_repair_blocks_done.py": "cc6ddfc2f3b7987b526df476ccec14585e76890b912316446a3bf88b3f83465f",

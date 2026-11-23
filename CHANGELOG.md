@@ -15,6 +15,12 @@
 - Tests: source subprocess helpers set an explicit import environment.
 - Tests: interrupt escalation and the shared parent comparison are checked against real processes and cached versus uncached bytes.
 - Tests: the sparse proposal check counts workspace file opens, reads and copies instead of elapsed time.
+- Fixed: retrying an interrupted chat `/apply` resumes from paths already published in an earlier attempt; damaged retry metadata is ignored with a notice.
+- Endpoint probe JSON is limited to 4 MiB by default; `STATEFRAME_ENDPOINT_MAX_JSON_BYTES` sets another positive byte limit. An oversized optional `/slots` reply is ignored with one warning, while an invalid setting is reported at startup.
+- Fixed: the capability report names grammar parsers that fail to load instead of dropping them.
+- Tests: the license files, inventories and asset provenance of built artifacts are checked.
+- Tests: strict provider mock subframes use their own home.
+- Docs: two public switches are documented, and a test checks that every public switch is.
 
 ## 0.8.25 (2026-11-23)
 
