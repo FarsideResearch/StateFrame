@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Tests: the grep audit runs again with the real indexed-search setting and checks both rendering routes.
+
 ## 0.8.17 (2026-11-22)
 
 - Tests: the startup journal parity check is no longer affected by problems logged by earlier tests.

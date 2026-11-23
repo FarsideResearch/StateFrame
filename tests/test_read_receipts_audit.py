@@ -8,6 +8,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import pathlib
 import re
 import subprocess
 import sys
@@ -17,6 +18,7 @@ import pytest
 
 import kernel_read_exec as reads
 import kernel_read_receipts as receipts
+from kernel_bolt import indexed_grep_symbols_enabled
 from kernel_check_receipts import observe_check_output, retrieve_check_output
 from kernel_execution_reply_budget import record_delivery
 from kernel_pilot import ACTIVE_RUNTIME
@@ -307,7 +309,8 @@ def _grep(rt, root, *, native=False, source=None, bolt=None):
         _hook_gate_route=lambda *a: False, MODEL="scripted", multifile=False,
         bolt=bolt if bolt is not None else SimpleNamespace(
             receipt=lambda *a, **k: None, sure_observe=lambda *a: None),
-        interventions=False, re=re, sys=sys, json=json, msgs=[],
+        _indexed_grep_symbols=indexed_grep_symbols_enabled(),
+        interventions=False, os=os, pathlib=pathlib, re=re, sys=sys, json=json, msgs=[],
         _workspace_truth=SimpleNamespace(enabled=lambda: False,
             render_legacy_symbol_answer=lambda *args: ""))
     exec(_grep_route(source), env)
@@ -321,6 +324,24 @@ def test_grep_source_reply_has_exactly_one_result(tmp_path, native):
     assert "VALUE = 1" in _grep(rt, tmp_path, native=native)
     result, = _results(rt)
     assert result["status"] == "GREP" and "capture_id" not in result
+
+
+def test_grep_symbol_switch_selects_indexed_and_legacy_rendering(tmp_path, monkeypatch):
+    import kernel_navigation_pages as navigation
+
+    (tmp_path / "app.py").write_text("VALUE = 1\n")
+    monkeypatch.setenv("STATEFRAME_OWNER_COORDS", "on")
+    monkeypatch.setenv("STATEFRAME_TURN_REPO_INTEL", "on")
+    monkeypatch.setattr(navigation, "render_grep_result",
+                        lambda page, **kwargs: page.text + "\nlegacy rendering")
+
+    monkeypatch.setenv("STATEFRAME_TURN_INDEXED_READS", "off")
+    legacy = _grep(runtime(tmp_path), tmp_path)
+    monkeypatch.setenv("STATEFRAME_TURN_INDEXED_READS", "on")
+    indexed = _grep(runtime(tmp_path), tmp_path)
+
+    assert "VALUE = 1" in indexed
+    assert legacy == indexed + "\nlegacy rendering"
 
 
 @pytest.mark.parametrize("native,allocator", [(True, "on"), (True, "off"), (False, "on")])
@@ -407,8 +428,10 @@ def _baseline(tmp_path, filename):
     return module
 
 
-def test_switch_off_grep_check_delivery_and_journal_match_base(tmp_path, monkeypatch):
+@pytest.mark.parametrize("owner_coords", ["on", "off"])
+def test_switch_off_grep_check_delivery_and_journal_match_base(tmp_path, monkeypatch, owner_coords):
     monkeypatch.setenv("STATEFRAME_WORKING_SET_ALLOCATOR", "off")
+    monkeypatch.setenv("STATEFRAME_OWNER_COORDS", owner_coords)
     rt = runtime(tmp_path)
     (tmp_path / "app.py").write_text("VALUE = 1\n")
     baseline_grep = subprocess.check_output(
