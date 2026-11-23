@@ -1,15 +1,16 @@
 # Changelog
 
-## Unreleased
+## 0.8.29 (2026-11-23)
+
+- Tests: the time-namespace provider test is Linux only in the platform list, and journal parity ignores earlier warnings.
+- Docs: scope fallback, checkpoint disk use, resume conditions, slot sizing and sample counts agree across the guides.
+- Fixed: hook trust additions commit only after a flushed review and final digest recheck; concurrent additions are serialized.
+- Fixed: witness replay reports span-facts provider failures as typed unavailable evidence, keeps candidates alive, and logs one degrade reason.
 
 ## 0.8.28 (2026-11-23)
 
 - In-place promotion freezes the verified path set and digests after checks, then applies that set and those bytes or records an apply error. Verified deletions follow the same file exclusions as the checks.
 - Fixed scoped parallel delivery with test protection off. Workers retain the task file scope, unchanged sealed context is accepted, and the host refuses outside changes in the seal, retry workcopy, or final promotion set.
-- Tests: the time-namespace provider test is Linux only in the platform list, and journal parity ignores earlier warnings.
-- Docs: scope fallback, checkpoint disk use, resume conditions, slot sizing and sample counts agree across the guides.
-- Fixed: hook trust additions commit only after a flushed review and final digest recheck; concurrent additions are serialized.
-- Fixed: witness replay reports span-facts provider failures as typed unavailable evidence, keeps candidates alive, and logs one degrade reason.
 
 ## 0.8.27 (2026-11-23)
 
