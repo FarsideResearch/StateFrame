@@ -7,13 +7,20 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-OLD_MODULE = "_".join(("mc", "repo", "intel", "vendor"))
 _WORD_DIGESTS = frozenset(
     (
         "0ca758e42f6979815a567dfb58e968579596915fe9f7c106f3300be64568bd4f",
         "74273b01236c1ddf9e57c145950d53c27fd03f301ae79402629c2bc94f7daa26",
     )
 )
+# Keep the removed package identifier as component digests, with its underscore boundaries.
+_OLD_MODULE_COMPONENT_DIGESTS = (
+    "6bc0f9c4ecb0acbebf1b9f6c816bdd66f4885f67c917d9e141cf893014fba936",
+    "071ca2227754705837aa3ef9748ed59e9f8a015fd765c42f391a4cbc271c6d5e",
+    "96eebba49dbbf422d245f02290f9d4ed0eb02da9daa6bbceefb162800ff42481",
+    "630ba09448af522154f38ef7685ef1f44b0f3e9430f80829a03ce24f400f3754",
+)
+_OLD_MODULE_COMPONENT_WIDTHS = (2, 4, 5, 6)
 # Each pair digest maps to the separators its original expression accepted.
 _PAIR_RULES = {
     "7ee1c8c1e9004ef9dfdf5c7d98eccf0221569cb950d262efb440c29f01197b7c": frozenset(
@@ -42,7 +49,6 @@ _SHAPED_RULES = {
     "/": frozenset((_SHAPE_B,)),
 }
 RULE_PATTERN = re.compile(r"(?<!\w)rule\s*\#\s*\d+(?!\w)", re.IGNORECASE)
-OLD_MODULE_PATTERN = re.compile(re.escape(OLD_MODULE))
 
 
 def _source_files(directory: str):
@@ -68,6 +74,16 @@ def _text(path: Path) -> str:
 
 def _digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _identifier_sequence_matches(text: str, component_digests: tuple[str, ...],
+                                 widths: tuple[int, ...] = _OLD_MODULE_COMPONENT_WIDTHS):
+    """Yield every substring match, as the plain pattern did: attached letters or digits do not hide it."""
+    shape = "_".join(f"[A-Za-z0-9]{{{width}}}" for width in widths)
+    for match in re.finditer(f"(?=({shape}))", text):
+        found = match.group(1).lower()
+        if tuple(map(_digest, found.split("_"))) == component_digests:
+            yield match.start(), _digest(found)
 
 
 def _digest_matches(
@@ -97,19 +113,12 @@ def _digest_matches(
                 yield token.start(), pair_digest
         elif (word_digest, _digest(next_word)) in shaped_rules.get(separator, frozenset()):
             yield token.start(), _digest(text[token.start() : next_token.end()].lower())
+    yield from _identifier_sequence_matches(text, _OLD_MODULE_COMPONENT_DIGESTS)
 
 
 def _hit(path: Path, text: str, offset: int, digest: str) -> str:
     line = text.count("\n", 0, offset) + 1
     return f"{path.relative_to(ROOT)}:{line}: sha256:{digest[:12]}"
-
-
-def _hits(path: Path, pattern: re.Pattern[str]) -> list[str]:
-    text = _text(path)
-    return [
-        _hit(path, text, match.start(), _digest(match.group().lower()))
-        for match in pattern.finditer(text)
-    ]
 
 
 def _private_hits(path: Path) -> list[str]:
@@ -158,15 +167,30 @@ def test_digest_matching_preserves_phrase_shapes():
         assert not list(_digest_matches(text, {}, frozenset(), shaped))
 
 
+def test_identifier_digest_matching_preserves_component_boundaries():
+    components = tuple(_digest(part) for part in ("alpha", "beta"))
+    widths = (5, 4)
+    for text, start in (("prefix_alpha_beta_suffix", 7), ("(!alpha_beta123?!", 2), ("xAlpha_Betay", 1)):
+        assert list(_identifier_sequence_matches(text, components, widths)) == [(start, _digest("alpha_beta"))]
+    for text in ("prefix_alpha__beta_suffix", "prefix_alpha-beta_suffix", "alph_abeta"):
+        assert not list(_identifier_sequence_matches(text, components, widths))
+
+
 def test_old_repository_intelligence_module_is_absent():
     paths = [ROOT / "pyproject.toml"]
     paths.extend(path for directory in ("src", "tests", "docs") for path in _source_files(directory))
-    hits = [hit for path in paths for hit in _hits(path, OLD_MODULE_PATTERN)]
-    hits.extend(
-        str(path.relative_to(ROOT))
-        for path in paths
-        if OLD_MODULE_PATTERN.search(path.relative_to(ROOT).as_posix())
-    )
+    hits = []
+    for path in paths:
+        text = _text(path)
+        hits.extend(
+            _hit(path, text, offset, digest)
+            for offset, digest in _identifier_sequence_matches(text, _OLD_MODULE_COMPONENT_DIGESTS)
+        )
+        relative = path.relative_to(ROOT).as_posix()
+        hits.extend(
+            _hit(path, relative, offset, digest)
+            for offset, digest in _identifier_sequence_matches(relative, _OLD_MODULE_COMPONENT_DIGESTS)
+        )
     assert not hits, "Old repository intelligence module references:\n" + "\n".join(hits)
 
 

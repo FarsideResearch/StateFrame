@@ -10,14 +10,15 @@ from collections.abc import Mapping
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+_UNCACHED = "7540148c9c7b58cd76dfec3b004dc3763451a3d3"
 
 
 def _parent_projector():
-    """Load the uncached final-layout projector from this commit's parent."""
+    """Load the uncached final-layout projector from release 0.8.23, before the memo."""
     import kernel_cache_layout_candidate as candidate
 
     source = subprocess.run(
-        ["git", "show", "HEAD^:src/stateframe/engine/kernel_cache_layout_candidate.py"],
+        ["git", "show", f"{_UNCACHED}:src/stateframe/engine/kernel_cache_layout_candidate.py"],
         cwd=ROOT, check=True, capture_output=True, text=True,
     ).stdout
     tree = ast.parse(source)

@@ -27,10 +27,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 # OWED TO THE RELEASE MATRIX: files whose parity tests (node id or marker contains off_wire / byte_identical /
 # parity) tests/must_run.json does not select, with the per-file count of such tests (parametrized cases
-# folded). The release owner made every listed parity test mandatory except the ones below, which were red,
-# skipping, or unwitnessable on this tree; a mandatory set must never start red. The check passes only while
-# the uncovered set equals this list exactly, so a new uncovered parity test, a removed one, or one newly
-# selected by the matrix all fail until the list is updated deliberately.
+# folded). The release owner selects cases deliberately; entries below remain pending because no cell is
+# approved for them or because their documented baseline/host requirement is unavailable. A mandatory set
+# must never start red. The check passes only while the uncovered set equals this list exactly, so a new
+# uncovered parity test, a removed one, or one newly selected by the matrix all fail until updated deliberately.
 PENDING_RELEASE_SELECTION: dict[str, int] = {
     # failed on the release-owner selection run
     "tests/acceptance/test_routes_host.py": 1,  # test_inactive_routes_keep_requests_byte_identical
@@ -40,7 +40,7 @@ PENDING_RELEASE_SELECTION: dict[str, int] = {
     "tests/test_fu070_offparity_gates.py": 6,  # pending release-owner selection
     "tests/test_hook_wiring_parity.py": 1,  # test_no_hooks_real_shaped_llama_keeps_automatic_pin_and_release_bytes
     "tests/test_ledger_pin_delivery.py": 1,  # pending release-owner selection
-    "tests/test_parallel_worker_prep.py": 1,  # test_default_parallel_off_wire_and_public_artifacts_match_merged_main
+    "tests/test_parallel_worker_prep.py": 2,  # exit-status control + merged-main wire/artifact comparison await selection
     "tests/test_working_set_off_parity_base.py": 1,  # test_off_provider_bytes_match_cutover_base, both bases
     "tests/test_working_set_render_off_parity.py": 1,  # test_off_wire_bytes_match_1de34aa4, both bases
     # always skip in a gate run
@@ -53,6 +53,22 @@ PENDING_RELEASE_SELECTION: dict[str, int] = {
     "tests/test_native_prefix_whole_file_edit.py": 1,  # test_whole_file_executor_proof_parity
     "tests/test_source_window_length_framing.py": 1,  # pending release-owner selection
     "tests/test_unit_coalesce.py": 3,  # missing addition history, history errors, rejects pinned oracles
+    # Newly uncovered parity cases without approved release-matrix cells.
+    "tests/test_edit_protocol_menu.py": 1,  # legacy-safe menu/base byte match remains unselected
+    "tests/test_edit_protocol_switch_wiring.py": 1,  # legacy-safe multi-turn wire match remains unselected
+    "tests/test_legacy_safe_dispatch_parity.py": 2,  # refusal-text controls have no approved cells
+    "tests/test_legacy_safe_parity.py": 5,  # golden observation/routing compatibility cases remain unselected
+    "tests/test_routing_v2_model_ids.py": 1,  # schema-one alias-body byte match remains unselected
+    "tests/test_rp3_intake_grounding_work.py": 1,  # intake front-door confidence parity remains unselected
+    "tests/test_tool_class_protocol_parity_K1.py": 6,  # migrated literal-detection inventory has no approved cell
+    "tests/test_tool_class_protocol_parity_K23.py": 3,  # protocol-list migration checks have no approved cell
+    "tests/test_tool_class_protocol_parity_K4.py": 5,  # protocol edit classification/source checks have no approved cell
+    "tests/test_tool_class_protocol_parity_K5.py": 4,  # protocol literal inventory/locator checks have no approved cell
+    "tests/test_tool_class_protocol_parity_K6.py": 3,  # protocol constant/import audits have no approved cell
+    "tests/test_turn_proofs_budget.py": 1,  # green parent-route parity has no approved cell
+    "tests/test_unit_policy_visible_asserts.py": 1,  # legacy OFF diagnostic byte match remains unselected
+    "tests/test_wave4_readiness.py": 1,  # readiness frame/menu/journal parity remains unselected
+    "tests/test_workspace_consumer_parity.py": 6,  # workspace provider/cache/shell consumer cases have no approved cells
 }
 
 # Reviewed shell-lint findings: (path, rule, statement text) -> why it is not a false pass.

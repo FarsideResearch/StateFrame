@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.25 (2026-11-23)
+
+- Tests: the retired-name, parity-baseline and release-matrix guards check the current sources again.
+- Fixed: startup provider probes wait out HTTP 503 and 429 answers on a longer schedule, with one waiting line; every other failure keeps the short schedule.
+- Tests: three parity cases joined the release matrix, and the list of parity tests outside it is current.
+
 ## 0.8.24 (2026-11-23)
 
 - Within one request build, an unchanged layout row is no longer split and restored again. Request bytes are unchanged.

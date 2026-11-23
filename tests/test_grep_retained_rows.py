@@ -400,7 +400,14 @@ else:
     result = search_repository(root, "MATCH", mode="literal", requested_page_size=12)
     metadata, text = result.metadata, result.text
 elapsed = time.perf_counter() - start
-peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+peak = None
+if sys.platform.startswith("linux"):
+    # ru_maxrss survives exec, so a large parent would set the floor; VmHWM belongs to this process image.
+    for line in open("/proc/self/status", encoding="ascii", errors="replace"):
+        if line.startswith("VmHWM:"):
+            peak = int(line.split()[1])
+if peak is None:
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
 if sys.platform == "darwin":
     peak //= 1024
 print(json.dumps({"elapsed_s": elapsed, "peak_rss_kib": peak,

@@ -119,6 +119,8 @@ EXPECTED_ENTRIES = (
     ("tests/test_hook_wiring_parity.py::test_journal_kind_parity_rejects_unexpected_extra_kind", "requires:host_sandbox"),
     ("tests/test_hook_wiring_parity.py::test_release_diet_counts_allow_only_verified_schema_effects", "requires:host_sandbox"),
     ("tests/test_hook_wiring_parity.py::test_spec_key_parity_rejects_unexpected_extra_key", "requires:host_sandbox"),
+    ("tests/test_host_eff_09_switch_proofs.py::test_t2_off_explicit_and_unset_are_byte_identical", "all"),
+    ("tests/test_journal_observer_failure_accounting.py::test_no_failure_batch_and_single_append_are_byte_identical_after_replay_and_resume", "all"),
     ("tests/test_journal_replay_publication.py::test_parity_control_skipped_live_handoff_fails", "all"),
     ("tests/test_llama_wire_seal_parity.py::test_bundled_llama_wire_matches_normalization_input_and_its_seal", "requires:host_sandbox"),
     ("tests/test_llama_wire_seal_parity.py::test_ready_seals_require_a_wire_hash_and_ready_status", "all"),
@@ -132,7 +134,7 @@ EXPECTED_ENTRIES = (
     ("tests/test_offmode_compatibility.py::test_parity_command_compares_raw_bytes_and_exercises_resume", "all"),
     ("tests/test_parallel_shell_parity.py::test_off_mode_shell_directory_is_not_tracked_as_created_file", "all"),
     ("tests/test_parallel_worker_prep.py::test_engine_venv_installs_bypass_shared_pip_cache", "all"),
-    ("tests/test_parallel_worker_prep.py::test_release_parity_checks_wire_before_summary", "all"),
+    ("tests/test_parallel_worker_prep_digest_guard.py::test_release_parity_checks_wire_before_reading_artifacts", "all"),
     ("tests/test_parallel_worker_prep.py::test_wire_parity_reports_first_send_byte_and_component", "all"),
     ("tests/test_powerups_parity.py::test_feature_off_raw_request_parity", "requires:host_sandbox"),
     ("tests/test_provider_body.py::test_shipped_profile_llama_body_is_byte_identical_to_unmodified_parent_code", "all"),
@@ -152,6 +154,7 @@ EXPECTED_ENTRIES = (
     ("tests/test_unit_coalesce.py::test_r2_n8_parity_and_contract_pins_are_identified", "all"),
     ("tests/test_unit_planner_v2.py::test_switch_off_is_byte_identical_to_v059_planner", "all"),
     ("tests/test_view_ladder_integration.py::test_frozen_selection_re_renders_byte_identically_across_requests", "all"),
+    ("tests/test_wave4_probe_provider.py::test_cross_process_static_work_and_wire_parity", "all"),
     ("tests/test_working_set_off_parity_base.py::test_off_parity_direct_callers_share_trace_results", "all"),
     ("tests/test_must_run_gate.py::test_must_run_manifest_matches_reviewed_inventory", "all"),
     ("tests/test_must_run_gate.py::test_planted_controls_reject_unqualified_runs", "all"),
@@ -432,6 +435,10 @@ EXPECTED_ASSERTIONS = {
         "assert len(baseline_payloads) == len(current_payloads)",
     "tests/test_hook_wiring_parity.py::test_spec_key_parity_rejects_unexpected_extra_key":
         "assert current_keys == expected",
+    "tests/test_host_eff_09_switch_proofs.py::test_t2_off_explicit_and_unset_are_byte_identical":
+        "assert unset_runs == explicit_runs",
+    "tests/test_journal_observer_failure_accounting.py::test_no_failure_batch_and_single_append_are_byte_identical_after_replay_and_resume":
+        "assert journals[True] == journals[False]",
     "tests/test_journal_replay_publication.py::test_parity_control_skipped_live_handoff_fails":
         'assert skipped["sequence"] + 1 == third["sequence"]',
     "tests/test_llama_wire_seal_parity.py::test_bundled_llama_wire_matches_normalization_input_and_its_seal":
@@ -458,8 +465,8 @@ EXPECTED_ASSERTIONS = {
         "assert receipts[0][1]['effects'] == ({'path': 'new-directory', 'change': 'created'}, {'path': 'new-file.py', 'change': 'created'})",
     "tests/test_parallel_worker_prep.py::test_engine_venv_installs_bypass_shared_pip_cache":
         "assert len(installs) == 2",
-    "tests/test_parallel_worker_prep.py::test_release_parity_checks_wire_before_summary":
-        "assert source.index('_assert_wire_parity(') < source.index('old_summary_a =')",
+    "tests/test_parallel_worker_prep_digest_guard.py::test_release_parity_checks_wire_before_reading_artifacts":
+        'assert "component messages[0].content" in str(error.value)',
     "tests/test_parallel_worker_prep.py::test_wire_parity_reports_first_send_byte_and_component":
         "assert f'byte {offset}' in message",
     "tests/test_powerups_parity.py::test_feature_off_raw_request_parity":
@@ -498,6 +505,8 @@ EXPECTED_ASSERTIONS = {
         "assert hashlib.sha256(text.encode()).hexdigest() == text_sha",
     "tests/test_view_ladder_integration.py::test_frozen_selection_re_renders_byte_identically_across_requests":
         "assert render_a.text.encode() == render_b.text.encode()",
+    "tests/test_wave4_probe_provider.py::test_cross_process_static_work_and_wire_parity":
+        "assert len(set(provider.wire)) == 1",
     "tests/test_working_set_off_parity_base.py::test_off_parity_direct_callers_share_trace_results":
         "assert calls == [reference, current]",
     "tests/test_must_run_gate.py::test_must_run_manifest_matches_reviewed_inventory":

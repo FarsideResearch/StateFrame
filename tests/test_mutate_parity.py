@@ -12,11 +12,15 @@ import pytest
 from stateframe import runner
 from stateframe.scripted_endpoint import Script, serve
 from tools.compare_mutation_off_requests import capture, write_launcher
+from tools.pinned_tree import pinned_tree
 
 
 CURRENT = Path(__file__).resolve().parents[1]
-_baseline = os.environ.get("SF_TEST_PARITY_BASELINE")
-BASELINE = Path(_baseline).expanduser().resolve() if _baseline else None
+
+
+@pytest.fixture(scope="module")
+def baseline_tree(tmp_path_factory):
+    return pinned_tree("7540148c9c7b58cd76dfec3b004dc3763451a3d3", tmp_path_factory)
 
 
 def test_default_level_is_off_and_omits_spec_key(monkeypatch):
@@ -76,11 +80,22 @@ def _stable_spec(value: dict) -> dict:
     """Drop only fields tied to the capture's endpoint, clock or absolute paths."""
     def normalize(item):
         if isinstance(item, dict):
-            return {key: normalize(child) for key, child in item.items()
-                    if key not in {"chat_url", "engine_dir", "created"}
-                    and not (key in {"file_count", "shipped_hash", "release_manifest", "source_hash"}
-                             and item is value.get("engine_source"))
-                    and not (key == "DS_URL")}
+            normalized = {
+                key: normalize(child)
+                for key, child in item.items()
+                if key not in {"chat_url", "engine_dir", "created", "run_identity_seed"}
+                and not (key in {"file_count", "shipped_hash", "release_manifest", "source_hash"}
+                         and item is value.get("engine_source"))
+                and key != "DS_URL"
+            }
+            providers = item.get("provider_capabilities")
+            if isinstance(providers, dict):
+                # Each capture gets a fresh loopback port; preserve capability records and count.
+                normalized["provider_capabilities"] = sorted(
+                    (normalize(capability) for capability in providers.values()),
+                    key=lambda capability: json.dumps(capability, sort_keys=True),
+                )
+            return normalized
         if isinstance(item, list):
             return [normalize(child) for child in item]
         if isinstance(item, str) and item.startswith("/"):
@@ -90,15 +105,13 @@ def _stable_spec(value: dict) -> dict:
 
 
 @pytest.mark.host_sandbox
-@pytest.mark.skipif(BASELINE is None, reason="set SF_TEST_PARITY_BASELINE to an untouched base checkout")
 @pytest.mark.parametrize("example", ["discount_bug", "tiny_site", "brief_to_report"])
-def test_l0_full_run_capture_parity_against_base(tmp_path, example):
-    assert BASELINE is not None
+def test_l0_full_run_capture_parity_against_base(baseline_tree, tmp_path, example):
     launcher = tmp_path / "launch.py"
     write_launcher(launcher)
     repo = tmp_path / "repo"
     run = tmp_path / "run"
-    base_request, base_tools, base_spec = capture(BASELINE, sys.executable, launcher, example, repo, run,
+    base_request, base_tools, base_spec = capture(baseline_tree, sys.executable, launcher, example, repo, run,
                                                   stable_tool_head="on", final_cache_layout="on")
     _remove_run(run)
     current_request, current_tools, current_spec = capture(CURRENT, sys.executable, launcher, example, repo, run,

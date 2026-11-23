@@ -543,6 +543,22 @@
       "witness_assertion": null
     },
     {
+      "scenario_id": "test_host_eff_09_switch_proofs_test_t2_off_explicit_and_unset_are_byte_identical",
+      "nodeid": "tests/test_host_eff_09_switch_proofs.py::test_t2_off_explicit_and_unset_are_byte_identical",
+      "item_nodeids": [
+        "tests/test_host_eff_09_switch_proofs.py::test_t2_off_explicit_and_unset_are_byte_identical"
+      ],
+      "jobs": {
+        "darwin": "RUN",
+        "linux": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert unset_runs == explicit_runs"
+    },
+    {
       "scenario_id": "test_http_gzip_test_default_profile_cli_run_sends_large_request_without_gzip",
       "nodeid": "tests/test_http_gzip.py::test_default_profile_cli_run_sends_large_request_without_gzip",
       "item_nodeids": [
@@ -1776,6 +1792,22 @@
       "witness_assertion": "assert current_keys == expected"
     },
     {
+      "scenario_id": "test_journal_observer_failure_accounting_test_no_failure_batch_and_single_append_are_byte_identical_after_replay_and_resume",
+      "nodeid": "tests/test_journal_observer_failure_accounting.py::test_no_failure_batch_and_single_append_are_byte_identical_after_replay_and_resume",
+      "item_nodeids": [
+        "tests/test_journal_observer_failure_accounting.py::test_no_failure_batch_and_single_append_are_byte_identical_after_replay_and_resume"
+      ],
+      "jobs": {
+        "darwin": "RUN",
+        "linux": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert journals[True] == journals[False]"
+    },
+    {
       "scenario_id": "test_journal_replay_publication_test_parity_control_skipped_live_handoff_fails",
       "nodeid": "tests/test_journal_replay_publication.py::test_parity_control_skipped_live_handoff_fails",
       "item_nodeids": [
@@ -1992,10 +2024,10 @@
       "witness_assertion": "assert len(installs) == 2"
     },
     {
-      "scenario_id": "test_parallel_worker_prep_test_release_parity_checks_wire_before_summary",
-      "nodeid": "tests/test_parallel_worker_prep.py::test_release_parity_checks_wire_before_summary",
+      "scenario_id": "test_parallel_worker_prep_digest_guard_test_release_parity_checks_wire_before_reading_artifacts",
+      "nodeid": "tests/test_parallel_worker_prep_digest_guard.py::test_release_parity_checks_wire_before_reading_artifacts",
       "item_nodeids": [
-        "tests/test_parallel_worker_prep.py::test_release_parity_checks_wire_before_summary"
+        "tests/test_parallel_worker_prep_digest_guard.py::test_release_parity_checks_wire_before_reading_artifacts"
       ],
       "jobs": {
         "linux": "RUN",
@@ -2005,7 +2037,7 @@
       "optional_prerequisites": [],
       "baseline": null,
       "witness_schema": "assertion_match",
-      "witness_assertion": "assert source.index('_assert_wire_parity(') < source.index('old_summary_a =')"
+      "witness_assertion": "assert \"component messages[0].content\" in str(error.value)"
     },
     {
       "scenario_id": "test_parallel_worker_prep_test_wire_parity_reports_first_send_byte_and_component",
@@ -2301,6 +2333,22 @@
       "baseline": null,
       "witness_schema": "assertion_match",
       "witness_assertion": "assert render_a.text.encode() == render_b.text.encode()"
+    },
+    {
+      "scenario_id": "test_wave4_probe_provider_test_cross_process_static_work_and_wire_parity",
+      "nodeid": "tests/test_wave4_probe_provider.py::test_cross_process_static_work_and_wire_parity",
+      "item_nodeids": [
+        "tests/test_wave4_probe_provider.py::test_cross_process_static_work_and_wire_parity"
+      ],
+      "jobs": {
+        "darwin": "RUN",
+        "linux": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert len(set(provider.wire)) == 1"
     },
     {
       "scenario_id": "test_working_set_off_parity_base_test_off_parity_direct_callers_share_trace_results",
