@@ -16,6 +16,7 @@ import math
 import os
 from pathlib import Path
 import signal
+import struct
 import subprocess
 import sys
 import time
@@ -33,8 +34,10 @@ class ProcessIdentity:
     ppid: int
     pgid: int
     sid: int
-    start: tuple[int, int]
+    start: tuple[int, int] | None
     zombie: bool
+    uid: int | None = None
+    short_info_denied: bool = False
 
 
 @dataclass(frozen=True)
@@ -55,6 +58,14 @@ def _boot_id() -> str | None:
 
 class ContainmentUnverified(RuntimeError):
     """The supervisor cannot prove that every launched process was contained."""
+
+
+class ProcessIdentityUnavailable(ContainmentUnverified):
+    """A macOS process is visible but lacks an authoritative birth identity."""
+
+
+_NO_PROCESS_BIRTH = "macOS process birth identity is unavailable"
+_NO_SHORT_INFO = "cannot read macOS short process information for launch unit"
 
 
 def _log_containment_unverified(cause_key: str, why: str) -> None:
@@ -105,7 +116,7 @@ def capture_launch_identity(process, table: ProcessTable | None = None, *,
     if row is None and (not session_leader or getattr(process, "_waitpid_lock", None) is None
                         or getattr(process, "returncode", None) is not None):
         return None
-    if row is not None and row.pgid != pid:
+    if row is not None and (row.start is None or row.pgid != pid):
         return None
     if sys.platform == "linux" and not boot_id:
         return None
@@ -174,6 +185,9 @@ def signal_launch_group(process, launch_identity: LaunchIdentity | None, sig: si
         try:
             boot_id = _boot_id()
             row = table.identity(launch_identity.pid)
+        except ProcessIdentityUnavailable as error:
+            _log_containment_unverified("macos_launch_birth_unavailable", str(error))
+            return False
         except (OSError, RuntimeError, ValueError):
             return False
         if boot_id != launch_identity.boot_id:
@@ -185,7 +199,8 @@ def signal_launch_group(process, launch_identity: LaunchIdentity | None, sig: si
                 group_still_owned = _unreaped_child(launch_identity.pid)
             if not group_still_owned:
                 return False
-        elif ((launch_identity.start is not None and row.start != launch_identity.start)
+        elif (row.start is None
+              or (launch_identity.start is not None and row.start != launch_identity.start)
               or row.pgid != launch_identity.pid):
             return False
         transient_pidfd = None
@@ -252,10 +267,46 @@ def _libproc():
     return ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
 
 
+class _ShortBSDInfo(ctypes.Structure):
+    # Darwin's PROC_PIDT_SHORTBSDINFO is intentionally available across UIDs.
+    _fields_ = [(field, ctypes.c_uint32) for field in ("pid", "ppid", "pgid", "status")]
+    _fields_ += [("comm", ctypes.c_char * 16)]
+    _fields_ += [(field, ctypes.c_uint32) for field in (
+        "flags", "uid", "gid", "ruid", "rgid", "svuid", "svgid", "rfu")]
+
+
+def _mac_sysctl_observation(pid: int) -> ProcessIdentity | None:
+    """Read LP64 kinfo_proc topology and effective UID, without granting identity."""
+    # Darwin's user64_kinfo_proc ABI is shared by arm64 and x86_64.
+    libc = ctypes.CDLL(None, use_errno=True)
+    sysctl = libc.sysctl
+    sysctl.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_uint, ctypes.c_void_p,
+                       ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p, ctypes.c_size_t]
+    mib = (ctypes.c_int * 4)(1, 14, 1, pid)  # CTL_KERN, KERN_PROC, KERN_PROC_PID
+    buffer = ctypes.create_string_buffer(648)
+    size = ctypes.c_size_t(ctypes.sizeof(buffer))
+    result = sysctl(mib, len(mib), buffer, ctypes.byref(size), None, 0)
+    if (result == 0 and size.value == 0) or (result != 0 and ctypes.get_errno() == errno.ESRCH):
+        return None
+    if result != 0 or size.value != ctypes.sizeof(buffer):
+        raise ProcessIdentityUnavailable(_NO_SHORT_INFO)
+    # extern_proc.p_stat/p_pid and eproc.e_ucred.cr_uid/e_ppid/e_pgid.
+    status, actual_pid = struct.unpack_from("=B3xi", buffer, 36)
+    uid = struct.unpack_from("=I", buffer, 420)[0]
+    ppid, pgid = struct.unpack_from("=ii", buffer, 560)
+    if actual_pid != pid or status == 0 or ppid < 0 or pgid <= 0:
+        raise ProcessIdentityUnavailable(_NO_SHORT_INFO)
+    # A foreign effective UID explains the denial, but can also be a setuid child.
+    return ProcessIdentity(pid, ppid, pgid, 0, None, status == 5, uid,
+                           short_info_denied=uid in {os.getuid(), os.geteuid()})
+
+
 def signal_mac_verified_process(expected: ProcessIdentity, sig: signal.Signals) -> str | bool:
     """Return the verified signal path, or False when the process is gone or changed."""
     if sys.platform != "darwin" or expected.pid <= 0 or expected.zombie:
         return False
+    if expected.start is None:
+        raise ProcessIdentityUnavailable(_NO_PROCESS_BIRTH)
     try:
         lib = _libproc()
     except OSError as error:
@@ -324,6 +375,26 @@ def signal_mac_verified_process(expected: ProcessIdentity, sig: signal.Signals) 
     return MAC_KERNEL_SIGNAL_PATH
 
 
+def live_group_rows(rows: dict[int, ProcessIdentity], pgid: int,
+                    bound: tuple[int, int] | None = None) -> list[ProcessIdentity]:
+    """Filter a shared scan to one group, retaining members with no birth stamp."""
+    leader = rows.get(pgid)
+    if (bound is not None and leader is not None and leader.pgid == pgid
+            and leader.start is not None and leader.start > bound):
+        return []
+    live = []
+    for row in rows.values():
+        if row.pgid != pgid or row.zombie:
+            continue
+        if row.start is None:
+            if row.short_info_denied:
+                raise ProcessIdentityUnavailable(_NO_SHORT_INFO)
+        elif bound is not None and row.start > bound:
+            continue
+        live.append(row)
+    return live
+
+
 class _TaskInfo(ctypes.Structure):
     _fields_ = [(name, ctypes.c_uint64) for name in (
         "virtual", "resident", "user", "system", "threads_user", "threads_system")]
@@ -347,28 +418,52 @@ class ProcessTable:
     def __init__(self):
         self._lib = None
         if sys.platform == "darwin":
-            self._lib = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+            self._lib = _libproc()
             self._lib.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int,
                                              ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
             self._lib.proc_listallpids.argtypes = [ctypes.c_void_p, ctypes.c_int]
 
+    def _mac_observation(self, pid: int) -> ProcessIdentity | None:
+        info = _BSDInfo()
+        count = self._lib.proc_pidinfo(pid, 3, 0, ctypes.byref(info), ctypes.sizeof(info))
+        if count == 0:
+            error = ctypes.get_errno()
+            if error in (errno.ESRCH, errno.ENOENT):
+                return None
+            if error == errno.EPERM:
+                return self._mac_short_observation(pid)
+            raise OSError(error, "cannot inspect execution descendant", pid)
+        if count != ctypes.sizeof(info) or info.pid != pid:
+            raise RuntimeError("incomplete macOS process identity")
+        try:
+            sid = os.getsid(pid)
+        except ProcessLookupError:
+            return None
+        return ProcessIdentity(pid, info.ppid, info.pgid, sid,
+                               (info.start_sec, info.start_usec), info.status == 5, info.uid)
+
+    def _mac_short_observation(self, pid: int) -> ProcessIdentity | None:
+        info = _ShortBSDInfo()
+        count = self._lib.proc_pidinfo(pid, 13, 0, ctypes.byref(info), ctypes.sizeof(info))
+        if count == 0 and ctypes.get_errno() in (errno.ESRCH, errno.ENOENT):
+            return None
+        if count == ctypes.sizeof(info) and info.pid == pid:
+            # Even if the PID was reused, only this reply's topology is used.
+            return ProcessIdentity(pid, info.ppid, info.pgid, 0, None, info.status == 5, info.uid)
+        return _mac_sysctl_observation(pid)
+
+    def observe(self, pid: int) -> ProcessIdentity | None:
+        """Read liveness and topology, which may be available without birth identity."""
+        if self._lib is not None:
+            return self._mac_observation(pid)
+        return self.identity(pid)
+
     def identity(self, pid: int) -> ProcessIdentity | None:
         if self._lib is not None:
-            info = _BSDInfo()
-            count = self._lib.proc_pidinfo(pid, 3, 0, ctypes.byref(info), ctypes.sizeof(info))
-            if count == 0:
-                error = ctypes.get_errno()
-                if error in (errno.ESRCH, errno.ENOENT):
-                    return None
-                raise OSError(error, "cannot inspect execution descendant", pid)
-            if count != ctypes.sizeof(info):
-                raise RuntimeError("incomplete macOS process identity")
-            try:
-                sid = os.getsid(pid)
-            except ProcessLookupError:
-                return None
-            return ProcessIdentity(pid, info.ppid, info.pgid, sid,
-                                   (info.start_sec, info.start_usec), info.status == 5)
+            row = self._mac_observation(pid)
+            if row is not None and row.start is None:
+                raise ProcessIdentityUnavailable(_NO_PROCESS_BIRTH)
+            return row
         try:
             # Raw descriptor read: a full-table scan calls this per process, and the pathlib
             # text path costs about four times as much. Bytes also tolerate any comm name.
@@ -402,7 +497,12 @@ class ProcessTable:
         return int(fields[11]) + int(fields[12])
 
     def resident_bytes(self, row: ProcessIdentity) -> int:
-        current = self.identity(row.pid)
+        if row.start is None:
+            return 0
+        try:
+            current = self.identity(row.pid)
+        except ProcessIdentityUnavailable:
+            return 0
         if current is None or current.start != row.start or current.zombie:
             return 0
         if self._lib is not None:
@@ -586,6 +686,7 @@ class ProcessTable:
         return rows
 
     def snapshot(self) -> dict[int, ProcessIdentity]:
+        """Collect shared observations. Callers resolve membership in their own family or group."""
         if self._lib is not None:
             count = self._lib.proc_listallpids(None, 0)
             if count <= 0:
@@ -599,11 +700,12 @@ class ProcessTable:
             # os.listdir: a Path object per /proc entry is a measurable share of a full scan.
             candidates = [int(name) for name in os.listdir("/proc") if name.isdecimal()]
         result = {}
+        observe = self.observe if self._lib is not None else self.identity
         for pid in candidates:
             if pid <= 0:
                 continue
             try:
-                row = self.identity(pid)
+                row = observe(pid)
             except PermissionError:
                 if getattr(self, "require_complete", False):
                     raise
@@ -611,8 +713,10 @@ class ProcessTable:
                 continue
             if row is not None:
                 result[pid] = row
-        if getattr(self, "require_complete", False) and (not result or os.getpid() not in result):
-            raise RuntimeError("authoritative process snapshot omits its observer")
+        if getattr(self, "require_complete", False):
+            observer = result.get(os.getpid())
+            if observer is None or observer.start is None:
+                raise RuntimeError("authoritative process snapshot omits its observer")
         return result
 
 
@@ -666,6 +770,8 @@ class Descendants:
         self.leader = leader
         self.table = table
         self.members: dict[int, ProcessIdentity] = {}
+        self._recent_members: dict[int, ProcessIdentity] = {}
+        self._unverified_lineage: set[int] = set()
         self.launch_leader_start: tuple[int, int] | None = None
         self.signal_errors: dict[int, str] = {}
         self.signal_paths: dict[int, str] = {}
@@ -681,17 +787,20 @@ class Descendants:
         # reports it (leader_reaped); otherwise the newest start seen while the leader was live.
         self.owned_bound: tuple[int, int] | None = None
         self.reaped_bound: tuple[int, int] | None = None
-        row = table.identity(leader)
+        row = getattr(table, "observe", table.identity)(leader)
         identity_matches = (
             launch_identity is None
-            or (row is not None and row.pid == launch_identity.pid
+            or (row is not None and row.start is not None and row.pid == launch_identity.pid
                 and (row.start == launch_identity.start
                      or (allow_unstamped_leader and launch_identity.start is None)))
         )
-        if row is not None and identity_matches:
+        if row is not None and row.start is not None and identity_matches:
             self.members[leader] = row
             if launch_identity is not None:
                 self.launch_leader_start = row.start
+        if sys.platform == "darwin" and row is not None and not row.zombie:
+            if leader in self.members or row.start is None:
+                self._recent_members[leader] = row
 
     def leader_reaped(self) -> None:
         """Record that the caller has just reaped the leader; call once, right after the reap."""
@@ -699,12 +808,22 @@ class Descendants:
             self.reaped_bound = process_start_now()
 
     def update(self, rows: dict[int, ProcessIdentity]) -> list[ProcessIdentity]:
-        for pid in self.members.keys() - rows.keys():
-            current = self.table.identity(pid)
+        darwin = sys.platform == "darwin"
+        tracked = self.members.keys()
+        observe = self.table.identity
+        if darwin:
+            tracked = tracked | self._recent_members.keys()
+            observe = getattr(self.table, "observe", observe)
+        missing = tracked - rows.keys()
+        if missing and darwin:
+            # Keep per-family rereads out of the shared tick view.
+            rows = dict(rows)
+        for pid in missing:
+            current = observe(pid)
             if current is not None:
                 rows[pid] = current
         active = {pid for pid, old in self.members.items()
-                  if pid in rows and rows[pid].start == old.start}
+                  if pid in rows and rows[pid].start is not None and rows[pid].start == old.start}
         namespace_inode = getattr(self.table, "pid_namespace_inode", None)
         if (sys.platform == "linux" and self.private_pid_namespace_inode is None
                 and self.launch_namespace_inode is not None and namespace_inode is not None):
@@ -729,6 +848,8 @@ class Descendants:
                                                   if rows.get(key[0]) is not None
                                                   and rows[key[0]].start == key[1]}
             for pid, row in rows.items():
+                if row.start is None:
+                    continue
                 # A process never changes PID namespace, so (pid, start) names its inode for
                 # good; re-reading /proc/<pid>/ns/pid for every process on every update made
                 # each supervisor observation cost one syscall per process on the host.
@@ -753,9 +874,14 @@ class Descendants:
         leader = self.members.get(self.leader)
         leader_live = leader is not None and self.leader in active and self.reaped_bound is None
         if leader_live and rows:
-            newest = max(row.start for row in rows.values())
+            newest = max(row.start for row in rows.values() if row.start is not None)
             self.owned_bound = newest if self.owned_bound is None else max(self.owned_bound, newest)
         bound = self.reaped_bound if self.reaped_bound is not None else self.owned_bound
+        group_leader = rows.get(self.leader)
+        group_reused = (darwin and bound is not None and group_leader is not None
+                        and group_leader.pgid == self.leader and group_leader.start is not None
+                        and group_leader.start > bound)
+        unverified_lineage: set[int] = set()
         changed = True
         while changed:
             changed = False
@@ -763,19 +889,73 @@ class Descendants:
                 if pid in active:
                     continue
                 in_group = row.pgid == self.leader or row.sid == self.leader
-                if row.ppid in active or (in_group and (leader_live or (bound is not None and row.start <= bound))):
+                if row.start is None:
+                    if row.ppid in active or (in_group and not group_reused and leader is not None):
+                        if row.short_info_denied:
+                            raise ProcessIdentityUnavailable(_NO_SHORT_INFO)
+                        unverified_lineage.add(pid)
+                        active.add(pid)
+                        changed = True
+                    continue
+                verified_group = (in_group and not group_reused
+                                  and (leader_live or (bound is not None and row.start <= bound)))
+                if row.ppid in active or verified_group:
                     # A reused leader PID must not acquire a new unrelated family.
                     previous = self.members.get(pid)
                     if previous is not None and previous.start != row.start:
                         continue
-                    self.members[pid] = row
+                    if darwin and not verified_group and row.ppid in unverified_lineage:
+                        unverified_lineage.add(pid)
+                    else:
+                        self.members[pid] = row
                     active.add(pid)
                     changed = True
-        return [rows[pid] for pid in active if not rows[pid].zombie]
+        # A member that turns unreadable can have detached. Its PID can keep the
+        # family live, but cannot seed identity adoption without a current link.
+        if darwin:
+            for pid, previous in self._recent_members.items():
+                row = rows.get(pid)
+                if row is None or pid in active:
+                    continue
+                if row.start is None or (pid in self._unverified_lineage and row.start == previous.start):
+                    if row.short_info_denied:
+                        raise ProcessIdentityUnavailable(_NO_SHORT_INFO)
+                    unverified_lineage.add(pid)
+                    active.add(pid)
+            for row in rows.values():
+                if row.short_info_denied:
+                    self._exclude_unreadable(row, rows, active)
+        live = [rows[pid] for pid in active if not rows[pid].zombie]
+        if darwin:
+            self._recent_members = {row.pid: row for row in live}
+            self._unverified_lineage = unverified_lineage
+        return live
+
+    @staticmethod
+    def _exclude_unreadable(row: ProcessIdentity, rows: dict[int, ProcessIdentity],
+                            active: set[int]) -> None:
+        """A same-UID sysctl reply must establish an ancestry outside the family."""
+        seen = {row.pid}
+        parent = row.ppid
+        while parent not in active and parent not in seen:
+            if parent in (0, 1):
+                return
+            ancestor = rows.get(parent)
+            if ancestor is None:
+                break
+            seen.add(parent)
+            parent = ancestor.ppid
+        raise ProcessIdentityUnavailable(_NO_SHORT_INFO)
 
     def signal(self, rows: list[ProcessIdentity], sig: signal.Signals) -> set[int]:
         signalled = set()
         for row in rows:
+            if row.start is None:
+                self.signal_errors[row.pid] = _NO_PROCESS_BIRTH
+                continue
+            if row.pid in self._unverified_lineage:
+                self.signal_errors[row.pid] = "macOS process ancestry crosses an unverified parent"
+                continue
             pidfd = None
             try:
                 if sys.platform == "linux" and not hasattr(os, "pidfd_open"):
@@ -800,6 +980,8 @@ class Descendants:
                     self.signal_errors[row.pid] = "detached descendant signal unavailable without pidfd"
                     continue
                 signalled.add(row.pid)
+            except ProcessIdentityUnavailable as error:
+                self.signal_errors[row.pid] = str(error)
             except ProcessLookupError:
                 pass
             except PermissionError:
@@ -879,9 +1061,12 @@ def kill_launch_unit(process, family: Descendants | None = None,
         lock = getattr(process, "_waitpid_lock", None)
         with lock if lock is not None else nullcontext():
             if getattr(process, "returncode", None) is None:
-                current = table.identity(process.pid)
-                if (current is not None and (launch_identity.start is None
-                                              or current.start == launch_identity.start)
+                try:
+                    current = table.identity(process.pid)
+                except ProcessIdentityUnavailable:
+                    current = None
+                if (current is not None and current.start is not None
+                        and (launch_identity.start is None or current.start == launch_identity.start)
                         and current.pgid == launch_identity.pid):
                     effective_identity = launch_identity
                     if launch_identity.start is None and _boot_id() == launch_identity.boot_id:

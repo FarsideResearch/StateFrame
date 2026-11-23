@@ -941,6 +941,28 @@
       "witness_assertion": "assert len(kwargs[\"pass_fds\"]) == 1"
     },
     {
+      "scenario_id": "test_exec_tracker_darwin_test_startup_probe_and_worker_tick_with_root_processes",
+      "nodeid": "tests/test_exec_tracker_darwin.py::test_startup_probe_and_worker_tick_with_root_processes",
+      "item_nodeids": [
+        "tests/test_exec_tracker_darwin.py::test_startup_probe_and_worker_tick_with_root_processes"
+      ],
+      "jobs": {
+        "linux": {
+          "disposition": "NA_PLATFORM",
+          "platform": "darwin",
+          "reason": "requires macOS process inspection"
+        },
+        "darwin": "RUN"
+      },
+      "prerequisites": [
+        "host_sandbox"
+      ],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert result.exit_code == 0 and result.output == b\"42\\n\" and result.cleanup.ok"
+    },
+    {
       "scenario_id": "test_exec_supervisor_parent_death_test_short_lived_wrapper_exits_before_init_and_owner_eof_stops_job",
       "nodeid": "tests/test_exec_supervisor_parent_death.py::test_short_lived_wrapper_exits_before_init_and_owner_eof_stops_job",
       "item_nodeids": [

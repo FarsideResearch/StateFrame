@@ -27,7 +27,8 @@ import weakref
 from .engine.kernel_parallel_records import (CheckReceipt, HostAnswer, HostRequest, ParallelRecordError, Proposal,
                                               ProposalEntry, UnitSpec, canonical_json)
 from .engine.kernel_parallel_txn import TxnStoreError
-from .engine.kernel_exec_tracker import ContainmentUnverified, ProcessTable, _boot_id, load_tolerant_seconds
+from .engine.kernel_exec_tracker import (ContainmentUnverified, ProcessTable, _boot_id,
+                                         live_group_rows, load_tolerant_seconds)
 from . import outcomes, workcopy
 from .parallel_journal import Journal, JournalBusy, JournalFault, JournalProtocolError, Ticket
 from .parallel_channel import ChannelWrites, read_synced_record
@@ -722,6 +723,8 @@ class ParallelSupervisor:
             rows = self._process_table.snapshot() if fresh else self._process_table.tick_snapshot()
             if not rows or os.getpid() not in rows:
                 raise ProcessInspectionDeferred("authoritative host process scan omits its observer; retry pending")
+            if sys.platform == "darwin":
+                return bool(live_group_rows(rows, pgid))
         except (OSError, RuntimeError, ValueError) as error:
             raise ProcessInspectionDeferred("authoritative host process scan failed; retry pending") from error
         return any(row.pgid == pgid and not row.zombie for row in rows.values())
@@ -3450,6 +3453,8 @@ def _group_has_live_processes(pgid: int, table: TickProcessTable | None = None) 
         return any(group == pgid and not state.startswith("Z") for _, group, state, _ in _process_table())
     try:
         rows = table.snapshot()
+        if sys.platform == "darwin":
+            return bool(live_group_rows(rows, pgid))
     except (OSError, RuntimeError, ValueError) as error:
         raise ProcessInspectionDeferred("authoritative host process scan failed; retry pending") from error
     return any(row.pgid == pgid and not row.zombie for row in rows.values())

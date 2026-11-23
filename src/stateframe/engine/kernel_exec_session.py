@@ -214,11 +214,16 @@ def _launch_unit_progress(process, table: ProcessTable) -> tuple | None:
     try:
         root = table.identity(pid)
         recorded = recorded_launch_identity(process)
-        if (root is None or root.zombie
+        if (root is None or root.zombie or root.start is None
                 or (recorded is not None and recorded.start is not None
                     and recorded.start != root.start)):
             return None
         members = table.refresh_members({pid: root})
+        if sys.platform == "darwin" and any(row.start is None for row in members.values()):
+            observed = Descendants(pid, table, recorded).update(members)
+            if any(row.start is None for row in observed):
+                return None
+            members = {pid: row for pid, row in members.items() if row.start is not None}
         ticks = [table.cpu_ticks(row) for row in members.values()]
     except (OSError, RuntimeError, ValueError, IndexError):
         return None

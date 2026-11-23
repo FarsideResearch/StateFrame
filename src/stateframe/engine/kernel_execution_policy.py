@@ -557,7 +557,12 @@ class _ResidentMemorySupervisor:
 
         # The exited leader's PID may already belong to a new process. Keep its
         # recorded row for identity continuity, but never use it as a new PPID root.
-        parents = allowed - {getattr(self.family, "leader", self.process.pid)}
+        leader = getattr(self.family, "leader", self.process.pid)
+        if sys.platform == "darwin":
+            # Descendants checks for a reused group before counting these rows.
+            allowed.update(pid for pid, row in candidates.items()
+                           if row.pgid == leader and (row.start is None or pid == leader))
+        parents = allowed - {leader}
         changed = True
         while changed:
             changed = False

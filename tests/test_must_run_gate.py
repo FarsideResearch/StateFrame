@@ -54,6 +54,8 @@ EXPECTED_ENTRIES = (
     ("tests/test_exec_launch.py::test_macos_launcher_requires_memory_supervision", "darwin"),
     ("tests/test_exec_session.py::test_engine_death_stops_supervised_job", "requires:host_sandbox"),
     ("tests/test_exec_session.py::test_owner_pipe_eof_stops_job_while_forked_child_holds_control_socket", "requires:host_sandbox"),
+    ("tests/test_exec_tracker_darwin.py::test_startup_probe_and_worker_tick_with_root_processes",
+     "darwin_requires:host_sandbox"),
     ("tests/test_exec_session_framing.py::test_session_lifetime_pipe_wrapper_argv_contract", "requires:host_sandbox"),
     ("tests/test_exec_supervisor_parent_death.py::test_short_lived_wrapper_exits_before_init_and_owner_eof_stops_job", "requires:host_sandbox"),
     ("tests/test_exec_supervisor_parent_death.py::test_supervisor_stays_alive_when_started_through_intermediate_process", "requires:host_sandbox"),
@@ -250,6 +252,8 @@ EXPECTED_OPTIONAL_DEPENDENCIES = (
 )
 
 _PLATFORM_REASONS = {
+    "tests/test_exec_tracker_darwin.py::test_startup_probe_and_worker_tick_with_root_processes":
+        "requires macOS process inspection",
     "tests/test_exec_launch.py::test_macos_launcher_requires_memory_supervision": "macOS only",
     "tests/test_process_signal_liveness.py::test_exiting_empty_cmdline_is_gone_before_launch_identity_mismatch":
         "Linux exiting-process cmdline evidence",
@@ -321,6 +325,8 @@ EXPECTED_ASSERTIONS = {
         "assert _wait_for_stable_file(heartbeat)",
     "tests/test_exec_session_framing.py::test_session_lifetime_pipe_wrapper_argv_contract":
         'assert len(kwargs["pass_fds"]) == 1',
+    "tests/test_exec_tracker_darwin.py::test_startup_probe_and_worker_tick_with_root_processes":
+        'assert result.exit_code == 0 and result.output == b"42\\n" and result.cleanup.ok',
     "tests/test_exec_supervisor_parent_death.py::test_short_lived_wrapper_exits_before_init_and_owner_eof_stops_job":
         "assert wrapper.wait(timeout=5) == 0",
     "tests/test_exec_supervisor_parent_death.py::test_supervisor_stays_alive_when_started_through_intermediate_process":
