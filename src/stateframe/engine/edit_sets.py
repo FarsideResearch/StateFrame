@@ -1747,9 +1747,6 @@ def c1_import_change(span_lines, start_idx, file_lines=None, providers=None):
 TRANSACTION_WRITES = frozenset(("add", "add_all", "delete", "execute", "flush",
                                 "merge", "bulk_save_objects"))
 TRANSACTION_RESOLVES = frozenset(("commit", "rollback"))
-RESOURCE_ACQUIRE = {"open": "close", "SessionLocal": "close",
-                    "acquire": "release", "connect": "close",
-                    "raw_connection": "close"}
 
 
 def _receiver_of(call):
@@ -1772,12 +1769,10 @@ def _outer_returns(fn, span_lines):
 def c2_statement_insert(span_lines, start_idx, file_lines=None, providers=None):
     """The `statement_insert` family: one statement, at a legal boundary.
 
-    four signal classes, each capped at `MAX_BOUNDARIES_PER_CLASS`:
+    three signal classes, each capped at `MAX_BOUNDARIES_PER_CLASS`:
 
       X a recognised transaction write reaches an exit unresolved -> `commit`
          before a `return`, `rollback` before a `raise` in a handler;
-      R a registry-recognised resource is acquired and never released ->
-         `close()`/`release()` before the last exit;
       U a local is USED before anything binds it -> bind it from the RHS the
          function itself uses later (a donor, never invented text);
       P a peer function in the SAME FILE with the same call shape performs a
@@ -1840,48 +1835,6 @@ def c2_statement_insert(span_lines, start_idx, file_lines=None, providers=None):
             es = _mk_set(span_lines, start_idx, [edit], "stmt_rollback", [recv])
             if es is not None:
                 out.append(es)
-
-    # ---- R: unreleased resource
-    with_bound = set()
-    for node in ast.walk(fn):
-        if isinstance(node, (ast.With, ast.AsyncWith)):
-            for item in node.items:
-                if item.optional_vars is not None:
-                    for n in ast.walk(item.optional_vars):
-                        if isinstance(n, ast.Name):
-                            with_bound.add(n.id)
-    held = []
-    for node in ast.walk(fn):
-        if not (isinstance(node, ast.Assign) and len(node.targets) == 1
-                and isinstance(node.targets[0], ast.Name)
-                and isinstance(node.value, ast.Call)):
-            continue
-        f = node.value.func
-        key = f.id if isinstance(f, ast.Name) else (
-            f.attr if isinstance(f, ast.Attribute) else None)
-        if key not in RESOURCE_ACQUIRE:
-            continue
-        name = node.targets[0].id
-        if name in with_bound:
-            continue                       # auto-released
-        rel = RESOURCE_ACQUIRE[key]
-        calls_on_it = {m for r, m in (_receiver_of(c) for c in calls) if r == name}
-        if rel in calls_on_it:
-            continue
-        held.append((node.lineno, name, rel))
-    for lineno, name, rel in sorted(held)[:MAX_BOUNDARIES_PER_CLASS]:
-        rets = [r for r in _outer_returns(fn, span_lines) if r.lineno > lineno]
-        if not rets:
-            continue
-        i = rets[-1].lineno - 1
-        edit = _insert_before(span_lines, i,
-                              "%s%s.%s()" % (_indent_of(span_lines[i]), name, rel),
-                              "insert_release")
-        if edit is None:
-            continue
-        es = _mk_set(span_lines, start_idx, [edit], "stmt_release", [name, rel])
-        if es is not None:
-            out.append(es)
 
     # ---- U: used before bound (donor RHS from the function's own later binding)
     first_load, first_store = {}, {}

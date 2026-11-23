@@ -252,7 +252,7 @@ SHAPE_FAMILY_ROUTES = {
     #   * `clause_insertion` adds a clause to a condition or filter chain;
     #   * `none_passthrough_guard` inserts `if x is None: <action>`;
     #   * `coordinated_edit_set`'s `c2_statement_insert` inserts a commit /
-    #     rollback / release / binding / peer step.
+    #     rollback / binding / peer step.
     # All three genuinely express "a step that should happen is not happening",
     # so naming one would be a preference dressed as a finding, and the shaped
     # arm puts the chosen family's WHOLE output ahead of the round-robin — i.e.

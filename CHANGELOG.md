@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- Removed resource-release statements from the suggested edit menus: they could add a close or release call where one is not wanted.
+- Fixed: malformed terminal metadata now behaves like a missing terminal when deciding whether to offer resume.
+- Fixed: no resume hint is printed for a run whose engine result was submitted, including one refused for a missing sealed artifact; resume refuses such runs.
+- Fixed: runs with a reasoning effort set on the strict OpenAI dialect no longer stop before the first request. The working-set body is now priced and certified with the effort that is actually sent.
+- An applied `file_create` receipt now counts as a product change at `done` if it still names a regular product file that the current edit policy admits.
+- Tests: checkpoint publication is checked at each crash point in a fresh process, including rename, fsync and index order.
+- Tests/docs: cover Linux per-check loopback isolation, including host and cross-check boundaries, and document that macOS checks deny network access.
+- Tests: watchdog signal authority covers direct kills, permission errors and a missing process.
+- Tests: source subprocess helpers set an explicit import environment.
+- Tests: interrupt escalation and the shared parent comparison are checked against real processes and cached versus uncached bytes.
+- Tests: the sparse proposal check counts workspace file opens, reads and copies instead of elapsed time.
+
 ## 0.8.25 (2026-11-23)
 
 - Tests: the retired-name, parity-baseline and release-matrix guards check the current sources again.

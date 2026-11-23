@@ -227,6 +227,27 @@ def candidate_changed(runtime: object | None) -> bool:
     return bool(changed and revision and str(revision).strip().upper() != "UNKNOWN")
 
 
+def _applied_file_create_product_changed(runtime: object) -> bool:
+    from kernel_delivery_manifest import DeliveryManifestTracker
+    from kernel_edit_source_tool import task_scope_refusal
+    from kernel_tool_paths import receipt_target_path
+    from kernel_tool_surface import dispatch_admissible
+    from probes.react_repair import _is_product_path, protected_test_path
+
+    owner = getattr(runtime, "owner", None)
+    if not getattr(owner, "_receipts", ()) or not dispatch_admissible("file_create", runtime=runtime):
+        return False
+    creates = [receipt for receipt in owner._receipts if receipt.get("result_class") == "APPLIED"
+               and str(receipt.get("intent", "")).startswith("file_create ")]
+    reader = getattr(runtime, "delivery_contract", None) or DeliveryManifestTracker(owner.root, {}, None)
+    return any(_is_product_path(path := edit["file"], owner.task_row)
+               and not task_scope_refusal(path, owner.task_row.get("task_file_scope"))
+               and receipt_target_path(owner.root, target := owner.root / path) == path and os.path.isfile(target)
+               and not protected_test_path(target, getattr(runtime, "protected_tests", ()))
+               and not ((hooks := getattr(runtime, "_hook_wiring", None)) and hooks.protected(target))
+               for edit in reader._applied_edits(creates, read_content=False))
+
+
 def _ownerless_progress_tool_names(available_tools: object) -> tuple[str, ...]:
     names: list[str] = []
     if isinstance(available_tools, Mapping):
@@ -280,12 +301,22 @@ def _ownerless_gate_preflight(
             return "green", actions
         if not product_parent_proven_unchanged(runtime):
             return "parent_unproven", actions
+        try:
+            created_file_changed = _applied_file_create_product_changed(runtime)
+        except Exception as error:  # noqa: BLE001 - an unproven create keeps the refusal
+            try:
+                _emit(runtime, "done_submit_ownerless_gate_unavailable",
+                      reason=f"created-file proof failed: {type(error).__name__}",
+                      error_type=type(error).__name__)
+            except Exception:  # noqa: BLE001 - a diagnostic failure cannot bypass the refusal
+                pass
+            created_file_changed = False
+        return ("mutation_present" if created_file_changed else None), actions
     except Exception as error:  # noqa: BLE001 - unavailable proof cannot create a false refusal
         _emit(runtime, "done_submit_ownerless_gate_unavailable",
               reason=f"ownerless proof preflight failed: {type(error).__name__}",
               error_type=type(error).__name__)
         return "proof_unavailable", ()
-    return None, actions
 
 
 def ownerless_early_done_refusal(

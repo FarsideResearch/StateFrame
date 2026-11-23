@@ -434,6 +434,7 @@ def test_acceptance_switch_on_widens_and_carries_the_change(tmp_path):
     assert listed not in json.dumps(case.requests[0])
     assert any(listed in json.dumps(request) for request in case.requests[1:])
     assert case.summary and case.summary["check_outcome"] == "pass", case.summary
+    assert case.summary["engine_result"] == "SUBMITTED"
 
 
 def test_acceptance_batch_str_replace_is_refused_before_dispatch(tmp_path):

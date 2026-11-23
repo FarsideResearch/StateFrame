@@ -133,6 +133,9 @@ class PreparationSnapshot:
     grep_result_digests: tuple[tuple[str, str], ...] = field(default=(), repr=False)
     # Fresh reads reserve overlapping source ranges during admission.
     protected_ranges: tuple[tuple[str, int, int], ...] = field(default=(), repr=False)
+    # Provider environment authority is frozen at construction. Keep the unset
+    # default out of repr/digests so the llama.cpp default path stays identical.
+    provider_reasoning_effort: str | None = field(default=None, repr=False)
 
     @property
     def slots(self) -> tuple[SourceSlot, ...]:
@@ -169,6 +172,10 @@ class PreparationSnapshot:
                 for row in grep_digests) or len(dict(grep_digests)) != len(grep_digests)):
             raise ValueError("invalid grep result-set bindings")
         object.__setattr__(self, "grep_result_digests", grep_digests)
+        effort = self.provider_reasoning_effort
+        if (effort is not None and
+                (not isinstance(effort, str) or not effort or effort != effort.strip().lower())):
+            raise ValueError("invalid frozen provider reasoning effort")
         if not isinstance(self.fixed_body, bytes):
             raise ValueError("snapshot provider body must be immutable bytes")
         body = json.loads(self.fixed_body)
@@ -342,6 +349,10 @@ def freeze_preparation(body, runtime, *, request_id: str, byte_cap: int,
     Existing source parsers identify host-owned windows. User/tool prose is
     opaque and never classified by a path substring. Missing blobs fail closed.
     """
+    from kernel_launch_identity_cost import normalized_reasoning_effort
+
+    provider_effort = (normalized_reasoning_effort()
+                       if dialect == "openai-strict" else None)
     from kernel_measurement import _read_journal_blob
     from kernel_read_reuse_visibility import editable_read_paths
     from kernel_request_source_window import (parse_model_source_window, parse_window,
@@ -546,4 +557,5 @@ def freeze_preparation(body, runtime, *, request_id: str, byte_cap: int,
         recovery_owner_allowed=owner_actions is not None and "read" in owner_actions,
         recovery_schema=next((json.dumps(t["function"].get("parameters", {})).encode()
             for t in frozen.get("tools", ()) if isinstance(t, dict)
-            and isinstance(t.get("function"), dict) and t["function"].get("name") == "read"), b""))
+            and isinstance(t.get("function"), dict) and t["function"].get("name") == "read"), b""),
+        provider_reasoning_effort=provider_effort)

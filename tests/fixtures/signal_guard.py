@@ -15,6 +15,8 @@ APPROVED_SOURCE_CALLS: dict[tuple[str, str, str], tuple[int, str]] = {
         (1, "child suicide on lost parent"),
     ("src/stateframe/engine/capability_host_capacity.py", "captured_process_group", "os.getpgid(pid)"):
         (1, "inspect an admitted command process"),
+    ("src/stateframe/engine/kernel_check_watchdog.py", "process_snapshot", "os.kill(pid, 0)"):
+        (1, "signal zero checks absence after an incomplete identity read without delivering a signal"),
     ("src/stateframe/engine/kernel_checkpoint.py", "_pid_alive", "os.kill(pid, 0)"):
         (1, "probe a checkpoint process identity"),
     ("src/stateframe/engine/kernel_env_seed.py", "_evict_to_cap", "os.kill(pid, 0)"):

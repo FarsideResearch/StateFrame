@@ -131,7 +131,8 @@ def test_bookmarks_off_repeated_read_matches_release_bytes(tmp_path, monkeypatch
     monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "off")
     monkeypatch.setenv("STATEFRAME_DELIVER_REQUESTED_BYTES", "on")
     baseline_source = subprocess.check_output([
-        "git", "show", "v0.2.1:src/stateframe/engine/kernel_read_exec.py",
+        "git", "show",
+        "97cd52d6c2225a823fdfeb632aad7bfd738f4d91:src/stateframe/engine/kernel_read_exec.py",
     ], cwd=Path(__file__).resolve().parents[1])
     baseline_path = tmp_path / "release_read_exec.py"
     baseline_path.write_bytes(baseline_source)

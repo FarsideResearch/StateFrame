@@ -198,11 +198,7 @@ def _openai_body(
     environ: Mapping[str, str] | None = None,
     side_call: bool = False,
 ) -> dict[str, object]:
-    source = os.environ if environ is None else environ
-    raw_effort = source.get("REACT_REASONING_EFFORT")
-    explicit_effort = raw_effort.strip().lower() if isinstance(raw_effort, str) else None
-    if not explicit_effort:
-        explicit_effort = None
+    explicit_effort = normalized_reasoning_effort(environ)
     if side_call:
         require_strict_side_call_reasoning_off(explicit_effort)
     if selected.off and explicit_effort != "none":
@@ -550,6 +546,16 @@ def _profile_value(value: object) -> str | None:
         return None
     result = str(value).strip().lower()
     return result or None
+
+
+def normalized_reasoning_effort(
+    environ: Mapping[str, str] | None = None,
+) -> str | None:
+    """Return the operator's normalized OpenAI reasoning-effort override."""
+    source = os.environ if environ is None else environ
+    value = source.get("REACT_REASONING_EFFORT")
+    effort = value.strip().lower() if isinstance(value, str) else None
+    return effort or None
 
 
 def reasoning_profile(

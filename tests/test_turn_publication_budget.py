@@ -8,6 +8,7 @@ from time import perf_counter
 
 import kernel_checkpoint as checkpoint
 from kernel_continuation_journal import ContinuationJournal
+from _source_subprocess_env import source_subprocess_env
 
 
 def test_constant_head_work_and_crash_atomicity(tmp_path, monkeypatch):
@@ -223,7 +224,8 @@ def test_journal_batch_recovers_at_each_persistence_barrier(tmp_path, monkeypatc
         parent = tmp_path / barrier
         parent.mkdir()
         child = subprocess.run([sys.executable, "-c", _JOURNAL_KILL, str(parent), barrier],
-                               capture_output=True, text=True, timeout=30, check=False)
+                               capture_output=True, text=True, timeout=30, check=False,
+                               cwd=parent, env=source_subprocess_env())
         assert child.returncode == -signal.SIGKILL, child.stderr
         name, before = child.stdout.strip().split()
         path = Path(name)
@@ -302,7 +304,8 @@ def test_checkpoint_index_recovers_latest_at_publication_barriers(tmp_path, monk
         (previous / checkpoint.META_FILE).write_text('{"seq":199}')
         (root / "LATEST").write_text("0199-1\n")
         child = subprocess.run([sys.executable, "-c", _CHECKPOINT_KILL, str(run), barrier],
-                               capture_output=True, text=True, timeout=30, check=False)
+                               capture_output=True, text=True, timeout=30, check=False,
+                               cwd=run, env=source_subprocess_env())
         assert child.returncode == -signal.SIGKILL, child.stderr
         checkpoint.recover_publication_latest(root)
         expected = checkpoint.latest(run).name
@@ -351,7 +354,8 @@ def test_manifest_and_object_survive_together_after_writer_death(tmp_path, monke
         path = tmp_path / barrier
         path.mkdir()
         child = subprocess.run([sys.executable, "-c", _MANIFEST_KILL, str(path), barrier],
-                               capture_output=True, text=True, timeout=30, check=False)
+                               capture_output=True, text=True, timeout=30, check=False,
+                               cwd=path, env=source_subprocess_env())
         assert child.returncode == -signal.SIGKILL, child.stderr
         port = publication.open_port(Context("owner", "run", "parent", path, "profile"))
         head = port.head()

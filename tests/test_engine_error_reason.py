@@ -171,11 +171,82 @@ REPLAY_REASON = "replay diverged at send 4: prompt bytes differ"
     ({"runtime_outcome": "missing_result"}, True),
     ({"runtime_outcome": "recovery_required",
       "engine_terminal": {"result": "RECOVERY_REQUIRED"}}, True),
+    ({"runtime_outcome": "engine_error", "engine_result": "DELIVERY_REFUSED",
+      "candidate_error": "sealed candidate artifact missing",
+      "engine_terminal": {"result": "SUBMITTED"}}, False),
     ({"runtime_outcome": "completed", "engine_terminal": {"result": "ERR:X"}}, False),
     ({"runtime_outcome": "completed"}, False),
 ])
 def test_resume_hint_truth_table(summary, expected):
     assert outcomes.resume_hint_applies(summary) is expected
+
+
+@pytest.mark.parametrize("malformed_terminal", [None, False, 0, 1, "", "bad", [], ["bad"], True])
+def test_non_object_terminal_matches_missing_resume_hint(malformed_terminal):
+    runtime_outcomes = (
+        "hook_containment", "hook_blocked", "continuation_blocked", "suspended", "cancelled", "completed",
+        "budget_stop", "recovery_required", "engine_error", "context_too_small", "incomplete", "missing_result",
+    )
+    refusal_states = (
+        (None, None),
+        ("DELIVERY_REFUSED", "bad"),
+        ("DELIVERY_REFUSED", {"engine_result": "SUBMITTED", "reason_code": "CHECKS_STALE"}),
+        ("DELIVERY_REFUSED", {"engine_result": "SUBMITTED", "reason_code": "CANDIDATE_NOT_DELIVERED"}),
+        ("DELIVERY_REFUSED", {"engine_result": "SUBMITTED", "reason_code": "CANDIDATE_OUT_OF_SCOPE"}),
+        ("DELIVERY_REFUSED", {"engine_result": "SUBMITTED", "reason_code": "OTHER"}),
+        ("OTHER", {"engine_result": "SUBMITTED", "reason_code": "CHECKS_STALE"}),
+    )
+    for runtime_outcome in runtime_outcomes:
+        for engine_result, delivery_refusal in refusal_states:
+            summary = {"runtime_outcome": runtime_outcome}
+            if engine_result is not None:
+                summary["engine_result"] = engine_result
+            if delivery_refusal is not None:
+                summary["delivery_refusal"] = delivery_refusal
+            expected = outcomes.resume_hint_applies(summary)
+
+            summary["engine_terminal"] = malformed_terminal
+            assert outcomes.resume_hint_applies(summary) is expected
+
+
+def test_resume_hint_wellformed_truth_table():
+    runtime_outcomes = (
+        "hook_containment", "hook_blocked", "continuation_blocked", "suspended", "cancelled", "completed",
+        "budget_stop", "recovery_required", "engine_error", "context_too_small", "incomplete", "missing_result",
+    )
+    resumable = {"cancelled", "engine_error", "missing_result", "budget_stop", "recovery_required"}
+    absent = object()
+    terminals = (
+        absent,
+        {},
+        {"result": "ERR:ValueError"},
+        {"result": "ENGINE_ERROR", "error": "ValueError", "error_message": "boom"},
+        {"result": "HARNESS_CONTRACT"},
+        {"result": "SUBMITTED"},
+    )
+    refusal_states = (
+        (None, None, False),
+        ("DELIVERY_REFUSED", "bad", False),
+        ("DELIVERY_REFUSED", {"engine_result": "SUBMITTED", "reason_code": "CHECKS_STALE"}, True),
+        ("DELIVERY_REFUSED", {"engine_result": "SUBMITTED", "reason_code": "CANDIDATE_NOT_DELIVERED"}, True),
+        ("DELIVERY_REFUSED", {"engine_result": "SUBMITTED", "reason_code": "CANDIDATE_OUT_OF_SCOPE"}, True),
+        ("DELIVERY_REFUSED", {"engine_result": "SUBMITTED", "reason_code": "OTHER"}, False),
+        ("DELIVERY_REFUSED", {"engine_result": "OTHER", "reason_code": "CHECKS_STALE"}, False),
+        ("OTHER", {"engine_result": "SUBMITTED", "reason_code": "CHECKS_STALE"}, False),
+    )
+    for runtime_outcome in runtime_outcomes:
+        for terminal in terminals:
+            for engine_result, delivery_refusal, refused in refusal_states:
+                summary = {"runtime_outcome": runtime_outcome}
+                if terminal is not absent:
+                    summary["engine_terminal"] = terminal
+                if engine_result is not None:
+                    summary["engine_result"] = engine_result
+                if delivery_refusal is not None:
+                    summary["delivery_refusal"] = delivery_refusal
+                submitted = isinstance(terminal, dict) and terminal.get("result") == "SUBMITTED"
+                assert outcomes.resume_hint_applies(summary) is (
+                    runtime_outcome in resumable and not refused and not submitted)
 
 
 @pytest.mark.parametrize("reason_code", ["CHECKS_STALE", "CANDIDATE_NOT_DELIVERED"])

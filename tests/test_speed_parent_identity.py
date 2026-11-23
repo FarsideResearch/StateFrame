@@ -1,6 +1,8 @@
 """Parent identity work budgets and generation boundaries for completion."""
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
+import json
 from pathlib import Path
 from threading import Barrier
 from time import perf_counter
@@ -9,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 import kernel_completion_owner as completion
+import kernel_file_digest_memo
 import kernel_green_lock as green_lock
 from kernel_live_projection import WorkspaceViewStore
 from kernel_stateframe_runtime import StateFrameRuntime
@@ -23,7 +26,12 @@ def _runtime(root, paths):
     runtime._binding_epoch = 0
     runtime._binding_cache = None
     runtime._workspace_view_store = WorkspaceViewStore(root, "test-environment")
-    runtime.journal = SimpleNamespace(manifest={}, emit=lambda *_args, **_kwargs: None)
+    events = []
+
+    def emit(*args, **kwargs):
+        events.append((args, kwargs))
+
+    runtime.journal = SimpleNamespace(manifest={}, events=events, emit=emit)
     runtime.stateframe_completion_owner_mode = "on"
     runtime.pass_gates_vector = None
     runtime.public_test_verdict = lambda: None
@@ -44,8 +52,12 @@ def test_route_menu_and_send_share_one_parent_comparison(tmp_path, monkeypatch):
     monkeypatch.setenv("STATEFRAME_HOST_STEP_BUDGET2_CACHE", "on")
     monkeypatch.setenv("STATEFRAME_HOST_CACHE", "off")
     runtime = _runtime(tmp_path, paths)
+    kernel_file_digest_memo.clear()
 
     counts = Counter()
+    observations = {}
+    generations = {}
+    checkpoint = "route"
     scan = green_lock._workspace_product_file_digests
     read = Path.read_bytes
     compare = green_lock.product_revision_change_from_parent
@@ -61,7 +73,12 @@ def test_route_menu_and_send_share_one_parent_comparison(tmp_path, monkeypatch):
 
     def tracked_compare(runtime):
         counts["consumers"] += 1
-        return compare(runtime)
+        result = compare(runtime)
+        observations.setdefault(checkpoint, []).append(result)
+        cached = getattr(runtime, "_parent_product_comparison_cache", None)
+        if isinstance(cached, tuple) and cached:
+            generations.setdefault(checkpoint, []).append(cached[0])
+        return result
 
     monkeypatch.setattr(Path, "read_bytes", tracked_read)
     monkeypatch.setattr(green_lock, "_workspace_product_file_digests", tracked_scan)
@@ -73,12 +90,16 @@ def test_route_menu_and_send_share_one_parent_comparison(tmp_path, monkeypatch):
     started = perf_counter()
     for _ in range(17):
         assert completion.completion_route_decision(runtime, tools=tools).route == "NONE"
+    checkpoint = "postgreen_done_offer"
     assert completion.postgreen_done_offer(runtime)[0] is False
+    checkpoint = "terminal_tool_menu"
     menu = completion.terminal_tool_menu(runtime, tools)
     assert [tool["function"]["name"] for tool in menu] == ["read"]
+    checkpoint = "request_preparation"
     prepared = completion.establish_request_action_contract(
         runtime, messages, menu, request_id="request-1", preserve_input_surface=True,
     )
+    checkpoint = "provider_checkpoint"
     sent = completion.assert_request_action_contract(
         runtime, messages, menu, request_id="request-1", boundary="provider",
     )
@@ -87,7 +108,115 @@ def test_route_menu_and_send_share_one_parent_comparison(tmp_path, monkeypatch):
     # Work counts are the stable performance contract; filesystem and suite load make
     # an absolute wall-clock cutoff noisy, so retain elapsed time as diagnostic only.
     print(f"Parent comparison fixture: {elapsed:.3f}s, {dict(counts)}")
-    assert counts == {"consumers": 43, "comparisons": 1, "source_reads": file_count}
+    expected_checkpoints = {
+        "route", "postgreen_done_offer", "terminal_tool_menu",
+        "request_preparation", "provider_checkpoint",
+    }
+    assert set(observations) == expected_checkpoints
+    observed_results = [result for values in observations.values() for result in values]
+    assert counts["consumers"] == len(observed_results) == 43
+    assert counts["comparisons"] == 1
+    assert counts["source_reads"] == file_count
+    assert set(generations) == expected_checkpoints
+    observed_generations = [generation for values in generations.values() for generation in values]
+    assert observed_results
+    assert all(result == observed_results[0] for result in observed_results)
+    assert observed_results[0][0] is False
+    assert observed_results[0][2] == "product_file_digests_match_parent"
+    assert all(generation == observed_generations[0] for generation in observed_generations)
+
+
+def test_parent_comparison_cache_preserves_completion_wire_and_journal(tmp_path, monkeypatch):
+    (tmp_path / "module.py").write_text("VALUE = 1\n")
+    from kernel_measurement import ACTIVE_REQUEST
+    from stateframe import _child
+    import kernel_bounded_http
+
+    wire_state_present = "wire" in _child.HOST_STATE
+    previous_wire_state = _child.HOST_STATE.get("wire")
+
+    def render(cache_mode):
+        monkeypatch.setenv("STATEFRAME_HOST_STEP_BUDGET2_CACHE", cache_mode)
+        monkeypatch.setenv("STATEFRAME_HOST_CACHE", "off")
+        monkeypatch.setenv("STATEFRAME_STABLE_WIRE", "off")
+        monkeypatch.setenv("STATEFRAME_FINAL_CACHE_LAYOUT", "off")
+        runtime = _runtime(tmp_path, ["module.py"])
+        tools = [{"type": "function", "function": {
+            "name": "read", "parameters": {"type": "object"},
+        }}]
+        messages = [{"role": "user", "content": "Read the package."}]
+        route = completion.completion_route_decision(runtime, tools=tools)
+        offer = completion.postgreen_done_offer(runtime)
+        menu = completion.terminal_tool_menu(runtime, tools)
+        prepared = completion.establish_request_action_contract(
+            runtime, messages, menu, request_id="request-1", preserve_input_surface=True,
+        )
+        sent = completion.assert_request_action_contract(
+            runtime, messages, menu, request_id="request-1", boundary="provider",
+        )
+        assert sent == prepared
+
+        run = tmp_path.parent / f"wire-{cache_mode}"
+        run.mkdir()
+        monkeypatch.setattr(
+            _child, "time",
+            SimpleNamespace(monotonic=lambda: 1.0, monotonic_ns=lambda: 1_000_000_000),
+        )
+        monkeypatch.setattr(_child, "emit", lambda *_args, **_kwargs: None)
+
+        def offline_send(_wire, _endpoint, _key, **_kwargs):
+            return b'{"choices":[{}]}'
+
+        monkeypatch.setattr(kernel_bounded_http, "request_bytes", offline_send)
+        _child.install_wire_recorder(run, "http://localhost/chat")
+        capture = SimpleNamespace(request_id="request-1")
+        request_wire = json.dumps({"messages": messages, "tools": tools}).encode("utf-8")
+        active = ACTIVE_REQUEST.set(capture)
+        try:
+            response = kernel_bounded_http.request_bytes(
+                request_wire, "http://localhost/chat", "",
+            )
+        finally:
+            ACTIVE_REQUEST.reset(active)
+        assert response == b'{"choices":[{}]}'
+        wire_tape = {
+            path.relative_to(run).as_posix(): path.read_bytes().hex()
+            for path in sorted(run.rglob("*")) if path.is_file()
+        }
+        wire_hashes = {
+            path: hashlib.sha256(bytes.fromhex(content)).hexdigest()
+            for path, content in wire_tape.items()
+        }
+        artifact = {
+            "route": route.to_dict(),
+            "postgreen_offer": offer,
+            "messages": messages,
+            "tools": tools,
+            "menu": menu,
+            "prepared": prepared,
+            "sent": sent,
+            "journal": runtime.journal.events,
+            "wire_tape": wire_tape,
+            "wire_hashes": wire_hashes,
+        }
+        return json.dumps(
+            artifact, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")
+
+    try:
+        uncached_wire_and_journal = render("off")
+        cached_wire_and_journal = render("on")
+    finally:
+        if wire_state_present:
+            _child.HOST_STATE["wire"] = previous_wire_state
+        else:
+            _child.HOST_STATE.pop("wire", None)
+    assert cached_wire_and_journal == uncached_wire_and_journal
+    artifact_hash = hashlib.sha256(uncached_wire_and_journal).hexdigest()
+    assert hashlib.sha256(cached_wire_and_journal).hexdigest() == artifact_hash
+    wire_hashes = json.loads(uncached_wire_and_journal)["wire_hashes"]
+    print(f"Completion wire/tape file SHA-256: {wire_hashes}")
+    print(f"Completion wire/journal bundle SHA-256: {artifact_hash}")
 
 
 @pytest.mark.parametrize("change", ["edit", "create", "delete", "symlink"])

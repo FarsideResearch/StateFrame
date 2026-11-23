@@ -580,7 +580,7 @@ class DeliveryManifestTracker:
                 result.append(dict(raw))
         return result
 
-    def _applied_edits(self, receipts: object) -> list[dict[str, object]]:
+    def _applied_edits(self, receipts: object, *, read_content: bool = True) -> list[dict[str, object]]:
         """Pair settled edit receipts with revision-bound workspace hunks."""
         provided: list[dict[str, object]] = []
         for raw in _items(receipts):
@@ -612,7 +612,7 @@ class DeliveryManifestTracker:
                 }
                 if isinstance(supplied_hunk, str) and supplied_hunk:
                     row["hunk"] = supplied_hunk
-                else:
+                elif read_content:
                     relative = Path(path)
                     if relative.is_absolute() or ".." in relative.parts:
                         continue

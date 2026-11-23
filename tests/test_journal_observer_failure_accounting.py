@@ -9,6 +9,7 @@ from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 
+from _source_subprocess_env import source_subprocess_env
 import kernel_continuation_journal as journal_module
 import pytest
 from kernel_continuation_executive import ContinuationExecutive
@@ -289,7 +290,8 @@ journal.emit_batch([("observer_probe", {})] * 32, atomic=True)
 def test_resume_finishes_an_interrupted_failure_report_exactly_once(tmp_path, stop_after, stop_point):
     crashed = subprocess.run([sys.executable, "-c", _STOP_DURING_FAILURE_REPORT,
                               str(tmp_path), str(stop_after), stop_point],
-                             capture_output=True, text=True, timeout=45, check=False)
+                             capture_output=True, text=True, timeout=45, check=False,
+                             cwd=tmp_path, env=source_subprocess_env())
     assert crashed.returncode == -signal.SIGKILL, crashed.stderr
     path = Path(crashed.stdout.strip())
     lines = path.read_bytes().splitlines(keepends=True)
@@ -439,7 +441,8 @@ def _complete_prefix(path):
 ])
 def test_report_recovery_preserves_complete_rows_at_write_boundaries(tmp_path, point, complete_details, torn):
     stopped = subprocess.run([sys.executable, "-c", _STOP_AT_REPORT_IO_BOUNDARY, str(tmp_path), point],
-                             capture_output=True, text=True, timeout=45, check=False)
+                             capture_output=True, text=True, timeout=45, check=False,
+                             cwd=tmp_path, env=source_subprocess_env())
     assert stopped.returncode == -signal.SIGKILL, stopped.stderr
     path = Path(stopped.stdout.strip())
     assert path.read_bytes().endswith(b"\n") is not torn
@@ -467,14 +470,16 @@ def test_report_recovery_preserves_complete_rows_at_write_boundaries(tmp_path, p
 def test_repeated_interruption_during_report_recovery_keeps_original_rows(tmp_path, point):
     stopped = subprocess.run([sys.executable, "-c", _STOP_DURING_FAILURE_REPORT,
                               str(tmp_path), "20", "during_summary_write"],
-                             capture_output=True, text=True, timeout=45, check=False)
+                             capture_output=True, text=True, timeout=45, check=False,
+                             cwd=tmp_path, env=source_subprocess_env())
     assert stopped.returncode == -signal.SIGKILL, stopped.stderr
     path = Path(stopped.stdout.strip())
     prefix = _complete_prefix(path)
     rows = list(map(json.loads, prefix.splitlines()))
 
     retry = subprocess.run([sys.executable, "-c", _STOP_AT_REPORT_IO_BOUNDARY, str(path), point,
-                            rows[-1]["record_hash"]], capture_output=True, text=True, timeout=45, check=False)
+                            rows[-1]["record_hash"]], capture_output=True, text=True, timeout=45, check=False,
+                            cwd=tmp_path, env=source_subprocess_env())
     assert retry.returncode == -signal.SIGKILL, retry.stderr
     recovered_prefix = _complete_prefix(path)
     recovered_head = json.loads(recovered_prefix.splitlines()[-1])["record_hash"]
@@ -541,7 +546,8 @@ def test_replay_resume_archives_the_completed_observer_failure_report(tmp_path, 
     measurements.mkdir(parents=True)
     crashed = subprocess.run([sys.executable, "-c", _STOP_DURING_FAILURE_REPORT,
                               str(measurements), "20", stop_point],
-                             capture_output=True, text=True, timeout=45, check=False)
+                             capture_output=True, text=True, timeout=45, check=False,
+                             cwd=tmp_path, env=source_subprocess_env())
     assert crashed.returncode == -signal.SIGKILL, crashed.stderr
     path = Path(crashed.stdout.strip())
     lines = path.read_bytes().splitlines(keepends=True)
@@ -599,7 +605,8 @@ def test_retry_archive_after_report_recovery_preserves_the_completed_report(tmp_
     measurements.mkdir(parents=True)
     stopped = subprocess.run([sys.executable, "-c", _STOP_DURING_FAILURE_REPORT,
                               str(measurements), "20", "during_summary_write"],
-                             capture_output=True, text=True, timeout=45, check=False)
+                             capture_output=True, text=True, timeout=45, check=False,
+                             cwd=tmp_path, env=source_subprocess_env())
     assert stopped.returncode == -signal.SIGKILL, stopped.stderr
     path = Path(stopped.stdout.strip())
     prefix = _complete_prefix(path)
@@ -607,7 +614,8 @@ def test_retry_archive_after_report_recovery_preserves_the_completed_report(tmp_
     (tmp_path / "spec.json").write_text(json.dumps(spec))
 
     archive_stop = subprocess.run([sys.executable, "-c", _STOP_AFTER_REPORT_RECOVERY_BEFORE_ARCHIVE,
-                                   str(tmp_path)], capture_output=True, text=True, timeout=45, check=False)
+                                   str(tmp_path)], capture_output=True, text=True, timeout=45, check=False,
+                                   cwd=tmp_path, env=source_subprocess_env())
     assert archive_stop.returncode == -signal.SIGKILL, archive_stop.stderr
     assert not (tmp_path / "attempts").exists()
     repaired = path.read_bytes()
@@ -628,7 +636,8 @@ def test_archive_refuses_an_unreadable_pending_observer_detail(tmp_path):
     measurements.mkdir(parents=True)
     crashed = subprocess.run([sys.executable, "-c", _STOP_DURING_FAILURE_REPORT,
                               str(measurements), "0", "between_rows", "π" * 3000],
-                             capture_output=True, text=True, timeout=45, check=False)
+                             capture_output=True, text=True, timeout=45, check=False,
+                             cwd=tmp_path, env=source_subprocess_env())
     assert crashed.returncode == -signal.SIGKILL, crashed.stderr
     path = Path(crashed.stdout.strip())
     prefix = path.read_bytes()
@@ -747,6 +756,7 @@ def test_resume_keeps_failures_recorded_before_fanout_is_killed(tmp_path, source
     crashed = subprocess.run(
         [sys.executable, "-c", _STOP_DURING_OBSERVER_FANOUT, str(tmp_path), source],
         capture_output=True, text=True, timeout=45, check=False,
+        cwd=tmp_path, env=source_subprocess_env(),
     )
     assert crashed.returncode == -signal.SIGKILL, crashed.stderr
     path = Path(crashed.stdout.strip())
@@ -857,7 +867,8 @@ journal.emit_batch([("observer_probe", {})] * 24, atomic=True)
 def test_interrupted_report_save_recovers_exactly_the_published_failures(tmp_path, point, target, durable):
     stopped = subprocess.run([sys.executable, "-c", _STOP_WHILE_SAVING_OBSERVER_FAILURE,
                               str(tmp_path), point, str(target)],
-                             capture_output=True, text=True, timeout=45, check=False)
+                             capture_output=True, text=True, timeout=45, check=False,
+                             cwd=tmp_path, env=source_subprocess_env())
     assert stopped.returncode == -signal.SIGKILL, stopped.stderr
     path = Path(stopped.stdout.strip())
     prefix = path.read_bytes()
