@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.30 (2026-11-23)
 
 - macOS: startup probes and subframe workers no longer stop because another user's process cannot be inspected (0.7.0 to 0.8.29).
 
