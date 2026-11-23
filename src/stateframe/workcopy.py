@@ -375,50 +375,80 @@ def _check_bytes(current: bytes | None, baseline_sha: str | None) -> str | None:
     return None
 
 
-def _conflict(original: Path, rel: str, baseline_sha: str | None) -> str | None:
-    """Why writing ``rel`` into ``original`` would clobber something, or None if it is safe."""
-    try:
-        with _parent_fd(original, rel) as parent:
-            current, _ = _read_at(parent, Path(rel).name)
-    except FileNotFoundError:
-        current = None
-    except (OSError, WorkCopyError) as error:
-        return str(error)
-    return _check_bytes(current, baseline_sha)
+def _apply_conflict(current: bytes | None, mode: int | None, baseline_sha: str | None,
+                    values: list[dict[str, str | int] | None] | None) -> str | None:
+    """Why the observed destination conflicts with its baseline or accepted retry state."""
+    why = _check_bytes(current, baseline_sha)
+    if current is None:
+        return why if why and None not in (values or ()) else None
+    digest = _sha(current)
+    for value in values or ():
+        if value is not None and value["sha256"] == digest:
+            if "mode" not in value or value["mode"] == mode:
+                return None
+            return why or "changed in the original since the start"
+    return why
 
 
-def guarded_apply(original: Path, changes: dict[str, bytes | None], baseline: dict[str, str],
-                  *, what: str) -> list[str]:
+def _verify_parent_identity(original: Path, rel: str, parent: int) -> None:
+    """Refuse a changed parent name while keeping writes anchored to ``parent``."""
+    with _parent_fd(original, rel) as named_parent:
+        opened = os.fstat(parent)
+        named = os.fstat(named_parent)
+        if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
+            raise WorkCopyError(f"parent directory changed while applying: {rel}")
+
+
+def guarded_apply(
+    original: Path,
+    changes: dict[str, bytes | None],
+    baseline: dict[str, str],
+    *,
+    what: str,
+    alternatives: dict[str, list[dict[str, str | int] | None]] | None = None,
+) -> list[str]:
     """Write ``changes`` (rel -> new bytes, or None = delete) into ``original``.
 
     Every path is validated against ``baseline`` (sha at start; absent = new file) BEFORE anything is
     written, and re-checked right before its own write. Writes are atomic per file (temp + rename).
+    The parent name is reopened without following links before mutation; writes stay anchored to the
+    original directory descriptor.
     The whole set is not atomic: on an I/O error the files already written stay written and the error
     names them; nothing is rolled back destructively.
     """
-    conflicts = [f"{rel} ({why})" for rel in sorted(changes)
-                 if (why := _conflict(original, rel, baseline.get(rel)))]
+    # Preflight may defer a retry match; only the write pass can authorize it.
+    conflicts = []
+    for rel in sorted(changes):
+        try:
+            with _parent_fd(original, rel) as parent:
+                current, mode = _read_at(parent, Path(rel).name)
+        except FileNotFoundError:
+            current, mode = None, None
+        except (OSError, WorkCopyError) as error:
+            conflicts.append(f"{rel} ({error})")
+            continue
+        if why := _apply_conflict(current, mode, baseline.get(rel), (alternatives or {}).get(rel)):
+            conflicts.append(f"{rel} ({why})")
     if conflicts:
         raise WorkCopyError(f"refusing {what}: " + "; ".join(conflicts[:10]))
     applied: list[str] = []
     # For a rename, install the new path before deleting the old path. A later
     # I/O failure can then leave a duplicate, but cannot lose the only copy.
     for rel in sorted(changes, key=lambda path: (changes[path] is None, path)):
-        why = _conflict(original, rel, baseline.get(rel))
-        if why:
-            raise WorkCopyError(f"refusing {what} at {rel} ({why}); already applied: {applied or 'nothing'}")
         data = changes[rel]
         name = Path(rel).name
         try:
             with _parent_fd(original, rel, create=data is not None) as parent:
                 current, mode = _read_at(parent, name)
-                why = _check_bytes(current, baseline.get(rel))
+                why = _apply_conflict(current, mode, baseline.get(rel), (alternatives or {}).get(rel))
                 if why:
                     raise WorkCopyError(why)
                 if data is None:
-                    if current is not None:
-                        os.unlink(name, dir_fd=parent)
-                else:
+                    if current is None:
+                        continue
+                    _verify_parent_identity(original, rel, parent)
+                    os.unlink(name, dir_fd=parent)
+                elif current != data:
                     # O_EXCL prevents following or overwriting any pre-existing temp file.
                     temp = f".stateframe-{secrets.token_hex(16)}.tmp"
                     descriptor = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
@@ -429,19 +459,21 @@ def guarded_apply(original: Path, changes: dict[str, bytes | None], baseline: di
                                 os.fchmod(target.fileno(), mode)
                             target.write(data)
                         # Recheck ancestors and the leaf after staging, immediately before replace.
-                        why = _conflict(original, rel, baseline.get(rel))
+                        current, mode = _read_at(parent, name)
+                        why = _apply_conflict(current, mode, baseline.get(rel), (alternatives or {}).get(rel))
                         if why:
                             raise WorkCopyError(why)
-                        current, _ = _read_at(parent, name)
-                        why = _check_bytes(current, baseline.get(rel))
-                        if why:
-                            raise WorkCopyError(why)
+                        if current == data:
+                            continue
+                        _verify_parent_identity(original, rel, parent)
                         os.replace(temp, name, src_dir_fd=parent, dst_dir_fd=parent)
                     finally:
                         try:
                             os.unlink(temp, dir_fd=parent)
                         except FileNotFoundError:
                             pass
+                else:
+                    continue
         except (OSError, WorkCopyError) as error:
             raise WorkCopyError(f"{what} stopped at {rel}: {error}; already applied: {applied or 'nothing'}") \
                 from error

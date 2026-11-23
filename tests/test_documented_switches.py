@@ -56,6 +56,8 @@ RETIRED_SWITCHES = {"STATEFRAME_READ_LOCKOUT"}
 # Internal repair-probe inputs set by the runner child (runner.py:1231, _child.py:1641), not user switches;
 # only named in a historical rename note in CHANGELOG.md.
 INTERNAL_PROBE_INPUTS = {"STATEFRAME_SOURCE_REPO_PRIMARY", "STATEFRAME_SOURCE_REPO_SECONDARY"}
+# The one registered shell switch reserved for internal benchmark runs, as classified by runner.py.
+INTERNAL_UNDOCUMENTED_SWITCHES = frozenset({"STATEFRAME_PARALLEL_FORCE_MANIFEST"})
 PREFIXES = {"STATEFRAME_ROUTE_"}
 NAME = re.compile(r"STATEFRAME_[A-Z0-9_]+")
 
@@ -100,6 +102,36 @@ def unsupported(documented: dict[str, list[str]], allowlist, product: set[str]) 
 
 def test_every_documented_switch_takes_effect():
     assert unsupported(_documented(), runner.OPT_IN_SWITCHES, _product_reads()) == []
+
+
+def undocumented_registered_switches(registered, documented, internal):
+    """Registered shell switches missing public docs, excluding named internal-only switches."""
+    return sorted(set(registered) - set(documented) - set(internal))
+
+
+def test_every_registered_shell_switch_is_documented_or_explicitly_internal():
+    internal_metadata = runner.INTERNAL_BENCHMARK_SWITCHES
+    assert set(INTERNAL_UNDOCUMENTED_SWITCHES) == set(internal_metadata)
+    assert all(internal_metadata[name]["classification"] == "internal/benchmark-only"
+               for name in INTERNAL_UNDOCUMENTED_SWITCHES)
+    assert undocumented_registered_switches(
+        runner.OPT_IN_SWITCHES, _documented(), INTERNAL_UNDOCUMENTED_SWITCHES
+    ) == []
+
+
+def test_planted_undocumented_registered_switch_is_caught():
+    assert undocumented_registered_switches(
+        {"STATEFRAME_NOT_DOCUMENTED"}, {}, INTERNAL_UNDOCUMENTED_SWITCHES
+    ) == ["STATEFRAME_NOT_DOCUMENTED"]
+
+
+def test_cache_layout_and_checkpoint_capture_document_shipped_defaults():
+    profile = json.loads((ROOT / "src/stateframe/profiles/r2hc3.json").read_text(encoding="utf-8"))
+    documented = _documented()
+    for name in ("STATEFRAME_CACHE_LAYOUT", "STATEFRAME_FL_CHECKPOINT_CAPTURE"):
+        assert profile["switches"][name] == "on"
+        assert any("default" in sentence.lower() and "r2hc3" in sentence.lower()
+                   and "on" in sentence.lower() for sentence in documented[name])
 
 
 def test_continuation_refusal_fixture_is_not_a_documented_switch():

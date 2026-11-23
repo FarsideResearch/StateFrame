@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.27 (2026-11-23)
+
+- Fixed: retrying an interrupted chat `/apply` resumes from paths already published in an earlier attempt; damaged retry metadata is ignored with a notice.
+- Endpoint probe JSON is limited to 4 MiB by default; `STATEFRAME_ENDPOINT_MAX_JSON_BYTES` sets another positive byte limit. An oversized optional `/slots` reply is ignored with one warning, while an invalid setting is reported at startup.
+- Fixed: the capability report names grammar parsers that fail to load instead of dropping them.
+- Tests: the license files, inventories and asset provenance of built artifacts are checked.
+- Tests: strict provider mock subframes use their own home.
+- Docs: two public switches are documented, and a test checks that every public switch is.
+
 ## 0.8.26 (2026-11-23)
 
 - Removed resource-release statements from the suggested edit menus: they could add a close or release call where one is not wanted.

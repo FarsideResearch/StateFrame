@@ -22,6 +22,7 @@ from . import outcomes, workcopy
 from .endpoint import EndpointError
 from .runner import HookContainmentRunError, HookRefusedRunError, RunError, RunOptions, run, succeeded
 from .state_dirs import private_directory
+from .storage_gc import _write_json_atomic
 from .task_row import TaskRowError
 
 from .engine.kernel_safe_paths import safe_home
@@ -76,6 +77,7 @@ class Session:
     _stopped: bool = field(default=False, init=False, repr=False)
     _active_copy: Path | None = field(default=None, init=False, repr=False)
     _baseline_snapshot: Path | None = field(default=None, init=False, repr=False)
+    _apply_attempt: dict[str, object] = field(default_factory=dict, init=False, repr=False)
 
     @property
     def copy(self) -> Path:
@@ -243,7 +245,7 @@ class Session:
         """Session changes vs the session-start snapshot (never re-reads the live repository)."""
         return _tree_diff(self.start_snapshot, self.copy)
 
-    def apply(self) -> list[str]:
+    def apply(self, printer=print) -> list[str]:
         """Write session changes into the repository, refusing any file that changed there since
         the session started (the same guarded path as --in-place)."""
         if (self.base is not None and self.base.hooks_files) or self._project_hooks is not None:
@@ -253,21 +255,92 @@ class Session:
         else:
             changes = {rel: ((self.copy / rel).read_bytes() if (self.copy / rel).is_file() else None)
                        for rel in _changed(self.start_snapshot, self.copy)}
-        if not changes:
+        attempt_path = self.home / "apply-attempt.json"
+        allowed = set(changes) | set(self.baseline)
+        try:
+            descriptor = os.open(attempt_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(descriptor, "r", encoding="utf-8") as source:
+                state = json.load(source)
+            checksum_ok = isinstance(state, dict) and state.get("checksum") == _attempt_checksum(state.get("paths"))
+        except FileNotFoundError:
+            state = {
+                "schema": _APPLY_ATTEMPT_SCHEMA,
+                "paths": self._apply_attempt,
+                "checksum": _attempt_checksum(self._apply_attempt),
+            }
+            checksum_ok = True
+        except (OSError, UnicodeError, ValueError, TypeError, RecursionError):
+            state = None
+            checksum_ok = False
+        previous = state.get("paths") if isinstance(state, dict) and set(state) == {"schema", "paths", "checksum"} \
+            and state.get("schema") == _APPLY_ATTEMPT_SCHEMA and checksum_ok else None
+        if isinstance(previous, dict):
+            previous = {rel: value if isinstance(value, list) else [value] for rel, value in previous.items()}
+        if not isinstance(previous, dict) or any(
+            not isinstance(rel, str) or rel not in allowed or not isinstance(values, list) or not values
+            or any(value is not None and (
+                not isinstance(value, dict) or set(value) not in ({"sha256"}, {"sha256", "mode"})
+                or not isinstance(value.get("sha256"), str) or len(value["sha256"]) != 64
+                or any(c not in "0123456789abcdef" for c in value["sha256"])
+                or "mode" in value and (type(value["mode"]) is not int or not 0 <= value["mode"] <= 0o7777))
+                for value in values)
+            for rel, values in previous.items()):
+            printer("notice: ignored invalid apply-attempt.json")
+            previous = {}
+        planned = dict(changes)
+        for rel in previous.keys() - changes.keys():
+            planned[rel] = (self.start_snapshot / rel).read_bytes() if (self.start_snapshot / rel).is_file() else None
+        if not planned:
             return []
+        attempt = {rel: list(values) for rel, values in previous.items()}
+        for rel, data in changes.items():
+            value = None
+            if data is not None:
+                value = {"sha256": hashlib.sha256(data).hexdigest()}
+                prior_mode = next((item["mode"] for item in attempt.get(rel, ())
+                                   if isinstance(item, dict) and "mode" in item), None)
+                if prior_mode is None and not attempt.get(rel):
+                    try:
+                        with workcopy._parent_fd(self.repo, rel) as parent:
+                            current, mode = workcopy._read_at(parent, Path(rel).name)
+                        if current is not None:
+                            value["mode"] = mode
+                    except (OSError, workcopy.WorkCopyError):
+                        pass
+                elif prior_mode is not None:
+                    value["mode"] = prior_mode
+            values = attempt.setdefault(rel, [])
+            if value not in values: values.append(value)
+        _write_json_atomic(attempt_path, {"schema": _APPLY_ATTEMPT_SCHEMA, "paths": attempt,
+                                          "checksum": _attempt_checksum(attempt)}, mode=0o600)
+        self._apply_attempt = attempt
         # Prepare the next baseline before writing the original. Failed staging leaves both intact.
         staged = Path(tempfile.mkdtemp(prefix="applied-", dir=self.home)) / "repo"
         shutil.copytree(self.copy, staged)
-        applied = workcopy.guarded_apply(self.repo, changes, self.baseline, what="/apply")
+        applied = workcopy.guarded_apply(self.repo, planned, self.baseline, what="/apply", alternatives=previous)
         # The applied state is the new baseline: later /apply only writes later changes.
         self._baseline_snapshot = staged
-        for rel in applied:
-            data = changes[rel]
+        for rel, data in planned.items():
             if data is None:
                 self.baseline.pop(rel, None)
             else:
                 self.baseline[rel] = hashlib.sha256(data).hexdigest()
+        try:
+            attempt_path.unlink()
+        except OSError:
+            paths: dict[str, object] = {}
+            _write_json_atomic(attempt_path, {"schema": _APPLY_ATTEMPT_SCHEMA, "paths": paths,
+                                              "checksum": _attempt_checksum(paths)}, mode=0o600)
+        self._apply_attempt = {}
         return applied
+
+
+_APPLY_ATTEMPT_SCHEMA = "stateframe-chat-apply-attempt/2"
+
+
+def _attempt_checksum(paths: object) -> str:
+    encoded = json.dumps(paths, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _files(root: Path) -> dict[str, bytes]:
@@ -350,7 +423,7 @@ def repl(session: Session, read=input, printer=print, print_summary=None) -> int
                 printer("(no tasks yet)")
         elif line == "/apply":
             try:
-                changed = session.apply()
+                changed = session.apply(printer=printer)
             except (KeyboardInterrupt, *EXPECTED_ERRORS) as error:
                 printer(f"not applied: {_one_line(error)}")
                 continue

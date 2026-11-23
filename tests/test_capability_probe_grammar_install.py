@@ -18,11 +18,20 @@ import pytest
 from stateframe import runner
 
 
-def _run_probe(monkeypatch: pytest.MonkeyPatch, *, install) -> dict:
+def _run_probe(monkeypatch: pytest.MonkeyPatch, *, install,
+               languages: tuple[str, ...] = ("python",),
+               failures: dict[str, type[Exception]] | None = None) -> dict:
     grammars = types.ModuleType("stateframe.ts_grammars")
     grammars.install_as_language_pack = install
-    grammars.available_languages = lambda: ["python"]
-    grammars.get_parser = lambda _name: types.SimpleNamespace(parse=lambda _data: None)
+    grammars.available_languages = lambda: list(languages)
+
+    def get_parser(name):
+        def parse(_data):
+            if failures and name in failures:
+                raise failures[name]("forced parser failure")
+        return types.SimpleNamespace(parse=parse)
+
+    grammars.get_parser = get_parser
     bundle = types.ModuleType("tree_sitter_language_pack")
     bundle.__version__ = "9.9.9"
     bundle.get_parser = lambda _name: None
@@ -49,4 +58,34 @@ def test_failed_grammar_install_is_recorded_and_never_reports_the_bundle(monkeyp
 
 def test_working_grammar_install_reports_its_languages(monkeypatch):
     repo_map = _run_probe(monkeypatch, install=lambda: True)
-    assert repo_map == {"enabled": True, "detail": "1 languages: python"}
+    assert repo_map == {"enabled": True, "detail": "1 languages: python", "failed_parsers": []}
+
+
+def test_empty_language_pack_reports_no_grammar_package_and_fallback(monkeypatch):
+    repo_map = _run_probe(monkeypatch, install=lambda: True, languages=())
+    assert repo_map == {
+        "enabled": False,
+        "detail": "no grammar package installed; text-scan fallback available",
+        "failed_parsers": [],
+    }
+
+
+def test_no_parser_succeeded_when_all_installed_languages_fail(monkeypatch):
+    repo_map = _run_probe(monkeypatch, install=lambda: True,
+                           languages=("broken",), failures={"broken": ValueError})
+    assert repo_map == {
+        "enabled": False,
+        "detail": "no grammar parser succeeded; failed parsers: broken (ValueError); "
+                  "text-scan fallback available",
+        "failed_parsers": [{"name": "broken", "reason": "ValueError"}],
+    }
+
+
+def test_failed_parser_is_recorded_while_healthy_parsers_remain_enabled(monkeypatch):
+    repo_map = _run_probe(monkeypatch, install=lambda: True,
+                           languages=("python", "broken"), failures={"broken": ValueError})
+    assert repo_map == {
+        "enabled": True,
+        "detail": "1 languages: python; failed parsers: broken (ValueError)",
+        "failed_parsers": [{"name": "broken", "reason": "ValueError"}],
+    }
