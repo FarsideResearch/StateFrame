@@ -154,8 +154,9 @@ def test_release_parity_checks_wire_before_reading_artifacts(tmp_path, monkeypat
 
     isolate_release_test(monkeypatch, write_wire)
 
-    with pytest.raises(AssertionError, match=r"component messages\[0\]\.content"):
+    with pytest.raises(AssertionError, match=r"component messages\[0\]\.content") as error:
         parity.test_default_parallel_off_wire_and_public_artifacts_match_merged_main(tmp_path)
+    assert "component messages[0].content" in str(error.value)
 
 
 def test_default_off_comparison_detects_changed_profile_provenance(tmp_path, monkeypatch):

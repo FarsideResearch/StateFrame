@@ -16,16 +16,43 @@ import pytest
 from stateframe.scripted_endpoint import Script, ScriptStepUnavailable, serve
 from fixtures.process_signals import record_identity, signal_run_owned, signal_run_verified
 from mutate_leftovers import mutation_root, sweep_and_assert
+from tools.pinned_tree import pinned_tree
 
 
 CURRENT = Path(__file__).resolve().parents[1]
-_baseline = os.environ.get("SF_TEST_PARITY_BASELINE")
-BASELINE = Path(_baseline).expanduser().resolve() if _baseline else None
 EXAMPLES = {
     "discount_bug": "Fix the pricing code so the tests pass.",
     "tiny_site": "Create the product page and run its tests.",
     "brief_to_report": "Turn the brief into the requested report and verify it.",
 }
+
+
+@pytest.fixture(scope="module")
+def baseline_tree(tmp_path_factory):
+    return pinned_tree("6063b3c49949ddacc61976bb262edfed5323bd52", tmp_path_factory)
+
+
+def _parity_environment(checkout: Path, stable_head: str, trace: Path,
+                        mutation_value: str | None = None) -> dict[str, str]:
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(("STATEFRAME_", "KERNEL_", "DS_", "REACT_", "PILOT_", "UNIT_PLAN_"))
+        and key != "SF_TEST_PARITY_BASELINE"
+    }
+    environment.update({
+        "PYTHONHASHSEED": "0",
+        "PYTHONPATH": os.pathsep.join((
+            str(checkout / "src"),
+            str(checkout / "src" / "stateframe" / "engine"),
+            str(checkout / "tests"),
+        )),
+        "STATEFRAME_HOME": str(trace.with_name(f"{trace.stem}-stateframe-home")),
+        "STATEFRAME_STABLE_TOOL_HEAD": stable_head,
+    })
+    if mutation_value is not None:
+        environment["STATEFRAME_MUTATIONS"] = mutation_value
+    return environment
 
 
 def _write_trace_launchers(launcher: Path, wrapper: Path) -> None:
@@ -56,12 +83,20 @@ def _write_trace_launchers(launcher: Path, wrapper: Path) -> None:
         encoding="utf-8",
     )
     wrapper.write_text(
-        "import json, os, runpy, sys\n"
+        "import json, os, runpy, stat, sys\n"
         "child, run, trace = sys.argv[1:]\n"
         "sys.path.insert(0, os.path.dirname(child))\n"
         "sys.argv = [child, run]\n"
+        "def record_bundle_mode(stage):\n"
+        "    path = os.path.join(run, 'hook-bundle')\n"
+        "    try: mode = oct(stat.S_IMODE(os.stat(path).st_mode))\n"
+        "    except OSError as error: mode = type(error).__name__\n"
+        "    with open(trace + '.bundle-mode', 'a') as output: output.write(stage + '=' + mode + '\\n')\n"
+        "record_bundle_mode('before')\n"
         "try: runpy.run_path(child, run_name='__main__')\n"
-        "finally: open(trace, 'w').write(json.dumps(sorted(sys.modules)))\n",
+        "finally:\n"
+        "    record_bundle_mode('after')\n"
+        "    open(trace, 'w').write(json.dumps(sorted(sys.modules)))\n",
         encoding="utf-8",
     )
 
@@ -83,12 +118,7 @@ def _run(checkout: Path, repo: Path, run: Path, example: str, stable_head: str,
     script_path = CURRENT / "examples" / f"{example}.script.json"
     script = Script(json.loads(script_path.read_text(encoding="utf-8")))
     server = serve(script)
-    environment = {key: value for key, value in os.environ.items()
-                   if key != "STATEFRAME_MUTATIONS"}
-    environment.update({"PYTHONPATH": str(checkout / "src"),
-                        "STATEFRAME_STABLE_TOOL_HEAD": stable_head})
-    if mutation_value is not None:
-        environment["STATEFRAME_MUTATIONS"] = mutation_value
+    environment = _parity_environment(checkout, stable_head, trace, mutation_value)
     try:
         result = subprocess.run([
             sys.executable, str(launcher), str(wrapper), str(trace), str(trace) + ".child", "run",
@@ -97,7 +127,9 @@ def _run(checkout: Path, repo: Path, run: Path, example: str, stable_head: str,
             "--model", "scripted", "--run-dir", str(run), "--test-python", sys.executable,
             "--max-turns", "32", "--quiet", "--hooks", str(hooks),
         ], env=environment, capture_output=True, text=True, timeout=600)
-        assert result.returncode == 0, result.stdout + result.stderr
+        mode_trace = Path(str(trace) + ".bundle-mode")
+        mode_detail = mode_trace.read_text(encoding="utf-8") if mode_trace.exists() else ""
+        assert result.returncode == 0, result.stdout + result.stderr + mode_detail
         script.assert_consumed()
         requests = [path.read_bytes() for path in sorted((run / "wire").glob("*.request.json"))]
         assert requests
@@ -109,14 +141,12 @@ def _run(checkout: Path, repo: Path, run: Path, example: str, stable_head: str,
 
 
 @pytest.mark.host_sandbox
-@pytest.mark.skipif(BASELINE is None,
-                    reason="set SF_TEST_PARITY_BASELINE to the untouched base checkout")
 @pytest.mark.parametrize("example", tuple(EXAMPLES))
 @pytest.mark.parametrize("stable_head", ("off", "on"))
 @pytest.mark.parametrize("mutation_mode", ("unset", "off"))
 def test_mutation_l0_request_bytes_and_stable_tool_head_parity(
-        mutation_root, tmp_path, example, stable_head, mutation_mode):
-    assert BASELINE is not None and (BASELINE / "src/stateframe/runner.py").is_file()
+        baseline_tree, mutation_root, tmp_path, example, stable_head, mutation_mode):
+    assert (baseline_tree / "src/stateframe/runner.py").is_file()
     repo = tmp_path / "parity-repo"
     run = tmp_path / "parity-run"
     shutil.copytree(CURRENT / "examples" / example, repo)
@@ -130,7 +160,7 @@ def test_mutation_l0_request_bytes_and_stable_tool_head_parity(
     launcher, wrapper = tmp_path / "launcher.py", tmp_path / "wrapper.py"
     _write_trace_launchers(launcher, wrapper)
 
-    base = _run(BASELINE, repo, run, example, stable_head, hooks,
+    base = _run(baseline_tree, repo, run, example, stable_head, hooks,
                 launcher, wrapper, tmp_path / "base-modules.json")
     shutil.rmtree(repo)
     _remove_generated_run(run)
@@ -164,12 +194,7 @@ def _resume_run(checkout: Path, repo: Path, run: Path, stable_head: str,
 
     script = InterruptedScript()
     server = serve(script)
-    environment = {key: value for key, value in os.environ.items()
-                   if key != "STATEFRAME_MUTATIONS"}
-    environment.update({"PYTHONPATH": str(checkout / "src"),
-                        "STATEFRAME_STABLE_TOOL_HEAD": stable_head})
-    if mutation_value is not None:
-        environment["STATEFRAME_MUTATIONS"] = mutation_value
+    environment = _parity_environment(checkout, stable_head, trace, mutation_value)
     child_pid = Path(str(trace) + ".child")
     command = [sys.executable, str(launcher), str(wrapper), str(trace), str(child_pid), "run",
                "--repo", str(repo), "--task", EXAMPLES["discount_bug"],
@@ -179,8 +204,17 @@ def _resume_run(checkout: Path, repo: Path, run: Path, stable_head: str,
     launched_at = time.time()
     process = subprocess.Popen(command, env=environment, stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, text=True)
+    output_collected = False
     try:
-        assert script.waiting.wait(600), "first attempt did not reach interrupted request"
+        if not script.waiting.wait(600):
+            if process.poll() is None:
+                raise AssertionError("first attempt did not reach interrupted request before timeout")
+            stdout, stderr = process.communicate(timeout=10)
+            output_collected = True
+            raise AssertionError(
+                "first attempt exited before reaching interrupted request "
+                f"(exit={process.returncode})\n{stdout}{stderr}"
+            )
         original = [path.read_bytes() for path in sorted((run / "wire").glob("*.request.json"))
                     if path.with_name(path.name.replace(".request.", ".response.")).exists()]
         assert len(original) == 2
@@ -206,19 +240,17 @@ def _resume_run(checkout: Path, repo: Path, run: Path, stable_head: str,
         if process.poll() is None:
             signal_run_owned(run, process, signal.SIGKILL, deadline=time.monotonic(),
                              what="parity cleanup", require_checkpoint_saved=False)
+        if not output_collected:
             process.communicate(timeout=10)
         server.shutdown()
         server.server_close()
 
 
 @pytest.mark.host_sandbox
-@pytest.mark.skipif(BASELINE is None,
-                    reason="set SF_TEST_PARITY_BASELINE to the untouched base checkout")
 @pytest.mark.parametrize("stable_head", ("off", "on"))
 @pytest.mark.parametrize("mutation_mode", ("unset", "off"))
-def test_mutation_l0_resume_selection_parity(mutation_root, tmp_path, stable_head,
+def test_mutation_l0_resume_selection_parity(baseline_tree, mutation_root, tmp_path, stable_head,
                                               mutation_mode):
-    assert BASELINE is not None
     launcher, wrapper = tmp_path / "launcher.py", tmp_path / "wrapper.py"
     _write_trace_launchers(launcher, wrapper)
     hook = tmp_path / "observer.py"
@@ -231,7 +263,7 @@ def test_mutation_l0_resume_selection_parity(mutation_root, tmp_path, stable_hea
     repo = tmp_path / "parity-repo"
     run = tmp_path / "parity-run"
     shutil.copytree(CURRENT / "examples/discount_bug", repo)
-    baseline = _resume_run(BASELINE, repo, run, stable_head,
+    baseline = _resume_run(baseline_tree, repo, run, stable_head,
                            hooks, launcher, wrapper, tmp_path / "baseline-modules.json")
     shutil.rmtree(repo)
     _remove_generated_run(run)

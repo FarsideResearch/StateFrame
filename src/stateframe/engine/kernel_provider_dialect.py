@@ -30,9 +30,13 @@ except ImportError:
 LLAMA_CPP = "llama.cpp"
 OPENAI_STRICT = "openai-strict"
 PROVIDER_OVERRIDE_ENV = "STATEFRAME_PROVIDER"
-# Transient probe failures (no answer, or a 5xx) are retried with these pauses.
-# A definite answer (2xx/4xx other than a transient fault) is never retried.
-PROBE_RETRY_DELAYS = (0.25, 0.5, 1.0)
+# HTTP 503 and 429 answers may indicate a provider that is loading or rate-limited.
+PROBE_RETRY_DELAYS = (1.0, 2.0, 4.0, 8.0, 15.0, 30.0, 30.0)
+# No-response outcomes keep the base's short schedule; they cannot identify why
+# the endpoint did not answer.
+PROBE_UNREACHABLE_RETRY_DELAYS = (0.25, 0.5, 1.0)
+# Tests replace this module-local seam without changing subprocess polling sleeps.
+_sleep = time.sleep
 PROBE_DEGRADED_EVENT = "provider_probe_degraded"
 PROBE_DEGRADED_CODE = "props_probe_unreachable"
 PROBE_FAULT_HANDLER = "kernel_provider_dialect.props_probe"
@@ -264,8 +268,8 @@ def _slots_proof(
 
 
 def _transient_probe(result: tuple[int, object] | None) -> bool:
-    """No usable answer or a server fault: worth another attempt. 4xx and bodies are definite."""
-    return result is None or result[0] >= 500
+    """No usable answer, a server fault, or rate limiting: worth another attempt."""
+    return result is None or result[0] >= 500 or result[0] == 429
 
 
 def probe_degradation_warning(capabilities: ProviderCapabilities, origin: str) -> str | None:
@@ -379,23 +383,41 @@ def capabilities_for(
                 return verified
 
         started = time.monotonic()
+        waiting_notice_printed = False
 
         def probe(path: str, *, retry: bool = True) -> tuple[tuple[int, object] | None, bool, int, str]:
             """Return (result, cut_short, attempts, last_error_type).
 
-            Only transient failures (no answer, or 5xx) are retried, and never past
-            the deadline. A definite answer returns on its first attempt.
+            HTTP 503 and 429 answers use the extended per-path schedule. Other
+            transient answers retain the short schedule. Definite answers return on
+            their first attempt, and no schedule passes the caller deadline.
             """
+            nonlocal waiting_notice_printed
             attempts = 0
             last_error = "TimeoutError"
             result: tuple[int, object] | None = None
             # An operator override or an already-proven dialect never waits on retries.
-            retries = PROBE_RETRY_DELAYS if retry and not override else ()
-            for delay in (0.0, *retries):
-                if delay:
+            retries = PROBE_UNREACHABLE_RETRY_DELAYS if retry and not override else ()
+            extended_retries = False
+            retry_index = 0
+            while True:
+                if attempts:
+                    if retry_index >= len(retries):
+                        break
+                    delay = retries[retry_index]
                     if deadline is not None and deadline - time.monotonic() <= delay:
                         break
-                    time.sleep(delay)
+                    if (delay > 5.0 and result is not None and result[0] in {429, 503}
+                            and not waiting_notice_printed):
+                        waiting_notice_printed = True
+                        print(
+                            f"INFO: {path} probe received HTTP {result[0]}; "
+                            f"waiting {delay:g}s before retry",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                    _sleep(delay)
+                    retry_index += 1
                 if deadline is not None and deadline <= time.monotonic():
                     break
                 attempts += 1
@@ -403,8 +425,17 @@ def capabilities_for(
                 result = bounded_json_probe(origin, key, path, **deadline_kw)
                 if not _transient_probe(result):
                     return result, False, attempts, last_error
-                last_error = "HTTPServerError" if result is not None else (
-                    last_probe_error() or "TimeoutError")
+                if result is not None:
+                    last_error = "HTTPRateLimit" if result[0] == 429 else "HTTPServerError"
+                    use_extended_retries = result[0] in {429, 503}
+                else:
+                    transport_error = last_probe_error()
+                    last_error = transport_error or "TimeoutError"
+                    use_extended_retries = False
+                if use_extended_retries and not extended_retries:
+                    extended_retries = True
+                    retries = PROBE_RETRY_DELAYS if retry and not override else ()
+                    retry_index = 0
             cut_short = result is None and deadline is not None and time.monotonic() >= deadline
             return result, cut_short, attempts, last_error
 
@@ -468,7 +499,7 @@ def capabilities_for(
         # can journal and announce it. Operator overrides and definite answers are not.
         probe_degradation = None
         if (dialect == OPENAI_STRICT and not override and cached_llama_proof is None
-                and (props is None or props[0] >= 500)):
+                and (props is None or _transient_probe(props))):
             probe_degradation = ProbeDegradation(
                 attempts=props_attempts,
                 last_error_type=props_error or "TimeoutError",

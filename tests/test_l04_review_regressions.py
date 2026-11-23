@@ -21,14 +21,12 @@ ROOT = Path(__file__).resolve().parents[1]
 BASE = "6063b3c499"
 
 
-def _git_show(ref: str, path: str) -> bytes:
-    return subprocess.check_output(["git", "show", f"{ref}:{path}"], cwd=ROOT)
-
-
-def _engine_module_at(ref: str, name: str) -> ModuleType:
+def _released_engine_module(name: str) -> ModuleType:
+    """The engine module as it was at BASE (a literal revision, see test_git_show_ancestry)."""
     path = f"src/stateframe/engine/{name}.py"
+    source = subprocess.check_output(["git", "show", f"{BASE}:{path}"], cwd=ROOT)
     module = ModuleType(name)
-    exec(compile(_git_show(ref, path), f"{ref}:{path}", "exec"), vars(module))
+    exec(compile(source, f"{BASE}:{path}", "exec"), vars(module))
     return module
 
 
@@ -232,7 +230,7 @@ def test_auth_fallback_request_measurement_bytes_match_base(
     import kernel_request_diet as diet
 
     _deny_key_read(monkeypatch, tmp_path)
-    old = _engine_module_at(BASE, "kernel_request_auth_identity")
+    old = _released_engine_module("kernel_request_auth_identity")
     fixed_fallback = b"f" * 32
     monkeypatch.setattr(auth, "_AUTH_BINDING_FALLBACK_SECRET", fixed_fallback)
     old._AUTH_BINDING_FALLBACK_SECRET = fixed_fallback

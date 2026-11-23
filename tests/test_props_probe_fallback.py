@@ -218,17 +218,19 @@ def run_cache() -> Iterator[None]:
 
 
 @pytest.mark.host_sandbox
-def test_5xx_props_is_retried_and_degradation_survives_host_seed(run_cache):
+def test_5xx_props_is_retried_and_degradation_survives_host_seed(run_cache, monkeypatch):
     plans = {"/props": [(503, {"error": "loading"})], "/slots": [(503, {"error": "loading"})]}
+    monkeypatch.setattr(dialect, "_sleep", lambda _delay: None)
     with _stub(plans) as (endpoint, stub):
         origin = origin_of(endpoint)
-        host = capabilities_for(endpoint, KEY, deadline=time.monotonic() + 20, cache={}, environ={})
-        assert stub.seen.count("/props") == 4, stub.seen
+        host = capabilities_for(endpoint, KEY, cache={}, environ={})
+        assert stub.seen.count("/props") == len(dialect.PROBE_RETRY_DELAYS) + 1, stub.seen
         assert host.probe_degradation is not None
         assert host.probe_degradation.last_error_type == "HTTPServerError"
         record = host.to_record()
         assert record["probe_degradation"] == {
-            "attempts": 4, "last_error_type": "HTTPServerError",
+            "attempts": len(dialect.PROBE_RETRY_DELAYS) + 1,
+            "last_error_type": "HTTPServerError",
             "elapsed_ms": host.probe_degradation.elapsed_ms,
         }
         # The host ships its proof to the engine child, which must not re-probe.

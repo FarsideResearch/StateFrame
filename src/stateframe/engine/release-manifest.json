@@ -517,7 +517,7 @@
   "kernel_protocol_spec.py": "75dc91f629371f6e4ae138c71a0bf819570b27d2d03f687c9028789b09c621bd",
   "kernel_provability.py": "28eec412421d66336a438feefcddae222082a9136f8b0e578f1f87db1f5d1285",
   "kernel_provider_adapter.py": "3ff16422a4cb0ee94444f303b3b0e9b3c8e99777d9256aa0a1793297c966c060",
-  "kernel_provider_dialect.py": "053c62fac70f121cbf40f4228495e8cc1cb1cdcc3df4ae56bfb1d8b59b5669ed",
+  "kernel_provider_dialect.py": "c193a837213a00b91dc47a0517bf5f296f2b2f5a5187fde51a7192f891efb29c",
   "kernel_psgaps.py": "3fe13f6e75b9a377957cc7fad5355d6743ca2cddb08dc60db203b2da54362bcb",
   "kernel_public_contract.py": "5b2c5e22cbf8ac1130708d0549b5b3c09d9948e267b3e562a218bac857d3697f",
   "kernel_public_evidence.py": "e8618cafb706cb9443664b32a1f875f8552a66c7b20e096d36ea29bcef7ba471",
