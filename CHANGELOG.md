@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.20 (2026-11-23)
 
 - Tests: the process-signal guard lists the check watchdog's existence probe, and the release parity test's fixed clock covers the current engine entry point.
 
