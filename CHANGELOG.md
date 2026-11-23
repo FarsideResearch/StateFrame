@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.28 (2026-11-23)
 
 - In-place promotion freezes the verified path set and digests after checks, then applies that set and those bytes or records an apply error. Verified deletions follow the same file exclusions as the checks.
 - Fixed scoped parallel delivery with test protection off. Workers retain the task file scope, unchanged sealed context is accepted, and the host refuses outside changes in the seal, retry workcopy, or final promotion set.
