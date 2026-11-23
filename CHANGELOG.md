@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Fixed: checkpoint failure warnings match the background write that failed and name reviewed exception classes without exposing exception messages. Background checkpoint outcome rows carry a step, a journal position and the writer's process id. Limits are listed in KNOWN_LIMITATIONS.
+- Fixed: with model routes configured, a `LLAMA_CPP_TOKENIZE_URL` that conflicts with a routed model is refused before any server is contacted. Earlier, probe requests were sent first. The refusal itself is unchanged.
+- Call-site census structures are reused while the source revision is unchanged, so repeated turns reread less source.
+- Fixed: pruning old checkpoints stopped early when the run also stored environment objects, so pool files that no kept checkpoint needed stayed on disk.
+
 ## 0.8.22 (2026-11-23)
 
 - Fixed: a failed install can be run again. Each attempt uses its own private environment, an unfinished one from an earlier release is moved aside instead of deleted, and any other existing environment is left alone and refused.

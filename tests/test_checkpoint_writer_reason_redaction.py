@@ -42,8 +42,25 @@ def _assert_secret_free(text: object, secret: str) -> None:
         raise AssertionError("checkpoint writer diagnostic contains a registered secret")
 
 
+def _parent_reason(run: Path, step: int, identity: str, writer_pid: int) -> str:
+    journal = run / "checkpoints" / "events.jsonl"
+    try:
+        with journal.open("rb") as stream:
+            info = os.fstat(stream.fileno())
+    except FileNotFoundError:
+        return kernel_checkpoint._writer_failure_reason(
+            run, step, identity, writer_pid, 0, None, journal_missing=True,
+        )
+    except OSError:
+        return kernel_checkpoint._writer_failure_reason(run, step, identity, writer_pid, 0, None)
+    return kernel_checkpoint._writer_failure_reason(
+        run, step, identity, writer_pid, 0, (info.st_dev, info.st_ino),
+    )
+
+
 def _run_writer_failure(
-        tmp_path: Path, capsys, secret: str, fail_write, expected_reason: str) -> None:
+        tmp_path: Path, capsys, secret: str, fail_write,
+        expected_reason: str) -> tuple[str, dict[str, object]]:
     previous_secrets = kernel_checkpoint._SECRETS.copy()
     previous_state = kernel_checkpoint._STATE.copy()
     kernel_checkpoint.register_secret(secret)
@@ -86,6 +103,7 @@ def _run_writer_failure(
             raise AssertionError("child recorded a non-allowlisted failure reason")
         if event.get("error") != expected_reason:
             raise AssertionError("child event carried exception text instead of the fixed code")
+        return warning, event
     finally:
         child = kernel_checkpoint._STATE.get("child")
         if child:
@@ -100,7 +118,7 @@ def _run_writer_failure(
 
 def _run_synchronous_writer_failure(
         tmp_path: Path, capsys, monkeypatch, secret: str, fail_save,
-        expected_reason: str) -> None:
+        expected_reason: str) -> tuple[str, dict[str, object]]:
     previous_secrets = kernel_checkpoint._SECRETS.copy()
     previous_state = kernel_checkpoint._STATE.copy()
     kernel_checkpoint.register_secret(secret)
@@ -152,6 +170,7 @@ def _run_synchronous_writer_failure(
         engine_log = tmp_path / "engine.log"
         engine_log.write_text(child_output)
         _assert_secret_free(engine_log.read_text(), secret)
+        return child_output, event
     finally:
         kernel_checkpoint._SECRETS[:] = previous_secrets
         kernel_checkpoint._STATE.clear()
@@ -243,17 +262,67 @@ def test_parent_ignores_unallowlisted_failure_reason(tmp_path: Path) -> None:
         "event": "checkpoint_failed",
         "step": 7,
         "background": True,
+        "writer_generation": "writer-7",
+        "writer_pid": 773,
         "failure_reason": _KEY,
         "error": _KEY,
     }
     (checkpoints / "events.jsonl").write_text(json.dumps(event) + "\n")
 
-    if kernel_checkpoint._writer_failure_reason(run, 7) != "unexpected writer error":
+    if _parent_reason(run, 7, "writer-7", 773) != "unexpected writer error":
         raise AssertionError("parent accepted a non-allowlisted writer reason")
 
 
+def test_parent_does_not_reuse_same_step_failure_from_prior_writer(
+        tmp_path: Path, capsys) -> None:
+    run = tmp_path / "run"
+    checkpoints = run / "checkpoints"
+    checkpoints.mkdir(parents=True)
+    old_event = {
+        "event": "checkpoint_failed",
+        "step": 7,
+        "background": True,
+        "writer_generation": "prior-generation",
+        "writer_pid": 774,
+        "failure_reason": _SECRET_GUARD_REASON,
+    }
+    (checkpoints / "events.jsonl").write_text(json.dumps(old_event) + "\n")
+
+    previous_state = kernel_checkpoint._STATE.copy()
+    kernel_checkpoint._STATE.clear()
+    kernel_checkpoint._STATE.update(
+        failed=kernel_checkpoint.MAX_CONSECUTIVE_FAILURES - 1,
+        consecutive_failed=kernel_checkpoint.MAX_CONSECUTIVE_FAILURES - 1,
+        disabled=False,
+    )
+    try:
+        reason = _parent_reason(run, 7, "current-generation", 774)
+        kernel_checkpoint._note_failure(run, reason)
+        warning = capsys.readouterr().err
+        assert reason == "unexpected writer error"
+        assert "unexpected writer error" in warning
+        assert _SECRET_GUARD_REASON not in warning
+    finally:
+        kernel_checkpoint._STATE.clear()
+        kernel_checkpoint._STATE.update(previous_state)
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="async writer requires fork")
+def test_async_writer_reports_safe_error_type(tmp_path: Path, capsys) -> None:
+    def fail_write():
+        raise RuntimeError(_KEY)
+
+    warning, event = _run_writer_failure(
+        tmp_path, capsys, _KEY, fail_write, "unexpected writer error")
+
+    assert "unexpected writer error: RuntimeError" in warning
+    assert event.get("writer_error_type") == "RuntimeError"
+    _assert_secret_free(warning, _KEY)
+    _assert_secret_free(event.get("writer_error_type"), _KEY)
+
+
 def test_parent_uses_fixed_reason_when_child_event_is_missing(tmp_path: Path) -> None:
-    if kernel_checkpoint._writer_failure_reason(tmp_path / "run", 7) != "unexpected writer error":
+    if _parent_reason(tmp_path / "run", 7, "writer-7", 775) != "unexpected writer error":
         raise AssertionError("parent exposed a dynamic writer exit status")
 
 
@@ -285,13 +354,29 @@ def test_parent_rejects_errno_table_injected_reason(tmp_path: Path, monkeypatch)
         "event": "checkpoint_failed",
         "step": 7,
         "background": True,
+        "writer_generation": "writer-7",
+        "writer_pid": 776,
         "failure_reason": f"checkpoint write failed: {_KEY}",
         "error": _KEY,
     }
     (checkpoints / "events.jsonl").write_text(json.dumps(event) + "\n")
 
-    if kernel_checkpoint._writer_failure_reason(run, 7) != "unexpected writer error":
+    if _parent_reason(run, 7, "writer-7", 776) != "unexpected writer error":
         raise AssertionError("parent accepted a reason injected through errno.errorcode")
+
+
+def test_synchronous_writer_reports_safe_error_type(
+        tmp_path: Path, capsys, monkeypatch) -> None:
+    def fail_save():
+        raise RuntimeError(_KEY)
+
+    warning, event = _run_synchronous_writer_failure(
+        tmp_path, capsys, monkeypatch, _KEY, fail_save, "unexpected writer error")
+
+    assert "unexpected writer error: RuntimeError" in warning
+    assert event.get("writer_error_type") == "RuntimeError"
+    _assert_secret_free(warning, _KEY)
+    _assert_secret_free(event.get("writer_error_type"), _KEY)
 
 
 def test_serialization_failure_logs_error_type_and_value_free_field_path(

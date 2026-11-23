@@ -103,6 +103,9 @@ _WRITER_FAILURE_REASONS = frozenset({
     "checkpoint serialization failed",
     "unexpected writer error",
 })
+_WRITER_ERROR_NAMES = frozenset({
+    "TypeError", "ValueError", "AttributeError", "RuntimeError", "OverflowError", "RecursionError",
+})
 
 
 class CheckpointError(RuntimeError):
@@ -2214,6 +2217,14 @@ def _failure_reason(error: BaseException) -> str:
     return "unexpected writer error"
 
 
+def _writer_reason(reason: str, writer_error_type: object) -> str:
+    """Enrich a generic warning without changing durable reason codes."""
+    if (reason == "unexpected writer error" and type(writer_error_type) is str
+            and writer_error_type in _WRITER_ERROR_NAMES):
+        return f"{reason}: {writer_error_type}"
+    return reason
+
+
 def _capture_stage(error: BaseException) -> dict[str, str]:
     if type(error) is ObjectCaptureError:
         stage = getattr(error, "stage", None)
@@ -2371,7 +2382,9 @@ def probe(frame, step: int, out_dir: Path) -> dict:
 # --------------------------------------------------------------------------- save
 
 _STATE = {"saved": 0, "failed": 0, "restored_step": None, "disabled": None, "last_sends": None,
-          "child": None, "child_tmp": None, "consecutive_failed": 0, "low_disk": False}
+          "child": None, "child_tmp": None, "child_journal_offset": None,
+          "child_journal_file_id": None, "child_journal_missing": False,
+          "consecutive_failed": 0, "low_disk": False}
 # Saving stops after this many failures in a row (a full disk would otherwise retry, and leave a
 # partial copy, at every boundary for the rest of the run).
 MAX_CONSECUTIVE_FAILURES = 3
@@ -4084,6 +4097,11 @@ def _reap() -> bool:
     tmp, _STATE["child_tmp"] = _STATE.get("child_tmp"), None
     run_dir, step = _STATE.get("child_run_dir"), _STATE.get("child_step")
     _STATE["child_run_dir"], _STATE["child_step"] = None, None
+    writer_generation = _STATE.get("child_writer_generation")
+    _STATE["child_writer_generation"] = None
+    journal_offset, _STATE["child_journal_offset"] = _STATE.get("child_journal_offset"), None
+    journal_file_id, _STATE["child_journal_file_id"] = _STATE.get("child_journal_file_id"), None
+    journal_missing, _STATE["child_journal_missing"] = _STATE.get("child_journal_missing"), False
     if os.waitstatus_to_exitcode(status) != 0:
         if tmp is not None:
             with (tmp.parent / ".checkpoint.lock").open("a+b") as lock:
@@ -4091,40 +4109,83 @@ def _reap() -> bool:
                 _cleanup_checkpoint_transaction(tmp.parent, tmp)
             _sweep_stale(tmp.parent)
         _SCANS.clear()  # the writer may have failed on a stale scan: rescan at the next boundary
-        reason = _writer_failure_reason(run_dir, step)
+        reason = _writer_failure_reason(
+            run_dir, step, writer_generation, pid, journal_offset,
+            journal_file_id, journal_missing=journal_missing,
+        )
         _note_failure(run_dir, reason)
     else:
         _STATE["consecutive_failed"] = 0
     return True
 
 
-def _writer_failure_reason(run_dir, step: object) -> str:
-    """Read an allowlisted writer code from its durable failure event."""
-    if run_dir is None or type(step) is not int:
-        return "unexpected writer error"
+def _writer_journal_start(run_dir: Path) -> tuple[int, tuple[int, int] | None, bool]:
+    """Return the readable journal's byte size and identity; a missing journal starts at zero."""
+    path = Path(run_dir) / "checkpoints" / "events.jsonl"
+    descriptor = None
     try:
-        if __package__:
-            from .kernel_journal_store import open_journal
-        else:
-            from kernel_journal_store import open_journal
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            return 0, None, False
+        return info.st_size, (info.st_dev, info.st_ino), False
+    except FileNotFoundError:
+        return 0, None, True
+    except OSError:
+        return 0, None, False
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
 
-        with open_journal(Path(run_dir) / "checkpoints") as stream:
-            lines = stream.readlines()
-    except Exception:  # noqa: BLE001 - a missing or unreadable event is a generic writer failure
+
+def _writer_failure_reason(
+        run_dir, step: object, writer_generation: object, writer_pid: object,
+        journal_offset: object, journal_file_id: object,
+        *, journal_missing: object = False) -> str:
+    """Read only a post-fork failure from the matching writer process and journal."""
+    if (run_dir is None or type(step) is not int or type(writer_generation) is not str
+            or type(writer_pid) is not int or type(journal_offset) is not int or journal_offset < 0
+            or type(journal_missing) is not bool):
         return "unexpected writer error"
-    for line in reversed(lines):
-        try:
-            event = json.loads(line)
-        except ValueError:
-            continue
-        if (not isinstance(event, dict) or event.get("event") != "checkpoint_failed"
-                or event.get("step") != step or event.get("background") is not True):
-            continue
-        reason = event.get("failure_reason")
-        if type(reason) is str and reason in _WRITER_FAILURE_REASONS:
-            return reason
+    if journal_file_id is None:
+        if not journal_missing:
+            return "unexpected writer error"
+    elif (type(journal_file_id) is not tuple or len(journal_file_id) != 2
+          or any(type(value) is not int for value in journal_file_id) or journal_missing):
         return "unexpected writer error"
-    return "unexpected writer error"
+    matched_reason = None
+    try:
+        path = Path(run_dir) / "checkpoints" / "events.jsonl"
+        with path.open("rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode):
+                return "unexpected writer error"
+            if journal_file_id is not None and (info.st_dev, info.st_ino) != journal_file_id:
+                return "unexpected writer error"
+            stream.seek(journal_offset)
+            for line in stream:
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if (not isinstance(event, dict) or event.get("event") != "checkpoint_failed"
+                        or type(event.get("step")) is not int or event["step"] != step
+                        or event.get("background") is not True
+                        or event.get("writer_generation") != writer_generation
+                        or type(event.get("writer_pid")) is not int
+                        or event["writer_pid"] != writer_pid):
+                    continue
+                reason = event.get("failure_reason")
+                if type(reason) is str and reason in _WRITER_FAILURE_REASONS:
+                    matched_reason = _writer_reason(reason, event.get("writer_error_type"))
+                else:
+                    matched_reason = "unexpected writer error"
+    except OSError:  # noqa: BLE001 - a missing or unreadable event is a generic writer failure
+        return "unexpected writer error"
+    return matched_reason or "unexpected writer error"
 
 
 def failure_summary() -> dict[str, object]:
@@ -4203,6 +4264,8 @@ def _fork_writer(run_dir: Path, step: int, final: Path, write, tmp: Path,
                  *, diagnostic_payload=None) -> None:
     sys.stdout.flush()
     sys.stderr.flush()
+    journal_offset, journal_file_id, journal_missing = _writer_journal_start(run_dir)
+    writer_generation = f"{step}:{journal_offset}"
     forked = time.perf_counter()
     pid = os.fork()
     if pid == 0:  # the writer: pickle this frozen image, write, and leave without any cleanup
@@ -4219,6 +4282,7 @@ def _fork_writer(run_dir: Path, step: int, final: Path, write, tmp: Path,
             started = time.perf_counter()
             meta = write()
             _record(run_dir, event="checkpoint_saved", step=step, dir=final.name, background=True,
+                    writer_generation=writer_generation, writer_pid=os.getpid(),
                     seconds=round(time.perf_counter() - started, 3), sends=meta["sends"],
                     state_bytes=meta["state_bytes"], chunks=len(meta["chunks"]))
             code = 0
@@ -4232,12 +4296,16 @@ def _fork_writer(run_dir: Path, step: int, final: Path, write, tmp: Path,
             diagnostics = _serialization_failure_fields(error)
             _record(run_dir, event="checkpoint_failed", step=step, background=True,
                     error=reason, failure_reason=reason, writer_error_type=_safe_error_type(error),
-                    **diagnostics)
+                    writer_generation=writer_generation, writer_pid=os.getpid(), **diagnostics)
             _log_serialization_failure(diagnostics)
         finally:
             os._exit(code)
     _STATE["child"], _STATE["child_tmp"], _STATE["child_run_dir"] = pid, tmp, run_dir
     _STATE["child_step"] = step
+    _STATE["child_writer_generation"] = writer_generation
+    _STATE["child_journal_offset"] = journal_offset
+    _STATE["child_journal_file_id"] = journal_file_id
+    _STATE["child_journal_missing"] = journal_missing
     _STATE["fork_seconds"] = round(time.perf_counter() - forked, 3)
 
 
@@ -4423,11 +4491,13 @@ def _save_point(frame, step: int, poc, entered: float) -> None:
                 if current == "save":
                     _STATE["last_sends"] = previous_sends
                 reason = _failure_reason(error)
+                writer_error_type = _safe_error_type(error)
                 _record(run_dir, event="checkpoint_failed", step=step,
                         error=reason, failure_reason=reason, **_capture_stage(error),
+                        writer_error_type=writer_error_type,
                         **_serialization_failure_fields(error))
                 _log_serialization_failure(_serialization_failure_fields(error))
-                _note_failure(run_dir, reason)
+                _note_failure(run_dir, _writer_reason(reason, writer_error_type))
                 return
         finally:
             if gc_was_enabled:
@@ -4450,11 +4520,13 @@ def _save_point(frame, step: int, poc, entered: float) -> None:
         if current == "save":
             _STATE["last_sends"] = previous_sends  # nothing was saved: the next boundary may retry
         reason = _failure_reason(error)
+        writer_error_type = _safe_error_type(error)
         _record(run_dir, event="checkpoint_failed", step=step,
                 error=reason, failure_reason=reason, **_capture_stage(error),
+                writer_error_type=writer_error_type,
                 **_serialization_failure_fields(error))
         _log_serialization_failure(_serialization_failure_fields(error))
-        _note_failure(run_dir, reason)
+        _note_failure(run_dir, _writer_reason(reason, writer_error_type))
 
 
 # --------------------------------------------------------------------------- restore
@@ -4551,7 +4623,7 @@ def _prune_pool(root: Path, run_dir: Path, checkpoints: tuple[Path, ...] | None 
     referenced: dict[str, set[str]] = {}
     for checkpoint in root.iterdir() if checkpoints is None else checkpoints:
         if (not checkpoint.is_dir() or checkpoint.is_symlink()
-                or checkpoint.name in {POOL_DIR, CACHE_DIR}):
+                or checkpoint.name in {POOL_DIR, CACHE_DIR, OBJECT_DIR}):
             continue
         try:
             manifest = json.loads((checkpoint / MANIFEST_FILE).read_text())
