@@ -411,7 +411,8 @@ def test_bookmarks_off_qualified_request_and_journal_match_release(tmp_path, mon
         } for index in range(4)]
 
     source = subprocess.check_output([
-        "git", "show", "v0.2.1:src/stateframe/engine/kernel_frame_allocation_capture.py"
+        "git", "show",
+        "97cd52d6c2225a823fdfeb632aad7bfd738f4d91:src/stateframe/engine/kernel_frame_allocation_capture.py",
     ], cwd=Path(__file__).resolve().parents[1])
     release_path = tmp_path / "release_frame_allocation_capture.py"
     release_path.write_bytes(source)

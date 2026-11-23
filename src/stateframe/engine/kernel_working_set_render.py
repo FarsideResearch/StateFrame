@@ -430,6 +430,8 @@ def snapshot_digest(snapshot: PreparationSnapshot) -> str:
             return {"bytes": value.hex()}
         raise TypeError("unsupported preparation authority")
     authority = asdict(snapshot)
+    if snapshot.provider_reasoning_effort is None:
+        authority.pop("provider_reasoning_effort")
     if not snapshot.protected_ranges:
         authority.pop("protected_ranges")
     return digest(json.dumps(authority, default=encode,
@@ -463,10 +465,12 @@ def _normalize(body, snapshot):
     # The llama.cpp reasoning-on contract is exactly a deepcopy. Each render
     # owns its body and message dictionaries; nested fixed values are opaque
     # and read-only. Other profiles still run their full provider transform.
+    provider_environment = ({"REACT_REASONING_EFFORT": snapshot.provider_reasoning_effort}
+                            if snapshot.provider_reasoning_effort is not None else {})
     result = (body if snapshot.dialect == "llama.cpp" and snapshot.reasoning_mode == "on"
               else enforce_provider_body(body,
                   profile=ReasoningProfile(snapshot.reasoning_mode, "snapshot"),
-                  dialect=snapshot.dialect, environ={}))
+                  dialect=snapshot.dialect, environ=provider_environment))
     # Output is normalized before costing. Never mutate it after certification.
     output_key = "max_completion_tokens" if "max_completion_tokens" in result else "max_tokens"
     output = result.get(output_key)

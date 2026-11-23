@@ -184,6 +184,8 @@ def _warm_process(directory):
 
 def test_persisted_queries_read_only_their_postings(tmp_path, monkeypatch):
     pytest.importorskip("kernel_turn_facts")
+    from _source_subprocess_env import source_subprocess_env
+
     monkeypatch.setenv("STATEFRAME_TURN_INDEXED_READS", "on")
     files = {f"provider_{index:04}.py".encode(): b"def compute(): pass\n"
              for index in range(4800)}
@@ -203,8 +205,9 @@ def test_persisted_queries_read_only_their_postings(tmp_path, monkeypatch):
         [sys.executable, "-c",
          "from pathlib import Path; import runpy, sys; "
          "runpy.run_path(sys.argv[1])['_warm_process'](Path(sys.argv[2]))",
-         __file__, str(tmp_path)],
+         str(Path(__file__).resolve()), str(tmp_path)],
         capture_output=True, text=True, check=False, timeout=30,
+        cwd=tmp_path, env=source_subprocess_env(inherit_pythonpath=True),
     )
     print(run.stdout, end="")
     assert run.returncode == 0, run.stdout + run.stderr

@@ -4,6 +4,7 @@ import ast
 import sys
 from collections import Counter
 from pathlib import Path
+from types import SimpleNamespace
 
 
 SOURCE = Path(__file__).resolve().parents[1] / "src"
@@ -208,6 +209,81 @@ def test_signal_guard_rejects_planted_calls():
     assert examined == 2
     assert violations == [(2, "os.killpg(process.pid, 9)"),
                           (3, "kill_launch_unit lacks launch_identity")]
+
+
+def test_signal_guard_rejects_a_planted_real_signal():
+    planted = "def stop(pid):\n    os." + "kill(pid, signal.SIGTERM)\n"
+    examined, violations = _calls(planted, "stateframe/engine/planted.py")
+    assert examined == 1
+    assert violations == [(2, "os.kill(pid, signal.SIGTERM)")]
+
+
+def test_watchdog_liveness_probe_keeps_signal_zero_outcomes(monkeypatch):
+    import errno
+
+    import kernel_check_watchdog as watchdog
+    from kernel_exec_tracker import ProcessIdentity
+
+    root = ProcessIdentity(2_147_483_646, 1, 1, 1, (10, 0), False)
+    missing = ProcessIdentity(2_147_483_647, root.pid, 1, 1, (11, 0), False)
+    previous = watchdog.ProgressSnapshot({(root.pid, root.start): 10,
+                                          (missing.pid, missing.start): 20})
+    table = SimpleNamespace(cpu_ticks=lambda _row: 10, identity=lambda _pid: None)
+
+    for failure, expected in (
+        (None, False),
+        (PermissionError(errno.EPERM, "denied"), False),
+        (ProcessLookupError(errno.ESRCH, "gone"), True),
+        (ProcessLookupError(), True),
+    ):
+        probes = []
+
+        def probe(pid, sig, failure=failure):
+            probes.append((pid, sig))
+            assert sig == 0
+            if failure is not None:
+                raise failure
+
+        monkeypatch.setattr(watchdog.os, "kill", probe)
+        snapshot = watchdog.process_snapshot(table, [root], previous=previous)
+        assert probes == [(missing.pid, 0)]
+        assert (snapshot is not None) is expected
+        if expected:
+            assert snapshot.cpu == {(root.pid, root.start): 10}
+
+
+def test_reused_zombie_pid_does_not_authorize_watchdog_progress(monkeypatch):
+    import kernel_check_watchdog as watchdog
+    from kernel_exec_tracker import ProcessIdentity
+
+    root = ProcessIdentity(2_147_483_646, 1, 1, 1, (10, 0), False)
+    pid = 2_147_483_647
+    reused = ProcessIdentity(pid, 1, 1, 1, (99, 0), True)
+    previous = watchdog.ProgressSnapshot({(root.pid, root.start): 10, (pid, (11, 0)): 20})
+    root_only = watchdog.ProgressSnapshot({(root.pid, root.start): 10})
+    reads = iter((None, reused))
+
+    def identity(queried_pid):
+        assert queried_pid == pid
+        return next(reads)
+
+    def signal_zero(queried_pid, signum):
+        assert (queried_pid, signum) == (pid, 0)
+
+    table = SimpleNamespace(cpu_ticks=lambda _row: 10, identity=identity)
+    monkeypatch.setattr(watchdog.os, "kill", signal_zero)
+    watch = watchdog.CheckWatchdog(watchdog.CheckWatchdogConfig(2, on_event=lambda *_: None))
+
+    assert not watch.observe(0, previous)
+    sample, next_baseline = watchdog.progress_sample(table, [root], previous)
+    assert not watch.observe(0.5, sample)
+    for when in (1, 1.5, 2):
+        assert not watch.observe(when, root_only)
+    stopped_early = watch.observe(2.5, root_only)
+
+    assert (sample, next_baseline, watch.progress_sequence, stopped_early) == (None, None, 0, False)
+    assert watch.observe(3, root_only)
+    assert watch.stop_cause == "no_progress"
 
 
 def test_signal_guard_rejects_each_indirect_form():

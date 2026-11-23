@@ -7,9 +7,26 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 ENGINE = Path(__file__).resolve().parents[1] / "src" / "stateframe" / "engine"
+
+
+def test_engine_source_records_the_product_release_manifest():
+    manifest = (ENGINE / "release-manifest.json").read_bytes()
+    source = json.loads((ENGINE / "ENGINE_SOURCE.json").read_text())
+    assert source["files"]["release-manifest.json"] == hashlib.sha256(manifest).hexdigest()
+    assert json.loads(manifest)["format"] == "stateframe-product-engine/1"
+
+
+def test_switch_registry_generator_accepts_shipped_engine():
+    result = subprocess.run(
+        [sys.executable, "-I", str(ENGINE / "kernel_release_switch_registry.py"), "--check"],
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def manifest_drift(engine: Path) -> dict[str, list[str]]:

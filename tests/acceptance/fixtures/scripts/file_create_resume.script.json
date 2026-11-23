@@ -1,0 +1,1 @@
+{"model":"scripted","steps":[{"tool":"file_create","arguments":{"path":"answer.json","content":"{\"answer\":42}\n"}}],"tokenize":{"mode":"ok"}}

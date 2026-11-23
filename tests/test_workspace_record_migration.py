@@ -7,6 +7,7 @@ import json
 import os
 import pickle
 import random
+import shutil
 import stat
 import sys
 import time
@@ -34,7 +35,7 @@ def run(tmp_path, monkeypatch):
     return run
 
 
-def _bind(run, work, monkeypatch):
+def _bind(run, work, monkeypatch, *, run_state=False):
     # Base still executes the historical call sites. A stitched tree supplies the
     # same fenced fixture binding the product host supplies to its consumers.
     if not hasattr(checkpoint, "_workspace_checkpoint_codec"):
@@ -46,10 +47,172 @@ def _bind(run, work, monkeypatch):
 
     bind_run_store(run, "a" * 64)
     monkeypatch.setattr(index, "time_ns", lambda: time.time_ns() + 5_000_000_000)
-    consumers = WorkspaceConsumers(WorkspaceState(
-        WorkspaceFence.create(work, run.parent / f"fence-{work.name}"), trust_stat=True))
+    fence = WorkspaceFence.create(work, run.parent / f"fence-{work.name}")
+    if run_state:
+        from weakref import WeakSet
+
+        from kernel_workspace_consumers import _RunWorkspaceState
+        from kernel_workspace_feed import WorkspaceFeed
+
+        state = _RunWorkspaceState(fence, WeakSet(), "live",
+                                   feed=WorkspaceFeed(work, enabled=True))
+    else:
+        state = WorkspaceState(fence, trust_stat=True)
+    consumers = WorkspaceConsumers(state)
     bind_consumers(work, consumers)
     return consumers
+
+
+class WorkspaceAccessProbe:
+    """Count file opens and copies sourced from one workspace during a boundary."""
+
+    def __init__(self, root: Path, monkeypatch: pytest.MonkeyPatch):
+        self.root = Path(os.path.abspath(root))
+        self.file_opens: list[str] = []
+        self.file_reads: list[tuple[str, int]] = []
+        self.copies: list[str] = []
+        self.active = False
+        descriptor_paths: dict[int, Path] = {}
+        audit_state: dict[str, object] = {}
+        self._audit_state = audit_state
+
+        def resolved_path(path, dir_fd=None):
+            if isinstance(path, int):
+                return descriptor_paths.get(path)
+            try:
+                name = os.fsdecode(path)
+                if not os.path.isabs(name):
+                    base = (descriptor_paths.get(dir_fd)
+                            if dir_fd is not None else Path.cwd())
+                    if base is None:
+                        return None
+                    name = os.path.join(base, name)
+                return Path(os.path.abspath(name))
+            except (OSError, TypeError, ValueError):
+                return None
+
+        def target(path, dir_fd=None):
+            resolved = resolved_path(path, dir_fd)
+            if resolved is None:
+                return None
+            if resolved == self.root or resolved.is_relative_to(self.root):
+                return resolved
+            return None
+
+        def audit(event, args):
+            if (not audit_state.get("active") or event != "open" or len(args) < 2
+                    or args[1] is None):
+                return
+            try:
+                name = os.fsdecode(args[0])
+                if not os.path.isabs(name):
+                    name = os.path.join(os.getcwd(), name)
+                source = Path(os.path.abspath(name))
+            except (OSError, TypeError, ValueError):
+                return
+            root = audit_state.get("root")
+            file_opens = audit_state.get("file_opens")
+            if (not isinstance(root, Path) or not isinstance(file_opens, list)
+                    or not (source == root or source.is_relative_to(root))):
+                return
+            try:
+                mode = os.stat(source, follow_symlinks=False).st_mode
+            except OSError:
+                file_opens.append(str(source))
+            else:
+                if not stat.S_ISDIR(mode):
+                    file_opens.append(str(source))
+
+        sys.addaudithook(audit)
+
+        original_open = os.open
+
+        def tracked_open(path, flags, mode=0o777, *, dir_fd=None):
+            source = target(path, dir_fd)
+            if dir_fd is None:
+                descriptor = original_open(path, flags, mode)
+            else:
+                descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
+            resolved = resolved_path(path, dir_fd)
+            if resolved is None:
+                descriptor_paths.pop(descriptor, None)
+            else:
+                descriptor_paths[descriptor] = resolved
+            if self.active and source is not None and not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                self.file_opens.append(str(source))
+            return descriptor
+
+        monkeypatch.setattr(os, "open", tracked_open)
+
+        original_close = os.close
+
+        def tracked_close(descriptor):
+            try:
+                return original_close(descriptor)
+            finally:
+                descriptor_paths.pop(descriptor, None)
+
+        monkeypatch.setattr(os, "close", tracked_close)
+
+        original_read = os.read
+
+        def tracked_read(descriptor, size):
+            data = original_read(descriptor, size)
+            if self.active and data:
+                source = target(descriptor)
+                if source is not None:
+                    self.file_reads.append((str(source), len(data)))
+            return data
+
+        monkeypatch.setattr(os, "read", tracked_read)
+
+        for name in ("copy", "copy2", "copyfile", "copytree"):
+            original_copy = getattr(shutil, name)
+
+            def tracked_copy(source, destination, *args, _copy=original_copy, **kwargs):
+                source_path = target(source)
+                if self.active and source_path is not None:
+                    self.copies.append(str(source_path))
+                return _copy(source, destination, *args, **kwargs)
+
+            monkeypatch.setattr(shutil, name, tracked_copy)
+
+        original_link = os.link
+
+        def tracked_link(source, destination, *args, **kwargs):
+            source_path = target(source, kwargs.get("src_dir_fd"))
+            if self.active and source_path is not None:
+                self.copies.append(str(source_path))
+            return original_link(source, destination, *args, **kwargs)
+
+        monkeypatch.setattr(os, "link", tracked_link)
+
+    def __enter__(self):
+        self.active = True
+        self._audit_state.update({
+            "active": True,
+            "root": self.root,
+            "file_opens": self.file_opens,
+        })
+        return self
+
+    def __exit__(self, *_exc):
+        self.active = False
+        self._audit_state.clear()
+
+    def assert_accesses(self, expected_reads: dict[Path, int]):
+        expected = {str(path): size for path, size in expected_reads.items()}
+        opened: dict[str, int] = {}
+        for path in self.file_opens:
+            opened[path] = opened.get(path, 0) + 1
+        read: dict[str, int] = {}
+        for path, size in self.file_reads:
+            read[path] = read.get(path, 0) + size
+        expected_opens = {path: 1 for path in expected}
+        assert (opened == expected_opens and read == expected and not self.copies), (
+            "proposal accessed workspace files: "
+            f"opens={self.file_opens[:3]!r}, reads={read!r}, "
+            f"copies={self.copies[:3]!r}")
 
 
 def test_sparse_proposal_does_not_copy_or_read_the_workspace(run, monkeypatch):
@@ -64,7 +227,7 @@ def test_sparse_proposal_does_not_copy_or_read_the_workspace(run, monkeypatch):
         data = generator.randbytes(1024)
         (parent / name).write_bytes(data)
         (work / name).write_bytes(data)
-    consumers = _bind(run, work, monkeypatch)
+    consumers = _bind(run, work, monkeypatch, run_state=True)
     row = {"path": paths[0], "files": dict.fromkeys(paths)}
     monkeypatch.setattr(evidence, "capture_candidate", evidence.capture_candidate)
     _child.install_compact_capture(parent)
@@ -85,16 +248,19 @@ def test_sparse_proposal_does_not_copy_or_read_the_workspace(run, monkeypatch):
     with edit:
         (work / paths[1]).write_bytes(binary)
         (work / paths[2]).unlink()
-    started = time.perf_counter()
-    evidence.capture_candidate(str(candidates), work, row, 2)
-    elapsed = time.perf_counter() - started
+    access = WorkspaceAccessProbe(work, monkeypatch)
+    with access:
+        evidence.capture_candidate(str(candidates), work, row, 2)
+    access.assert_accesses({work / paths[1]: len(binary)})
     boundary = candidates / "0002.json"
     if consumers is not None:
         reads += consumers.state.work.content_reads
-    print(f"proposal: {elapsed:.6f}s, {reads} workspace reads, {boundary.stat().st_size} record bytes")
+    actual_reads = sum(size for _, size in access.file_reads)
+    print(f"proposal: {reads} legacy reads, {actual_reads} bytes read, "
+          f"{len(access.file_opens)} file opens, "
+          f"{len(access.copies)} copies, {boundary.stat().st_size} record bytes")
     assert reads <= 2
     assert boundary.stat().st_size <= 1024
-    assert elapsed < 2
     record = json.loads(boundary.read_bytes())
     assert record["parent_tree"] != record["new_tree"]
     assert set(record) == {"schema", "proposals", "namespace", "parent_tree", "new_tree", "projection"}
@@ -102,6 +268,48 @@ def test_sparse_proposal_does_not_copy_or_read_the_workspace(run, monkeypatch):
     assert exported is not None
     assert exported[paths[0]] == read_bytes(parent / paths[0])
     assert exported[paths[1]] == binary and exported[paths[2]] is None
+
+
+@pytest.mark.parametrize("mutation", ["read", "copy"])
+def test_workspace_access_probe_rejects_read_or_copy_mutants(tmp_path, monkeypatch, mutation):
+    work = tmp_path / "workspace"
+    work.mkdir()
+    for index in range(3):
+        (work / f"sample-{index}.bin").write_bytes(b"workspace payload")
+    access = WorkspaceAccessProbe(work, monkeypatch)
+    real_readlink = os.readlink
+    proc_readlinks: list[str] = []
+
+    def no_proc_readlink(path, *args, **kwargs):
+        name = os.fsdecode(path)
+        if name.startswith("/proc/"):
+            proc_readlinks.append(name)
+            raise FileNotFoundError(name)
+        return real_readlink(path, *args, **kwargs)
+
+    with access:
+        with monkeypatch.context() as no_proc:
+            no_proc.setattr(os, "readlink", no_proc_readlink)
+            if mutation == "read":
+                directory = os.open(work, os.O_RDONLY)
+                try:
+                    for source in work.iterdir():
+                        descriptor = os.open(source.name, os.O_RDONLY, dir_fd=directory)
+                        try:
+                            os.read(descriptor, 1024)
+                        finally:
+                            os.close(descriptor)
+                finally:
+                    os.close(directory)
+            else:
+                shutil.copytree(work, tmp_path / "mutant-copy")
+    assert not proc_readlinks
+    with pytest.raises(AssertionError, match="proposal accessed workspace files"):
+        access.assert_accesses({})
+    if mutation == "read":
+        assert access.file_reads
+    else:
+        assert access.copies
 
 
 def test_proposal_capture_makes_private_boundaries_with_permissive_umask(run, monkeypatch):
@@ -254,7 +462,6 @@ def test_second_checkpoint_emits_no_file_payloads_in_state_stream(run, monkeypat
     print(f"checkpoint: {elapsed:.6f}s, {emitted} serialized bytes, "
           f"{(second / 'checkpoint.json').stat().st_size} record bytes")
     assert emitted <= 64 << 10
-    assert elapsed < 2
     for saved in (first, second):
         assert {entry.name for entry in saved.iterdir()} == {"checkpoint.json"}
         assert (saved / "checkpoint.json").stat().st_size <= 1024

@@ -278,7 +278,8 @@ def project(summary: dict[str, object], *, cancelled: bool = False,
 def resume_hint_applies(summary: dict[str, object]) -> bool:
     """True when a stopped run should be offered `stateframe resume`.
 
-    A seal/finalization failure would only repeat on resume, so it gets no hint; an ERR:* crash keeps it.
+    Terminal submissions and seal/finalization failures are already finished or would only repeat on
+    resume, so they get no hint; an ERR:* crash keeps it.
     """
     delivery_refusal = summary.get("delivery_refusal")
     if (summary.get("engine_result") == "DELIVERY_REFUSED"
@@ -290,7 +291,11 @@ def resume_hint_applies(summary: dict[str, object]) -> bool:
     if summary.get("runtime_outcome") not in ("cancelled", "engine_error", "missing_result", "budget_stop",
                                               "recovery_required"):
         return False
-    terminal = summary.get("engine_terminal") or {}
+    terminal = summary.get("engine_terminal")
+    if not isinstance(terminal, dict):
+        terminal = {}
+    if terminal.get("result") == "SUBMITTED":
+        return False
     result = terminal.get("result")
     if isinstance(result, str) and result.startswith("ERR:"):
         return True
