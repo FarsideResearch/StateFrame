@@ -14,7 +14,17 @@ from _child_env import child_env
 
 import kernel_continuation_journal as journals
 import kernel_measurement as measurement
+import kernel_reason_log
 from kernel_continuation_journal import ContinuationJournal, JournalError
+
+
+@pytest.fixture(autouse=True)
+def _fresh_reason_log():
+    # Closing a journal appends the process-wide problem summary, so causes logged by an
+    # earlier test in the same worker would change these journals' bytes and heads.
+    kernel_reason_log.reset_for_tests()
+    yield
+    kernel_reason_log.reset_for_tests()
 
 
 def _pilot(monkeypatch, enabled):

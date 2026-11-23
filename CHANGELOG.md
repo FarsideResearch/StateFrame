@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.17 (2026-11-22)
+
+- Tests: the startup journal parity check is no longer affected by problems logged by earlier tests.
+
 ## 0.8.16 (2026-11-22)
 
 - A submitted run whose stored result is missing is now refused with exit code 2 and leaves the repository unchanged. It was previously reported as submitted.
