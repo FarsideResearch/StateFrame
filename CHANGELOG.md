@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.18 (2026-11-22)
 
 - Tests: the grep audit runs again with the real indexed-search setting and checks both rendering routes.
 
