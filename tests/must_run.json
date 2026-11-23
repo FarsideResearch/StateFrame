@@ -2007,6 +2007,22 @@
       "witness_assertion": "assert receipts[0][1]['effects'] == ({'path': 'new-directory', 'change': 'created'}, {'path': 'new-file.py', 'change': 'created'})"
     },
     {
+      "scenario_id": "test_parallel_worker_prep_test_default_off_result_parity_checks_the_published_exit_status",
+      "nodeid": "tests/test_parallel_worker_prep.py::test_default_off_result_parity_checks_the_published_exit_status",
+      "item_nodeids": [
+        "tests/test_parallel_worker_prep.py::test_default_off_result_parity_checks_the_published_exit_status"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert type(released.get('exit_status')) is type(candidate.get('exit_status')) is int"
+    },
+    {
       "scenario_id": "test_parallel_worker_prep_test_engine_venv_installs_bypass_shared_pip_cache",
       "nodeid": "tests/test_parallel_worker_prep.py::test_engine_venv_installs_bypass_shared_pip_cache",
       "item_nodeids": [
@@ -2038,6 +2054,22 @@
       "baseline": null,
       "witness_schema": "assertion_match",
       "witness_assertion": "assert \"component messages[0].content\" in str(error.value)"
+    },
+    {
+      "scenario_id": "test_parallel_worker_prep_test_unscoped_worker_projection_is_byte_identical_to_base",
+      "nodeid": "tests/test_parallel_worker_prep.py::test_unscoped_worker_projection_is_byte_identical_to_base",
+      "item_nodeids": [
+        "tests/test_parallel_worker_prep.py::test_unscoped_worker_projection_is_byte_identical_to_base"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert canonical_json(prepared[\"public_row\"]) == canonical_json(expected)"
     },
     {
       "scenario_id": "test_parallel_worker_prep_test_wire_parity_reports_first_send_byte_and_component",

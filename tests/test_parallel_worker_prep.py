@@ -602,6 +602,30 @@ def test_prepare_worker_builds_an_ordinary_isolated_run_from_verified_snapshot(t
     assert sorted(path.name for path in run_dir.glob(".workspace-*")) == []
 
 
+def test_prepare_worker_projects_parent_task_file_scope(tmp_path):
+    snapshot, run_dir, spec_path, spec, parent_spec, _ = _unit_fixture(tmp_path)
+    parent_spec["public_row"]["task_file_scope"] = ["pkg/a.py"]
+
+    prepare_worker(spec, spec_path, run_dir, snapshot, parent_spec=parent_spec)
+
+    prepared = json.loads((run_dir / "spec.json").read_text())
+    assert prepared["public_row"]["task_file_scope"] == ["pkg/a.py"]
+
+
+def test_legacy_parent_without_recorded_task_scope_keeps_base_projection(tmp_path):
+    snapshot, run_dir, spec_path, spec, parent_spec, _ = _unit_fixture(tmp_path)
+    parent_spec["public_row"] = {"msg": "Only edit pkg/a.py."}
+    start_files = {path: (snapshot / path).read_bytes()
+                   for path in ("pkg/a.py", "tests/test_a.py")}
+    expected = build_public_row(spec, start_files)
+
+    prepare_worker(spec, spec_path, run_dir, snapshot, parent_spec=parent_spec)
+
+    prepared = json.loads((run_dir / "spec.json").read_text())
+    assert prepared["public_row"] == expected
+    assert "task_file_scope" not in prepared["public_row"]
+
+
 def test_unit_task_builder_omits_empty_legacy_test_fields_when_no_checks(tmp_path):
     _snapshot, _run_dir, _spec_path, spec, _parent_spec, _parent_run = _unit_fixture(tmp_path)
     no_checks = replace(spec, contract=replace(
@@ -827,6 +851,19 @@ def test_prepare_worker_leases_the_resolved_subframe_endpoint(tmp_path):
     worker_spec = json.loads((run_dir / "spec.json").read_text())
     assert worker_spec["parallel_parent_endpoint"] == "http://127.0.0.1:9090/v1/chat/completions"
     assert worker_spec["prompt_cache_slot"]["slot"] is None
+
+
+def test_unscoped_worker_projection_is_byte_identical_to_base(tmp_path):
+    snapshot, run_dir, spec_path, spec, parent_spec, _ = _unit_fixture(tmp_path)
+    parent_spec["public_row"] = {"msg": "parent task"}
+    start_files = {path: (snapshot / path).read_bytes()
+                   for path in ("pkg/a.py", "tests/test_a.py")}
+    expected = build_public_row(spec, start_files)
+
+    prepare_worker(spec, spec_path, run_dir, snapshot, parent_spec=parent_spec)
+
+    prepared = json.loads((run_dir / "spec.json").read_text())
+    assert canonical_json(prepared["public_row"]) == canonical_json(expected)
 
 
 @pytest.mark.host_sandbox
@@ -1276,6 +1313,7 @@ def test_restart_refuses_missing_prior_incarnation_record(tmp_path):
 @pytest.mark.host_sandbox
 def test_restart_archives_same_execution_and_replays_from_immutable_snapshot(tmp_path):
     snapshot, run_dir, spec_path, spec, parent_spec, _ = _unit_fixture(tmp_path)
+    parent_spec["public_row"]["task_file_scope"] = ["pkg/a.py"]
     prepare_worker(spec, spec_path, run_dir, snapshot, parent_spec=parent_spec)
     changed = run_dir / "workspace" / "pkg" / "a.py"
     changed.chmod(0o644)
@@ -1292,10 +1330,80 @@ def test_restart_archives_same_execution_and_replays_from_immutable_snapshot(tmp
     resumed = json.loads((run_dir / "spec.json").read_text())
     assert resumed["unit_spec"] == original["unit_spec"]
     assert resumed["run_identity_seed"] == original["run_identity_seed"]
+    assert resumed["public_row"]["task_file_scope"] == ["pkg/a.py"]
     assert resumed["resume"]["attempt"] == 2
     assert (run_dir / "attempts" / "1" / "workspace" / "pkg" / "a.py").read_bytes() == b"VALUE = 2\n"
     assert changed.read_bytes() == (snapshot / "pkg" / "a.py").read_bytes()
     assert (run_dir / "proc" / "2" / "process.json").is_file()
+
+
+@pytest.mark.host_sandbox
+@pytest.mark.parametrize("record_scope", [True, False], ids=["scoped", "legacy"])
+def test_worker_scope_after_live_restart(tmp_path, tmp_path_factory, monkeypatch, record_scope):
+    from fixtures.barrier_endpoint import BarrierEndpoint
+    from stateframe.engine.kernel_request_auth_identity import protected_home_identity
+
+    snapshot, run_dir, spec_path, spec, parent_spec, _ = _unit_fixture(tmp_path)
+    parent_spec["public_row"] = {"msg": "Only edit pkg/a.py."}
+    if record_scope:
+        parent_spec["public_row"]["task_file_scope"] = ["pkg/a.py"]
+    parent_spec.pop("routes")
+    parent_spec.pop("routes_digest")
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    stateframe_home = tmp_path_factory.mktemp("stateframe-home")
+    stateframe_home.chmod(0o700)
+    steps = [
+        {"tool": "read", "arguments": {"path": "pkg/a.py"}},
+        {"tool": "subframe_blocked", "arguments": {
+            "reason_code": "OTHER", "detail": "Script completed after replay."}},
+    ]
+
+    with BarrierEndpoint([], {"a": steps}, hold_subframe_request={"a": 2},
+                         barrier_timeout=_scaled_test_timeout(240)) as endpoint:
+        parent_spec["chat_url"] = endpoint.url + "/chat/completions"
+        parent_spec["model"] = "scripted"
+        environment = parent_spec["environment"]
+        environment.update(_pin_off_cache_switches(profiles.load("r2hc3")))
+        environment.pop("STATEFRAME_PROTECT_TESTS", None)
+        environment.update(DS_URL=parent_spec["chat_url"], DS_MODEL="scripted", HOME=str(home),
+                           STATEFRAME_HOME=str(stateframe_home),
+                           STATEFRAME_RUNNER_HOME_IDENTITY=json.dumps(
+                               protected_home_identity(stateframe_home, initialize=True),
+                               sort_keys=True, separators=(",", ":")))
+        prepare_worker(spec, spec_path, run_dir, snapshot, parent_spec=parent_spec)
+
+        first = launch_worker(run_dir, 1)
+        try:
+            assert endpoint.wait_for_requests("a", 2, timeout=_scaled_test_timeout(120)), (
+                first.log_path.read_text())
+        finally:
+            first.cancel("test interruption at the second provider request")
+            first.escalate(grace=0)
+            assert first.reap(timeout=15) is not None
+
+        restarted = launch_worker(run_dir, 2)
+        try:
+            assert restarted.reap(timeout=_scaled_test_timeout(120)) is not None, restarted.log_path.read_text()
+        finally:
+            if restarted.exit_code is None:
+                restarted.cancel("test cleanup")
+                restarted.escalate(grace=0)
+                restarted.reap(timeout=15)
+        endpoint.assert_consumed()
+        assert len(endpoint.requests) == 3
+
+    resumed = json.loads((run_dir / "spec.json").read_text())
+    assert resumed["resume"]["attempt"] == 2
+    assert resumed["resume"]["tape"], "the completed read must be replayed"
+    assert '"kind":"replay_done"' in restarted.log_path.read_text()
+    assert json.loads((run_dir / "engine-result.json").read_text())["result"]["result"] == "SUBFRAME_BLOCKED"
+    assert not (run_dir / "resume-divergence.json").exists()
+    if record_scope:
+        assert resumed["public_row"]["task_file_scope"] == ["pkg/a.py"]
+    else:
+        assert "task_file_scope" not in resumed["public_row"]
 
 
 def _latest_stable_release_commit(root: Path) -> str:

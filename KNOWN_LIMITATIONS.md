@@ -1,5 +1,13 @@
 # Known limitations
 
+## In-place delivery while the repository is being edited
+
+`--in-place` checks every destination before it writes the first file, then writes
+the files one after another. If another program edits a destination between two of
+those writes, the run stops with an apply error and exit status 2 and keeps that
+edit, but files written earlier in the same delivery stay in place. The error names
+the conflicting file. Compare the repository with `final.diff` in the run directory.
+
 ## Opt-in unit coalescing: evidence and escalation
 
 `STATEFRAME_UNIT_COALESCE` is **EXPERIMENTAL** and **off by default**. It requires

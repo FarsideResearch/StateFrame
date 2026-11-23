@@ -381,6 +381,8 @@ def test_in_place_apply_receipt_is_durable_before_summary_publication(tmp_path, 
     identity = runner._capture_stateframe_home_identity(options)
     work = workcopy.WorkCopy(original=tmp_path / "repo", copy=tmp_path / "copy",
                              baseline={"src.py": "before"})
+    work.copy.mkdir()
+    (work.copy / "src.py").write_bytes(b"after")
     spec = {
         "repo": str(options.repo),
         "environment": {"STATEFRAME_HOME": str(tmp_path / "stateframe-home")},
@@ -401,7 +403,6 @@ def test_in_place_apply_receipt_is_durable_before_summary_publication(tmp_path, 
     monkeypatch.setattr(runner, "edit_scope_widened", lambda _spec: False)
     monkeypatch.setattr(runner, "_dropped_existing_candidate_paths", lambda *_args: [])
     monkeypatch.setattr(runner.workcopy, "apply_files", lambda *_args, **_kwargs: ["src.py"])
-    monkeypatch.setattr(runner, "candidate_digest", lambda _root: "sha256:candidate")
     def safe_diff(_work, *, scan_bytes):
         assert callable(scan_bytes), "final.diff must retain the source-byte guard"
         scan_bytes(b"safe fixture content")

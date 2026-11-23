@@ -6,6 +6,7 @@ any value other than "on" must keep today's refusal text byte for byte.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 from pathlib import Path
@@ -72,6 +73,24 @@ def test_different_lines_merge_and_both_changes_land(tmp_path, drift_on):
         "return 2", "return 20").encode("utf-8")
     assert applied == [MOD]
     assert merged == [MOD]
+
+
+def test_verified_candidate_bytes_still_merge_outside_edits(tmp_path, drift_on):
+    work = _start(tmp_path, {MOD: SOURCE, "other.txt": "x\n"})
+    run_text = SOURCE.replace("return 1", "return 10")
+    run_version = run_text.encode("utf-8")
+    _run_writes(work, MOD, run_text)
+    file_digests = {MOD: hashlib.sha256(run_version).hexdigest()}
+    _human_writes(work, MOD, SOURCE.replace("return 2", "return 20").encode("utf-8"))
+
+    merged: list[str] = []
+    applied = workcopy.apply_in_place(
+        work, merged=merged, candidate_file_digests=file_digests)
+
+    assert applied == [MOD]
+    assert merged == [MOD]
+    assert _original_bytes(work, MOD) == SOURCE.replace("return 1", "return 10").replace(
+        "return 2", "return 20").encode("utf-8")
 
 
 def test_overlapping_lines_conflict_nothing_written_and_hunks_reported(tmp_path, drift_on):
