@@ -63,6 +63,11 @@ class WorkCopyScanError(WorkCopyError):
     pass
 
 
+def _repository_scan_error(path: Path | str, error: OSError) -> WorkCopyScanError:
+    detail = error.strerror or str(error)
+    return WorkCopyScanError(f"cannot scan repository directory {path}: {detail}")
+
+
 @dataclass
 class Limits:
     max_files: int = 5000
@@ -142,9 +147,7 @@ def create(original: Path, destination: Path, limits: Limits | None = None, *,
     destination.mkdir(parents=True)
 
     def scan_error(error: OSError) -> None:
-        path = error.filename or original
-        detail = error.strerror or str(error)
-        raise WorkCopyScanError(f"cannot scan repository directory {path}: {detail}") from error
+        raise _repository_scan_error(error.filename or original, error) from error
 
     for directory, dirnames, filenames in os.walk(original, followlinks=False, onerror=scan_error):
         here = Path(directory)

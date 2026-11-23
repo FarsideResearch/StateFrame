@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fixed: with the opt-in `STATEFRAME_SEND1_WAVE4=on` (off by default), a repository directory that could not be read, or that disappeared during the startup copy, was left out of the workspace without an error. The run is now refused with the same message as with the switch off.
+
 ## 0.8.18 (2026-11-22)
 
 - Tests: the grep audit runs again with the real indexed-search setting and checks both rendering routes.

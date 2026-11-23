@@ -440,7 +440,9 @@ def _interpreter_dependencies(python: str) -> _Dependencies:
     stdlib = dependencies.path(base / sys.platlibdir / version)
     dependencies.tree(stdlib)
     _no_sitecustomize(stdlib)
-    _no_sitecustomize(stdlib / "lib-dynload")
+    dynload = dependencies.path(stdlib / "lib-dynload", optional=True)
+    if dynload is not None:
+        _no_sitecustomize(dynload)
     # Standard CPython checks the zip path even when it was absent at build time.
     zip_name = f"python{sys.version_info.major}{sys.version_info.minor}.zip"
     if dependencies.path(base / sys.platlibdir / zip_name, optional=True) is not None:
@@ -516,8 +518,10 @@ def _bounded_header(path: Path) -> bytes:
 
 
 def _site_dependencies(directory: Path, dependencies: _Dependencies) -> None:
-    for entry in sorted(directory.glob("*.pth")):
-        if entry.name.startswith("."):
+    # A listing error invalidates the interpreter fingerprint. Path.glob can
+    # suppress that error and make import hooks look absent.
+    for entry in sorted(directory.iterdir()):
+        if entry.name.startswith(".") or not entry.name.endswith(".pth"):
             continue
         for line in _bounded_read(entry, 64 << 10).decode().splitlines():
             if not line.strip() or line.startswith("#"):
@@ -537,7 +541,7 @@ def _site_dependencies(directory: Path, dependencies: _Dependencies) -> None:
 
 
 def _no_sitecustomize(directory: Path) -> None:
-    if any(directory.glob("sitecustomize*")):
+    if any(entry.name.startswith("sitecustomize") for entry in directory.iterdir()):
         raise ValueError("executable Python site customization")
 
 
