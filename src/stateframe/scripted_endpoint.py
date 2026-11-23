@@ -300,6 +300,10 @@ def _step_tools(step: dict) -> list[str]:
     return [step["tool"], *(extra["tool"] for extra in step.get("also", []))]
 
 
+def _finished_call() -> dict:
+    return {"tool": "done", "arguments": {"summary": "scripted run finished"}}
+
+
 class ScriptStepUnavailable(RuntimeError):
     """A required scripted action is missing from the offered tool menu."""
 
@@ -395,7 +399,36 @@ class Script:
                     raise ScriptStepUnavailable(
                         f"required script step {index + 1} ({step['tool']!r}) "
                         "is not offered by the endpoint tool menu")
-            return {"tool": "done", "arguments": {"summary": "scripted run finished"}}
+            return _finished_call()
+
+    def next_forced_call(self, offered: list[str], tool_name: str) -> dict:
+        """Return a scripted response for a forced tool without losing unmatched steps."""
+        with self.lock:
+            index = self.position
+            unavailable = "forced function call is not served by the script"
+            while index < len(self.steps):
+                step = self.steps[index]
+                step_tools = _step_tools(step)
+                if all(name in offered for name in step_tools):
+                    if tool_name not in step_tools:
+                        raise ScriptStepUnavailable(unavailable)
+                    break
+                if step.get("required", True):
+                    raise ScriptStepUnavailable(unavailable)
+                index += 1
+            else:
+                if tool_name != "done" or tool_name not in offered:
+                    raise ScriptStepUnavailable(unavailable)
+                step = _finished_call()
+
+            for skipped_index in range(self.position, index):
+                self._states[skipped_index] = "skipped"
+            self.position = index
+            if index < len(self.steps):
+                if not step.get("repeat", False):
+                    self.position += 1
+                self._states[index] = "consumed"
+            return step
 
     def assert_consumed(self) -> None:
         """Fail with each required step that was skipped or never reached."""
@@ -536,8 +569,17 @@ def make_handler(script: Script):
                     stream.write(json.dumps(body, ensure_ascii=False) + "\n")
             offered = [t.get("function", {}).get("name") for t in body.get("tools") or []
                        if isinstance(t, dict)]
+            choice = body.get("tool_choice")
+            forced_tool = None
+            if isinstance(choice, Mapping) and choice.get("type") == "function":
+                function = choice.get("function")
+                if isinstance(function, Mapping):
+                    name = function.get("name")
+                    if isinstance(name, str) and name:
+                        forced_tool = name
             try:
-                step = script.next_call(offered)
+                step = (script.next_forced_call(offered, forced_tool)
+                        if forced_tool is not None else script.next_call(offered))
             except ScriptStepUnavailable as error:
                 self._send(409, {"error": {"message": str(error)}})
                 return

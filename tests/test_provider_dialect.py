@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -626,6 +628,77 @@ def test_old_spec_without_provider_capabilities_seeds_empty_run_cache():
     dialect.seed_run_capability_cache(old_spec.get("provider_capabilities"))
 
     assert dialect.RUN_CAPABILITY_CACHE == {}
+
+
+def test_successful_probe_keeps_null_in_run_spec_and_summary(monkeypatch, tmp_path):
+    from stateframe import runner
+
+    origin = "https://api.example"
+    monkeypatch.setattr(
+        dialect, "bounded_json_probe",
+        lambda _origin, _key, path: (200, LLAMA_PROPS) if path == "/props" else (404, None),
+    )
+    monkeypatch.setattr(runner, "_provider_environment", lambda _options: {})
+    cache = {}
+    capabilities = capabilities_for(origin + "/v1", "", cache=cache, environ={})
+    expected = {
+        "dialect": "llama.cpp",
+        "slots": False,
+        "slot_ids": [],
+        "reason": "proven by /props",
+        "props_status": 200,
+        "slots_status": 404,
+        "probe_degradation": None,
+    }
+    options = SimpleNamespace(_provider_capabilities=cache)
+    runner._write_run_spec_atomic(tmp_path, {
+        "schema": "stateframe-run/1",
+        "provider_capabilities": runner._provider_preflight_records(options),
+    })
+    records = {
+        origin: {**expected, "reasoning_controls": "llama.cpp reasoning controls unchanged"},
+    }
+    expected_spec = {"schema": "stateframe-run/1", "provider_capabilities": records}
+    assert (tmp_path / "spec.json").read_bytes() == (
+        json.dumps(expected_spec, indent=1, sort_keys=True) + "\n"
+    ).encode("utf-8")
+    assert runner.summarize(tmp_path, time.monotonic())["provider_capabilities"] == records
+    assert runner._provider_preflight_warnings(cache) == []
+    assert dialect._verified_capability_record(capabilities.to_record()) == capabilities
+
+
+@pytest.mark.parametrize("shape", ["absent", "null", "degraded"])
+def test_run_capability_seed_accepts_legacy_and_real_probe_diagnostics(monkeypatch, shape):
+    origin = "https://api.example"
+    monkeypatch.setattr(dialect, "RUN_CAPABILITY_CACHE", {})
+    monkeypatch.setattr(dialect, "RUN_DIALECT_JOURNALED", set())
+    record = ProviderCapabilities("llama.cpp").to_record()
+    if shape == "absent":
+        record.pop("probe_degradation", None)
+    elif shape == "degraded":
+        monkeypatch.setattr(dialect, "PROBE_RETRY_DELAYS", ())
+        monkeypatch.setattr(
+            dialect, "bounded_json_probe",
+            lambda _origin, _key, path: (503 if path == "/props" else 404, None),
+        )
+        result = capabilities_for(origin + "/v1", "", cache={}, environ={})
+        record = result.to_record()
+        assert result.probe_degradation is not None
+        assert record["probe_degradation"] == {
+            "attempts": 1,
+            "last_error_type": "HTTPServerError",
+            "elapsed_ms": result.probe_degradation.elapsed_ms,
+        }
+    else:
+        record["probe_degradation"] = None
+
+    dialect.seed_run_capability_cache(json.loads(json.dumps({origin: record})))
+    seeded = dialect.RUN_CAPABILITY_CACHE[origin]
+    if shape == "degraded":
+        assert seeded.probe_degradation == result.probe_degradation
+        assert "HTTPServerError" in dialect.probe_degradation_warning(seeded, origin)
+    else:
+        assert seeded.probe_degradation is None
 
 
 def test_slot_zero_is_never_synthesized(monkeypatch):

@@ -1061,7 +1061,25 @@ def _open_site_window(
     else:
         anchored = _anchored_site_window(lines, locator)
         if anchored is None:
-            raise ActionLedgerError("open edit site could not be anchored to current bytes")
+            # A clipped read can contain only a blank line. Its text cannot be
+            # located uniquely, but the read revision and bounded line range
+            # still prove the current bytes at that exact location.
+            observed = str(locator.get("observed_text") or "")
+            read_revision = str(locator.get("last_read_revision") or "")
+            end = int(requested["end"])
+            requested_count = end - start + 1
+            if (
+                locator["last_action"] != "read"
+                or not observed
+                or read_revision != "sha256:" + hashlib.sha256(raw).hexdigest()
+                or start < 1
+                or requested_count < 1
+                or end > len(lines)
+                or count != requested_count
+                or b"".join(lines[start - 1:end]) != observed.encode("utf-8")
+            ):
+                raise ActionLedgerError("open edit site could not be anchored to current bytes")
+            return _bounded_site_window(lines, start, requested_count, "", 0)
         start, count, anchor, offset = anchored
     return _bounded_site_window(lines, start, count, anchor, offset)
 

@@ -514,28 +514,12 @@ def _is_volatile_tail_message(message: Mapping[str, object]) -> bool:
     )
 
 
-def _is_regenerated_wire_fact(message: Mapping[str, object]) -> bool:
+def _regenerated_wire_fact(message: Mapping[str, object]) -> str | None:
     content = message.get("content")
-    return (
-        message.get("role") == "user"
-        and isinstance(content, str)
-        and content.startswith("[WIRE_TRUTH_FACT ")
-    )
-
-
-def _strip_regenerated_tail_fact(
-        message: Mapping[str, object],
-) -> dict[str, object] | None:
-    if _is_volatile_tail_message(message) or _is_regenerated_wire_fact(message):
-        return None
-    copied = copy.deepcopy(dict(message))
-    content = copied.get("content")
-    if (copied.get("role") == "user" and isinstance(content, str)
-            and content.endswith(GREENFACT_TEXT)):
-        copied["content"] = content[:-len(GREENFACT_TEXT)]
-        if not copied["content"]:
-            return None
-    return copied
+    if (message.get("role") == "user" and isinstance(content, str)
+            and content.startswith("[WIRE_TRUTH_FACT ")):
+        return content
+    return None
 
 
 _FrameSections = tuple[dict[str, object], tuple[dict[str, object], ...], int, int]
@@ -570,9 +554,9 @@ def _task_and_latest_turn(
         if message.get("_stateframe_host_state") is True or (
                 isinstance(content, str) and content.startswith(HANDOFF_HEADER)):
             continue
-        regenerated = _strip_regenerated_tail_fact(message)
-        if regenerated is not None:
-            latest_rows.append(regenerated)
+        if _is_volatile_tail_message(message) or _regenerated_wire_fact(message) is not None:
+            continue
+        latest_rows.append(copy.deepcopy(dict(message)))
     latest = tuple(latest_rows)
     return copy.deepcopy(dict(task_message)), latest, task_index, last_action_index
 
@@ -2535,7 +2519,8 @@ def _split_volatile_tail_content(content: object) -> object | None:
     raise FrameFit5Error("volatile tail content has an unsupported shape")
 
 
-def _strip_greenfact_suffix(content: object) -> tuple[object, int]:
+def _split_host_greenfact(content: object) -> tuple[object, int]:
+    """Separate GREENFACT from the already identified host volatile tail."""
     if isinstance(content, str):
         if content.endswith(GREENFACT_TEXT):
             return content[:-len(GREENFACT_TEXT)], 1
@@ -2700,7 +2685,7 @@ def finalize_frame_only_wire_order(
     marker_index = marker_indexes[0]
     marker_message = copy.deepcopy(result[marker_index])
     marker_payload = _split_volatile_tail_content(marker_message.get("content"))
-    marker_payload, greenfact_count = _strip_greenfact_suffix(marker_payload)
+    marker_payload, greenfact_count = _split_host_greenfact(marker_payload)
     if micrograph_fact is not None:
         marker_payload = _strip_prior_micrograph_fact(marker_payload)
 
@@ -2709,18 +2694,15 @@ def finalize_frame_only_wire_order(
     for index, message in enumerate(result):
         if exchange_start <= index < exchange_end or index == marker_index:
             continue
-        copied = copy.deepcopy(dict(message))
-        if copied.get("role") == "user":
-            content, found_greenfact = _strip_greenfact_suffix(copied.get("content"))
-            greenfact_count += found_greenfact
-            copied["content"] = content
-            if (isinstance(content, str)
-                    and content.startswith("[WIRE_TRUTH_FACT ")):
-                # Wire facts can carry an earlier projection on a separate line.
-                wire_facts.append(_strip_projection_lines(content) if micrograph_fact is not None
-                                  else content)
-                continue
-        ordinary_messages.append(copied)
+        wire_fact = _regenerated_wire_fact(message)
+        if wire_fact is not None:
+            content = wire_fact.removesuffix(GREENFACT_TEXT)
+            greenfact_count += content != wire_fact
+            # Wire facts can carry an earlier projection on a separate line.
+            wire_facts.append(_strip_projection_lines(content) if micrograph_fact is not None
+                              else content)
+            continue
+        ordinary_messages.append(message)
 
     if greenfact_count not in {0, 1}:
         raise FrameFit5Error("final frame-only request contains duplicate GREENFACT tails")

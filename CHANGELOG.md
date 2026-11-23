@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.21 (2026-11-23)
+
+- Schema metering falls back to recorded estimates when the tokenizer is unavailable. Aggregate schema counts are advisory for tools already admitted.
+- Cancellation of startup schema metering propagates to the caller.
+- Fixed: unserved forced calls to the scripted endpoint no longer consume pending script steps.
+- A clipped read that contains only blank lines can be reopened when its revision, line range and bytes still match, instead of ending the run with a frame error.
+- Docs: `STATEFRAME_SEND1_WAVE4` is described without a speed claim. In our paired measurements the first model request and the whole run were not shown to be faster with it on; it remains off by default.
+- Fixed: when a user message ended with text identical to a host status line, that text was removed from the request. Only host-written rows are now changed.
+- Fixed false retries: a repeated answer is retried only when generation hits its token limit and ends with no new content.
+
 ## 0.8.20 (2026-11-23)
 
 - Tests: the process-signal guard lists the check watchdog's existence probe, and the release parity test's fixed clock covers the current engine entry point.
