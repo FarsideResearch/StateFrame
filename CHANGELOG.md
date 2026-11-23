@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.25 (2026-11-23)
 
 - Tests: the retired-name, parity-baseline and release-matrix guards check the current sources again.
 - Fixed: startup provider probes wait out HTTP 503 and 429 answers on a longer schedule, with one waiting line; every other failure keeps the short schedule.
