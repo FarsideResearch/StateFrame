@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.24 (2026-11-23)
 
 - Within one request build, an unchanged layout row is no longer split and restored again. Request bytes are unchanged.
 - Fixed: resume no longer stops when old checkpoint data of an archived attempt cannot be removed; the data stays and a later resume tries again.
