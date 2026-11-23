@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.8.28 (2026-11-23)
 
 - In-place promotion freezes the verified path set and digests after checks, then applies that set and those bytes or records an apply error. Verified deletions follow the same file exclusions as the checks.
