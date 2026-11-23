@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.21 (2026-11-23)
 
 - Schema metering falls back to recorded estimates when the tokenizer is unavailable. Aggregate schema counts are advisory for tools already admitted.
 - Cancellation of startup schema metering propagates to the caller.
