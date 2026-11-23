@@ -14,6 +14,7 @@ import re
 from collections import OrderedDict
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 from typing import TYPE_CHECKING, Generic, TypeVar
 
@@ -122,10 +123,22 @@ def _cursor(digest: str, offset: int) -> str:
     return f"nav1:{digest}:{offset}"
 
 
-def _offset(cursor: object, digest: str) -> int:
+@dataclass(frozen=True, slots=True)
+class _ParsedCursor:
+    parts: tuple[str, ...] | None
+
+
+def _parse_cursor(cursor: object) -> _ParsedCursor:
+    if isinstance(cursor, _ParsedCursor):
+        return cursor
     if cursor in (None, ""):
+        return _ParsedCursor(None)
+    return _ParsedCursor(tuple(str(cursor).split(":")))
+
+
+def _offset_parts(parts: tuple[str, ...] | None, digest: str) -> int:
+    if parts is None:
         return 0
-    parts = str(cursor).split(":")
     if len(parts) != 3 or parts[0] != "nav1" or parts[1] != digest:
         raise ValueError("navigation continuation is stale; repeat the search")
     try:
@@ -135,6 +148,11 @@ def _offset(cursor: object, digest: str) -> int:
     if value < 0:
         raise ValueError("navigation continuation is invalid; repeat the search")
     return value
+
+
+def _offset(cursor: object, digest: str) -> int:
+    parsed = cursor if isinstance(cursor, _ParsedCursor) else _parse_cursor(cursor)
+    return _offset_parts(parsed.parts, digest)
 
 
 def _advice(policy: object | None, *, kind: str, size: int) -> str:
@@ -156,6 +174,71 @@ def _page_rows(rows: Sequence[Mapping[str, object]], *, cursor: object,
     start = _offset(cursor, digest)
     shown = list(rows[start:start + size])
     return shown, _page_metadata(digest, start, len(shown), len(rows))
+
+
+def _cursor_offset_hint(parts: tuple[str, ...] | None) -> int:
+    """Find a candidate page window without validating a cursor before the scan."""
+    if parts is None or len(parts) != 3 or parts[0] != "nav1":
+        return 0
+    try:
+        offset = int(parts[2])
+    except ValueError:
+        return 0
+    return offset if offset >= 0 else 0
+
+
+class _SearchPageAccumulator:
+    """Hash every result row while retaining only the requested page window."""
+
+    def __init__(self, cursor: object, size: int,
+                 *, initial_page: list[dict[str, object]] | None = None):
+        self._parsed_cursor = _parse_cursor(cursor)
+        self.offset_hint = _cursor_offset_hint(self._parsed_cursor.parts)
+        self.size = size
+        self.rows = initial_page if initial_page is not None else []
+        self.total = 0
+        self._digest = hashlib.sha256()
+        self._digest.update(b"[")
+        self._serialized_chars = 1
+        self._encoding_error: tuple[int, int, str, str] | None = None
+        if initial_page is not None:
+            for row in initial_page:
+                self._record(row, retain=False)
+
+    def _record(self, row: dict[str, object], *, retain: bool) -> None:
+        separator = 1 if self.total else 0
+        encoded_row = json.dumps(row, sort_keys=True, ensure_ascii=False,
+                                 separators=(",", ":"))
+        if self._encoding_error is None:
+            try:
+                encoded = encoded_row.encode("utf-8")
+            except UnicodeEncodeError as error:
+                start = self._serialized_chars + separator + error.start
+                end = self._serialized_chars + separator + error.end
+                self._encoding_error = (start, end, error.reason,
+                                        encoded_row[error.start:error.end])
+            else:
+                if separator:
+                    self._digest.update(b",")
+                self._digest.update(encoded)
+        if retain and self.offset_hint <= self.total < self.offset_hint + self.size:
+            self.rows.append(row)
+        self._serialized_chars += separator + len(encoded_row)
+        self.total += 1
+
+    def add(self, row: dict[str, object]) -> None:
+        self._record(row, retain=True)
+
+    def finish(self) -> tuple[list[dict[str, object]], dict[str, object]]:
+        self._digest.update(b"]")
+        if self._encoding_error is not None:
+            start, end, reason, invalid_text = self._encoding_error
+            # Preserve the original error position without retaining the serialized result set.
+            error_object = "\0" * start + invalid_text
+            raise UnicodeEncodeError("utf-8", error_object, start, end, reason)
+        digest = self._digest.hexdigest()[:24]
+        start = _offset(self._parsed_cursor, digest)
+        return self.rows, _page_metadata(digest, start, len(self.rows), self.total)
 
 
 def _page_metadata(digest: str, start: int, shown: int, total: int) -> dict[str, object]:
@@ -329,10 +412,12 @@ def _pinned_files(prefix: str, entry: Entry) -> Iterator[tuple[str, File]]:
 
 
 def _requested_offset(cursor: object) -> int:
-    if cursor in (None, ""):
+    parsed = _parse_cursor(cursor)
+    parts = parsed.parts
+    if parts is None:
         return 0
     try:
-        return _offset(cursor, str(cursor).split(":")[1])
+        return _offset(parsed, parts[1])
     except (IndexError, ValueError):
         # Validate against the completed canonical digest before rendering.
         return 0
@@ -492,25 +577,47 @@ def search_repository(root: Path, pattern: str, scope: object = None, *,
     else:
         files = _walk_files(root, scope, journal=journal)
         matcher = _matcher(normalized_mode, query)
-        rows: list[dict[str, object]] = []
         unreadable_files = non_text_files = 0
         limited = False
-        for relative, path in files:
-            if not _matches_file_glob(relative, file_glob):
-                continue
-            if matcher is None:
-                if query in relative:
-                    rows.append({"path": relative})
-                continue
-            text, status = _read_text(path)
-            if text is None:
-                unreadable_files += status == "unreadable"
-                non_text_files += status == "non_text"
-                continue
-            for line_number, line in enumerate(text.splitlines(), 1):
-                if matcher.search(line):
-                    rows.append({"path": relative, "line": line_number, "text": line})
-        shown, metadata = _page_rows(rows, cursor=cursor, size=page)
+
+        def matching_rows() -> Iterator[dict[str, object]]:
+            nonlocal unreadable_files, non_text_files
+            for relative, path in files:
+                if not _matches_file_glob(relative, file_glob):
+                    continue
+                if matcher is None:
+                    if query in relative:
+                        yield {"path": relative}
+                    continue
+                text, status = _read_text(path)
+                if text is None:
+                    unreadable_files += status == "unreadable"
+                    non_text_files += status == "non_text"
+                    continue
+                for line_number, line in enumerate(text.splitlines(), 1):
+                    if matcher.search(line):
+                        yield {"path": relative, "line": line_number, "text": line}
+
+        small_first_page = cursor is None or (type(cursor) is str and not cursor)
+        rows = matching_rows()
+        if small_first_page:
+            initial_page = list(islice(rows, page + 1))
+            if len(initial_page) <= page:
+                shown, metadata = _page_rows(initial_page, cursor=cursor, size=page)
+            else:
+                overflow = initial_page.pop()
+                page_rows = _SearchPageAccumulator(
+                    cursor, page, initial_page=initial_page,
+                )
+                page_rows.add(overflow)
+                for row in rows:
+                    page_rows.add(row)
+                shown, metadata = page_rows.finish()
+        else:
+            page_rows = _SearchPageAccumulator(cursor, page)
+            for row in rows:
+                page_rows.add(row)
+            shown, metadata = page_rows.finish()
 
     if normalized_mode == "path":
         rendered = [str(row["path"]) for row in shown]

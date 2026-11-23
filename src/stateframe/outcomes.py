@@ -280,6 +280,13 @@ def resume_hint_applies(summary: dict[str, object]) -> bool:
 
     A seal/finalization failure would only repeat on resume, so it gets no hint; an ERR:* crash keeps it.
     """
+    delivery_refusal = summary.get("delivery_refusal")
+    if (summary.get("engine_result") == "DELIVERY_REFUSED"
+            and isinstance(delivery_refusal, dict)
+            and delivery_refusal.get("engine_result") == "SUBMITTED"
+            and delivery_refusal.get("reason_code") in (
+                "CHECKS_STALE", "CANDIDATE_NOT_DELIVERED", "CANDIDATE_OUT_OF_SCOPE")):
+        return False
     if summary.get("runtime_outcome") not in ("cancelled", "engine_error", "missing_result", "budget_stop",
                                               "recovery_required"):
         return False

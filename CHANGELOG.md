@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Fixed: a failed install can be run again. Each attempt uses its own private environment, an unfinished one from an earlier release is moved aside instead of deleted, and any other existing environment is left alone and refused.
+- Security: the pinned pytest is 9.0.3 for online and offline installs, which fixes CVE-2025-71176.
+- Added: JavaScript-only projects whose package test script runs `node --test` directly now get that command as their check, and its counts are read before anything is called verified.
+- Fixed: ticket sentences no longer split inside dotted names such as file names, and closing quotes stay with their sentence.
+- Searching a repository with very many matches keeps only the requested page in memory. Results, totals and paging are unchanged.
+- Fixed: submitted delivery refusals no longer suggest continuation when resumption rejects the submitted result.
+- Fixed: "by editing only FILE" and "only editing FILE" now limit edits to that file, as "only edit FILE" already did.
+
 ## 0.8.21 (2026-11-23)
 
 - Schema metering falls back to recorded estimates when the tokenizer is unavailable. Aggregate schema counts are advisory for tools already admitted.

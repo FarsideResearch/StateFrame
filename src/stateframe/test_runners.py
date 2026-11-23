@@ -24,6 +24,7 @@ DEFAULT_PYTEST_FILE_PATTERNS = ("test_*.py", "*_test.py")
 PYTEST_CONFIG_FILES = ("pytest.ini", ".pytest.ini", "pyproject.toml", "tox.ini", "setup.cfg")
 PYTEST_DISCOVERY_PATTERNS = DEFAULT_PYTEST_FILE_PATTERNS
 DECLARED_TEST_SOURCE = "tests"
+_DISCOVERED_NODE_TEST_SOURCE = "node-tests"
 GENERIC_PATTERNS = (
     "test_*.py", "*_test.py", "conftest.py", "*.test.*", "*.spec.*",
     "*_test.go", "*.test.sh", "test*.sh", "check*.sh",
@@ -185,6 +186,24 @@ _PYTEST_RESULT = re.compile(
     r"xpassed|deselected|warnings?|reruns?))*) in \S+(?:\s*=+)?\s*$")
 _COUNT = re.compile(r"(\d+) (passed|failed|errors?|skipped|xfailed|xpassed|deselected|warnings?|reruns?)\b")
 _PYTEST_NONRUN_FLAGS = frozenset({"--collect-only", "--co", "--version", "-V", "--help", "-h"})
+_NODE_TEST_NAME = re.compile(r"test|test-.*|.+[._-]test")
+_NODE_JS_SUFFIXES = frozenset({".js", ".cjs", ".mjs"})
+_NODE_TS_SUFFIXES = frozenset({".ts", ".cts", ".mts"})
+_NODE_TEST_REPORTERS = frozenset({"--test-reporter=tap", "--test-reporter=spec"})
+
+
+def _package_script_argv(script: object) -> tuple[str, ...]:
+    if not isinstance(script, str):
+        return ()
+    try:
+        argv = tuple(shlex.split(script))
+    except ValueError:
+        return ()
+    # A package script is a shell program. Only a direct runner invocation
+    # can establish which program emitted the receipt.
+    if any(re.search(r"[;&|<>`$\n]", arg) for arg in argv):
+        return ()
+    return argv
 
 
 def _runner_for_command(kind: str, command: tuple[str, ...], repo: Path | None) -> str | None:
@@ -217,15 +236,8 @@ def _runner_for_command(kind: str, command: tuple[str, ...], repo: Path | None) 
             return None
         try:
             package = json.loads((repo / "package.json").read_text(encoding="utf-8"))
-            script = package["scripts"]["test"]
-            if not isinstance(script, str):
-                return None
-            resolved = tuple(shlex.split(script))
+            resolved = _package_script_argv(package["scripts"]["test"])
         except (OSError, UnicodeError, ValueError, KeyError, TypeError):
-            return None
-        # A package script is a shell program. Only a direct runner invocation
-        # can establish which program emitted the receipt.
-        if any(re.search(r"[;&|<>`$\n]", arg) for arg in resolved):
             return None
         if resolved and PurePosixPath(resolved[0]).name.lower() in {"npm", "yarn", "pnpm"}:
             return None
@@ -243,7 +255,7 @@ def _runner_for_command(kind: str, command: tuple[str, ...], repo: Path | None) 
     return None
 
 
-def _parsed_passes(runner: str, output: str) -> int:
+def _parsed_passes(runner: str, output: str, *, require_node_total: bool = False) -> int:
     lines = [line.strip() for line in _ANSI.sub("", output).splitlines() if line.strip()]
     if not lines:
         return 0
@@ -265,7 +277,10 @@ def _parsed_passes(runner: str, output: str) -> int:
             break
         counts = {name: int(count) for line in reversed(footer)
                   for name, count in re.findall(r"^[#ℹ]\s*(\w+)\s+(\d+)$", line)}
-        return counts.get("pass", 0) if "fail" in counts and not any(
+        passes = counts.get("pass", 0)
+        if require_node_total and (len(footer) != len(counts) or passes > counts.get("tests", 0)):
+            return 0
+        return passes if "fail" in counts and not any(
             counts.get(name, 0) for name in ("fail", "error", "errors", "cancelled")) else 0
     if runner == "package":
         tail = []
@@ -313,8 +328,8 @@ def command_runs_tests(kind: str, command: tuple[str, ...], paths: set[str],
 
 def declared_test_evidence(test_cmd: str | None, check_cmd: str | None,
                            source: str | None, kind: str) -> bool:
-    """An implicit pytest check is the declared default when tests exist."""
-    return bool(source == DECLARED_TEST_SOURCE and not check_cmd
+    """A test command or an implicit pytest check supplies declared evidence."""
+    return bool(source in {DECLARED_TEST_SOURCE, _DISCOVERED_NODE_TEST_SOURCE} and not check_cmd
                 and (test_cmd or kind == "pytest"))
 
 
@@ -322,6 +337,11 @@ def verification_evidence_for_tests(source: str | None, kind: str, command: tupl
                                     output: str, *, passed: bool, declared: bool,
                                     repo: Path | None = None) -> tuple[str | None, str | None, bool]:
     """Sole authority for a final test source and its human verification label."""
+    if source == _DISCOVERED_NODE_TEST_SOURCE:
+        evidence = bool(declared and passed and kind == "generic" and repo is not None
+                        and _is_direct_node_test(command, repository_paths(repo))
+                        and _parsed_passes("node", output, require_node_total=True))
+        return ("tests", "verified by tests", True) if evidence else ("command", None, False)
     # Pytest receipts prove explicitly selected modules even when names are unusual.
     evidence = bool(source == "tests" and declared and passed and
                     (repo is None or kind == "pytest" or has_discovered_test_files(repo)) and
@@ -372,10 +392,58 @@ def has_discovered_test_files(repo: Path) -> bool:
     return any(is_test_file(path) for path in repository_paths(repo))
 
 
+def _is_direct_node_test(argv: tuple[str, ...], paths: set[str]) -> bool:
+    if len(argv) < 2 or argv[0] not in {"node", "node.exe"} or argv[1] != "--test":
+        return False
+    operands = argv[2:]
+    if operands and operands[0] == "--test-reporter":
+        if len(operands) < 2 or f"--test-reporter={operands[1]}" not in _NODE_TEST_REPORTERS:
+            return False
+        operands = operands[2:]
+    elif operands and operands[0] in _NODE_TEST_REPORTERS:
+        operands = operands[1:]
+    if operands:
+        for operand in operands:
+            path = PurePosixPath(operand)
+            relative = path.as_posix()
+            if (operand.startswith("-") or "\\" in operand or relative not in paths
+                    or path.suffix not in _NODE_JS_SUFFIXES or not is_test_file(relative)):
+                return False
+        return True
+    candidates = [path for path in map(PurePosixPath, paths)
+                  if path.suffix in _NODE_JS_SUFFIXES | _NODE_TS_SUFFIXES
+                  and ("test" in path.parts[:-1] or _NODE_TEST_NAME.fullmatch(path.stem))]
+    # Newer Node versions can collect TypeScript too. Auto-discover JavaScript
+    # only when the generic row can protect every file that Node may run.
+    return bool(candidates) and all(path.suffix in _NODE_JS_SUFFIXES and is_test_file(path.as_posix())
+                                    for path in candidates)
+
+
+def _direct_node_test_command(package: dict[str, object], scripts: dict[str, object],
+                              manager: str, paths: set[str]) -> str | None:
+    """Use the declared Node argv directly, bypassing package lifecycle shells."""
+    if any(hook in scripts for hook in ("pretest", "posttest")):
+        return None
+    if "packageManager" in package:
+        declared_manager = package["packageManager"]
+        if not isinstance(declared_manager, str):
+            return None
+        manager = declared_manager.split("@", 1)[0]
+    if manager not in {"npm", "yarn", "pnpm"}:
+        return None
+    script = scripts.get("test")
+    if not isinstance(script, str) or any(char in script for char in "\r\n\x00"):
+        return None
+    argv = _package_script_argv(script)
+    if not _is_direct_node_test(argv, paths):
+        return None
+    return shlex.join(argv)
+
+
 def discover_check(
     repo: Path, *, pytest_paths: list[str] | None = None
 ) -> tuple[str | None, str, bool]:
-    """Use pytest only when a runnable Python test module exists.
+    """Prefer runnable Python tests, then evidenced build and direct Node checks.
 
     Broader test-resource matching remains separate so fixtures and documentation
     cannot suppress a usable build check. ``pytest_paths`` receives selectors
@@ -392,6 +460,7 @@ def discover_check(
         sources = sorted(path for path in paths if path.endswith(".py") and not is_test_file(path))
         if sources:
             return "python -m compileall -q " + " ".join(shlex.quote(path) for path in sources), "build", False
+    node_test_command = None
     if "package.json" in paths:
         try:
             package = json.loads((repo / "package.json").read_text(encoding="utf-8"))
@@ -405,6 +474,7 @@ def discover_check(
             for name in ("typecheck", "build", "lint"):
                 if isinstance(scripts.get(name), str) and scripts[name].strip():
                     return f"{manager} run {name}", "build", False
+            node_test_command = _direct_node_test_command(package, scripts, manager, paths)
     if "go.mod" in paths:
         return "go build ./...", "build", False
     if "Cargo.toml" in paths:
@@ -418,6 +488,8 @@ def discover_check(
             for target in ("check", "build"):
                 if re.search(rf"(?m)^{target}\s*:(?![=])", source):
                     return f"make -f {shlex.quote(name)} {target}", "build", False
+    if node_test_command:
+        return node_test_command, _DISCOVERED_NODE_TEST_SOURCE, True
     return None, "none", False
 
 

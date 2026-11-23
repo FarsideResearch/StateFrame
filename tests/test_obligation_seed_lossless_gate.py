@@ -95,7 +95,9 @@ def test_seed_output_and_request_message_match_untouched_shipped_profile() -> No
     assert not mismatches, "; ".join(mismatches)
 
 
-def test_alignment_sentence_spans_match_untouched_shipped_profile_when_lossless_is_off() -> None:
+def test_alignment_sentence_spans_match_untouched_shipped_profile_when_lossless_is_off(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("STATEFRAME_ORACLE_GROUNDING", "off")
     baseline = json.loads(
         (ROOT / "tests/fixtures/obligation_seed_lossless_baseline.json").read_text(
             encoding="utf-8"

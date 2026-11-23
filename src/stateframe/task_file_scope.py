@@ -18,6 +18,17 @@ _NO_OTHER_RULE = re.compile(
 _ONLY_RULE = re.compile(
     r"\b(?:only\s+(?:edit|change|modify|touch|write)"
     r"|(?:edit|change|modify)\s+only)\b", re.IGNORECASE)
+_GERUND_VERB = r"(?:editing|changing|modifying|writing|updating|touching)"
+_GERUND_ONLY_RULE = re.compile(
+    rf"(?:(?P<t1_context>^|(?<![\w./\\-])(?:by|while)\s+)(?P<t1_verb>{_GERUND_VERB})\s+only\b)|"
+    rf"(?P<t2_context>^|(?<![\w./\\-])by\s+)only\s+(?P<t2_verb>{_GERUND_VERB})\b",
+    re.IGNORECASE)
+_GERUND_BLOCKED_CONTEXT = re.compile(
+    r"(?<![\w./\\-])(?:(?:don|doesn|didn|isn|aren|wasn|weren|can|couldn|mayn|mightn|"
+    r"mustn|shalln|shan|shouldn|willn|won|wouldn|haven|hasn|hadn|needn|daren|ain)[’']t|"
+    r"cannot|"
+    r"do|does|did|am|is|are|was|were|be|been|being|have|has|had|can|could|"
+    r"may|might|must|shall|should|will|would|never|not|without)(?![\w./\\-])", re.IGNORECASE)
 _WRITE_VERB = re.compile(
     r"(?<![\w./\\-])(?:write|creat(?:e|ing)|edit|change|modify|update|save|put|set|fix|add|touch|alter)"
     r"(?![\w./\\-])", re.IGNORECASE)
@@ -47,7 +58,7 @@ _TARGET_PREFIX = {
 }
 _LIST_SEPARATOR = re.compile(r"\s*(?:,\s*(?:and\s+)?|and\s+|&\s*)", re.IGNORECASE)
 # Abbreviation dots are not sentence boundaries; path dots have no following whitespace.
-_SENTENCE_END = re.compile(r"(?<!\bi\.e)(?<!\be\.g)[.;!?]+(?=\s|\Z)", re.IGNORECASE)
+_SENTENCE_END = re.compile(r"(?<!\bi\.e)(?<!\be\.g)([.;!?]+)(?=\s|\Z)", re.IGNORECASE)
 
 
 class TaskFileScopeError(ValueError):
@@ -97,7 +108,7 @@ def _mask_context(task: str) -> str:
     return _QUOTED.sub(mask_quote, task)
 
 
-def _targets(text: str) -> tuple[str, ...] | None:
+def _targets(text: str, *, end_offset: list[int] | None = None) -> tuple[str, ...] | None:
     """Read a verb's target list; None means an unsupported target, () no target."""
     paths: list[str] = []
     pos = 0
@@ -114,6 +125,7 @@ def _targets(text: str) -> tuple[str, ...] | None:
         if not token:
             break
         if _unsupported(token[0]):
+            if end_offset is not None: end_offset[:] = [token.end()]
             return None
         path = _path(token[0])
         if path:
@@ -121,7 +133,29 @@ def _targets(text: str) -> tuple[str, ...] | None:
         elif paths or _unquote(token[0]).lower() not in _TARGET_PREFIX | _ABBREVIATIONS:
             break
         pos = token.end()
+        if end_offset is not None: end_offset[:] = [pos]
     return tuple(dict.fromkeys(paths))
+
+
+def _expand_gerund_rule(sentence: str, *, question: bool) -> str:
+    """Present only the two closed gerund forms to the existing ONLY-rule parser."""
+    if question: return sentence
+    def normalize(match: re.Match[str]) -> str:
+        t2 = match.group("t2_verb") is not None
+        if _GERUND_BLOCKED_CONTEXT.search(sentence[:match.start()]): return match[0]
+        tail = sentence[match.end():]
+        connector = match.group("t1_context") or match.group("t2_context") or ""
+        if not re.fullmatch(r"the\s+file\s+above", tail.strip(), re.IGNORECASE):
+            end: list[int] = []
+            _targets(tail, end_offset=end)
+            remainder = tail[end[0] if end else 0:]
+            if t2 and (suffix := re.match(r"\s+is\s+(?:allowed|permitted)\b", remainder, re.IGNORECASE)):
+                remainder = remainder[suffix.end():]
+            if remainder.strip() and not re.match(r"\s*[,;]", remainder):
+                continuation = re.match(r"\s+(?:to|so|and)\s+", remainder, re.IGNORECASE)
+                if not continuation or not _WRITE_VERB.match(remainder[continuation.end():]): return match[0]
+        return connector + "Only edit"
+    return _GERUND_ONLY_RULE.sub(normalize, sentence)
 
 
 def _previous_paths(sentence: str) -> tuple[str, ...] | None:
@@ -161,17 +195,20 @@ def parse_task_file_scope(task: str, *, strict: bool = False) -> tuple[str, ...]
     """
     if not isinstance(task, str) or not task.strip():
         return None
-    sentences = [s.strip() for s in _SENTENCE_END.split(_mask_context(task)) if s.strip()]
+    split = _SENTENCE_END.split(_mask_context(task))
+    sentence_parts = [(split[i].strip(), "?" in split[i + 1] if i + 1 < len(split) else False)
+                      for i in range(0, len(split), 2) if split[i].strip()]
     allowed: list[str] = []
     no_other = False
-    for index, sentence in enumerate(sentences):
+    for index, (sentence, question) in enumerate(sentence_parts):
         if _CONDITIONAL.search(sentence):
-            if strict and (_ONLY_RULE.search(sentence) or _NO_OTHER_RULE.search(sentence)):
+            if strict and (_ONLY_RULE.search(sentence) or _NO_OTHER_RULE.search(sentence) or _GERUND_ONLY_RULE.search(sentence)):
                 raise TaskFileScopeError(
                     "task file-scope rule is conditional and cannot be safely scoped; "
                     "use an unconditional repository-relative path")
             continue
         no_other = no_other or bool(_NO_OTHER_RULE.search(sentence))
+        sentence = _expand_gerund_rule(sentence, question=question)
         affirmative_starts = {verb.start() for verb in _affirmative_verbs(sentence)}
         for rule in _ONLY_RULE.finditer(sentence):
             verb = _WRITE_VERB.search(rule[0])
@@ -179,7 +216,7 @@ def parse_task_file_scope(task: str, *, strict: bool = False) -> tuple[str, ...]
                 continue
             tail = sentence[rule.end():].strip()
             if re.fullmatch(r"the\s+file\s+above", tail, re.IGNORECASE):
-                targets = _previous_paths(sentences[index - 1]) if index else None
+                targets = _previous_paths(sentence_parts[index - 1][0]) if index else None
             else:
                 targets = _targets(tail)
             if targets is None:
@@ -192,7 +229,7 @@ def parse_task_file_scope(task: str, *, strict: bool = False) -> tuple[str, ...]
                     "name repository-relative file paths")
             allowed.extend(targets)
     if no_other:
-        for sentence in sentences:
+        for sentence, _ in sentence_parts:
             for verb in _affirmative_verbs(sentence):
                 targets = _targets(sentence[verb.end():])
                 if targets is None:

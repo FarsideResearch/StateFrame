@@ -31,6 +31,9 @@ done
 if [[ "$SF_HOME" != /* ]]; then
   SF_HOME="$CALLER_DIR/$SF_HOME"
 fi
+while [[ "$SF_HOME" != "/" && "$SF_HOME" == */ ]]; do
+  SF_HOME="${SF_HOME%/}"
+done
 
 case "$PYTHON_INPUT" in
   */*)
@@ -114,18 +117,18 @@ else
   fi
 fi
 
-VENV="$SF_HOME/venv"
-if [[ -d "$VENV" && ! -L "$VENV" && -f "$VENV/pyvenv.cfg" && ! -e "$VENV/bin/stateframe" ]]; then
-  # A venv without bin/stateframe is what a failed earlier run of this installer leaves (the pip
-  # steps run after the venv is created); rebuild it instead of refusing every rerun.
-  echo "removing an incomplete environment from an earlier failed install: $VENV"
-  rm -rf "$VENV"
+if [[ "$SF_HOME" == "/" ]]; then
+  die "SF_HOME must name a private install directory below the filesystem root"
 fi
-if [[ -e "$VENV" || -L "$VENV" ]]; then
-  die "install target already exists: $VENV (choose a new SF_HOME to preserve the existing environment)"
+if [[ -L "$SF_HOME" ]]; then
+  die "SF_HOME must be a real directory, not a symlink: $SF_HOME"
 fi
-
-mkdir -p -m 700 "$SF_HOME"
+if [[ -e "$SF_HOME" && ! -d "$SF_HOME" ]]; then
+  die "SF_HOME must be a directory: $SF_HOME"
+fi
+if ! mkdir -p -m 700 "$SF_HOME"; then
+  die "could not create the private install directory: $SF_HOME"
+fi
 if ! "$PYTHON_PATH" - "$SF_HOME" <<'PY'
 import os
 import stat
@@ -133,24 +136,65 @@ import sys
 
 directory = sys.argv[1]
 flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-descriptor = os.open(directory, flags)
+descriptor = -1
 try:
+    descriptor = os.open(directory, flags)
     info = os.fstat(descriptor)
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
         raise PermissionError("install directory is not owned by this user")
     os.fchmod(descriptor, 0o700)
+except Exception as error:
+    print(f"install directory must be a real directory owned by this user: {directory}: {error}",
+          file=sys.stderr)
+    sys.exit(1)
 finally:
-    os.close(descriptor)
+    if descriptor >= 0:
+        os.close(descriptor)
 PY
 then
   die "install directory must be a real directory owned by this user: $SF_HOME"
 fi
+if ! SF_HOME="$(cd "$SF_HOME" && pwd -P)"; then
+  die "could not resolve the private install directory: $SF_HOME"
+fi
+
+STABLE_VENV="$SF_HOME/venv"
+if [[ -e "$STABLE_VENV" || -L "$STABLE_VENV" ]]; then
+  if [[ -d "$STABLE_VENV" && ! -L "$STABLE_VENV" \
+    && -f "$STABLE_VENV/pyvenv.cfg" \
+    && ! -e "$STABLE_VENV/bin/stateframe" && ! -L "$STABLE_VENV/bin/stateframe" ]]; then
+    if ! INCOMPLETE_DIR="$(mktemp -d "$SF_HOME/.venv-incomplete.XXXXXXXX")"; then
+      die "could not reserve a preservation path for incomplete install target $STABLE_VENV; original contents were left in place"
+    fi
+    PRESERVED_VENV="$INCOMPLETE_DIR/venv"
+    if ! "$PYTHON_PATH" - "$STABLE_VENV" "$PRESERVED_VENV" <<'PY'
+import os
+import sys
+
+try:
+    os.rename(sys.argv[1], sys.argv[2])
+except OSError as error:
+    print(f"could not rename incomplete environment: {error}", file=sys.stderr)
+    sys.exit(1)
+PY
+    then
+      die "could not preserve incomplete install target $STABLE_VENV at $PRESERVED_VENV; original contents were left in place"
+    fi
+    printf 'preserved incomplete environment at %s\n' "$PRESERVED_VENV"
+  else
+    die "install target already exists: $STABLE_VENV (choose a distinct SF_HOME to preserve the existing environment and incomplete material)"
+  fi
+fi
+
+if ! VENV="$(mktemp -d "$SF_HOME/.venv-attempt.XXXXXXXX")"; then
+  die "could not create an isolated install attempt under $SF_HOME; existing contents were preserved"
+fi
 if ! "$PYTHON_PATH" -m venv "$VENV"; then
-  die "could not create isolated virtual environment at $VENV"
+  die "could not create isolated virtual environment at $VENV; attempt contents were retained"
 fi
 VENV_PYTHON="$VENV/bin/python"
 if [[ ! -x "$VENV_PYTHON" ]] || ! "$VENV_PYTHON" -m pip --version >/dev/null 2>&1; then
-  die "the new virtual environment has no usable pip: $VENV"
+  die "the new virtual environment has no usable pip: $VENV; attempt contents were retained"
 fi
 
 if (( OFFLINE )); then
@@ -160,11 +204,11 @@ if (( OFFLINE )); then
     PINNED_REQUIREMENTS+=("$requirement")
   done <<< "$OFFLINE_REQUIREMENTS"
   if (( ${#PINNED_REQUIREMENTS[@]} == 0 )); then
-    die "offline wheelhouse has no pinned distributions"
+    die "offline wheelhouse has no pinned distributions; attempt contents were retained at $VENV"
   fi
   if ! "$VENV_PYTHON" -m pip install --disable-pip-version-check --no-index \
     --find-links "$WHEELHOUSE" "${PINNED_REQUIREMENTS[@]}"; then
-    die "could not install pinned wheels from $WHEELHOUSE"
+    die "could not install pinned wheels from $WHEELHOUSE; attempt contents were retained at $VENV"
   fi
 else
   # Downloads only; every file is checked against the hash pinned in the requirements file.
@@ -174,28 +218,28 @@ else
   fi
   if ! "$VENV_PYTHON" -m pip install --disable-pip-version-check --require-hashes --only-binary :all: \
     "${REQUIREMENT_ARGS[@]}"; then
-    die "could not install pinned dependencies from PyPI (offline machine? use --offline)"
+    die "could not install pinned dependencies from PyPI (offline machine? use --offline); attempt contents were retained at $VENV"
   fi
 fi
 if ! "$VENV_PYTHON" -m pip install --disable-pip-version-check --no-index \
   --no-build-isolation --no-deps "$HERE"; then
-  die "could not install StateFrame from $HERE"
+  die "could not install StateFrame from $HERE; attempt contents were retained at $VENV"
 fi
 
 LICENSE_DOC="$HERE/src/stateframe/THIRD_PARTY_LICENSES.md"
 if [[ ! -f "$LICENSE_DOC" ]]; then
-  die "third-party license inventory is missing from the source package: $LICENSE_DOC"
+  die "third-party license inventory is missing from the source package: $LICENSE_DOC; attempt contents were retained at $VENV"
 fi
 if ! PACKAGE_DIR="$("$VENV_PYTHON" -c 'import pathlib, stateframe; print(pathlib.Path(stateframe.__file__).resolve().parent)')"; then
-  die "could not locate the installed StateFrame package"
+  die "could not locate the installed StateFrame package; attempt contents were retained at $VENV"
 fi
 VENV_REAL="$(cd "$VENV" && pwd -P)"
 case "$PACKAGE_DIR/" in
   "$VENV_REAL/"*) ;;
-  *) die "StateFrame package was installed outside its isolated venv: $PACKAGE_DIR" ;;
+  *) die "StateFrame package was installed outside its isolated venv: $PACKAGE_DIR; attempt contents were retained at $VENV" ;;
 esac
 if [[ ! -d "$PACKAGE_DIR" ]] || ! cp "$LICENSE_DOC" "$PACKAGE_DIR/THIRD_PARTY_LICENSES.md"; then
-  die "could not install the third-party license inventory into $PACKAGE_DIR"
+  die "could not install the third-party license inventory into $PACKAGE_DIR; attempt contents were retained at $VENV"
 fi
 
 if ! "$VENV_PYTHON" - <<'PY'
@@ -257,19 +301,47 @@ print(f"repo map: on ({len(working)} languages: {', '.join(working)})" if workin
       else "repo map: OFF (tree-sitter not installed; text-scan fallback)")
 PY
 then
-  die "an installed optional engine dependency could not be imported"
+  die "an installed optional engine dependency could not be imported; attempt contents were retained at $VENV"
 fi
 
-CLI="$VENV/bin/stateframe"
-if [[ ! -x "$CLI" ]]; then
-  die "StateFrame CLI was not created at $CLI"
+ATTEMPT_CLI="$VENV/bin/stateframe"
+if [[ ! -x "$ATTEMPT_CLI" ]]; then
+  die "StateFrame CLI was not created at $ATTEMPT_CLI; attempt contents were retained at $VENV"
 fi
-"$CLI" --version
+if ! "$ATTEMPT_CLI" --version; then
+  die "the installed CLI failed its version check at $ATTEMPT_CLI; attempt contents were retained at $VENV"
+fi
+
+# os.symlink is an exclusive atomic create: concurrent installers cannot replace one another's result.
+if "$PYTHON_PATH" - "$VENV" "$STABLE_VENV" <<'PY'
+import os
+import sys
+
+try:
+    os.symlink(sys.argv[1], sys.argv[2])
+except FileExistsError:
+    raise SystemExit(3)
+except OSError as error:
+    print(f"could not publish the verified environment at {sys.argv[2]}: {error}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+then
+  :
+else
+  publish_status=$?
+  if (( publish_status == 3 )); then
+    die "install target already exists: $STABLE_VENV (choose a distinct SF_HOME to preserve it); attempt contents were retained at $VENV"
+  fi
+  die "could not publish the verified environment at $STABLE_VENV; attempt contents were retained at $VENV"
+fi
+
+CLI="$STABLE_VENV/bin/stateframe"
 
 LOCAL_BIN="$HOME/.local/bin"
 LINK="$LOCAL_BIN/stateframe"
-mkdir -p "$LOCAL_BIN"
-if [[ -L "$LINK" && "$(readlink "$LINK")" == "$CLI" ]]; then
+if ! mkdir -p "$LOCAL_BIN"; then
+  printf 'note: could not create optional command directory: %s\n' "$LOCAL_BIN" >&2
+elif [[ -L "$LINK" && "$(readlink "$LINK")" == "$CLI" ]]; then
   :
 elif [[ -e "$LINK" || -L "$LINK" ]]; then
   printf 'note: leaving existing command path unchanged: %s\n' "$LINK" >&2

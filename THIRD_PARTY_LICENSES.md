@@ -16,7 +16,7 @@ The source package includes universal and platform wheels in `wheelhouse/` for `
 | parso | 0.8.7 | MIT |
 | pluggy | 1.6.0 | MIT |
 | Pygments | 2.20.0 | BSD-2-Clause |
-| pytest | 9.0.2 | MIT |
+| pytest | 9.0.3 | MIT |
 | PyYAML | 6.0.3 | MIT |
 | jsonschema | 4.26.0 | MIT |
 | jsonschema-specifications | 2025.9.1 | MIT |
@@ -32,7 +32,7 @@ The default install downloads these from PyPI, pinned and hash-checked (`require
 
 | Package | Version | PyPI license metadata | Classifiers | License file in that exact wheel | Wheel | Verdict |
 | --- | --- | --- | --- | --- | --- | --- |
-| pytest | 9.0.2 | MIT | - | MIT (LICENSE) | pytest-9.0.2-py3-none-any.whl | permissive |
+| pytest | 9.0.3 | MIT | - | MIT (LICENSE) | pytest-9.0.3-py3-none-any.whl | permissive |
 | pluggy | 1.6.0 | MIT | MIT License | MIT (LICENSE) | pluggy-1.6.0-py3-none-any.whl | permissive |
 | iniconfig | 2.3.0 | MIT | - | MIT (LICENSE) | iniconfig-2.3.0-py3-none-any.whl | permissive |
 | packaging | 26.0 | Apache-2.0 OR BSD-2-Clause | - | Apache-2.0+BSD (LICENSE, LICENSE.APACHE, LICENSE.BSD) | packaging-26.0-py3-none-any.whl | permissive |
@@ -855,7 +855,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-### pytest 9.0.2
+### pytest 9.0.3
 
 #### licenses/LICENSE
 
