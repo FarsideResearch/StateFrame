@@ -96,7 +96,7 @@ def refresh_source_replan_inputs(runtime: object, capture: object | None = None)
 
 @contextmanager
 def source_replan_preparation(runtime: object, capture: object | None = None):
-    """Mark the sole fresh build so regenerated stale read caches stay optional."""
+    """Mark a fresh build so regenerated stale read caches stay optional."""
     retired = refresh_source_replan_inputs(runtime, capture)
     previous = getattr(runtime, "_source_replan_in_progress", False)
     missing_origin = object()
@@ -114,6 +114,54 @@ def source_replan_preparation(runtime: object, capture: object | None = None):
             delattr(runtime, "_source_replan_origin_request_id")
         else:
             setattr(runtime, "_source_replan_origin_request_id", previous_origin)
+
+
+def prepared_source_revision_set(
+        runtime: object, capture: object | None = None,
+        source_plan: object | None = None,
+) -> tuple[tuple[str, str, str], ...] | None:
+    """Return the source revision pins used by the current prepared request."""
+    allocation = getattr(capture, "frame_request_allocation", None)
+    plan = source_plan
+    if not isinstance(plan, Mapping):
+        plan = getattr(capture, "_request_source_closure_override", None)
+    if not isinstance(plan, Mapping) and isinstance(allocation, FrameRequestAllocation):
+        try:
+            source_layout = allocation.source_layout
+        except (FrameRequestAllocationError, TypeError, ValueError):
+            source_layout = None
+        if isinstance(source_layout, Mapping):
+            plan = source_layout.get("source_plan")
+    if not isinstance(plan, Mapping):
+        plan = getattr(runtime, "_request_source_closure", None)
+    if not isinstance(plan, Mapping):
+        return None
+
+    rows: list[tuple[str, str, str]] = []
+    has_revision_map = False
+    for section in ("revisions", "dependency_revisions"):
+        values = plan.get(section)
+        if not isinstance(values, Mapping):
+            continue
+        has_revision_map = True
+        rows.extend((section, str(path), str(revision))
+                    for path, revision in values.items())
+    if isinstance(allocation, FrameRequestAllocation):
+        try:
+            optional = allocation.optional_heads
+        except (FrameRequestAllocationError, TypeError, ValueError):
+            optional = None
+        dependencies = optional.get("dependency_revisions") if isinstance(optional, Mapping) else None
+        if isinstance(dependencies, Mapping):
+            has_revision_map = True
+            rows.extend(("optional_dependency_revisions", str(path), str(revision))
+                        for path, revision in dependencies.items())
+    return tuple(sorted(rows)) if has_revision_map else None
+
+
+def same_source_revision_report(previous: object, current: object) -> bool:
+    """The same set, or two unknown sets, in a row is no source progress."""
+    return previous == current
 
 
 def _source_plan_matches_after_deferred_discharge(
@@ -246,7 +294,7 @@ class PreparationInput:
 # These fields describe already-completed preparation or the same logical lease.
 # Request contracts, receipts, hashes, transport and response state are excluded.
 _STABLE = """
-_source_replan_inputs _source_replan_attempted
+_source_replan_inputs
 _tokenize_logical_request_id _tokenize_deadline _tokenize_endpoint
 lean_request_shape lean_shape_event_id
 ticket_identity stateframe_f4_mode stateframe_think_prefill_mode

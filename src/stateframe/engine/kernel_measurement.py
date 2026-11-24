@@ -4658,6 +4658,7 @@ class RequestCapture:
         """Replace an unsent transaction as a whole, preserving caller aliases."""
         if (not isinstance(replacement, RequestCapture) or replacement is self
                 or (getattr(self, "_wire_truth_rebuild_used", False)
+                    and not source_replan
                     and (not boundary_recovery
                          or getattr(self, "_boundary_recovery_attempted", False)))
                 or getattr(self, "_transport_submission_started", False)
@@ -4949,10 +4950,11 @@ class RequestCapture:
 
     def _recover_source_revision_replan(
             self, error: Exception, state: _BoundaryRecoveryContext) -> dict:
-        """Re-run the normal preparation once while this request is unsent."""
+        """Repeat normal preparation while each unsent attempt sees new source pins."""
         from kernel_v46_mechanism_wiring import sanitized_error_message
         from kernel_request_reprepare import (
-            SourceRevisionReplanRefused, source_replan_preparation,
+            SourceRevisionReplanRefused, prepared_source_revision_set,
+            same_source_revision_report, source_replan_preparation,
         )
         from kernel_request_kind import require_adapter
         from kernel_frame_optional_allocation import FrameAllocationReplanNeeded
@@ -4962,99 +4964,124 @@ class RequestCapture:
 
         runtime = state.runtime
         inputs = getattr(self, "_source_replan_inputs", None)
-        if getattr(self, "_source_replan_attempted", False):
-            raise SourceRevisionReplanRefused(
-                "source_revision_replan_exhausted") from error
         if (runtime is None or state.side_call_contract is not None
                 or not isinstance(inputs, Mapping)
                 or state.submitted or getattr(self, "_transport_submission_started", False)
                 or self.transport_attempt_id is not None or self.response_event_id is not None):
             raise SourceRevisionReplanRefused("source_revision_replan_unavailable") from error
-        self._source_replan_attempted = True
         original_id = self.request_id
-        self.journal.emit(
-            "source_revision_replan_started", producer="kernel_measurement",
-            request_id=original_id, step=self.step, submitted=False,
-            error_detail=sanitized_error_message(error), dispatch=False,
-        )
-        try:
-            # Refresh the same workspace view used by replacement validation.
-            # Normal prepare builds a new closure, optional inputs, and owner
-            # contract; none of the old source snapshots are promoted.
-            messages = copy.deepcopy(inputs["messages"])
-            uncapped = (messages if inputs["messages"] is inputs["uncapped"]
-                        else copy.deepcopy(inputs["uncapped"]))
-            with source_replan_preparation(runtime, self):
-                prepared = runtime.prepare(
-                    messages,
-                    uncapped=uncapped,
-                    tools=copy.deepcopy(inputs["tools"]),
-                    provider_request=inputs["provider_request"],
-                    request_host_text_preparer=inputs["request_host_text_preparer"],
-                    **inputs.get("route_options", {}),
-                )
-            replacement = prepared.capture
-            from kernel_read_reuse_visibility import retire_changed_revision_candidates
-            retired_reads = retire_changed_revision_candidates(replacement, runtime)
-            if retired_reads:
+        pending_error = error
+        pending_revision_set = prepared_source_revision_set(runtime, self)
+        last_revision_set: object = None
+        has_last_revision_set = False
+        while True:
+            if (state.submitted or getattr(self, "_transport_submission_started", False)
+                    or self.transport_attempt_id is not None or self.response_event_id is not None):
+                raise SourceRevisionReplanRefused(
+                    "source_revision_replan_unavailable") from pending_error
+            if (has_last_revision_set
+                    and same_source_revision_report(last_revision_set, pending_revision_set)):
                 self.journal.emit(
-                    "source_revision_read_pins_retired", producer="kernel_measurement",
-                    request_id=original_id, step=self.step, count=retired_reads,
+                    "source_revision_replan_refused", producer="kernel_measurement",
+                    request_id=original_id, step=self.step, reason="revision_changed_again",
+                    error_detail=sanitized_error_message(pending_error),
                     submitted=False, dispatch=False,
                 )
-            body = copy.deepcopy(state.authoritative_body)
-            body["messages"] = list(prepared.messages)
-            body["tools"] = list(prepared.tools or ())
-            adapter = getattr(self, "_qualified_adapter", None)
-            if adapter is not None:
-                require_adapter(
-                    replacement, runtime, body["messages"],
-                    gate=self._qualified_request_gate,
-                    host_preparer=self._qualified_host_text_preparer,
-                    adapter=adapter,
+                raise SourceRevisionReplanRefused(
+                    "source_revision_replan_exhausted") from pending_error
+            last_revision_set = pending_revision_set
+            has_last_revision_set = True
+            self.journal.emit(
+                "source_revision_replan_started", producer="kernel_measurement",
+                request_id=original_id, step=self.step, submitted=False,
+                error_detail=sanitized_error_message(pending_error), dispatch=False,
+            )
+            try:
+                # Every fresh prepare starts with the same caller-owned request inputs.
+                messages = copy.deepcopy(inputs["messages"])
+                uncapped = (messages if inputs["messages"] is inputs["uncapped"]
+                            else copy.deepcopy(inputs["uncapped"]))
+                with source_replan_preparation(runtime, self):
+                    prepared = runtime.prepare(
+                        messages,
+                        uncapped=uncapped,
+                        tools=copy.deepcopy(inputs["tools"]),
+                        provider_request=inputs["provider_request"],
+                        request_host_text_preparer=inputs["request_host_text_preparer"],
+                        **inputs.get("route_options", {}),
+                    )
+                replacement = prepared.capture
+                from kernel_read_reuse_visibility import retire_changed_revision_candidates
+                retired_reads = retire_changed_revision_candidates(replacement, runtime)
+                if retired_reads:
+                    self.journal.emit(
+                        "source_revision_read_pins_retired", producer="kernel_measurement",
+                        request_id=original_id, step=self.step, count=retired_reads,
+                        submitted=False, dispatch=False,
+                    )
+                body = copy.deepcopy(state.authoritative_body)
+                body["messages"] = list(prepared.messages)
+                body["tools"] = list(prepared.tools or ())
+                adapter = getattr(self, "_qualified_adapter", None)
+                if adapter is not None:
+                    require_adapter(
+                        replacement, runtime, body["messages"],
+                        gate=self._qualified_request_gate,
+                        host_preparer=self._qualified_host_text_preparer,
+                        adapter=adapter,
+                    )
+                if getattr(self, "_release_prefix_boundary", None) is not None:
+                    bind_release_prefix_boundary(replacement, body["messages"], body["tools"])
+                    qualify_release_host_prefix(replacement, runtime, body, deadline=state.deadline)
+                self._adopt_reprepared(
+                    replacement, runtime, deadline=state.deadline,
+                    source_replan=True, publish_event=False,
                 )
-            if getattr(self, "_release_prefix_boundary", None) is not None:
-                bind_release_prefix_boundary(replacement, body["messages"], body["tools"])
-                qualify_release_host_prefix(replacement, runtime, body, deadline=state.deadline)
-            self._adopt_reprepared(
-                replacement, runtime, deadline=state.deadline,
-                source_replan=True, publish_event=False,
-            )
-            self._source_replan_attempted = True
-        except Exception as preparation_error:
+            except FrameAllocationReplanNeeded as preparation_error:
+                pending_error = preparation_error
+                pending_revision_set = getattr(
+                    preparation_error, "_source_revision_set", None,
+                )
+                if pending_revision_set is None:
+                    pending_revision_set = prepared_source_revision_set(runtime)
+                continue
+            except SourceRevisionReplanRefused as refusal:
+                self.journal.emit(
+                    "source_revision_replan_refused", producer="kernel_measurement",
+                    request_id=original_id, step=self.step,
+                    reason=("revision_changed_again"
+                            if refusal.stop_code == "source_revision_replan_exhausted"
+                            else "preparation_failed"),
+                    error_detail=sanitized_error_message(refusal),
+                    submitted=False, dispatch=False,
+                )
+                raise
+            except Exception as preparation_error:
+                self.journal.emit(
+                    "source_revision_replan_refused", producer="kernel_measurement",
+                    request_id=original_id, step=self.step, reason="preparation_failed",
+                    submitted=False, dispatch=False,
+                )
+                raise SourceRevisionReplanRefused(
+                    "source_revision_replan_failed") from preparation_error
             self.journal.emit(
-                "source_revision_replan_refused", producer="kernel_measurement",
-                request_id=original_id, step=self.step, reason="preparation_failed",
-                submitted=False, dispatch=False,
+                "source_revision_reprepared", producer="kernel_measurement",
+                request_id=original_id, replacement_request_id=self.request_id,
+                step=self.step, submitted=False, dispatch=False,
             )
-            raise SourceRevisionReplanRefused(
-                "source_revision_replan_exhausted"
-                if isinstance(preparation_error, FrameAllocationReplanNeeded)
-                else "source_revision_replan_failed") from preparation_error
-        self.journal.emit(
-            "source_revision_reprepared", producer="kernel_measurement",
-            request_id=original_id, replacement_request_id=self.request_id,
-            step=self.step, submitted=False, dispatch=False,
-        )
-        state.phase = "source_revision_reprepared"
-        state.preparation = None
-        try:
-            return self._send_once(
-                body, state.endpoint, state.key, deadline=state.deadline,
-                side_call_contract=None, required=state.required, preview=False,
-                transport_attempt_limit=state.transport_attempt_limit,
-                journal_timeouts=state.journal_timeouts,
-                _boundary_state=state, _recovery_prepared=True,
-            )
-        except FrameAllocationReplanNeeded as repeated:
-            self.journal.emit(
-                "source_revision_replan_refused", producer="kernel_measurement",
-                request_id=original_id, step=self.step, reason="revision_changed_again",
-                error_detail=sanitized_error_message(repeated),
-                submitted=False, dispatch=False,
-            )
-            raise SourceRevisionReplanRefused(
-                "source_revision_replan_exhausted") from repeated
+            state.phase = "source_revision_reprepared"
+            state.preparation = None
+            try:
+                return self._send_once(
+                    body, state.endpoint, state.key, deadline=state.deadline,
+                    side_call_contract=None, required=state.required, preview=False,
+                    transport_attempt_limit=state.transport_attempt_limit,
+                    journal_timeouts=state.journal_timeouts,
+                    _boundary_state=state, _recovery_prepared=True,
+                )
+            except FrameAllocationReplanNeeded as repeated:
+                pending_error = repeated
+                pending_revision_set = prepared_source_revision_set(runtime, self)
 
     def _recover_boundary_contract(
             self, error: BaseException, state: _BoundaryRecoveryContext) -> dict:

@@ -4487,15 +4487,6 @@
     },
     {
       "file": "src/stateframe/engine/probes/react_repair.py",
-      "function": "parse_dsml_tool_calls",
-      "except_clause": "except Exception:",
-      "fingerprint": "d3013d35392f5c812005d066",
-      "ordinal": 1,
-      "reason": "baseline debt 2026-11-05, see inventory",
-      "risk": "unclassified"
-    },
-    {
-      "file": "src/stateframe/engine/probes/react_repair.py",
       "function": "_render_semantic_facts",
       "except_clause": "except Exception:",
       "fingerprint": "b5cc91b7fd53b5a87d9a67ea",

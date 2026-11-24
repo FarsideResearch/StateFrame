@@ -2692,10 +2692,6 @@ def _render_multifile_list(fileset: FileSet, *, limit: int = 1400) -> str:
 #
 # Native tool calls deliver structured arguments and avoid ambiguities in
 # free-form command parsing, including quoting and truncated code fences.
-#
-# Ported from an upstream OpenAI-compatible client: the DeepSeek DSML quirk — Flash
-# occasionally emits tool calls as literal <｜DSML｜...> markup inside content with an empty
-# tool_calls array (known upstream bug). The client parser grammar is reproduced verbatim.
 
 
 def _list_files_command(args: Mapping[str, object]) -> str:
@@ -3329,14 +3325,6 @@ def _read_forced_parallel_manifest(path: str) -> tuple[dict, str, str | None]:
         return {}, "{}", "manifest_root_not_object"
     return parsed, source, None
 
-_DSML_PIPE = "｜"  # full-width vertical line
-_DSML_INVOKE_RE = re.compile(
-    rf'<{_DSML_PIPE}DSML{_DSML_PIPE}invoke\s+name="([^"]*)"[^>]*>([\s\S]*?)'
-    rf"</{_DSML_PIPE}DSML{_DSML_PIPE}invoke>", re.IGNORECASE)
-_DSML_PARAM_RE = re.compile(
-    rf'<{_DSML_PIPE}DSML{_DSML_PIPE}parameter\s+name="([^"]*)"'
-    rf'(?:\s+string="(true|false)")?[^>]*>([\s\S]*?)'
-    rf"</{_DSML_PIPE}DSML{_DSML_PIPE}parameter>", re.IGNORECASE)
 
 
 def _parse_r1_tool_calls(content: str) -> list:
@@ -3448,34 +3436,15 @@ def _parse_r1_tool_calls(content: str) -> list:
 
 
 def parse_dsml_tool_calls(content: str) -> list:
-    """sample project's grammar, verbatim semantics: never raises, [] on truncated/absent markup."""
+    """Return complete DSML calls; fall back to the R1 format only when no DSML marker is present."""
     if not content:
         return []
-    if f"{_DSML_PIPE}DSML{_DSML_PIPE}" not in content:
-        return _parse_r1_tool_calls(content)                         # E360 fallback
-    try:
-        out = []
-        for i, m in enumerate(_DSML_INVOKE_RE.finditer(content)):
-            name, body = m.group(1), m.group(2)
-            if not name:
-                continue
-            args = {}
-            for pm in _DSML_PARAM_RE.finditer(body):
-                pname, is_str, raw = pm.group(1), pm.group(2), pm.group(3)
-                if not pname:
-                    continue
-                if is_str == "false":
-                    try:
-                        args[pname] = json.loads(raw.strip())
-                    except (TypeError, ValueError):
-                        args[pname] = raw
-                else:
-                    args[pname] = raw
-            out.append({"id": f"dsml_{i}", "function":
-                        {"name": name, "arguments": json.dumps(args)}})
-        return out
-    except Exception:                                            # noqa: BLE001
-        return []
+    from kernel_dsml_tool_calls import parse_dsml
+
+    calls = parse_dsml(content)
+    if calls or "｜DSML｜" in content:
+        return calls
+    return _parse_r1_tool_calls(content)
 
 
 def _normalize_probe_tool_args(args: Mapping[str, object]) -> dict[str, object]:
