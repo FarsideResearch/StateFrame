@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.31 (2026-11-24)
 
 - Fixed: final source-delivery revalidation retains certified capture witnesses bound to the request, source plan, source bytes, and certificate.
 - Fixed: schema-2 route comparison includes effective timeout, context capacity, tokenizer endpoint and remote-connection policy. The behavior stays off by default; schema 1 keeps its existing provider requests and journal records.
