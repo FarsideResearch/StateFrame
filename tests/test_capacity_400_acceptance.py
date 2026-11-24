@@ -211,7 +211,7 @@ def test_capacity_400_then_success_retries_with_smaller_request(
 
 def test_two_capacity_400s_stop_with_base_terminal_and_capacity_reason(tmp_path: Path) -> None:
     case = _run_case(tmp_path, (CAPACITY_ERROR, CAPACITY_ERROR))
-    _assert_base_terminal(case, "HARNESS_TRANSPORT", "missing_result")
+    _assert_base_terminal(case, "HARNESS_TRANSPORT", "provider_transport_failure")
     assert 1 <= len(case.requests) <= 2
     transport = [event for event in case.events if event.get("kind") == "transport_error"]
     assert transport, case.events

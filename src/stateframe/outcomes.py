@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import lzma
 import re
 from pathlib import Path
 
@@ -162,6 +163,80 @@ def check_label(result: dict[str, object]) -> str:
     return "PASS" if passed else "FAIL" if passed is False else "NOT RUN"
 
 
+def provider_transport_failure(
+        run: Path, terminal: dict[str, object] | None = None) -> dict[str, object]:
+    """Read the final typed transport cause from the run's recorded root journal."""
+    from .engine.kernel_journal_store import journal_paths, open_journal
+
+    request_id = terminal.get("request_id") if isinstance(terminal, dict) else None
+    terminal_error = None
+    if isinstance(terminal, dict):
+        for key in ("error_type", "error"):
+            value = terminal.get(key)
+            if isinstance(value, str) and value.strip():
+                terminal_error = value.strip()[:160]
+                break
+    submission_by_attempt: dict[int, object] = {}
+    failure: dict[str, object] | None = None
+    try:
+        journals = journal_paths(run / "worker" / "measurement-runs")
+        if len(journals) == 1 and isinstance(request_id, str) and request_id:
+            with open_journal(journals[0]) as source:
+                for line in source:
+                    try:
+                        event = json.loads(line)
+                    except (ValueError, RecursionError):
+                        continue
+                    if (not isinstance(event, dict)
+                            or event.get("request_id") != request_id):
+                        continue
+                    kind = event.get("kind")
+                    transport_attempt = event.get("transport_attempt")
+                    if (kind == "transport_error" and type(transport_attempt) is int
+                            and isinstance(event.get("submission_state"), str)):
+                        submission_by_attempt[transport_attempt] = event["submission_state"]
+                    if event.get("outcome") != "HARNESS_TRANSPORT":
+                        continue
+                    if kind == "transport_error":
+                        failure = event
+                    elif kind == "provider_transport_retry_aborted":
+                        reasons = event.get("attempt_reasons")
+                        last = reasons[-1] if isinstance(reasons, list) and reasons else {}
+                        last_attempt = last.get("attempt") if isinstance(last, dict) else None
+                        submission = (submission_by_attempt.get(last_attempt)
+                                      if type(last_attempt) is int else None)
+                        if event.get("reason") == "response_already_received":
+                            submission = "sent"
+                        failure = {
+                            "http_status": last.get("http_status") if isinstance(last, dict) else None,
+                            "transport_reason": (last.get("reason") if isinstance(last, dict)
+                                                 else event.get("reason")),
+                            "error_type": last.get("error_type") if isinstance(last, dict) else None,
+                            "submission_state": submission,
+                        }
+    except (OSError, UnicodeError, ValueError, EOFError, lzma.LZMAError):
+        pass
+    if failure is None:
+        return {"status": None, "last_error": terminal_error, "request_sent": "unknown"}
+    status = failure.get("http_status")
+    status = status if type(status) is int else None
+    submission = failure.get("submission_state")
+    request_sent: bool | str = (
+        True if status is not None or submission in ("sent", "submitted") else
+        False if submission in ("not_sent", "not_submitted") else "unknown"
+    )
+    last_error = failure.get("transport_reason")
+    if not isinstance(last_error, str) or not last_error.strip():
+        last_error = failure.get("error_type")
+    if not isinstance(last_error, str) or not last_error.strip():
+        last_error = terminal_error
+    return {
+        "status": status,
+        "last_error": last_error if isinstance(last_error, str) and last_error.strip() else None,
+        "request_sent": request_sent,
+    }
+
+
 def project(summary: dict[str, object], *, cancelled: bool = False,
             timed_out: bool = False, check_output: str = "",
             check_repo: Path | None = None, declared_test_command: bool = False) -> dict[str, object]:
@@ -202,6 +277,8 @@ def project(summary: dict[str, object], *, cancelled: bool = False,
         runtime = "completed"
     elif status in INCOMPLETE:
         runtime = "incomplete"
+    elif status == "HARNESS_TRANSPORT":
+        runtime = "provider_transport_failure"
     else:
         runtime = "missing_result"
 
@@ -229,6 +306,11 @@ def project(summary: dict[str, object], *, cancelled: bool = False,
     else:
         artifact = "partial"
     projected = {"runtime_outcome": runtime, "check_outcome": check, "artifact": artifact}
+    if runtime == "provider_transport_failure":
+        failure = terminal.get("provider_transport_failure")
+        projected["provider_transport_failure"] = (
+            failure if isinstance(failure, dict) else
+            {"status": None, "last_error": None, "request_sent": "unknown"})
     source = summary.get("check_source")
     after_command = after.get("command")
     kind = str(summary.get("runner_kind") or "")
@@ -288,7 +370,8 @@ def resume_hint_applies(summary: dict[str, object]) -> bool:
             and delivery_refusal.get("reason_code") in (
                 "CHECKS_STALE", "CANDIDATE_NOT_DELIVERED", "CANDIDATE_OUT_OF_SCOPE")):
         return False
-    if summary.get("runtime_outcome") not in ("cancelled", "engine_error", "missing_result", "budget_stop",
+    if summary.get("runtime_outcome") not in ("cancelled", "engine_error", "missing_result",
+                                              "provider_transport_failure", "budget_stop",
                                               "recovery_required"):
         return False
     terminal = summary.get("engine_terminal")
@@ -358,7 +441,8 @@ def exit_code(summary: dict[str, object]) -> int:
         return 1
     if summary.get("apply_error"):
         return 2
-    if runtime in ("engine_error", "missing_result", "context_too_small") or runtime is None:
+    if runtime in ("engine_error", "missing_result", "provider_transport_failure",
+                   "context_too_small") or runtime is None:
         return 2
     if (runtime == "completed" and summary.get("engine_result") == "SUBMITTED"
             and summary.get("artifact") == "saved"
