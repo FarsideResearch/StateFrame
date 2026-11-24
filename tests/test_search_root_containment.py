@@ -51,7 +51,9 @@ def _expected(rows, *, pattern="needle", scope=".", size=1, offset=0):
     text = (f"[search page] shown={len(shown)} total={len(rows)} offset={offset} "
             f"complete={str(cursor is None).lower()} scan_complete=true\n"
             + next_line + "\n" + "\n".join(rendered))
-    return navigation.NavigationPage(text, metadata)
+    evidence = hashlib.sha256(json.dumps(shown, sort_keys=True, ensure_ascii=False,
+                                         separators=(",", ":")).encode()).hexdigest()[:24]
+    return navigation.NavigationPage(text, metadata, "sha256:" + evidence)
 
 
 @pytest.mark.parametrize("mode", ["pinned", "fallback", "unpinned"])
@@ -509,7 +511,7 @@ def test_search_escapes_non_utf8_names_and_keeps_other_hits(tmp_path, monkeypatc
     page = navigation.search_repository(root, query, mode=search_mode, requested_page_size=1)
     assert page.metadata["total"] == 2
     assert page.metadata.get("scan_complete", True)
-    assert r"bad\udcff.py" in page.text
+    assert r"//undecodable-name/bad\xff.py" in page.text
     page.text.encode("utf-8")
     second = navigation.search_repository(root, query, mode=search_mode,
                                           cursor=page.metadata["continuation"])

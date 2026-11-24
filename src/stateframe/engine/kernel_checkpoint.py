@@ -331,6 +331,12 @@ DROP_GLOBALS = {
         "per-thread /props probe outcome; each probe resets it before use",
     ("stateframe.engine.kernel_bounded_http", "_PROBE_STATE"):
         "per-thread /props probe outcome; each probe resets it before use",
+    ("kernel_navigation_pages", "_LINE_SCOPE"):
+        "per-thread regex line scope; unset outside a search and read through getattr defaults",
+    ("engine.kernel_navigation_pages", "_LINE_SCOPE"):
+        "per-thread regex line scope; unset outside a search and read through getattr defaults",
+    ("stateframe.engine.kernel_navigation_pages", "_LINE_SCOPE"):
+        "per-thread regex line scope; unset outside a search and read through getattr defaults",
     ("fixer", "_TRACE"):
         "per-thread last trace ref; each captured call resets it before use",
     ("engine.fixer", "_TRACE"):

@@ -145,6 +145,8 @@ EXPECTED_ENTRIES = (
     ("tests/test_read_receipts_admission.py::test_off_is_byte_identical_and_emits_nothing", "all"),
     ("tests/test_shell_e2e.py::test_kill_resume_serves_byte_identical_next_request", "requires:host_sandbox"),
     ("tests/test_stable_wire_tail.py::test_relayout_keeps_windows_before_the_first_changed_one_byte_identical", "all"),
+    ("tests/test_yolo_cli.py::test_yolo_request_byte_parity_and_disabled_matches_pinned_base", "all"),
+    ("tests/test_yolo_cli.py::test_yolo_full_network_wire_parity_changes_head_context_and_tail", "all"),
     ("tests/test_timing_sweep_parity.py::test_host_span_bounded_buffers_keep_oldest_to_newest_order", "all"),
     ("tests/test_timing_sweep_parity.py::test_host_span_finish_preserves_stack_and_trace", "all"),
     ("tests/test_timing_sweep_parity.py::test_host_span_serialization_has_exact_fields_and_order", "all"),
@@ -519,6 +521,10 @@ EXPECTED_ASSERTIONS = {
         "assert hashlib.sha256(text.encode()).hexdigest() == text_sha",
     "tests/test_view_ladder_integration.py::test_frozen_selection_re_renders_byte_identically_across_requests":
         "assert render_a.text.encode() == render_b.text.encode()",
+    "tests/test_yolo_cli.py::test_yolo_request_byte_parity_and_disabled_matches_pinned_base":
+        'assert results["yolo"] == results["explicit"] and results["disabled"] == results["base"]',
+    "tests/test_yolo_cli.py::test_yolo_full_network_wire_parity_changes_head_context_and_tail":
+        'assert any("YOLO_TAIL" in body and "unrestricted | network full" in body for body in yolo_wire)',
     "tests/test_wave4_probe_provider.py::test_cross_process_static_work_and_wire_parity":
         "assert len(set(provider.wire)) == 1",
     "tests/test_working_set_off_parity_base.py::test_off_parity_direct_callers_share_trace_results":

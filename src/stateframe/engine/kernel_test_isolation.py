@@ -47,12 +47,14 @@ class SandboxReadGrants:
 
 
 if __package__:
-    from .kernel_exec_capability import executable_read_roots, system_runtime_read_roots
+    from .kernel_exec_capability import (executable_read_roots, executable_symlinks,
+                                         public_ca_read_roots, system_runtime_read_roots)
     from .kernel_safe_paths import safe_home
     from .kernel_sbpl import sbpl_path_regex, sbpl_string
     from .kernel_test_python import selected_test_python
 else:
-    from kernel_exec_capability import executable_read_roots, system_runtime_read_roots
+    from kernel_exec_capability import (executable_read_roots, executable_symlinks,
+                                        public_ca_read_roots, system_runtime_read_roots)
     from kernel_safe_paths import safe_home
     from kernel_sbpl import sbpl_path_regex, sbpl_string
     from kernel_test_python import selected_test_python
@@ -191,6 +193,30 @@ def _program_read_roots(program: Path, env: dict[str, str] | None = None) -> set
                 if selected_shell.is_file():
                     roots.update(str(hop) for hop in executable_read_roots(selected_shell))
     return roots
+
+
+def _public_ca_mount_roots() -> tuple[tuple[Path, ...], tuple[Path, ...]]:
+    """Return the shell capability's CA roots and non-overlapping bind targets."""
+    try:
+        roots = public_ca_read_roots()
+    except (OSError, RuntimeError, ValueError):
+        return (), ()
+    resolved: set[Path] = set()
+    valid_roots: list[Path] = []
+    for root in roots:
+        try:
+            if root.is_absolute():
+                resolved.add(root.resolve(strict=True))
+                valid_roots.append(root)
+        except (OSError, RuntimeError, ValueError):
+            # A root disappearing between discovery and command construction is
+            # equivalent to an unavailable optional trust store.
+            continue
+    mounts: list[Path] = []
+    for path in sorted(resolved, key=lambda item: (len(item.parts), str(item))):
+        if not any(parent.is_dir() and path.is_relative_to(parent) for parent in mounts):
+            mounts.append(path)
+    return tuple(dict.fromkeys(valid_roots)), tuple(mounts)
 
 
 def check_sandbox_exec_denial(python: str, timeout: float = 60.0) -> str | None:
@@ -366,7 +392,9 @@ def isolated_command(command: list[str], root: Path, env: dict[str, str], *,
     # nothing secret. Without it such an interpreter cannot start and every check exits 127.
     if os.path.isfile("/etc/ld.so.cache"):
         arguments.extend(["--ro-bind", "/etc/ld.so.cache", "/etc/ld.so.cache"])
+    ca_roots, ca_mounts = _public_ca_mount_roots()
     prefixes ={str(Path(sys.prefix).resolve()), str(Path(sys.base_prefix).resolve())}
+    prefixes.update(map(str, ca_mounts))
     if selected != Path(sys.executable):
         prefixes.update((str(selected), str(resolved_selected)))
         prefixes.update(interpreter_roots)
@@ -406,11 +434,21 @@ def isolated_command(command: list[str], root: Path, env: dict[str, str], *,
         # read-only mount and fail ("Can't create file at ...").
         if any(Path(value).is_relative_to(parent) for parent in mounted):
             continue
-        arguments.extend(["--ro-bind", value, value])
+        bind_flag = "--ro-bind-try" if Path(value) in ca_mounts else "--ro-bind"
+        arguments.extend([bind_flag, value, value])
         mounted.append(Path(value))
     for source, destination in link_binds:
         if not any(Path(destination).is_relative_to(parent) for parent in mounted):
             arguments.extend(["--ro-bind", source, destination])
+    try:
+        ca_links = executable_symlinks(ca_roots)
+    except (OSError, RuntimeError, ValueError):
+        ca_links = {}
+    already_readable = (*mounted, *(Path(value) for value in ("/usr", "/bin", "/lib", "/lib64")
+                                    if Path(value).exists()))
+    for link, target in sorted(ca_links.items(), key=lambda item: (len(item[0].parts), str(item[0]))):
+        if not any(link.is_relative_to(parent) for parent in already_readable):
+            arguments.extend(["--symlink", target, str(link)])
     if relay_dir is not None:
         # /tmp is a fresh sandbox tmpfs; expose only this run's relay directory.
         arguments.extend(["--bind", str(relay_dir), str(relay_dir)])
@@ -533,6 +571,10 @@ def _mutation_command(command, cap, executable: str, mounts: dict, shared_namesp
         raise ValueError("mutation payload must have no network")
     if cap.purpose == "mutation_broker" and cap.network != "full":
         raise ValueError("mutation broker requires full network")
+    # The capability freezes CA read authority. Current discovery is only used
+    # to mark those exact roots as optional binds if one disappears before launch.
+    _, ca_mounts = _public_ca_mount_roots()
+    read_roots = tuple(cap.read_roots)
     allowed = (*cap.read_roots, cap.workspace)
     if any(not any(root == admitted or admitted in root.parents for admitted in allowed)
            for root in roots.values()):
@@ -559,24 +601,22 @@ def _mutation_command(command, cap, executable: str, mounts: dict, shared_namesp
             arguments += ["--symlink", os.readlink(link), link]
     if os.path.isfile("/etc/ld.so.cache"):
         arguments += ["--ro-bind", "/etc/ld.so.cache", "/etc/ld.so.cache"]
-    if __package__:
-        from .kernel_exec_capability import executable_symlinks
-    else:
-        from kernel_exec_capability import executable_symlinks
     links = executable_symlinks(tuple(cap.read_roots))
-    for root in sorted({path.resolve(strict=True) for path in cap.read_roots},
+    ca_mount_set = set(ca_mounts)
+    for root in sorted({path.resolve(strict=True) for path in read_roots},
                        key=lambda path: (len(path.parts), str(path))):
         if root not in roots.values():
-            arguments += ["--ro-bind", str(root), str(root)]
+            bind_flag = "--ro-bind-try" if root in ca_mount_set else "--ro-bind"
+            arguments += [bind_flag, str(root), str(root)]
+    bound = [root for root in (path.resolve(strict=True) for path in read_roots)
+             if root.is_dir() and root not in roots.values()]
     system_links = {Path(path) for path in ("/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32")
                     if os.path.islink(path)}
     for path, target in sorted(links.items(), key=lambda item: (len(item[0].parts), str(item[0]))):
-        if path not in system_links:
+        if path not in system_links and not any(path.is_relative_to(root) for root in bound):
             arguments += ["--symlink", target, str(path)]
     # Mask parts of a bound root (site-packages, unloadable extensions) instead of binding the
     # root entry by entry: a few hundred binds cost about a second per launch.
-    bound = [root for root in (path.resolve(strict=True) for path in cap.read_roots)
-             if root.is_dir() and root not in roots.values()]
     for raw in sorted(set(hide)):
         path = Path(raw)
         if path.resolve(strict=True) != path or not any(root in path.parents for root in bound):

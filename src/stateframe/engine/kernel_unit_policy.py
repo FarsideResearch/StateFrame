@@ -28,9 +28,13 @@ if TYPE_CHECKING:
 
 if __package__:
     from .kernel_edit_tool_names import EDIT_TOOL_NAMES
+    from .kernel_navigation_pages import (
+        _line_budget_spent, _line_match_session, _matching_lines, _undecided_note)
     from .kernel_parallel_records import CheckReceipt, Refusal, UnitSpec
 else:
     from kernel_edit_tool_names import EDIT_TOOL_NAMES
+    from kernel_navigation_pages import (
+        _line_budget_spent, _line_match_session, _matching_lines, _undecided_note)
     from kernel_parallel_records import CheckReceipt, Refusal, UnitSpec
 
 
@@ -440,12 +444,12 @@ class UnitPolicy:
         """Page only direct children leading to visible subframe files."""
         if __package__:
             from .kernel_navigation_pages import (
-                DEFAULT_DIRECTORY_PAGE_SIZE, _bounded_int, _page_rows, _page_text,
+                DEFAULT_DIRECTORY_PAGE_SIZE, _bounded_int, _fingerprint, _page_rows, _page_text,
                 NavigationPage,
             )
         else:
             from kernel_navigation_pages import (
-                DEFAULT_DIRECTORY_PAGE_SIZE, _bounded_int, _page_rows, _page_text,
+                DEFAULT_DIRECTORY_PAGE_SIZE, _bounded_int, _fingerprint, _page_rows, _page_text,
                 NavigationPage,
             )
         size = _bounded_int(page_size, DEFAULT_DIRECTORY_PAGE_SIZE)
@@ -464,7 +468,7 @@ class UnitPolicy:
         rendered = [str(row["name"]) for row in shown]
         text = (f"{display} is a DIRECTORY. Contents:\n"
                 + _page_text("directory", metadata, rendered))
-        return NavigationPage(text, metadata)
+        return NavigationPage(text, metadata, "sha256:" + _fingerprint(shown))
 
     def project_check_output(
         self, raw: str, runner: str, *, clone_root: Path | None = None,
@@ -657,6 +661,7 @@ class UnitPolicy:
     def _mentions_hidden(self, line: str) -> bool:
         return any(path in line for path in self.spec.hidden_paths)
 
+    @_line_match_session
     def search_visible(self, root: Path, pattern: str, *, scope: str = "",
                        mode: str = "regex", file_glob: str = "",
                        cursor: str = "", page_size: int = 60) -> "UnitSearchPage":
@@ -677,6 +682,8 @@ class UnitPolicy:
                                  separators=(",", ":")).encode("utf-8"))
         rows: list[str] = []
         total_bytes = 0
+        undecided_lines = [0]
+        unsearched = 0
         for path in paths:
             candidate = Path(root) / path
             if not candidate.is_file() or candidate.is_symlink():
@@ -691,14 +698,17 @@ class UnitPolicy:
                 if pattern in path:
                     rows.append(path)
                 continue
+            if _line_budget_spent():
+                unsearched += 1
+                continue
             try:
                 source = data.decode("utf-8")
             except UnicodeDecodeError:
                 continue
-            for number, line in enumerate(source.splitlines(), 1):
-                match = pattern in line if mode == "literal" else bool(expression.search(line))
-                if match:
-                    rows.append(f"{path}:{number}:{line[:500]}")
+            rows.extend(f"{path}:{number}:{line[:500]}" for number, line in _matching_lines(
+                source.splitlines(), expression,
+                undecided_lines if mode == "regex" else None,
+                pattern if mode == "literal" else None))
         identity = digest.hexdigest()
         offset = 0
         if cursor:
@@ -712,9 +722,15 @@ class UnitPolicy:
         page = rows[offset:offset + page_size]
         next_cursor = (f"subframe:{identity}:{offset + len(page)}"
                        if offset + len(page) < len(rows) else None)
-        metadata = {"total": len(rows), "shown": len(page), "scan_complete": True,
+        metadata = {"total": len(rows), "shown": len(page), "scan_complete": undecided_lines[0] == 0 and not unsearched,
                     "result_set_digest": identity, "next_cursor": next_cursor}
         text = "\n".join(page) or "(no matches in visible source)"
+        if undecided_lines[0] or unsearched:
+            if _line_budget_spent():
+                metadata["coverage_limited"] = True
+            if unsearched:
+                metadata["unsearched_files"] = unsearched
+            text = "\n".join([*page, *_undecided_note(undecided_lines[0], unsearched)])
         if next_cursor:
             text += f"\nnext_cursor={next_cursor}"
         return UnitSearchPage(text, metadata)

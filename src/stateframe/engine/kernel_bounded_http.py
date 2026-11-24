@@ -711,7 +711,7 @@ def _communicate_with_liveness(
         process: subprocess.Popen[bytes], packet: bytes, endpoint: str, key: str, *,
         deadline: float | None, hard_deadline: float | None, liveness_timeout: float,
         probe_state: dict[str, int | float | None]) -> tuple[bytes, bytes]:
-    """Extend a silent send only after the selected provider answers a probe.
+    """Renew liveness after a provider probe or new cumulative response bytes.
 
     ``deadline`` (per attempt) bounds upload completion and the first liveness verdict.
     None means no per-attempt cap (inf): only ``hard_deadline`` and liveness end the wait.
@@ -726,6 +726,7 @@ def _communicate_with_liveness(
                      max(last_liveness, deadline - first_probe_margin))
     communication_started = False
     delivered: threading.Event | None = None
+    observed_output_bytes = 0
 
     def record_markers(diagnostic: bytes | None) -> None:
         if diagnostic:
@@ -783,6 +784,11 @@ def _communicate_with_liveness(
             communication_started = True
             record_markers(error.stderr)
             now = time.monotonic()
+            partial_output = error.output
+            if (isinstance(partial_output, bytes)
+                    and len(partial_output) > observed_output_bytes):
+                observed_output_bytes = len(partial_output)
+                last_liveness = now
             if hard_deadline is not None and now >= hard_deadline:
                 _terminate_child(process)
                 raise TimeoutError("HTTP absolute deadline exceeded")

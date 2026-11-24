@@ -8169,10 +8169,15 @@ def work(d, *, resume=None):
         # product action lands. Edits and tests are never denied.
         try:
             from kernel_gate_switches import idle_governor_enabled
-            from kernel_idle_governor import IdleGovernor
+            from kernel_idle_governor import IdleGovernor, replay_receipts
             # STATEFRAME_IDLE_GOVERNOR=off disables the read budget for ablations;
             # an invalid value raises (caught below would hide it, so check first).
-            bolt.idlegov = IdleGovernor() if idle_governor_enabled() else None
+            if idle_governor_enabled():
+                _prior_receipts = getattr(bolt, "_receipts", ())
+                bolt.idlegov = (replay_receipts(_prior_receipts)
+                                if _prior_receipts else IdleGovernor())
+            else:
+                bolt.idlegov = None
         except ValueError:
             raise
         except Exception as _e:                                      # noqa: BLE001
@@ -13776,7 +13781,8 @@ def work(d, *, resume=None):
                     bolt.last_grep_hits = None if _grep_error is not None else _grep_total
                     if _grep_error is None:
                         bolt.sure_observe({"kind": "grep", "query": pat[:80],
-                                           "hit_count": _grep_total,
+                                           "hit_count": (_grep_total if _grep_total or _grep_complete
+                                                         else None),
                                            "shown": _grep_shown})
                     # E346: receipts carry the same complete-page metadata the model receives.
                     bolt.receipt(
@@ -13837,7 +13843,7 @@ def work(d, *, resume=None):
                             else:
                                 obs = _grep_page.text
                                 if _grep_symbol_fact and _grep_symbol_fact[1]:
-                                    obs += "\n(no grep matches)\n" + _workspace_truth.render_legacy_symbol_answer(
+                                    obs += ("\n(no grep matches)\n" if _grep_complete else "\n") + _workspace_truth.render_legacy_symbol_answer(
                                         _grep_symbol_fact[0], _grep_symbol_fact[1], (), 0, 0, 0,
                                     )
                         # Q6: the second identical zero grep at one revision changes the route.
@@ -15072,7 +15078,8 @@ def work(d, *, resume=None):
             if _igv is not None:
                 try:
                     from kernel_idle_governor import (
-                        GovernorDecision, post_execution_observation, read_governor_action,
+                        GovernorDecision, grep_governor_action,
+                        post_execution_observation, read_governor_action,
                     )
                     from kernel_gate_switches import deliver_requested_bytes_enabled
                     _atoks = line.split()
@@ -15082,10 +15089,16 @@ def work(d, *, resume=None):
                     if _akind in ("read", "grep", "list"):
                         _gpath = _atoks[1].strip("`'\"") if len(_atoks) > 1 else ""
                         _gaction = {"kind": _akind, "path": _gpath, "turn": step}
-                        if _akind == "read":
-                            # Budget only re-reads of already-delivered unchanged bytes:
-                            # the digest of THIS read's output is the novelty key, and a
-                            # path the request lists as required-but-missing is exempt.
+                        if _akind == "grep":
+                            _gaction = grep_governor_action(
+                                pat, turn=step, page=_grep_page,
+                                delivered=(_grep_error is None and _grep_page is not None))
+                            _successful_source_delivery = (
+                                _grep_error is None and _grep_page is not None)
+                        elif _akind == "read":
+                            # Budget only repeats of already-delivered evidence. The
+                            # source revision and exact range identify a read; its byte
+                            # digest is the fallback when either is not available.
                             # read_governor_action maps the delivery receipt; reads that
                             # delivered no requested bytes are undelivered and spend nothing.
                             _gaction = read_governor_action(
@@ -15106,9 +15119,20 @@ def work(d, *, resume=None):
                                 if _read_result == "OK" else None)
                             if _gvis is not None:
                                 _gaction["visible"] = _gvis
-                        elif _akind == "grep" and _deliver_requested:
-                            _successful_source_delivery = (
-                                _grep_error is None and _grep_page is not None)
+                        if isinstance(tool_call_id, str) and tool_call_id:
+                            _gaction["receipt_id"] = tool_call_id
+                        _evidence_identity = _gaction.get("evidence_identity")
+                        if _akind == "read" and isinstance(_read_delivery, dict):
+                            _read_delivery.pop("page_evidence_digest", None)
+                        _governor_receipts = getattr(bolt, "_receipts", None)
+                        if (isinstance(_evidence_identity, str) and _evidence_identity
+                                and _governor_receipts):
+                            # Store policy identity after normal receipt projections run.
+                            _governor_receipts[-1]["evidence_identity"] = _evidence_identity
+                            if _akind == "read":
+                                _delivery_receipt = _governor_receipts[-1].get("delivery")
+                                if isinstance(_delivery_receipt, dict):
+                                    _delivery_receipt.pop("page_evidence_digest", None)
                         _gd = _igv.should_allow(_gaction)
                         _gmsg = getattr(getattr(_igv, "_last_receipt", None),
                                         "message", "") or ""

@@ -1,10 +1,10 @@
 """Enforced liveness governor for collection-only repair actions.
 
-The governor is intentionally small and receipt-backed.  It counts read-like
-actions since the last productive receipt, warns once, then blocks repeated
-reads and greps until an edit, test, or new contract fact lands.  It is an
-action policy organ, not an execution layer: the dispatcher owns applying the
-returned decision and placing the refusal in the next observation.
+The governor is intentionally small and receipt-backed. It counts repeated
+read and search evidence since the last productive receipt, warns once, then
+blocks repeated reads and greps until an edit, test, or new contract fact lands.
+It is an action policy organ, not an execution layer: the dispatcher owns
+applying the returned decision and placing the refusal in the next observation.
 """
 
 from __future__ import annotations
@@ -129,6 +129,111 @@ def _result_class(action: Action, explicit_result: object = None) -> str:
     return ""
 
 
+_FAILED_RESULT_CLASSES = frozenset({
+    "BLOCKED", "CANCELLED", "CANCELED", "DENIED", "ERROR", "EXCEPTION",
+    "FAILED", "FAIL", "FAILURE", "MISSING", "REJECTED", "REFUSED", "STALE",
+    "STALE_REVISION", "STALE_COORDINATE", "TIMEOUT", "TIMED_OUT", "UNAVAILABLE",
+    "WITHHELD", "HIDDEN_PATH", "INVALID_ARGUMENT", "OUT_OF_RANGE",
+    "SYMBOL_NOT_FOUND",
+})
+
+
+def _undelivered_action(action: Action, kind: str) -> bool:
+    if not isinstance(action, Mapping):
+        return False
+    if action.get("undelivered") is True or action.get("refused") is True:
+        return True
+    if action.get("delivered") is False:
+        return True
+    if _result_class(action) in _FAILED_RESULT_CLASSES:
+        return True
+    if kind == "read":
+        delivery = action.get("delivery")
+        if not isinstance(delivery, Mapping):
+            delivery = action
+        if is_undelivered_read(delivery):
+            return True
+        outcome = _text(delivery.get("host_outcome")).upper()
+        status = _text(delivery.get("delivery_status")).upper()
+        return outcome in _FAILED_RESULT_CLASSES or status in _FAILED_RESULT_CLASSES
+    return False
+
+
+def _identity_key(action: Action, kind: str, action_path: str) -> str:
+    """Return a stable identity for evidence already delivered to the model."""
+    if not isinstance(action, Mapping):
+        return ""
+    explicit = action.get("evidence_identity")
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip()
+    if isinstance(explicit, Mapping) and explicit:
+        value: object = dict(explicit)
+    elif (kind == "read" and _text(action.get("result_set_digest", ""))
+          and _text(action.get("page_digest", ""))):
+        value = {
+            "kind": "directory", "path": action_path,
+            "result_set_digest": _text(action.get("result_set_digest")),
+            "page_digest": _text(action.get("page_digest")),
+        }
+    elif kind == "read":
+        delivery = action.get("delivery")
+        if not isinstance(delivery, Mapping):
+            delivery = action
+        revision = delivery.get("revision", action.get("revision"))
+        effective = delivery.get("effective_range", action.get("effective_range"))
+        byte_start = delivery.get("byte_start", action.get("byte_start"))
+        byte_end = delivery.get("byte_end", action.get("byte_end"))
+        if isinstance(effective, Mapping):
+            range_identity = {
+                key: effective[key]
+                for key in ("start_line", "end_line", "start_column", "end_column",
+                            "byte_start", "byte_end")
+                if effective.get(key) is not None
+            }
+        else:
+            range_identity = {}
+        if byte_start is not None or byte_end is not None:
+            range_identity["byte_start"] = byte_start
+            range_identity["byte_end"] = byte_end
+        content_digest = _text(
+            action.get("content_digest", delivery.get("requested_bytes_sha256", "")))
+        if revision is not None or range_identity:
+            value = {
+                "kind": "read",
+                "path": action_path,
+                "revision": revision,
+                "range": range_identity or {"span": _span_suffix(action.get("path"))},
+            }
+            if revision is None and content_digest:
+                value["content_digest"] = content_digest
+        else:
+            digest = content_digest
+            if not action_path and not _span_suffix(action.get("path")) and not digest:
+                return ""
+            value = {
+                "kind": "read", "path": action_path,
+                "span": _span_suffix(action.get("path")), "content_digest": digest,
+            }
+    elif kind in {"grep", "search"}:
+        raw_query = action.get("query", action.get("intent", ""))
+        query = raw_query if isinstance(raw_query, str) else str(raw_query or "")
+        result_digest = _text(action.get("result_set_digest", action.get("result_digest", "")))
+        page_digest = _text(action.get("page_digest", ""))
+        page = action.get("grep_page")
+        if isinstance(page, Mapping):
+            page_digest = page_digest or _text(page.get("sha256", ""))
+        if not query.strip() or not result_digest:
+            return ""
+        value = {
+            "kind": "grep", "query": query, "result_set_digest": result_digest,
+            "page_digest": page_digest,
+        }
+    else:
+        return ""
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+    return "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 def is_undelivered_read(delivery: object) -> bool:
     """True when a read's requested bytes never arrived (budget miss, withheld, or empty page).
 
@@ -149,23 +254,44 @@ def read_governor_action(
 ) -> dict[str, object]:
     """Governor action for one read, built from the executor's delivery receipt.
 
-    Only a re-read of bytes the model already received is budgeted. A read whose
-    requested bytes never arrived (budget miss, size limit, withheld or empty page)
-    is ``undelivered``: it spends no budget and is never refused, because the model
-    cannot act on bytes it was never given. A proof-backed reuse stub keeps its
-    budgeted, path-less shape, so repeated re-reads still reach the budget.
+    Only repeated evidence is budgeted. A read whose requested bytes never arrived
+    (budget miss, size limit, withheld or empty page) is ``undelivered``: it spends
+    no budget and is never refused, because the model cannot act on bytes it never
+    received. A proof-backed reuse stub keeps its path-less shape so repeats count.
     """
     action: dict[str, object] = {"kind": "read", "path": path, "turn": turn}
+    receipt: Mapping[str, object] = delivery if isinstance(delivery, Mapping) else {}
+    if _undelivered_action({"kind": "read", "delivery": receipt}, "read"):
+        action["undelivered"] = True
+        return action
+    if receipt.get("schema") == "navigation-page/1":
+        result_digest = _text(receipt.get("result_set_digest", ""))
+        page_digest = _text(receipt.get("page_evidence_digest", ""))
+        if result_digest and page_digest:
+            action["result_set_digest"] = result_digest
+            action["page_digest"] = page_digest
+            listing_path = _action_path(action) or _normal_path(receipt.get("path")) or "."
+            _attach_evidence_identity(action, "read", listing_path)
+            return action
+    if not read_ok:
+        action["undelivered"] = True
+        return action
     if not deliver_requested:
         action["content_digest"] = hashlib.sha256(
             observation.encode("utf-8", "replace")).hexdigest()[:32]
+        if is_undelivered_read(receipt):
+            action["undelivered"] = True
+        else:
+            _copy_read_coordinates(action, receipt)
+            _attach_evidence_identity(action, "read", _action_path(action))
         return action
-    receipt: Mapping[str, object] = delivery if isinstance(delivery, Mapping) else {}
     status = receipt.get("delivery_status")
     count = receipt.get("requested_bytes_delivered", 0)
     has_bytes = type(count) is int and count > 0
-    if read_ok and status == "DELIVERED" and has_bytes:
+    if status == "DELIVERED" and has_bytes:
+        _copy_read_coordinates(action, receipt)
         action["content_digest"] = str(receipt.get("requested_bytes_sha256") or "")
+        _attach_evidence_identity(action, "read", _action_path(action))
     elif is_undelivered_read(receipt):
         action["undelivered"] = True
     else:
@@ -173,18 +299,69 @@ def read_governor_action(
     return action
 
 
+def _copy_read_coordinates(action: dict[str, object], delivery: Mapping[str, object]) -> None:
+    """Carry the source revision and exact returned range into the policy receipt."""
+    for field in ("revision", "byte_start", "byte_end", "effective_range"):
+        value = delivery.get(field)
+        if value is not None:
+            action[field] = (
+                dict(value) if field == "effective_range" and isinstance(value, Mapping)
+                else value
+            )
+
+
+def _attach_evidence_identity(action: dict[str, object], kind: str, action_path: str) -> None:
+    identity = _identity_key(action, kind, action_path)
+    if identity:
+        action["evidence_identity"] = identity
+
+
+def grep_governor_action(
+        query: str, *, turn: int, page: object, delivered: bool,
+) -> dict[str, object]:
+    """Build a grep action from the exact result page returned to the model."""
+    action: dict[str, object] = {"kind": "grep", "query": query, "turn": turn}
+    if not delivered or page is None:
+        action["undelivered"] = True
+        return action
+    text = getattr(page, "text", None)
+    metadata = getattr(page, "metadata", None)
+    if not isinstance(text, str) or not isinstance(metadata, Mapping):
+        action["undelivered"] = True
+        return action
+    result_digest = _text(metadata.get("result_set_digest"))
+    page_digest = _text(getattr(page, "evidence_digest", ""))
+    if not page_digest:
+        page_digest = _text(metadata.get("page_digest"))
+    if not page_digest:
+        page_digest = "sha256:" + hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
+    if not result_digest:
+        result_digest = page_digest
+    action["result_set_digest"] = result_digest
+    action["page_digest"] = page_digest
+    action["evidence_identity"] = _identity_key(action, "grep", "")
+    return action
+
+
 def _fingerprint(action: Action) -> str:
     if isinstance(action, Mapping):
-        supplied = _text(action.get("fingerprint", action.get("receipt_id", "")))
+        supplied = _text(action.get("fingerprint", ""))
         if supplied:
             return supplied
+        kind = _action_kind(action)
         payload = {
-            "kind": _action_kind(action),
+            "kind": kind,
             "path": _action_path(action),
             "result_class": _result_class(action),
-            "intent": _text(action.get("intent")),
+            "intent": _text(action.get("intent", action.get("query", ""))),
+            "evidence_identity": _identity_key(action, kind, _action_path(action)),
             "turn": action.get("turn", action.get("step", "")),
         }
+        # A tool receipt ID correlates this action with a result, but it is not a
+        # sufficient cache key on its own: providers may reuse IDs across calls.
+        receipt_id = _text(action.get("receipt_id", ""))
+        if receipt_id:
+            payload["receipt_id"] = receipt_id
     else:
         payload = {"kind": _action_kind(action)}
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
@@ -227,6 +404,7 @@ class IdleDecisionReceipt:
     path: str = ""
     result_class: str = ""
     fingerprint: str = ""
+    evidence_identity: str = ""
     novelty_escape: bool = False
     message: str = ""
 
@@ -248,6 +426,7 @@ class IdleDecisionReceipt:
                         "path": self.path,
                         "result_class": self.result_class,
                         "fingerprint": self.fingerprint,
+                        "evidence_identity": self.evidence_identity,
                         "novelty_escape": self.novelty_escape,
                         "message": self.message,
                     },
@@ -263,6 +442,7 @@ class IdleDecisionReceipt:
             "path": self.path,
             "result_class": self.result_class,
             "fingerprint": self.fingerprint,
+            "evidence_identity": self.evidence_identity,
             "novelty_escape": self.novelty_escape,
             "message": self.message,
         }
@@ -313,7 +493,7 @@ class IdleGovernor:
         self._resets = 0
         self._recovery_reads = 0
         self._undelivered_reads = 0
-        self._read_paths: set[str] = set()
+        self._evidence_identities: set[str] = set()
         self._trace: list[dict[str, object]] = []
         self._last_receipt: IdleDecisionReceipt | None = None
         self._preflight: dict[str, IdleDecisionReceipt] = {}
@@ -405,7 +585,7 @@ class IdleGovernor:
             self._last_receipt = decision_receipt
             return decision_receipt.decision
 
-        decision, event, message, novelty_escape = self._decide(
+        decision, event, message, novelty_escape, evidence_identity = self._decide(
             action, kind=kind, action_path=action_path, result=result
         )
         row = IdleDecisionReceipt(
@@ -418,6 +598,7 @@ class IdleGovernor:
             path=action_path,
             result_class=result,
             fingerprint=_fingerprint(action),
+            evidence_identity=evidence_identity,
             novelty_escape=novelty_escape,
             message=message,
         )
@@ -429,39 +610,24 @@ class IdleGovernor:
 
     def _decide(
         self, action: Action, *, kind: str, action_path: str, result: str
-    ) -> tuple[GovernorDecision, str, str, bool]:
+    ) -> tuple[GovernorDecision, str, str, bool, str]:
         product_action = kind in PRODUCT_ACTIONS and (
             not isinstance(action, Mapping) or result not in _NON_PRODUCT_RESULTS
         )
         if product_action:
-            return GovernorDecision.ALLOW, "IDLE_ALLOWED", "", False
+            return GovernorDecision.ALLOW, "IDLE_ALLOWED", "", False, ""
         if not _is_non_product_action(action):
-            return GovernorDecision.ALLOW, "IDLE_ALLOWED", "", False
+            return GovernorDecision.ALLOW, "IDLE_ALLOWED", "", False, ""
 
         # The model received none of the requested bytes (budget miss, size limit, empty
         # page): nothing was re-read, so it neither counts toward the budget nor marks
         # the path delivered. The receipt stays visible under its own event.
-        if kind == "read" and isinstance(action, Mapping) and action.get("undelivered") is True:
-            self._undelivered_reads += 1
-            return GovernorDecision.ALLOW, "IDLE_UNDELIVERED", "", False
+        if kind in DENIABLE_ACTIONS and _undelivered_action(action, kind):
+            if kind == "read":
+                self._undelivered_reads += 1
+            return GovernorDecision.ALLOW, "IDLE_UNDELIVERED", "", False, ""
 
-        # A read is "novel" when its key (path, plus the delivered-content digest when
-        # the caller supplies one) has never been DELIVERED. Only re-reads of already
-        # delivered, unchanged bytes are budgeted: a first read of a path, a read of
-        # changed bytes, or a different range is never refused. Exempt reads (paths the
-        # request itself says are required but missing) are never refused either.
-        # Keys are recorded only when the read is allowed, so a refusal cannot make
-        # a never-seen path look already read (the earlier benchmark starvation).
-        novelty_escape = False
-        read_key = ""
-        if kind == "read" and action_path:
-            digest = _text(action.get("content_digest", "")) if isinstance(action, Mapping) else ""
-            # The span is part of the key: a different range of a delivered file is novel.
-            span = _span_suffix(action.get("path")) if isinstance(action, Mapping) else ""
-            read_key = action_path + span + ("#" + digest if digest else "")
-            novelty_escape = read_key not in self._read_paths
-        exempt = bool(action.get("exempt")) if isinstance(action, Mapping) else False
-
+        evidence_identity = _identity_key(action, kind, action_path)
         # A read of a path/span that is NOT currently in the request is recovery, not
         # waste: the model cannot act on bytes it cannot see. It is never refused under
         # any budget state, never spends the budget, and is counted separately.
@@ -470,38 +636,44 @@ class IdleGovernor:
         if (kind == "read" and isinstance(action, Mapping)
                 and action.get("visible") is False):
             self._recovery_reads += 1
-            self._remember_read(read_key)
-            return GovernorDecision.ALLOW, "IDLE_RECOVERY", "", novelty_escape
+            self._remember_evidence(evidence_identity)
+            return GovernorDecision.ALLOW, "IDLE_RECOVERY", "", False, evidence_identity
+
+        # Novelty is based on delivered evidence identity, not action volume. A read
+        # identity includes its source revision and exact returned range; grep includes
+        # its query, result set, and page. First delivery of evidence is always free.
+        # Only repeats of the same evidence advance the idle budget.
+        if evidence_identity and evidence_identity not in self._evidence_identities:
+            self._remember_evidence(evidence_identity)
+            return (GovernorDecision.ALLOW, "IDLE_NOVELTY_ESCAPE", "", True,
+                    evidence_identity)
+        exempt = bool(action.get("exempt")) if isinstance(action, Mapping) else False
 
         self._consecutive_non_product += 1
         if self._mode is GovernorMode.GOVERNED:
             if exempt and kind == "read":
-                self._remember_read(read_key)
-                return GovernorDecision.ALLOW, "IDLE_EXEMPT", "", novelty_escape
-            if novelty_escape:
-                self._remember_read(read_key)
-                return GovernorDecision.ALLOW, "IDLE_NOVELTY_ESCAPE", "", True
+                self._remember_evidence(evidence_identity)
+                return GovernorDecision.ALLOW, "IDLE_EXEMPT", "", False, evidence_identity
             if kind in DENIABLE_ACTIONS:
                 self._denials += 1
-                return GovernorDecision.DENY, "IDLE_DENIED", REFUSAL, False
-            return GovernorDecision.ALLOW, "IDLE_ALLOWED", "", False
+                return GovernorDecision.DENY, "IDLE_DENIED", REFUSAL, False, evidence_identity
+            return GovernorDecision.ALLOW, "IDLE_ALLOWED", "", False, evidence_identity
 
         if self._consecutive_non_product >= self.n2:
             self._mode = GovernorMode.GOVERNED
-            if kind in DENIABLE_ACTIONS and not novelty_escape and not (exempt and kind == "read"):
+            if kind in DENIABLE_ACTIONS and not (exempt and kind == "read"):
                 self._denials += 1
-                return GovernorDecision.DENY, "IDLE_DENIED", REFUSAL, False
-        self._remember_read(read_key)
+                return GovernorDecision.DENY, "IDLE_DENIED", REFUSAL, False, evidence_identity
         if self._consecutive_non_product >= self.n1 and not self._warning_emitted:
             self._warning_emitted = True
             self._warnings += 1
             warning = WARNING_TEMPLATE.format(count=self._consecutive_non_product)
-            return GovernorDecision.WARN, "IDLE_WARNING", warning, False
-        return GovernorDecision.ALLOW, "IDLE_ALLOWED", "", novelty_escape
+            return GovernorDecision.WARN, "IDLE_WARNING", warning, False, evidence_identity
+        return GovernorDecision.ALLOW, "IDLE_ALLOWED", "", False, evidence_identity
 
-    def _remember_read(self, read_key: str) -> None:
-        if read_key:
-            self._read_paths.add(read_key)
+    def _remember_evidence(self, evidence_identity: str) -> None:
+        if evidence_identity:
+            self._evidence_identities.add(evidence_identity)
 
     @staticmethod
     def _turn(action: Action, explicit_turn: int) -> int:
@@ -613,6 +785,11 @@ def replay_receipts(
 
     governor = IdleGovernor(n1=n1, n2=n2)
     for receipt in receipts:
+        # Live preflight decisions are cached until their matching action receipt
+        # arrives. A persisted receipt tape already contains completed actions, so
+        # each row must make a fresh decision even when a batch repeats one wire
+        # fingerprint within the same turn.
+        governor._preflight.clear()
         governor.observe_receipt(receipt)
     return governor
 
@@ -638,6 +815,7 @@ __all__ = [
     "WARNING_TEMPLATE",
     "is_undelivered_read",
     "load_receipts",
+    "grep_governor_action",
     "read_governor_action",
     "replay_receipts",
 ]

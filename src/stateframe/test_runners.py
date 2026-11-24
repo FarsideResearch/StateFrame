@@ -190,6 +190,15 @@ _NODE_TEST_NAME = re.compile(r"test|test-.*|.+[._-]test")
 _NODE_JS_SUFFIXES = frozenset({".js", ".cjs", ".mjs"})
 _NODE_TS_SUFFIXES = frozenset({".ts", ".cts", ".mts"})
 _NODE_TEST_REPORTERS = frozenset({"--test-reporter=tap", "--test-reporter=spec"})
+_GO_PACKAGE_RESULT = re.compile(r"^(ok|\?|FAIL)\s+\S+(?:\s+.*)?$")
+_GO_RUN_EVENT = re.compile(r"^=== RUN\s+(\S+)$")
+_GO_PASS_EVENT = re.compile(r"^--- PASS:\s+(\S+)(?:\s+.*)?$")
+_CARGO_RUNNING = re.compile(r"^running (\d+) tests?$")
+_CARGO_RESULT = re.compile(
+    r"^test result: (ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored; "
+    r"(\d+) measured; (\d+) filtered out; finished in \S+$")
+_CARGO_TEST_EVENT = re.compile(
+    r"\btest\s+.+?\s+\.\.\.\s+.*(ok|ignored|FAILED)(?:,\s*.+)?$")
 
 
 def _package_script_argv(script: object) -> tuple[str, ...]:
@@ -256,7 +265,8 @@ def _runner_for_command(kind: str, command: tuple[str, ...], repo: Path | None) 
 
 
 def _parsed_passes(runner: str, output: str, *, require_node_total: bool = False) -> int:
-    lines = [line.strip() for line in _ANSI.sub("", output).splitlines() if line.strip()]
+    clean_output = _ANSI.sub("", output)
+    lines = [line.strip() for line in clean_output.splitlines() if line.strip()]
     if not lines:
         return 0
     if runner == "pytest":
@@ -297,24 +307,71 @@ def _parsed_passes(runner: str, output: str, *, require_node_total: bool = False
         return counts.get("passed", 0) if not any(counts.get(name, 0) for name in
                                                    ("failed", "error", "errors")) else 0
     if runner == "go":
-        if not re.fullmatch(r"ok\s+\S+(?:\s+.*)?", lines[-1]) or any(
-                re.match(r"(?:--- FAIL:|FAIL\b)", line) for line in lines):
+        if (not _GO_PACKAGE_RESULT.fullmatch(lines[-1]) or any(
+                re.match(r"(?:--- FAIL:|FAIL(?:\s|$))", line) for line in lines)):
             return 0
-        if len(lines) < 3 or lines[-2] != "PASS":
-            return 0
-        start = max((index for index, line in enumerate(lines[:-2]) if re.match(
-            r"(?:ok\s|FAIL\b|\?\s)", line)), default=-1) + 1
-        package_lines = lines[start:-2]
-        started = {match.group(1) for line in package_lines if (match := re.fullmatch(
-            r"=== RUN\s+(\S+)", line))}
-        return sum(bool(match and match.group(1) in started) for line in package_lines
-                   if (match := re.fullmatch(r"--- PASS: (\S+)(?:\s+.*)?", line)))
+        passes = 0
+        unit_start = 0
+        for end, line in enumerate(lines):
+            result = _GO_PACKAGE_RESULT.fullmatch(line)
+            if result is None:
+                continue
+            if result.group(1) == "ok":
+                unit = lines[unit_start:end]
+                if unit and unit[-1] == "PASS":
+                    started: set[str] = set()
+                    confirmed: set[str] = set()
+                    for event in unit[:-1]:
+                        run = _GO_RUN_EVENT.fullmatch(event)
+                        passed = _GO_PASS_EVENT.fullmatch(event)
+                        if run is not None:
+                            started.add(run.group(1))
+                        elif passed is not None and passed.group(1) in started:
+                            confirmed.add(passed.group(1))
+                    passes += len(confirmed)
+            unit_start = end + 1
+        return passes
     if runner == "cargo":
-        match = re.fullmatch(r"test result: ok\. (\d+) passed; (\d+) failed; "
-                             r"(\d+) ignored; (\d+) measured; (\d+) filtered out; finished in \S+", lines[-1])
-        if match is None:
+        if any(line.startswith("test result: FAILED")
+               or ((match := _CARGO_TEST_EVENT.search(line)) is not None
+                   and match.group(1) == "FAILED") for line in lines):
             return 0
-        return int(match.group(1)) if int(match.group(2)) == 0 else 0
+        passes = 0
+        unit_start = 0
+        results = [(index, line) for index, line in enumerate(lines)
+                   if line.startswith("test result:")]
+        if not results:
+            return 0
+        for end, line in results:
+            unit = lines[unit_start:end]
+            unit_start = end + 1
+            result = _CARGO_RESULT.fullmatch(line)
+            if result is None:
+                return 0
+            status = result.group(1)
+            passed_count, failed_count, ignored_count = (
+                int(result.group(index)) for index in (2, 3, 4))
+            if status != "ok" or failed_count:
+                return 0
+            running = [int(match.group(1)) for row in unit
+                       if (match := _CARGO_RUNNING.fullmatch(row))]
+            event_counts = {"ok": 0, "ignored": 0, "FAILED": 0}
+            events = [match for row in unit
+                      if (match := _CARGO_TEST_EVENT.search(row))]
+            for match in events:
+                event_counts[match.group(1)] += 1
+            # Quiet and uncaptured output can hide event lines, so fewer events are fine.
+            if len(running) > 1 or (running and running[0] != sum(
+                    int(result.group(index)) for index in (2, 3, 4, 5))):
+                return 0
+            if (event_counts["ok"] > passed_count
+                    or event_counts["ignored"] > ignored_count):
+                return 0
+            passes += passed_count
+        if any(_CARGO_RUNNING.fullmatch(row) or _CARGO_TEST_EVENT.search(row)
+               for row in lines[unit_start:]):
+            return 0
+        return passes
     return 0
 
 

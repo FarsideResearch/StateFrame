@@ -122,9 +122,16 @@ def _definition_rows(targets: Sequence[ClassTarget]) -> tuple[dict[str, object],
 
 def _line_offsets(source: str) -> tuple[int, ...]:
     offsets = [0]
-    for index, character in enumerate(source):
-        if character == "\n":
-            offsets.append(index + 1)
+    index = 0
+    while index < len(source):
+        if source[index] == "\r":
+            index += 2 if source[index:index + 2] == "\r\n" else 1
+            offsets.append(index)
+        elif source[index] == "\n":
+            index += 1
+            offsets.append(index)
+        else:
+            index += 1
     return tuple(offsets)
 
 
@@ -193,7 +200,11 @@ def _char_column(line: str, byte_column: int) -> int:
 
 def _offset(source: str, offsets: Sequence[int], line: int, column: int) -> int:
     line_start = offsets[line - 1]
-    line_end = offsets[line] - 1 if line < len(offsets) else len(source)
+    line_end = offsets[line] if line < len(offsets) else len(source)
+    if line < len(offsets) and source[line_end - 1:line_end] == "\n":
+        line_end -= 1
+    if line_end > line_start and source[line_end - 1:line_end] == "\r":
+        line_end -= 1
     line_text = source[line_start:line_end]
     return line_start + _char_column(line_text, column)
 
@@ -429,11 +440,20 @@ def prepare_class_edit(
     # decorators when native payloads repeat the class header.  If the target has no
     # decorators, a decorated payload is allowed and its decorator source is applied.
     include_payload_decorators = not selected.node.decorator_list and bool(payload.decorator_list)
-    payload_segment = _source_segment(
-        replacement, payload, include_decorators=include_payload_decorators,
-    )
-    candidate_segment = _reindent(payload_segment, selected.node.col_offset)
-    start, end = _node_span(current, selected.node)
+    try:
+        payload_segment = _source_segment(
+            replacement, payload, include_decorators=include_payload_decorators,
+        )
+        candidate_segment = _reindent(payload_segment, selected.node.col_offset)
+        start, end = _node_span(current, selected.node)
+    except IndexError:
+        return ClassEditPlan(
+            handled=True,
+            rejection=_typed_refusal(
+                "INVALID_CLASS_RESULT", path, target, root=root,
+                hint=f"class edit could not map Python source positions for {selected.qualified_name}",
+            ),
+        )
     candidate = current[:start] + candidate_segment + current[end:]
     if payload_imports:
         candidate = _add_missing_imports(candidate, payload_imports, replacement)

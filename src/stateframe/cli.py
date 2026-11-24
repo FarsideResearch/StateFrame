@@ -67,6 +67,14 @@ def _parallel_mode(value: str) -> str:
     if value.isascii() and value.isdecimal() and int(value) > 0:
         return value
     raise argparse.ArgumentTypeError("must be off, auto, or a positive integer")
+
+
+class _ExplicitValue(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, self.dest, values)
+        setattr(namespace, self.dest + "_explicit", True)
+
+
 def _nonnegative(value: str) -> int:
     number = int(value)
     if number < 0:
@@ -178,11 +186,14 @@ def _add_task_arguments(command: argparse.ArgumentParser, *, for_run: bool = Fal
     command.add_argument("--routes", type=Path, help="TOML or JSON route configuration file")
     command.add_argument("--timeout", type=float, default=None,
                          help="optional wall-clock limit in seconds (default: no limit; stop with Ctrl-C)")
+    command.add_argument("--yolo", action="store_true",
+                         help="authorize unrestricted host shell execution for this command")
     command.add_argument("--shell", choices=("off", "read-only", "standard", "unrestricted"),
-                         default="standard")
+                         default="standard", action=_ExplicitValue)
     command.add_argument("--shell-ask", action=argparse.BooleanOptionalAction,
                          default=not for_run)
-    command.add_argument("--shell-network", choices=("none", "loopback", "full"), default="loopback")
+    command.add_argument("--shell-network", choices=("none", "loopback", "full"), default="loopback",
+                         action=_ExplicitValue)
     for flag in ("shell-allow", "shell-deny", "shell-read", "web-allow", "tools", "mcp"):
         command.add_argument("--" + flag, action="append", default=[])
     command.add_argument("--skill", action="append", default=[], metavar="NAME_OR_PATH",
@@ -200,7 +211,7 @@ def _add_task_arguments(command: argparse.ArgumentParser, *, for_run: bool = Fal
                               "else CLAUDE.md (default: off)")
     project.add_argument("--no-instructions", action="store_true",
                          help="do not read project instructions (the default)")
-    command.add_argument("--shell-sandbox", choices=("on", "off"), default="on")
+    command.add_argument("--shell-sandbox", choices=("on", "off"), default="on", action=_ExplicitValue)
     for flag in ("run-env", "git-tool", "web"):
         command.add_argument("--" + flag, action=argparse.BooleanOptionalAction, default=None)
     _add_mutation_arguments(command)
@@ -258,6 +269,10 @@ def build_parser(*, json_errors: bool = False) -> argparse.ArgumentParser:
     resume_cmd.add_argument("--model", default=None,
                             help="continue under this model name, when the endpoint serves the SAME model under "
                                  "another name (default: the run's model name)")
+    resume_cmd.add_argument("--shell", default=None, choices=("unrestricted",),
+                            help="repeat the run's --shell unrestricted host grant")
+    resume_cmd.add_argument("--shell-sandbox", default=None, choices=("off",),
+                            help="repeat the run's --shell-sandbox off host grant")
     resume_cmd.add_argument("--api-key-env", metavar="VAR",
                             help="environment variable holding the API key (default: the run's)")
     resume_cmd.add_argument("--max-turns", type=_turns, default=None,
@@ -266,6 +281,8 @@ def build_parser(*, json_errors: bool = False) -> argparse.ArgumentParser:
                             help="optional wall-clock limit in seconds for this resume")
     resume_cmd.add_argument("--replay-external", action="store_true",
                             help="explicitly repeat external tool operations and verify their results")
+    resume_cmd.add_argument("--yolo", action="store_true",
+                            help="authorize resuming a run created with --yolo")
     resume_cmd.add_argument("--keep-checkpoints", action="store_true",
                             help="keep the run's checkpoints after it finishes (default: removed once finished)")
     resume_cmd.add_argument("--keep-run-env", action="store_true",
@@ -337,12 +354,13 @@ def build_parser(*, json_errors: bool = False) -> argparse.ArgumentParser:
     return parser
 
 
-def _run_options(args: argparse.Namespace, endpoint: Endpoint) -> RunOptions:
+def _run_options(args: argparse.Namespace, endpoint: Endpoint, *, warn: bool = True) -> RunOptions:
     if args.shell_sandbox == "off" and args.shell != "unrestricted":
         raise ToolSettingsError("--shell-sandbox off requires --shell unrestricted")
     host_authorization = None
     if args.shell_sandbox == "off":
-        print("WARNING: SHELL SANDBOX OFF; COMMANDS CAN ACCESS THE HOST", file=sys.stderr)
+        if warn:
+            print("WARNING: SHELL SANDBOX OFF; COMMANDS CAN ACCESS THE HOST", file=sys.stderr)
         host_authorization = {"granted_at": datetime.now(timezone.utc).isoformat(),
                               "flags": ["--shell unrestricted", "--shell-sandbox off"]}
     settings = ToolSettings(shell=args.shell, shell_ask=args.shell_ask,
@@ -357,7 +375,7 @@ def _run_options(args: argparse.Namespace, endpoint: Endpoint) -> RunOptions:
                                               for path in args.tools),
                             mcp_files=tuple({"path": str(safe_expanduser(Path(path)).resolve()), "digest": "pending"}
                                             for path in args.mcp))
-    return RunOptions(repo=args.repo, task=getattr(args, "task", ""), endpoint=endpoint,
+    options = RunOptions(repo=args.repo, task=getattr(args, "task", ""), endpoint=endpoint,
                        max_turns=args.max_turns, test_cmd=args.test_cmd, check_cmd=args.check_cmd,
                        checks=args.check,
                       runner_kind=args.runner_kind,
@@ -404,6 +422,49 @@ def _run_options(args: argparse.Namespace, endpoint: Endpoint) -> RunOptions:
                        mutation_retain=args.mutation_retain,
                       mutation_audit=args.mutation_audit,
                       mutation_hooks=args.mutation_hook)
+    options._cli_yolo = bool(getattr(args, "yolo", False)) and args.shell_sandbox == "off"
+    return options
+
+
+def _yolo_notice(args: argparse.Namespace) -> None:
+    if args.command == "resume":
+        if not args.yolo:
+            return
+        try:
+            spec = json.loads((args.run_dir / "spec.json").read_text(encoding="utf-8"))
+            settings = spec.get("tool_settings", {}) if isinstance(spec, dict) else {}
+        except (OSError, ValueError):
+            return
+        if (isinstance(spec, dict) and spec.get("yolo") is True
+                and isinstance(settings, dict) and settings.get("shell") == "unrestricted"
+                and settings.get("host_authorization")):
+            print("WARNING: --yolo resumes unrestricted host shell access; commands can modify host files "
+                  "and access the network", file=sys.stderr)
+        return
+    if args.command not in {"run", "chat"}:
+        return
+    if not args.yolo:
+        if args.shell_sandbox == "off" and args.shell == "unrestricted":
+            print("WARNING: SHELL SANDBOX OFF; COMMANDS CAN ACCESS THE HOST", file=sys.stderr)
+        return
+    # An explicit narrower value stops here, so no combination forces the host on.
+    targets = {"shell": "unrestricted", "shell_sandbox": "off", "shell_network": "full"}
+    for name, target in targets.items():
+        if not getattr(args, name + "_explicit", False):
+            setattr(args, name, target)
+        elif name != "shell_network" and getattr(args, name) != target:
+            break
+    conflicts = [f"--{name.replace('_', '-')}={getattr(args, name)}"
+                 for name, target in targets.items()
+                 if getattr(args, name + "_explicit", False) and getattr(args, name) != target]
+    host = args.shell == "unrestricted" and args.shell_sandbox == "off"
+    if host:
+        suffix = "; explicit values retained: " + ", ".join(conflicts) if conflicts else ""
+        print("WARNING: --yolo enables unrestricted host shell execution; commands can modify host files "
+              "and access the network" + suffix, file=sys.stderr)
+    elif conflicts:
+        print("NOTICE: --yolo host access is limited by explicit shell settings: "
+              + ", ".join(conflicts), file=sys.stderr)
 
 
 def _mutation_platform_refusal(args: argparse.Namespace) -> str | None:
@@ -595,6 +656,7 @@ def main(argv: list[str] | None = None) -> int:
     ))
     try:
         args = build_parser(json_errors=args.json).parse_args(argv)
+        _yolo_notice(args)
         refusal = _mutation_platform_refusal(args)
         if refusal is not None:
             return _report_error(args, f"stateframe: refused: {refusal}")
@@ -663,6 +725,12 @@ def main(argv: list[str] | None = None) -> int:
             from .powerups_cli import handle as handle_powerups
             return handle_powerups(args)
         if args.command == "resume":
+            if ((args.shell is not None or args.shell_sandbox is not None)
+                    and (args.shell, args.shell_sandbox) != ("unrestricted", "off")):
+                return _report_error(
+                    args, "stateframe: refused: repeat both host flags exactly with: "
+                    "stateframe resume RUN --shell unrestricted --shell-sandbox off")
+            host_authorization = args.yolo or (args.shell, args.shell_sandbox) == ("unrestricted", "off")
             endpoint = None
             if args.endpoint or args.api_key_env:
                 spec = json.loads((args.run_dir / "spec.json").read_text())
@@ -674,6 +742,8 @@ def main(argv: list[str] | None = None) -> int:
                                  route_cli=args.route, routes_file=args.routes,
                                  keep_checkpoints=args.keep_checkpoints, keep_run_env=args.keep_run_env,
                                  replay_external=args.replay_external,
+                                 _yolo_cli=args.yolo,
+                                 host_authorization=host_authorization,
                                  printer=(lambda *_: None) if args.json else print)
             if args.json:
                 print(json.dumps(summary, indent=1))
@@ -696,11 +766,11 @@ def main(argv: list[str] | None = None) -> int:
         endpoint = Endpoint.from_args(args.endpoint, args.model, args.api_key_env)
         if args.command == "chat":
             from . import chat
-            base = _run_options(args, endpoint)
+            base = _run_options(args, endpoint, warn=False)
             session = chat.Session(repo=args.repo.resolve(), base=base,
                                    home=(args.session_dir or chat.default_home(args.repo)).resolve())
             return chat.repl(session, print_summary=lambda p: _print_summary(json.loads(p.read_text())))
-        options = _run_options(args, endpoint)
+        options = _run_options(args, endpoint, warn=False)
         summary = run(options, printer=(lambda *_: None) if args.json else print)
         if args.json:
             print(json.dumps(summary, indent=1))
