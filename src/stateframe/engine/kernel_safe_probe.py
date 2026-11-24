@@ -10,10 +10,12 @@ from collections.abc import Callable, Mapping, Sequence
 if __package__:
     from .kernel_exec_capability import executable_read_roots, shell_capability
     from .kernel_exec_session import ExecResult, ExecSession, ExecSessionError, ProbeFailure
+    from .kernel_safe_paths import container_active
     from .kernel_test_isolation import _interpreter_roots
 else:
     from kernel_exec_capability import executable_read_roots, shell_capability
     from kernel_exec_session import ExecResult, ExecSession, ExecSessionError, ProbeFailure
+    from kernel_safe_paths import container_active
     from kernel_test_isolation import _interpreter_roots
 
 
@@ -126,9 +128,10 @@ def _run_probe_once(argv: Sequence[str], workspace: Path, *, timeout: float,
         home, environment = scratch / "home", scratch / "env"
         home.mkdir()
         environment.mkdir()
+        network = "full" if container_active() else "none"
         cap = shell_capability(
             workspace=workspace, run_env_dir=environment, scratch_home=home,
-            network="none", writable=False,
+            network=network, writable=False,
             include_path_executable_roots=False,
             extra_read_roots=(*executable_read_roots(executable),
                               *map(Path, _interpreter_roots(executable)), *read_roots))

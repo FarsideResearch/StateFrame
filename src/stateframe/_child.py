@@ -1671,8 +1671,85 @@ def main(argv: list[str], *, teardown: EngineTeardown | None = None) -> int:
         return _main(argv, lifetime, teardown=teardown)
 
 
+def _execution_boundary_module():
+    if __package__:
+        from .engine import kernel_execution_boundary
+    else:
+        sys.path.insert(0, str(Path(__file__).resolve().parent / "engine"))
+        import kernel_execution_boundary
+    return kernel_execution_boundary
+
+
+def _read_run_spec(run: Path, *, container_selected: bool = False) -> dict:
+    path = Path(run) / "spec.json"
+    if not container_selected:
+        return json.loads(path.read_text())
+    boundary = _execution_boundary_module()
+    try:
+        directory = os.stat(run, follow_symlinks=False)
+        if (not stat.S_ISDIR(directory.st_mode) or directory.st_uid != os.getuid()
+                or stat.S_IMODE(directory.st_mode) != 0o700):
+            raise ValueError("run directory is not private")
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
+            info = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                    or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600):
+                raise ValueError("run spec is not private")
+            spec = json.load(stream)
+        if type(spec) is not dict:
+            raise ValueError("run spec is not an object")
+        return spec
+    except (OSError, UnicodeError, ValueError, TypeError):
+        raise boundary.BoundaryRefused("CONTAINER_RESUME_MISMATCH") from None
+
+
+def _activate_execution_boundary(spec: dict, *, selected: bool):
+    record = spec.get("execution_boundary")
+    if not selected and "execution_boundary" not in spec:
+        return None
+    boundary = _execution_boundary_module()
+    if not selected:
+        try:
+            previous = boundary.Boundary.from_record(record)
+        except (TypeError, ValueError, KeyError):
+            raise boundary.BoundaryRefused("CONTAINER_RESUME_MISMATCH") from None
+        if previous.backend == boundary.BACKEND_CONTAINER:
+            raise boundary.BoundaryRefused("CONTAINER_RESUME_MISMATCH")
+        return None
+    if not isinstance(record, dict):
+        raise boundary.BoundaryRefused("CONTAINER_UNSUPPORTED:engine-child-spec")
+    try:
+        selected_boundary = boundary.Boundary.from_record(record)
+    except (TypeError, ValueError, KeyError):
+        raise boundary.BoundaryRefused("CONTAINER_RESUME_MISMATCH") from None
+    if selected_boundary.backend != boundary.BACKEND_CONTAINER:
+        raise boundary.BoundaryRefused("CONTAINER_RESUME_MISMATCH")
+    settings = spec.get("tool_settings")
+    if isinstance(settings, dict) and settings.get("shell") == "read-only":
+        raise boundary.BoundaryRefused("CONTAINER_CONFLICT")
+    if not isinstance(settings, dict) or settings.get("shell_network") != "full":
+        raise boundary.BoundaryRefused("CONTAINER_NETWORK")
+    if settings.get("host_authorization") is not None or spec.get("yolo") is True:
+        raise boundary.BoundaryRefused("CONTAINER_CONFLICT")
+    if "mutations" in spec:
+        raise boundary.BoundaryRefused("CONTAINER_MUTATIONS")
+    if spec.get("parallel_mode", "off") != "off" or "unit_spec" in spec:
+        raise boundary.BoundaryRefused("CONTAINER_UNSUPPORTED:parallel-child")
+    if settings.get("mcp_files") or spec.get("mcp_tools_digest"):
+        raise boundary.BoundaryRefused("CONTAINER_UNSUPPORTED:mcp")
+    if settings.get("shell") not in ("off", "standard", "unrestricted"):
+        raise boundary.BoundaryRefused("CONTAINER_CONFLICT")
+    current = boundary.authorize(True, conflicts=(), detection=boundary.detect(),
+                                 uid=getattr(os, "geteuid", lambda: -1)())
+    boundary.check_resume(record, current)
+    boundary.activate(selected_boundary)
+    return selected_boundary
+
+
 def _main(argv: list[str], lifetime: ExitStack, *, teardown: EngineTeardown | None) -> int:
-    if len(argv) != 2:
+    selected = len(argv) == 3 and argv[2] == "--container-is-sandbox"
+    if len(argv) != 2 and not selected:
         print("usage: _child.py <run-dir>", file=sys.stderr)
         return 2
     startup_home_identity = _runner_home_identity_pin()
@@ -1682,7 +1759,15 @@ def _main(argv: list[str], lifetime: ExitStack, *, teardown: EngineTeardown | No
     lock = hold_engine_lock(run)  # noqa: F841 - held until exit
     if teardown is not None:
         teardown.lock = lock
-    spec = json.loads((run / "spec.json").read_text())
+    try:
+        spec = _read_run_spec(run, container_selected=selected)
+        _activate_execution_boundary(spec, selected=selected)
+    except Exception as error:
+        code = getattr(error, "code", None)
+        if not isinstance(code, str) or not code.startswith(("CONTAINER_", "CONTAINER_UNSUPPORTED:")):
+            raise
+        print(f"stateframe: refused: {code}", file=sys.stderr)
+        return 2
     emit_run_env_events(run)
     resume = spec.get("resume") if isinstance(spec.get("resume"), dict) else None
     checkpoint = _selected_resume_checkpoint(resume)

@@ -47,15 +47,15 @@ class SandboxReadGrants:
 
 
 if __package__:
+    from .kernel_safe_paths import container_active, safe_home
     from .kernel_exec_capability import (executable_read_roots, executable_symlinks,
                                          public_ca_read_roots, system_runtime_read_roots)
-    from .kernel_safe_paths import safe_home
     from .kernel_sbpl import sbpl_path_regex, sbpl_string
     from .kernel_test_python import selected_test_python
 else:
+    from kernel_safe_paths import container_active, safe_home
     from kernel_exec_capability import (executable_read_roots, executable_symlinks,
                                         public_ca_read_roots, system_runtime_read_roots)
-    from kernel_safe_paths import safe_home
     from kernel_sbpl import sbpl_path_regex, sbpl_string
     from kernel_test_python import selected_test_python
 
@@ -88,6 +88,7 @@ def _declared_relay_dir(env: dict[str, str]) -> Path | None:
 # Standard install locations, used when PATH does not list the sandbox binary (an IDE, cron or a
 # minimal-PATH launcher must still get the sandbox, never a silent "unavailable").
 _SANDBOX_DIRS = ("/usr/bin", "/bin", "/usr/local/bin", "/usr/sbin")
+NO_SANDBOX_BINARY_CONTAINER = "no sandbox binary: container"
 
 
 def sandbox_executable(name: str) -> str | None:
@@ -103,6 +104,8 @@ def sandbox_executable(name: str) -> str | None:
 
 
 def backend() -> str:
+    if sys.platform.startswith("linux") and container_active():
+        return NO_SANDBOX_BINARY_CONTAINER
     name = "sandbox-exec" if platform.system() == "Darwin" else "bwrap"
     executable = sandbox_executable(name)
     if executable is None:
@@ -257,7 +260,8 @@ def isolated_command(command: list[str], root: Path, env: dict[str, str], *,
                      selected_python: str | None = None,
                      read_grants_out: list[SandboxReadGrants] | None = None,
                      private_pid_check: bool = False) -> tuple[list[str], dict[str, str]]:
-    executable = backend()
+    container = sys.platform.startswith("linux") and container_active()
+    executable = None if container else backend()
     root = root.resolve()
     scratch = root / ".test-tmp"
     scratch.mkdir(exist_ok=True)
@@ -460,8 +464,12 @@ def isolated_command(command: list[str], root: Path, env: dict[str, str], *,
         # ceiling is installed. /tmp is private to this sandbox.
         launcher = Path(__file__).with_name("sf_launch.py").resolve()
         arguments.extend(["--ro-bind", str(launcher), "/tmp/sf_launch.py"])
-        command = [sys.executable, "-I", "/tmp/sf_launch.py", "--nproc-budget",
+        launcher = (Path(__file__).with_name("sf_launch.py").resolve()
+                    if container else Path("/tmp/sf_launch.py"))
+        command = [sys.executable, "-I", str(launcher), "--nproc-budget",
                    str(nproc_budget), *command]
+    if container:
+        return command, clean
     arguments.extend(["--chdir", str(root), "--", *command])
     return arguments, clean
 
@@ -648,10 +656,27 @@ def capability_command(command, cap, *, platform_backend=None, shared_namespace=
     namespaces while creating a per-command mount and user namespace. A none
     capability still gets a fresh, disconnected network namespace.
     """
+    container = platform_backend == "container" or (
+        sys.platform.startswith("linux") and container_active())
+    if container:
+        if __package__:
+            from .kernel_execution_boundary import BoundaryRefused
+        else:
+            from kernel_execution_boundary import BoundaryRefused
+        if cap.purpose in {"mutation", "mutation_broker"}:
+            raise BoundaryRefused("CONTAINER_UNSUPPORTED:mutations")
+        if cap.network != "full":
+            if platform_backend == "container":
+                raise RuntimeError("CONTAINER_NETWORK")
+            raise BoundaryRefused("CONTAINER_NETWORK")
+        if not cap.sandboxed:
+            raise BoundaryRefused("CONTAINER_CONFLICT")
     if not cap.sandboxed:
         return list(command), dict(cap.env)
-    selected = platform_backend or ("sandbox-exec" if platform.system() == "Darwin" else "bwrap")
-    if selected not in {"sandbox-exec", "bwrap"}:
+    selected = platform_backend or (
+        "container" if container
+        else "sandbox-exec" if platform.system() == "Darwin" else "bwrap")
+    if selected not in {"sandbox-exec", "bwrap", "container"}:
         raise ValueError("execution backend must be sandbox-exec or bwrap")
     if cap.purpose in {"mutation", "mutation_broker"}:
         if selected == "sandbox-exec":
@@ -663,6 +688,12 @@ def capability_command(command, cap, *, platform_backend=None, shared_namespace=
         if executable is None:
             raise RuntimeError("mutation execution requires bwrap")
         return _mutation_command(command, cap, executable, mutation_mounts, shared_namespace)
+    if selected == "container":
+        launcher = Path(__file__).with_name("sf_launch.py").resolve()
+        wrapped = [os.path.realpath(sys.executable), "-I", str(launcher),
+                   "--network-none" if cap.network == "none" else "--process-filter",
+                   json.dumps(dict(cap.env), separators=(",", ":")), *command]
+        return wrapped, dict(cap.env)
     executable = sandbox_executable(selected)
     if executable is None:
         raise RuntimeError(f"execution capability requires {selected}; no unsandboxed fallback")

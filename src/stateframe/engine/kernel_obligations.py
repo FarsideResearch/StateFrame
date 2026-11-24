@@ -288,7 +288,7 @@ def _extract_selectors(record: Mapping[str, object]) -> tuple[str, ...]:
         if field_name in record:
             values.extend(_text(item) for item in _values(record[field_name]))
     intent = _text(record.get("intent"))
-    if _is_selector(intent):
+    if _kind(record.get("kind", record.get("type"))) == "test" and _is_selector(intent):
         values.append(intent)
     for item in _values(record.get("command")):
         command_text = _text(item)
@@ -1321,7 +1321,9 @@ def _explicit_outcomes(
     outcomes: list[tuple[str, ObligationState, str, str]] = []
     default_state = _state_for_result(result) or ObligationState.UNKNOWN
 
-    def add(value: object, state: ObligationState, hint: str = "") -> None:
+    def add(
+        value: object, state: ObligationState, hint: str = "", *, skip_oracle: bool = False
+    ) -> None:
         for raw, details in _iter_refs(value):
             local_state = state
             local_reason = reason
@@ -1333,6 +1335,8 @@ def _explicit_outcomes(
                 local_reason = _text(details.get("reason", details.get("na_reason"))) or local_reason
                 local_tail = _failure_tail(details) or local_tail
             for key in _resolve_obligation_keys(graph, raw, hint):
+                if skip_oracle and key.startswith("oracle:"):
+                    continue
                 outcomes.append((key, local_state, local_reason, local_tail))
 
     direct_fields = (
@@ -1357,7 +1361,11 @@ def _explicit_outcomes(
     )
     for field_name, field_state, hint in direct_fields:
         if field_name in record:
-            add(record[field_name], field_state, hint)
+            add(
+                record[field_name], field_state, hint,
+                skip_oracle=field_name == "claim"
+                and _kind(record.get("kind", record.get("type"))) == "done",
+            )
     for field_name in ("not_applicable", "not_applicable_obligations"):
         value = record.get(field_name)
         if not isinstance(value, Mapping):

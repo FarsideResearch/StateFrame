@@ -21,6 +21,7 @@ import time
 import uuid
 
 if __package__:
+    from .kernel_safe_paths import container_active
     from .kernel_exec_capability import ExecCapability
     from .kernel_exec_tracker import (Descendants, ProcessTable, capture_launch_identity, kill_launch_unit,
                                       process_cmdline_digest, recorded_launch_identity)
@@ -29,6 +30,7 @@ if __package__:
     from .kernel_turn_work_counters import count_work
     from .sf_launch import _current_cgroup
 else:
+    from kernel_safe_paths import container_active
     from kernel_exec_capability import ExecCapability
     from kernel_exec_tracker import (Descendants, ProcessTable, capture_launch_identity, kill_launch_unit,
                                      process_cmdline_digest, recorded_launch_identity)
@@ -385,8 +387,9 @@ class RestoredJobHandle:
 class ExecSession:
     def __init__(self, run_dir: Path, *, platform_backend: str | None = None):
         self.run_dir = Path(run_dir).resolve(strict=True)
-        self.backend = platform_backend or ("sandbox-exec" if platform.system() == "Darwin" else "bwrap")
-        if self.backend not in {"sandbox-exec", "bwrap"}:
+        self.backend = platform_backend or ("container" if sys.platform.startswith("linux")
+            and container_active() else "sandbox-exec" if platform.system() == "Darwin" else "bwrap")
+        if self.backend not in {"sandbox-exec", "bwrap", "container"}:
             raise ValueError("platform_backend must be sandbox-exec or bwrap")
         # Replay deliberately repeats the UUID stream, but a previous attempt's
         # supervisor artifacts must remain intact. Allocate a fresh physical directory.
@@ -438,8 +441,12 @@ class ExecSession:
             raise ExecSessionError("execution session is closed")
         # Capabilities may be duck-typed (probes, tests); only mutation ones carry purpose.
         purposes = {getattr(cap, "purpose", None),
-                    getattr(self._initial_capability, "purpose", None)}
+                    getattr(getattr(self, "_initial_capability", None), "purpose", None)}
         mutation_session = bool(purposes & {"mutation", "mutation_broker"})
+        if self.backend == "container" and mutation_session:
+            raise ExecSessionError("CONTAINER_UNSUPPORTED:mutations")
+        if self.backend == "container" and cap.network != "full":
+            raise ExecSessionError("CONTAINER_NETWORK")
         if mutation_session and self._network_envelope is None:
             self._network_envelope = cap.network
             self._read_envelope = (*cap.read_roots, cap.workspace)
@@ -618,6 +625,7 @@ class ExecSession:
             return handle
 
     def spawn(self, argv, cap, *, cwd=None) -> JobHandle:
+        if container_active(): raise ExecSessionError("CONTAINER_UNSUPPORTED:persistent-jobs")
         if cap.workspace_writable:
             raise ValueError("background jobs require read-only workspace")
         if sum(handle.poll() is None for handle in self._handles) >= 4:

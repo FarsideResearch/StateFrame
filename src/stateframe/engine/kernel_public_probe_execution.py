@@ -13,10 +13,15 @@ from kernel_exec_tracker import child_exited_unreaped, kill_launch_unit, recorde
 from kernel_test_isolation import isolated_command
 from kernel_test_python import selected_test_python
 from kernel_public_probe_sandbox import RUNNER_SOURCE
+if __package__:
+    from .kernel_safe_paths import container_active
+else:
+    from kernel_safe_paths import container_active
 
 
 def execute_probe(root: Path, product_files: dict, source: str, output: Path, *,
                   deadline: float | None = None) -> dict:
+    if container_active(): raise RuntimeError("CONTAINER_UNSUPPORTED:public-probe")
     if not product_files or len(product_files) > 100:
         raise ValueError('public probe requires a bounded product snapshot')
     contents = {}

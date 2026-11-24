@@ -1,0 +1,7 @@
+**
+!docker/
+!docker/Dockerfile
+!docker/verify_wheel.py
+!dist/
+!dist/*.whl
+!requirements.txt

@@ -17,7 +17,7 @@ import hashlib
 import json
 import os
 import time
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Union
@@ -217,7 +217,6 @@ class ProgressContract:
     preconditions: tuple[str, ...] = ()
     result_ingestion_path: str = "action_results"
     root_budget_key: str = "repairs"
-    attempt_limit: int = 1
     expiration: float | None = None
     terminal_fallback: str = FAILED_UNRESOLVED_DEFECT
     result_kinds: tuple[str, ...] = ()
@@ -231,7 +230,6 @@ class ProgressContract:
         object.__setattr__(self, "preconditions", _tuple_strings(self.preconditions))
         object.__setattr__(self, "result_ingestion_path", str(self.result_ingestion_path).strip())
         object.__setattr__(self, "root_budget_key", str(self.root_budget_key).strip())
-        object.__setattr__(self, "attempt_limit", int(self.attempt_limit))
         object.__setattr__(self, "terminal_fallback", str(self.terminal_fallback))
         object.__setattr__(self, "result_kinds", _tuple_strings(self.result_kinds))
 
@@ -286,6 +284,147 @@ def _observed_effects(action: str, kind: str, status: str, result: Mapping[str, 
     if kind == "question_recorded":
         return ACTION_RESULT_EFFECTS.get(action, frozenset())
     return frozenset()
+
+
+_RECOVERY_PROGRESS_STATUSES = frozenset({
+    "PARTIAL", "APPLIED", "SUCCESS", "PASS", "PASSED", "GREEN", "OK", "CLOSED",
+})
+_RECOVERY_NO_CHANGE_STATUSES = frozenset({
+    "NO_CHANGE", "UNCHANGED", "NOOP", "NO_OP", "NOT_APPLIED",
+    "FAIL", "FAILED", "TIMEOUT", "TIMED_OUT", "ERROR", "RED", "REFUSED", "UNRESOLVED",
+})
+_RECOVERY_RESULT_FIELDS = (
+    "kind", "result_kind", "result_class", "status", "result", "exit_code",
+    "accepted", "applied", "changed", "progress", "revision", "product_revision",
+    "candidate_digest", "source_digest", "source_bytes_digest", "changed_paths",
+    "changed_files",
+)
+_MET_OBLIGATION_STATUSES = frozenset({
+    "MET", "CLOSED", "DONE", "PASS", "PASSED", "SATISFIED", "COMPLETE", "COMPLETED",
+})
+_MAX_AUTHORITY_HISTORY_ENTRIES = 4096
+_RECOVERY_PROGRESS_DIGEST_LENGTH = 64
+
+
+def _valid_recovery_progress_digest(value: object) -> str | None:
+    if not isinstance(value, str) or not value.startswith("sha256:"):
+        return None
+    digest = value.removeprefix("sha256:")
+    if len(digest) != _RECOVERY_PROGRESS_DIGEST_LENGTH:
+        return None
+    if any(character not in "0123456789abcdef" for character in digest):
+        return None
+    return value
+
+
+def recovery_progress_from_snapshot(snapshot: object) -> dict[str, set[str]]:
+    """Collect exact progress proofs from a snapshot or one journal state row.
+
+    New journal rows carry a compact delta. Sidecar-era rows also include
+    dispatch proofs in their bounded audit history; replaying every state row
+    recovers proofs that were flushed out of that release's pending batch.
+    """
+    if not isinstance(snapshot, Mapping):
+        return {}
+    found: dict[str, set[str]] = {}
+
+    def add(reason: object, digest: object) -> None:
+        code = _base_reason_code(reason)
+        proof = _valid_recovery_progress_digest(digest)
+        if code and proof:
+            found.setdefault(code, set()).add(proof)
+
+    for field_name in (
+        "recovery_progress_seen", "recovery_progress_pending", "recovery_progress_delta",
+    ):
+        raw = snapshot.get(field_name)
+        if isinstance(raw, Mapping):
+            for reason, values in raw.items():
+                if isinstance(values, str):
+                    add(reason, values)
+                elif isinstance(values, Sequence) and not isinstance(values, (str, bytes, bytearray)):
+                    for value in values:
+                        add(reason, value)
+    last_progress = snapshot.get("recovery_progress")
+    if isinstance(last_progress, Mapping):
+        for reason, digest in last_progress.items():
+            add(reason, digest)
+
+    # Sidecar-era rows retained the latest digest and a pending batch, but proofs
+    # flushed to SQLite only survive in action_dispatched audit rows. Each
+    # dispatch had its own journal state row, so replay all rows to span the
+    # bounded history window. Pre-progress rows simply have no digest to add.
+    history = snapshot.get("history")
+    if isinstance(history, Sequence) and not isinstance(history, (str, bytes, bytearray)):
+        for event in history:
+            if isinstance(event, Mapping) and event.get("kind") == "action_dispatched":
+                add(event.get("reason_code"), event.get("progress_digest"))
+    return found
+
+
+def _met_obligations(value: object, *, fallback_id: object = "") -> tuple[tuple[str, str], ...]:
+    """Keep only obligation outcomes that report an obligation as satisfied."""
+    found: set[tuple[str, str]] = set()
+
+    def add(identifier: object, status: object) -> None:
+        normalized = str(status or "").strip().upper()
+        if normalized in _MET_OBLIGATION_STATUSES:
+            found.add((str(identifier or fallback_id or ""), normalized))
+
+    def entry(item: object, identifier: object = "") -> None:
+        if isinstance(item, Mapping):
+            key = item.get("obligation_id", item.get("id", item.get("name", identifier)))
+            status = item.get("status", item.get("state", item.get("result", "")))
+            add(key, status)
+        elif identifier:
+            add(identifier, item)
+
+    if isinstance(value, Mapping):
+        if any(key in value for key in ("status", "state", "result")):
+            entry(value)
+        else:
+            for identifier, item in value.items():
+                entry(item, identifier)
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        for item in value:
+            entry(item)
+    elif isinstance(value, str):
+        add(fallback_id, value)
+    return tuple(sorted(found))
+
+
+def _action_result_progress_digest(
+    result: Mapping[str, object], expected_action: str,
+) -> str | None:
+    """Fingerprint a new result only when it reports a progress-capable outcome."""
+    action = str(result.get("action", result.get("tool", ""))).strip().lower()
+    if not expected_action or action != expected_action:
+        return None
+    status = str(result.get("status", result.get("result_class", result.get("result", "")))).strip().upper()
+    met_obligations = tuple(sorted(set(
+        _met_obligations(result.get("obligations"), fallback_id=result.get("obligation_id"))
+        + _met_obligations(result.get("obligation_state"), fallback_id=result.get("obligation_id"))
+    )))
+    explicit_progress = any(
+        result.get(key) is True
+        for key in ("accepted", "applied", "changed", "progress")
+    ) or any(result.get(key) not in (None, "", [], {}) for key in (
+        "revision", "product_revision", "candidate_digest", "source_digest",
+        "source_bytes_digest", "changed_paths", "changed_files",
+    )) or bool(met_obligations)
+    if status in _RECOVERY_NO_CHANGE_STATUSES and not explicit_progress:
+        return None
+    if status not in _RECOVERY_PROGRESS_STATUSES and not explicit_progress:
+        return None
+    summary = {key: result[key] for key in _RECOVERY_RESULT_FIELDS if key in result}
+    if met_obligations:
+        summary["met_obligations"] = met_obligations
+    summary["action"] = action
+    try:
+        return _digest(summary)
+    except (TypeError, ValueError, OverflowError):
+        # An unhashable/invalid observation cannot prove that the candidate stayed still.
+        return None
 
 
 _PRODUCT_REASONS = {
@@ -409,8 +548,6 @@ class ProgressContractRegistry(Mapping[str, ProgressContract]):
                 )
             if not contract.result_ingestion_path:
                 errors.append(f"{code}: missing RESULT_INGESTION_PATH")
-            if contract.attempt_limit < 1:
-                errors.append(f"{code}: attempt limit must be positive")
             if contract.terminal_fallback not in TERMINAL_STATES:
                 errors.append(f"{code}: terminal fallback is not terminal")
         return tuple(errors)
@@ -933,7 +1070,14 @@ class CompletionAuthority:
         self._recheck_required: set[str] = set()
         self._required_evidence = set(_tuple_strings(required_evidence))
         self._blockers: dict[str, BlockingCause] = {}
+        # Attempt ordinals are retained for audit and wire compatibility; they
+        # never decide whether another recovery action is allowed.
         self._attempts: dict[str, int] = {}
+        self._last_recovery_progress: dict[str, str] = {}
+        self._seen_recovery_progress: dict[str, set[str]] = {}
+        self._recovery_progress_delta: dict[str, set[str]] = {}
+        self._last_action_result_progress: str | None = None
+        self._last_action_result_progress_by_reason: dict[str, str] = {}
         self._inflight: dict[str, object] | None = None
         self._available_actions = (
             None if available_actions is None else set(str(item).strip().lower() for item in available_actions)
@@ -941,6 +1085,7 @@ class CompletionAuthority:
         self._seal: AcceptanceSeal | None = None
         self._terminal_decision: AuthorityDecision | None = None
         self._history: list[dict[str, object]] = []
+        self._history_dropped = 0
 
     @property
     def state(self) -> str:
@@ -1043,6 +1188,21 @@ class CompletionAuthority:
 
     def _record(self, kind: str, **fields: object) -> None:
         self._history.append({"kind": kind, "state_version": self._state_version, **copy.deepcopy(fields)})
+        excess = len(self._history) - _MAX_AUTHORITY_HISTORY_ENTRIES
+        if excess > 0:
+            del self._history[:excess]
+            self._history_dropped += excess
+
+    def _has_recovery_progress(self, reason_code: str, digest: str) -> bool:
+        return digest in self._seen_recovery_progress.get(reason_code, set())
+
+    def _remember_recovery_progress(self, reason_code: str, digest: str) -> None:
+        self._seen_recovery_progress.setdefault(reason_code, set()).add(digest)
+        self._recovery_progress_delta.setdefault(reason_code, set()).add(digest)
+
+    def acknowledge_recovery_progress(self) -> None:
+        """Clear deltas only after their enclosing journal row was fsynced."""
+        self._recovery_progress_delta.clear()
 
     def _cause_for(self, reason_code: str, *, obligation_id: str = "", detail: str = "") -> BlockingCause:
         contract = self.registry.require(reason_code)
@@ -1154,22 +1314,163 @@ class CompletionAuthority:
             self._blockers.pop(key, None)
         return resolved
 
+    def _recovery_progress_digest(self, reason_code: str) -> str | None:
+        """Hash semantic completion state, excluding history and dispatch metadata."""
+        try:
+            code = _base_reason_code(reason_code)
+            self.registry.require(code)
+            blockers = [
+                {
+                    "kind": type(cause).__name__,
+                    "reason_code": cause.reason_code,
+                    "obligation_id": cause.obligation_id,
+                    "detail": cause.detail,
+                    "candidate_digest": cause.candidate_digest,
+                }
+                for _, cause in sorted(self._blockers.items())
+                if cause.reason_code == code
+            ]
+            passed_receipts: set[str] = set()
+            failed_evidence_frontier: dict[str, set[str]] = {}
+            for item in self._receipts:
+                if not self._receipt_current(item):
+                    continue
+                if item.passed:
+                    passed_receipts.add(_digest({
+                        "obligation_id": item.obligation_id,
+                        "status": item.status,
+                        "candidate_digest": item.candidate_digest,
+                        "revision": item.revision,
+                        "stale": item.stale,
+                        "evidence": item.evidence,
+                        "identity": item.identity,
+                    }))
+                    continue
+                # A larger or merely different failure report is not
+                # recovery. Keep the smallest observed failure set for
+                # each obligation so only a strict reduction advances it.
+                observed = set(item.evidence)
+                previous = failed_evidence_frontier.get(item.obligation_id)
+                if previous is None or observed < previous:
+                    failed_evidence_frontier[item.obligation_id] = observed
+            current_evidence = {
+                key: _digest({
+                    "obligation_id": value.obligation_id,
+                    "status": value.status,
+                    "candidate_digest": value.candidate_digest,
+                    "revision": value.revision,
+                    "stale": value.stale,
+                    "evidence": value.evidence,
+                    "identity": value.identity,
+                })
+                for key, value in sorted(self._current_evidence.items())
+            }
+            return _digest({
+                "candidate_digest": self.candidate_digest,
+                "current_revision": self.current_revision,
+                "policy_digest": self.policy_digest,
+                "required_evidence": sorted(self._required_evidence),
+                "recheck_required": sorted(self._recheck_required),
+                "blockers": blockers,
+                "receipts": {
+                    "passed": sorted(passed_receipts),
+                    "failed_evidence_frontier": {
+                        key: sorted(values) for key, values in sorted(failed_evidence_frontier.items())
+                    },
+                },
+                "current_evidence": current_evidence,
+                "last_action_result_progress": self._last_action_result_progress_by_reason.get(code),
+            })
+        except (TypeError, ValueError, OverflowError):
+            # Unknown state is not proof of no progress, so callers must keep going.
+            return None
+
+    def _legacy_recovery_progress_digest(self, reason_code: str) -> str | None:
+        """Read proofs written by the prior snapshot algorithm during migration."""
+        try:
+            code = _base_reason_code(reason_code)
+            self.registry.require(code)
+            blockers = [
+                {
+                    "kind": type(cause).__name__,
+                    "reason_code": cause.reason_code,
+                    "obligation_id": cause.obligation_id,
+                    "detail": cause.detail,
+                    "candidate_digest": cause.candidate_digest,
+                }
+                for _, cause in sorted(self._blockers.items())
+                if cause.reason_code == code
+            ]
+            receipt_digests = sorted({
+                _digest({
+                    "obligation_id": item.obligation_id,
+                    "status": item.status,
+                    "candidate_digest": item.candidate_digest,
+                    "revision": item.revision,
+                    "stale": item.stale,
+                    "evidence": item.evidence,
+                    "identity": item.identity,
+                })
+                for item in self._receipts
+            })
+            current_evidence = {
+                key: _digest({
+                    "obligation_id": value.obligation_id,
+                    "status": value.status,
+                    "candidate_digest": value.candidate_digest,
+                    "revision": value.revision,
+                    "stale": value.stale,
+                    "evidence": value.evidence,
+                    "identity": value.identity,
+                })
+                for key, value in sorted(self._current_evidence.items())
+            }
+            return _digest({
+                "candidate_digest": self.candidate_digest,
+                "current_revision": self.current_revision,
+                "policy_digest": self.policy_digest,
+                "required_evidence": sorted(self._required_evidence),
+                "recheck_required": sorted(self._recheck_required),
+                "blockers": blockers,
+                "receipts": receipt_digests,
+                "current_evidence": current_evidence,
+                "last_action_result_progress": self._last_action_result_progress_by_reason.get(code),
+            })
+        except (TypeError, ValueError, OverflowError):
+            return None
+
     def record_action_result(self, result: Mapping[str, object]) -> AuthorityDecision:
         terminal = self._terminal_or(ignored=True)
         if terminal is not None:
             return terminal
         result = dict(result)
+        inflight = self._inflight or {}
+        expected = str(inflight.get("action", "")).strip().lower()
+        reason_code = _base_reason_code(inflight.get("reason_code", ""))
         resolved = self._resolve_blocker_for_result(result)
         receipt = result.get("receipt")
         if isinstance(receipt, (VerificationReceipt, Mapping)):
             self.record_receipt(receipt)
+        action = str(result.get("action", result.get("tool", ""))).strip().lower()
+        result_progress = (
+            _action_result_progress_digest(result, expected)
+            if action == expected else None
+        )
+        previous_result_progress = self._last_action_result_progress_by_reason.get(reason_code)
+        progress_changed = result_progress is not None and result_progress != previous_result_progress
+        if progress_changed:
+            self._last_action_result_progress = result_progress
+            if reason_code:
+                self._last_action_result_progress_by_reason[reason_code] = result_progress
+        if self._inflight is not None:
+            inflight_action = str(self._inflight.get("action", ""))
+            if not action or action == inflight_action:
+                self._inflight = None
+        # Recovery progress is persistence state, not a new public completion
+        # decision. Keep it out of the rendered decision version so requests
+        # remain byte-stable until recovery itself changes the visible state.
         if resolved or receipt is not None:
             self._state_version += 1
-        if self._inflight is not None:
-            expected = str(self._inflight.get("action", ""))
-            actual = str(result.get("action", result.get("tool", "")))
-            if not actual or actual == expected:
-                self._inflight = None
         self._record("action_result_ingested", result=result, resolved=resolved)
         return self._decision(
             reason_codes=() if not self._blockers else tuple(item.reason_code for item in self._blockers.values()),
@@ -1219,14 +1520,26 @@ class CompletionAuthority:
                 FAILED_CONTROL_CONFLICT, "CONTROL_CONFLICT",
                 f"permitted recovery action {action!r} is not on the current capability menu",
             )
-        attempts = self._attempts.get(code, 0) + 1
-        if attempts > contract.attempt_limit:
+        progress_digest = self._recovery_progress_digest(code)
+        legacy_progress_digest = self._legacy_recovery_progress_digest(code)
+        unchanged_digest = next((digest for digest in (progress_digest, legacy_progress_digest)
+                                 if digest is not None and self._has_recovery_progress(code, digest)), None)
+        if unchanged_digest is not None:
+            self._record(
+                "recovery_no_progress", action=action, reason_code=code,
+                previous_digest=unchanged_digest, observed_digest=unchanged_digest,
+                unchanged=True,
+            )
             return self._fail(contract.terminal_fallback, "NO_FEASIBLE_RECOVERY",
-                              f"attempt limit exhausted for {code}")
+                              f"no progress after {action} for {code}; proof {unchanged_digest}")
         if not self.fuel.charge(contract.root_budget_key):
             return self._fail(FAILED_BUDGET, "FUEL_EXHAUSTED",
                               f"root fuel cannot afford {action} while preserving terminalization")
+        attempts = self._attempts.get(code, 0) + 1
         self._attempts[code] = attempts
+        if progress_digest is not None:
+            self._last_recovery_progress[code] = progress_digest
+            self._remember_recovery_progress(code, progress_digest)
         self._inflight = {
             "action": action,
             "reason_code": code,
@@ -1237,7 +1550,8 @@ class CompletionAuthority:
             "attempt": attempts,
         }
         self._state_version += 1
-        self._record("action_dispatched", action=action, reason_code=code, attempt=attempts)
+        self._record("action_dispatched", action=action, reason_code=code, attempt=attempts,
+                     progress_digest=progress_digest)
         return self._decision(
             reason_codes=(code,), detail=f"dispatched bounded recovery action {action}",
             action=_action_mapping(action, reason_code=code, arguments=arguments),
@@ -1459,6 +1773,14 @@ class CompletionAuthority:
         clone._required_evidence = set(self._required_evidence)
         clone._blockers = dict(self._blockers)
         clone._attempts = dict(self._attempts)
+        clone._last_recovery_progress = dict(self._last_recovery_progress)
+        clone._seen_recovery_progress = {
+            key: set(values) for key, values in self._seen_recovery_progress.items()
+        }
+        clone._recovery_progress_delta = {
+            key: set(values) for key, values in self._recovery_progress_delta.items()
+        }
+        clone._last_action_result_progress_by_reason = dict(self._last_action_result_progress_by_reason)
         clone._history = copy.deepcopy(self._history)
         return clone
 
@@ -1486,7 +1808,16 @@ class CompletionAuthority:
             "seal": self._seal.to_dict() if self._seal is not None else None,
         }
 
-    def snapshot(self) -> dict[str, object]:
+    @property
+    def persistence_marker(self) -> tuple[object, ...]:
+        """Track snapshot changes that do not change the public decision version."""
+        return (
+            self._state_version,
+            self._last_action_result_progress,
+            tuple(sorted(self._last_action_result_progress_by_reason.items())),
+        )
+
+    def snapshot(self, *, include_recovery_progress_seen: bool = True) -> dict[str, object]:
         """Durable state used by restart/checkpoint replay."""
         result = self.render()
         result.update({
@@ -1503,9 +1834,27 @@ class CompletionAuthority:
                 key: value.receipt_id for key, value in self._current_evidence.items()
             },
             "attempts": dict(self._attempts),
+            "recovery_progress": dict(self._last_recovery_progress),
+            "recovery_progress_delta": {
+                key: sorted(values) for key, values in self._recovery_progress_delta.items()
+            },
+            "action_result_progress": self._last_action_result_progress,
+            "action_result_progress_by_reason": dict(self._last_action_result_progress_by_reason),
             "history": copy.deepcopy(self._history),
+            "history_dropped": self._history_dropped,
+            "blocker_state": {
+                key: {
+                    "candidate_digest": cause.candidate_digest,
+                    "evidence_refs": list(cause.evidence_refs),
+                }
+                for key, cause in sorted(self._blockers.items())
+            },
             "evidence_seed": copy.deepcopy(self._evidence_seed),
         })
+        if include_recovery_progress_seen:
+            result["recovery_progress_seen"] = {
+                key: sorted(values) for key, values in self._seen_recovery_progress.items()
+            }
         return result
 
     @classmethod
@@ -1516,6 +1865,7 @@ class CompletionAuthority:
         available_actions: Sequence[str] | None = None,
         registry: ProgressContractRegistry | None = None,
         identity: object = None,
+        recovery_progress_seen: Mapping[str, Collection[str]] | None = None,
     ) -> "CompletionAuthority":
         """Rehydrate a run without resetting fuel, debt, or terminal state."""
         if not isinstance(snapshot, Mapping):
@@ -1540,9 +1890,39 @@ class CompletionAuthority:
         authority._attempts = {
             str(key): int(value) for key, value in (snapshot.get("attempts", {}) or {}).items()
         } if isinstance(snapshot.get("attempts", {}), Mapping) else {}
+        recovery_progress = snapshot.get("recovery_progress", {})
+        authority._last_recovery_progress = {
+            str(key): value for key, value in recovery_progress.items()
+            if isinstance(value, str) and value
+        } if isinstance(recovery_progress, Mapping) else {}
+        restored_seen = recovery_progress_from_snapshot(snapshot)
+        if isinstance(recovery_progress_seen, Mapping):
+            for key, values in recovery_progress_seen.items():
+                if isinstance(values, Collection) and not isinstance(values, (str, bytes, bytearray)):
+                    code = _base_reason_code(key)
+                    for value in values:
+                        proof = _valid_recovery_progress_digest(value)
+                        if code and proof:
+                            restored_seen.setdefault(code, set()).add(proof)
+        authority._seen_recovery_progress = restored_seen
+        # All snapshot deltas are already durable when they are restored.
+        authority._recovery_progress_delta = {}
+        action_result_progress = snapshot.get("action_result_progress")
+        authority._last_action_result_progress = str(action_result_progress) \
+            if isinstance(action_result_progress, str) and action_result_progress else None
+        raw_action_progress = snapshot.get("action_result_progress_by_reason", {})
+        authority._last_action_result_progress_by_reason = {
+            str(key): value for key, value in raw_action_progress.items()
+            if isinstance(value, str) and value
+        } if isinstance(raw_action_progress, Mapping) else {}
         authority._history = copy.deepcopy(list(snapshot.get("history", ()))) \
             if isinstance(snapshot.get("history", ()), Sequence) \
             and not isinstance(snapshot.get("history", ()), (str, bytes)) else []
+        authority._history_dropped = max(0, int(snapshot.get("history_dropped", 0)))
+        excess_history = len(authority._history) - _MAX_AUTHORITY_HISTORY_ENTRIES
+        if excess_history > 0:
+            del authority._history[:excess_history]
+            authority._history_dropped += excess_history
         authority._receipts = []
         by_id: dict[str, VerificationReceipt] = {}
         raw_receipts = snapshot.get("receipts", ())
@@ -1560,6 +1940,7 @@ class CompletionAuthority:
                 for key, receipt_id in current_ids.items() if str(receipt_id) in by_id
             }
         authority._blockers = {}
+        raw_blocker_state = snapshot.get("blocker_state", {})
         raw_blockers = snapshot.get("blockers", ())
         if isinstance(raw_blockers, Sequence) and not isinstance(raw_blockers, (str, bytes)):
             classes = {item.__name__: item for item in CAUSE_TYPES}
@@ -1568,15 +1949,29 @@ class CompletionAuthority:
                     continue
                 kind = str(raw.get("kind", "RequiredEvidenceGap"))
                 cause_class = classes.get(kind, RequiredEvidenceGap)
+                obligation_id = str(raw.get("obligation_id", "evidence"))
+                details = raw_blocker_state.get(obligation_id, {}) \
+                    if isinstance(raw_blocker_state, Mapping) else {}
+                if not isinstance(details, Mapping):
+                    details = {}
+                source_digest = details.get("candidate_digest")
                 try:
                     cause = cause_class(
                         reason_code=str(raw.get("reason_code", "REQUIRED_EVIDENCE_GAP")),
-                        obligation_id=str(raw.get("obligation_id", "evidence")),
+                        obligation_id=obligation_id,
                         detail=str(raw.get("detail", "")),
+                        candidate_digest=str(source_digest) if source_digest is not None else None,
+                        evidence_refs=_tuple_strings(details.get("evidence_refs", ())),
                     )
                 except (TypeError, ValueError):
                     continue
                 authority._blockers[cause.obligation_id] = cause
+        if authority._last_action_result_progress and not authority._last_action_result_progress_by_reason:
+            active_code = authority._active_reason_code()
+            if active_code:
+                authority._last_action_result_progress_by_reason[active_code] = (
+                    authority._last_action_result_progress
+                )
         authority._inflight = copy.deepcopy(snapshot.get("inflight")) \
             if isinstance(snapshot.get("inflight"), Mapping) else None
         authority._state = str(snapshot.get("state", ACTIVE))

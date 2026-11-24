@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import hashlib
 import json
 import math
 import os
@@ -122,12 +123,18 @@ class _ProgressEmitter:
                 break
 
 
+def _boundary_receipt(record: dict[str, object] | None) -> dict[str, object]:
+    return {"execution_boundary": record} if record is not None else {}
+
+
 def run(command: str, cwd: Path, *, python: str, timeout_s: float | None = None,
         deadline: float | None = None, test_env: dict[str, str] | None = None,
         pytest_plugins: str | None = None, test_python: str | None = None,
         runner_kind: str = "pytest", capture_output: bool = False,
         check_settings: dict[str, str] | None = None,
-        required_test_ledger: bool = False) -> dict[str, object]:
+        required_test_ledger: bool = False,
+        protected_test_hashes: dict[str, str] | None = None,
+        execution_boundary: dict[str, object] | None = None) -> dict[str, object]:
     """Copy and check with progress supervision and bounded IPC.
 
     ``timeout_s`` selects inactivity, not total lifetime. Only an explicit
@@ -163,6 +170,20 @@ def run(command: str, cwd: Path, *, python: str, timeout_s: float | None = None,
             "runner_kind": runner_kind, "capture_output": capture_output}
     if required_test_ledger:
         spec["required_test_ledger"] = True
+    from .engine.kernel_safe_paths import container_active
+    boundary_record = execution_boundary
+    if boundary_record is None and container_active():
+        for name in ("stateframe.engine.kernel_execution_boundary", "kernel_execution_boundary"):
+            boundary = sys.modules.get(name)
+            active = getattr(boundary, "active", None)
+            current = active() if callable(active) else None
+            if getattr(current, "backend", None) == "container":
+                boundary_record = current.record()
+                break
+    if boundary_record is not None and boundary_record.get("backend") == "container":
+        spec["execution_boundary"] = boundary_record
+        if protected_test_hashes:
+            spec["protected_test_hashes"] = dict(protected_test_hashes)
     env = {key: os.environ[key] for key in PASS_ENV if key in os.environ}
     env["PYTHONHASHSEED"] = "0"
     env["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -326,7 +347,8 @@ def run(command: str, cwd: Path, *, python: str, timeout_s: float | None = None,
             raise OuterCheckError(f"outer check helper failed (exit {process.returncode}): {detail}")
         result = {"exit_code": None, "passed": False, "tail": "check stopped before completion",
                   "output_bytes": 0, "output_truncated": False}
-    result.update(command=command, seconds=round(time.monotonic() - started, 2))
+    result.update(command=command, seconds=round(time.monotonic() - started, 2),
+                  **_boundary_receipt(boundary_record))
     if execution_stop is not None:
         result["exit_code"] = None
     execution_stop = validate_execution_stop(execution_stop or result.get("execution_stop"))
@@ -460,6 +482,22 @@ def _helper() -> int:
     os.environ.clear()
     os.environ.update(env)
     sys.path.insert(0, str(Path(__file__).resolve().parent / "engine"))
+    if "execution_boundary" in spec:
+        import kernel_execution_boundary as boundary
+        record = spec["execution_boundary"]
+        try:
+            selected = boundary.Boundary.from_record(record)
+            current = boundary.authorize(
+                True, conflicts=(), detection=boundary.detect(),
+                uid=getattr(os, "geteuid", lambda: -1)())
+            boundary.check_resume(record, current)
+            boundary.activate(selected)
+        except boundary.BoundaryRefused as error:
+            print(json.dumps({"error": error.code}), flush=True)
+            print(json.dumps({"cleanup_ok": True}), flush=True)
+            return 2
+        except (TypeError, ValueError, KeyError) as error:
+            raise OuterCheckError("CONTAINER_RESUME_MISMATCH") from error
     import kernel_reason_log as _reason_log
     import kernel_execution_policy as policy
     from kernel_check_receipts import sandbox_open_denial
@@ -579,14 +617,20 @@ def _helper() -> int:
                 (sandbox_error.startswith("sandbox-exec:") and "sandbox_apply" in sandbox_error)
             ):
                 raise OuterCheckError("sandbox unavailable: " + result.completed.stderr[:1000])
+        tampered = _protected_test_tampering(copy, spec.get("protected_test_hashes", {}))
         output = (result.completed.stdout + result.completed.stderr).encode("utf-8")
+        if tampered:
+            output += ("\nDETECTED PROTECTED_TEST_TAMPERED: post-command hash changed for "
+                       + ", ".join(tampered)).encode("utf-8")
         payload = {"exit_code": None if result.timed_out else result.completed.returncode,
-                   "passed": not result.timed_out and execution_stop is None and result.completed.returncode == 0,
+                   "passed": not tampered and not result.timed_out and execution_stop is None and result.completed.returncode == 0,
                    "tail": output[-4000:].decode("utf-8", errors="ignore"),
                    "timed_out": result.timed_out, "output_truncated": result.output_truncated,
                    "output_bytes": len(output),
                    "process_group_killed": result.process_group_killed,
                    "execution_stop": execution_stop}
+        if tampered:
+            payload["protected_test_tampered"] = tampered
         if execution_stop is not None:
             payload.update(outcome=execution_stop_outcome(execution_stop), termination_reason=execution_stop["cause"],
                            execution_complete=False, reached_observation=False)
@@ -635,6 +679,29 @@ def _helper() -> int:
         if scratch is not None:
             scratch.cleanup()
     return 0
+
+
+def _protected_test_tampering(root: Path, expected: object) -> list[str]:
+    if not isinstance(expected, dict):
+        raise OuterCheckError("invalid protected test hashes")
+    tampered = []
+    for relative, digest in expected.items():
+        path = Path(relative) if isinstance(relative, str) else Path("/")
+        if (not isinstance(relative, str) or path.is_absolute() or ".." in path.parts
+                or path.as_posix() != relative or not re.fullmatch(r"[0-9a-f]{64}", str(digest))):
+            raise OuterCheckError("invalid protected test hashes")
+        actual = None
+        try:
+            with os.fdopen(os.open(root / path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                                   | getattr(os, "O_NONBLOCK", 0)), "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
+                    actual = hashlib.file_digest(stream, "sha256").hexdigest()
+        except OSError:
+            actual = None
+        if actual != digest:
+            tampered.append(relative)
+    return sorted(tampered)
 
 
 if __name__ == "__main__":

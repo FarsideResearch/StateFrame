@@ -565,8 +565,11 @@ def interpreter_fingerprint(python: str | Path, *, require_pytest: bool = False)
 
 def _sandbox_backend() -> str | None:
     from .engine.kernel_test_isolation import sandbox_executable
+    from .engine.kernel_safe_paths import container_active
     from .engine.sf_launch import _current_cgroup
 
+    if container_active():
+        return None
     if (platform.system() != "Linux" or os.getuid() == 0
             or threading.current_thread() is not threading.main_thread()
             or os.getuid() != os.geteuid() or os.getgid() != os.getegid()):

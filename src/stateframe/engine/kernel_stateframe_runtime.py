@@ -6436,7 +6436,10 @@ class StateFrameRuntime:
 
     def _init_completion_authority(self, *, step_limit: int | None, tools: object, resume=None) -> None:
         """Create completion authority only in its explicit opt-in mode."""
-        from kernel_completion_authority import CompletionAuthority, POLICY_VERSION, RootFuelBudget
+        from kernel_completion_authority import (
+            CompletionAuthority, POLICY_VERSION, RootFuelBudget,
+            recovery_progress_from_snapshot,
+        )
         from kernel_wire_identity import completion_root_budget_wire_id
 
         raw_total = os.environ.get("STATEFRAME_COMPLETION_ROOT_FUEL",
@@ -6452,6 +6455,7 @@ class StateFrameRuntime:
             ) from error
         if (total is not None and total < reserve) or reserve < 0:
             raise ValueError("completion root fuel must cover a non-negative terminalization reserve")
+        budget_id = completion_root_budget_wire_id(self.journal)
         binding = self.binding()
         selectors = tuple(self.required_public_selectors())
         available = []
@@ -6464,16 +6468,20 @@ class StateFrameRuntime:
                         available.append(str(name))
         revision = binding.get("product_revision", binding.get("artifact", binding.get("revision")))
         latest_state = None
+        recovery_progress_seen: dict[str, set[str]] = {}
         records = getattr(self.journal, "records", None)
         if resume is not None and callable(records):
             for event in records():
                 if (event.get("kind") == "completion_authority_state"
                         and isinstance(event.get("state"), Mapping)):
                     latest_state = event["state"]
+                    for code, digests in recovery_progress_from_snapshot(latest_state).items():
+                        recovery_progress_seen.setdefault(code, set()).update(digests)
         if latest_state is not None:
             self.completion_authority = CompletionAuthority.from_snapshot(
                 latest_state, available_actions=available or None,
-                identity=getattr(self, "verdict_identity_provider", None))
+                identity=getattr(self, "verdict_identity_provider", None),
+                recovery_progress_seen=recovery_progress_seen)
             self._completion_authority_receipt_ids = {
                 str(receipt.receipt_id).rsplit(":", 1)[0]
                 for receipt in self.completion_authority.receipts
@@ -6497,7 +6505,7 @@ class StateFrameRuntime:
                 budget=RootFuelBudget(
                     total=total, unbounded=total is None,
                     terminalization_reserve=reserve,
-                    root_budget_id=completion_root_budget_wire_id(self.journal),
+                    root_budget_id=budget_id,
                 ),
                 required_evidence=selectors,
                 available_actions=available or None,
@@ -6519,15 +6527,16 @@ class StateFrameRuntime:
         authority = getattr(self, "completion_authority", None)
         if authority is None:
             return
-        version = authority.state_version
+        version = authority.persistence_marker
         if version == getattr(self, "_completion_authority_last_persisted", None):
             return
         self.journal.emit(
             "completion_authority_state",
             producer="kernel_completion_authority",
-            state=authority.snapshot(),
+            state=authority.snapshot(include_recovery_progress_seen=False),
             dispatch=False,
         )
+        authority.acknowledge_recovery_progress()
         self._completion_authority_last_persisted = version
 
     def _sync_completion_authority(self):
@@ -17921,6 +17930,11 @@ class StateFrameRuntime:
             binding = self.binding()
         except (AttributeError, KeyError, OSError, RuntimeError, TypeError, ValueError):
             binding = None
+        if raw_assumptions in (None, (), []):
+            # The binding holds one entry per workspace file: do not encode it for an empty list.
+            self._catalog_assumption_receipts_cache = ()
+            self._catalog_assumption_receipts_cache_key = None
+            return ()
         cache_key = digest({
             "assumptions": raw_assumptions,
             "root": str(root.resolve()),
@@ -17931,10 +17945,6 @@ class StateFrameRuntime:
         cached = getattr(self, "_catalog_assumption_receipts_cache", None)
         if cached is not None and getattr(self, "_catalog_assumption_receipts_cache_key", None) == cache_key:
             return cached
-        if raw_assumptions in (None, (), []):
-            self._catalog_assumption_receipts_cache = ()
-            self._catalog_assumption_receipts_cache_key = cache_key
-            return ()
         task_id, scope = self._catalog_task_scope()
         try:
             from kernel_catalog_assume import unknown_receipts, verify_indexed_assumptions

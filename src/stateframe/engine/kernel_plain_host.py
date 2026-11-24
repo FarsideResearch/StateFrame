@@ -40,6 +40,7 @@ from kernel_plain_loop import (
     OUT_CAP, TOOLS, Limits, ProviderHTTPError, ProviderTransportError, run_loop,
 )
 from kernel_test_python import selected_test_python
+from kernel_safe_paths import container_active
 
 CHECK_TIMEOUT_S = 300
 GREP_TIMEOUT_S = 60
@@ -404,6 +405,10 @@ def sandboxed_check_runner(lock_path: Path, audit_path: Path, *,
                     outcome = execute(preflight_argv, root)
                 canary_receipt = {"argv": list(preflight_argv[1:]), "exit_code": outcome.exit_code,
                                   "timed_out": outcome.timed_out}
+                if container_active():
+                    canary_receipt.update(backend="container", passed=False,
+                                          network_isolation="unknown", path_isolation="unknown",
+                                          secret_isolation="unknown")
                 if outcome.cgroup_leaf_pattern:
                     canary_receipt["cgroup_leaf_pattern"] = outcome.cgroup_leaf_pattern
                 if profile:

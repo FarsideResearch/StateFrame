@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import redirect_stdout
+import io
 import json
 import os
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from . import __version__, _startup_optimization_enabled, profiles
 from .endpoint import CHAT_SUFFIX, Endpoint, EndpointError
@@ -29,6 +32,9 @@ if not _defer_subcommand_imports:
 from datetime import datetime, timezone
 
 from .engine.kernel_safe_paths import safe_expanduser, safe_home
+
+if TYPE_CHECKING:
+    from .engine.kernel_execution_boundary import Boundary
 
 def _task_text(value: str) -> str:
     """``--task`` is literal text, or ``@path`` to read it from a file."""
@@ -188,6 +194,9 @@ def _add_task_arguments(command: argparse.ArgumentParser, *, for_run: bool = Fal
                          help="optional wall-clock limit in seconds (default: no limit; stop with Ctrl-C)")
     command.add_argument("--yolo", action="store_true",
                          help="authorize unrestricted host shell execution for this command")
+    if for_run:
+        command.add_argument("--container-is-sandbox", action="store_true",
+                             help="use the current container as the boundary for a trusted repository")
     command.add_argument("--shell", choices=("off", "read-only", "standard", "unrestricted"),
                          default="standard", action=_ExplicitValue)
     command.add_argument("--shell-ask", action=argparse.BooleanOptionalAction,
@@ -283,6 +292,8 @@ def build_parser(*, json_errors: bool = False) -> argparse.ArgumentParser:
                             help="explicitly repeat external tool operations and verify their results")
     resume_cmd.add_argument("--yolo", action="store_true",
                             help="authorize resuming a run created with --yolo")
+    resume_cmd.add_argument("--container-is-sandbox", action="store_true",
+                            help="resume a run using the current container as its trusted-repository boundary")
     resume_cmd.add_argument("--keep-checkpoints", action="store_true",
                             help="keep the run's checkpoints after it finishes (default: removed once finished)")
     resume_cmd.add_argument("--keep-run-env", action="store_true",
@@ -354,7 +365,8 @@ def build_parser(*, json_errors: bool = False) -> argparse.ArgumentParser:
     return parser
 
 
-def _run_options(args: argparse.Namespace, endpoint: Endpoint, *, warn: bool = True) -> RunOptions:
+def _run_options(args: argparse.Namespace, endpoint: Endpoint, *, warn: bool = True,
+                 execution_boundary: Boundary | None = None) -> RunOptions:
     if args.shell_sandbox == "off" and args.shell != "unrestricted":
         raise ToolSettingsError("--shell-sandbox off requires --shell unrestricted")
     host_authorization = None
@@ -423,7 +435,51 @@ def _run_options(args: argparse.Namespace, endpoint: Endpoint, *, warn: bool = T
                       mutation_audit=args.mutation_audit,
                       mutation_hooks=args.mutation_hook)
     options._cli_yolo = bool(getattr(args, "yolo", False)) and args.shell_sandbox == "off"
+    options._execution_boundary = execution_boundary
     return options
+
+
+def _container_boundary_for_command(args: argparse.Namespace) -> Boundary | None:
+    """Authorize the opt-in boundary before project hooks, probes, or task code can run."""
+    if not getattr(args, "container_is_sandbox", False):
+        return None
+    from .engine import kernel_execution_boundary as execution_boundary
+
+    BoundaryRefused = execution_boundary.BoundaryRefused
+    if args.command == "run" and args.shell == "read-only":
+        raise BoundaryRefused("CONTAINER_CONFLICT")
+
+    conflicts = []
+    if args.command == "run":
+        if args.mcp:
+            raise BoundaryRefused("CONTAINER_UNSUPPORTED:mcp")
+        if args.parallel != "off":
+            raise BoundaryRefused("CONTAINER_UNSUPPORTED:parallel-child")
+        if args.shell_sandbox == "off":
+            conflicts.append("shell-sandbox off")
+        level = args.mutations
+        if level is None:
+            level = os.environ.get("STATEFRAME_MUTATIONS")
+        if level is None:
+            level = profiles.load(args.profile).get("STATEFRAME_MUTATIONS", "off")
+        if str(level).strip().lower() != "off" or bool(args.mutation_hook):
+            conflicts.append("mutations")
+    if getattr(args, "yolo", False):
+        conflicts.append("--yolo")
+
+    detection = execution_boundary.detect()
+    with redirect_stdout(io.StringIO()):
+        current = execution_boundary.authorize(
+            True, conflicts=conflicts, detection=detection, uid=getattr(os, "geteuid", lambda: -1)())
+
+    if args.command == "run":
+        if args.shell_network != "full" or not args.shell_network_explicit:
+            raise BoundaryRefused("CONTAINER_NETWORK")
+        if args.shell not in ("off", "standard", "unrestricted"):
+            raise BoundaryRefused("CONTAINER_CONFLICT")
+
+    print(execution_boundary.BOUNDARY_STATEMENT, file=sys.stderr)
+    return current
 
 
 def _yolo_notice(args: argparse.Namespace) -> None:
@@ -657,6 +713,7 @@ def main(argv: list[str] | None = None) -> int:
     ))
     try:
         args = build_parser(json_errors=args.json).parse_args(argv)
+        container_boundary = _container_boundary_for_command(args)
         _yolo_notice(args)
         refusal = _mutation_platform_refusal(args)
         if refusal is not None:
@@ -745,6 +802,7 @@ def main(argv: list[str] | None = None) -> int:
                                  replay_external=args.replay_external,
                                  _yolo_cli=args.yolo,
                                  host_authorization=host_authorization,
+                                 _execution_boundary=container_boundary,
                                  printer=(lambda *_: None) if args.json else print)
             if args.json:
                 print(json.dumps(summary, indent=1))
@@ -771,7 +829,7 @@ def main(argv: list[str] | None = None) -> int:
             session = chat.Session(repo=args.repo.resolve(), base=base,
                                    home=(args.session_dir or chat.default_home(args.repo)).resolve())
             return chat.repl(session, print_summary=lambda p: _print_summary(json.loads(p.read_text())))
-        options = _run_options(args, endpoint, warn=False)
+        options = _run_options(args, endpoint, warn=False, execution_boundary=container_boundary)
         summary = run(options, printer=(lambda *_: None) if args.json else print)
         if args.json:
             print(json.dumps(summary, indent=1))
@@ -780,8 +838,14 @@ def main(argv: list[str] | None = None) -> int:
         return summary["exit_code"]
     except ResumeRefused as error:
         return _report_error(args, f"stateframe: cannot resume: {error}")
-    except (EndpointError, RunError, TaskRowError, WorkCopyError, ValueError, OSError) as error:
-        return _report_error(args, f"stateframe: error: {error}")
+    except Exception as error:
+        if any(base.__name__ == "BoundaryRefused" and base.__module__ in {
+                "stateframe.engine.kernel_execution_boundary", "kernel_execution_boundary"}
+               for base in type(error).__mro__):
+            return _report_error(args, f"stateframe: refused: {error.code}")
+        if isinstance(error, (EndpointError, RunError, TaskRowError, WorkCopyError, ValueError, OSError)):
+            return _report_error(args, f"stateframe: error: {error}")
+        raise
     except KeyboardInterrupt:
         return _report_error(args, "stateframe: interrupted", 130)
 

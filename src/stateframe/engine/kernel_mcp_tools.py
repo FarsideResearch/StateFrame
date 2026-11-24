@@ -10,12 +10,14 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 if __package__:
+    from .kernel_safe_paths import container_active
     from .kernel_custom_tools import (CustomToolError, NETWORK_ORDER, _canonical, _digest,
         _file_digest, _json_constant, _json_object, resolve_executable)
     from .kernel_exec_capability import executable_read_roots, shell_capability
     from .kernel_exec_session import ExecSessionError
     from .kernel_mcp_driver import exchange
 else:
+    from kernel_safe_paths import container_active
     from kernel_custom_tools import (CustomToolError, NETWORK_ORDER, _canonical, _digest,
         _file_digest, _json_constant, _json_object, resolve_executable)
     from kernel_exec_capability import executable_read_roots, shell_capability
@@ -45,6 +47,11 @@ OMISSION_CODES = frozenset({"INVALID_NAME", "NAME_COLLISION", "UNSUPPORTED_SCHEM
 
 class McpError(CustomToolError):
     """An MCP definition, discovery response or driver result is invalid."""
+
+
+def _require_supported_boundary() -> None:
+    if container_active():
+        raise McpError("CONTAINER_UNSUPPORTED:mcp")
 
 
 def _fail(where: str, field: str, reason: str) -> None:
@@ -394,6 +401,7 @@ def discover_mcp(config: McpSet, session, base_cap, workspace: Path, *, custom_s
                  endpoint: str | None = None, auth_key: str | None = None,
                  generation_endpoint: str | None = None,
                  budget_admission: Sequence[bool] | None = None) -> McpSet:
+    _require_supported_boundary()
     if budget_admission is None:
         if __package__:
             from .kernel_request_diet import RequestTokenMeter
@@ -479,6 +487,7 @@ def discover(servers: Sequence[McpServer], workspace: Path, run_dir: Path, *,
              generation_endpoint: str | None = None,
              budget_admission: Sequence[bool] | None = None) -> McpSet:
     """Use the same sandbox boundary on the host and in the engine child."""
+    _require_supported_boundary()
     workspace = Path(workspace).resolve(strict=True)
     run_dir = Path(run_dir).resolve(strict=True)
     scratch = run_dir / "mcp-discovery-home"
@@ -501,6 +510,7 @@ def run_driver(server: McpServer, action: str, workspace: Path, run_dir: Path, *
                shell_network: str, host_authorization: bool,
                tool: str = "", arguments: dict | None = None) -> dict:
     """Run one isolated protocol exchange through the same discovery boundary."""
+    _require_supported_boundary()
     workspace = Path(workspace).resolve(strict=True)
     run_dir = Path(run_dir).resolve(strict=True)
     scratch = run_dir / "mcp-call-home"

@@ -6230,11 +6230,22 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
             " Preserve the partial output, keep completion unresolved, and use an offered "
             "diagnostic or verification action before attributing a product defect."),
             _timeout_stream(timeout_error.output), 124, complete=False)
+    _test_tampering = ""
     if _runtime is not None:
         from kernel_public_evidence import check_selectors
         _test_observation = check_selectors(root, list(targets), kexpr)
         with _profile_phase("post_snapshot_integrity"):
             _test_write_set = changed_write_set(_test_write_snapshot, snapshot_workspace(root))
+        _protected_test_paths = row.get("protected_test_paths", ()) if isinstance(row, Mapping) else ()
+        if isinstance(_protected_test_paths, (list, tuple, set, frozenset)):
+            _changed_protected = sorted(
+                set(_test_write_set) & {str(path) for path in _protected_test_paths})
+            if _changed_protected:
+                from kernel_safe_paths import container_active
+                if container_active():
+                    _test_tampering = (
+                        "CONTAINER TEST TAMPERED — detected changes to protected test file(s): "
+                        + ", ".join(_changed_protected))
         if _unit is not None:
             _runtime._unit_pending_test_observations.append(
                 (_test_observation, _test_binding, _cmd, env, _execution_id))
@@ -6242,7 +6253,8 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
             with _profile_phase("readiness_binding_enrichment"):
                 _runtime.test_observation(
                     _test_observation, p.returncode, _test_binding,
-                    observation=p.stdout + "\n" + p.stderr,
+                    observation=(p.stdout + "\n" + p.stderr
+                                 + ("\n" + _test_tampering if _test_tampering else "")),
                     run_write_set=_test_write_set, command=_cmd, test_environment=env,
                     memory_limit_mechanism=_check_memory_limit_mechanism,
                     cgroup_leaf_pattern=_check_cgroup_leaf_pattern,
@@ -6360,6 +6372,8 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
     # `NameError: name 'item' is not defined` with no file or line — the agent (and we)
     # then chased a phantom bug at the wrong line. A NameError/ImportError without its
     # `File "...", line N` frame is not evidence, it is a rumour.
+    if _test_tampering:
+        meaning = _test_tampering
     body = _pytest_failure_excerpt(tail)
     if _unit is not None:
         # The unit receipt is built after the disposable clone is scanned. Raw
@@ -6369,7 +6383,7 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
     if _runtime is not None:
         from kernel_check_receipts import compact_observation
         from kernel_check_truth_adapter import record_native_observation
-        receipt_status = {
+        receipt_status = "INVALID_CHECK" if _test_tampering else {
             0: "PASS",
             1: "FAIL",
             5: "NO_TESTS",
@@ -6379,6 +6393,8 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
             else "COLLECTION" if p.returncode in {2, 3, 4}
             else None
         )
+        if _test_tampering:
+            receipt_phase = "EXECUTION"
         receipt_reached = (
             False if receipt_phase is not None
             else True if p.returncode == 1
@@ -6393,11 +6409,12 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
                 status=receipt_status,
                 stdout=p.stdout,
                 stderr=p.stderr,
-                assertion_context=body,
+                assertion_context=(_test_tampering + "\n" + body if _test_tampering else body),
                 execution_id=str(_execution_id or ""),
                 exit_code=p.returncode,
                 reached_observation=receipt_reached,
                 failure_phase=receipt_phase,
+                **({"outcome": "INVALID_CHECK"} if _test_tampering else {}),
                 revision=receipt_revision,
                 sequence=getattr(getattr(_runtime, "owner", None), "current_step", None),
                 output_truncated=_check_output_truncated,

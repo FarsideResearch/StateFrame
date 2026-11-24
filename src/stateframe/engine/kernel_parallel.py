@@ -24,6 +24,7 @@ import time
 from typing import Callable, Mapping, Protocol, Sequence
 
 if __package__:
+    from .kernel_safe_paths import container_active
     from .kernel_fanout_continuation import WRITER_DETAIL_FIELDS, WRITER_SCOPE_FIELDS, WRITER_UNIT_FIELDS
     from .kernel_parallel_admission import DirectorySnapshot, _definitions, _safe_path, admit, rescan_proposal, scan_coupling
     from .kernel_parallel_contracts import _module_map, project_interface, verify_contracts
@@ -40,6 +41,7 @@ if __package__:
     from .kernel_journal_store import journal_paths, open_journal
     from .kernel_exec_tracker import ProcessTable, _boot_id, load_tolerant_seconds
 else:
+    from kernel_safe_paths import container_active
     from kernel_fanout_continuation import WRITER_DETAIL_FIELDS, WRITER_SCOPE_FIELDS, WRITER_UNIT_FIELDS
     from kernel_parallel_admission import DirectorySnapshot, _definitions, _safe_path, admit, rescan_proposal, scan_coupling
     from kernel_parallel_contracts import _module_map, project_interface, verify_contracts
@@ -1043,6 +1045,7 @@ _service: tuple[Path, dict] | None = None
 
 def install(run: Path, spec: dict) -> None:
     global _service
+    if container_active(): raise ParallelError("CONTAINER_UNSUPPORTED:parallel-child")
     if _service is not None:
         raise ParallelError("subframe service is already installed")
     if spec.get("parallel_mode") == "off" or "unit_spec" in spec:

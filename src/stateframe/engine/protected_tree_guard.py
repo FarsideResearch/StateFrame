@@ -16,8 +16,10 @@ import subprocess
 import sys
 
 if __package__:
+    from .kernel_safe_paths import container_active
     from .kernel_sbpl import sbpl_string
 else:
+    from kernel_safe_paths import container_active
     from kernel_sbpl import sbpl_string
 
 ROOT = Path(__file__).resolve().parent
@@ -58,6 +60,7 @@ class WriteGuard:
 
 
 def guarded_command(command, roots=PROTECTED):
+    if container_active(): raise RuntimeError("CONTAINER_UNSUPPORTED:protected_tree_guard")
     roots = tuple(dict.fromkeys(Path(root).resolve() for root in (*PROTECTED, *roots)))
     if platform.system() == "Darwin":
         backend = shutil.which("sandbox-exec")
@@ -75,6 +78,7 @@ def guarded_command(command, roots=PROTECTED):
 
 
 def main():
+    if container_active(): raise RuntimeError("CONTAINER_UNSUPPORTED:protected_tree_guard")
     if sys.argv[1:2] != ["--inside"]:
         return subprocess.call(guarded_command([sys.executable, str(Path(__file__)), "--inside", *sys.argv[1:]]))
     guard = WriteGuard()
