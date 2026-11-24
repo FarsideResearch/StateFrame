@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.8 (2026-11-24)
 
 - Note for 0.9.7: the new tool-call reply parser no longer accepts an uppercase `NAME` attribute.
 - Fixed: provider HTTP 429 responses retry the same sealed request after `Retry-After` and the existing backoff, while typed quota errors remain terminal.
