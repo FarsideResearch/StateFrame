@@ -1,6 +1,7 @@
 # Changelog
 
-## Unreleased
+## 0.8.36 (2026-11-24)
+
 - Workspace scans, undo of refused changes and test evidence read files over 16 MiB in blocks; such a file no longer ends a run.
 - Startup now probes reflink support, falls back to streamed copies, keeps and hashes files over 1 MiB outside task text, and records any remaining skipped paths with reasons.
 - Repository start copies, including empty repositories, no longer refuse eligible trees by file count or aggregate bytes; a start whose copies do not fit, or would leave a large repository less than the free-space reserve (1 to 20 GiB), stops before copying with needed and free bytes, and partial copies are removed on ENOSPC or EDQUOT.
@@ -12,7 +13,6 @@
 - Fixed: the check-state line shown to a subframe uses the subframe term.
 - Fixed: fan-out continuation prose and parser diagnostics call units subframes; recorded fields and readback decisions stay unchanged.
 - Fixed: large-workspace call-site census reuses byte-bounded revision facts and avoids reparsing cataloged source within a request.
-
 
 ## 0.8.35 (2026-11-24)
 
