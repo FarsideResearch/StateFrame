@@ -33,6 +33,7 @@ ASSET_PROVENANCE: dict[str, tuple[str, str]] = {
     "mutations_prebuilt/archive_list/unit.json": (
         "Repository-authored unit metadata", "Root license"
     ),
+    "contract-outputs.json": ("Repository-authored contract catalog", "Root license"),
     "mutations_prebuilt/file_facts/fixtures/sample.txt": (
         "Repository-authored fixture text", "Root license"
     ),

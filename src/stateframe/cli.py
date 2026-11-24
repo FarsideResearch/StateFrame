@@ -106,13 +106,17 @@ def _add_task_arguments(command: argparse.ArgumentParser, *, for_run: bool = Fal
                              help='what to fix: text, or @file to read it from a file')
     # Endpoint and model may come from STATEFRAME_ENDPOINT / STATEFRAME_MODEL so a container
     # (or a shell profile) can set them once; an explicit flag always wins.
-    command.add_argument("--endpoint", default=os.environ.get("STATEFRAME_ENDPOINT"),
-                         required="STATEFRAME_ENDPOINT" not in os.environ,
-                         help="OpenAI-compatible base URL, e.g. http://127.0.0.1:8080/v1 "
-                              "(default: $STATEFRAME_ENDPOINT)")
-    command.add_argument("--model", default=os.environ.get("STATEFRAME_MODEL"),
-                         required="STATEFRAME_MODEL" not in os.environ,
-                         help="model name the server serves (default: $STATEFRAME_MODEL)")
+    endpoint = command.add_argument("--endpoint", default=os.environ.get("STATEFRAME_ENDPOINT"),
+                                    required="STATEFRAME_ENDPOINT" not in os.environ,
+                                    help="OpenAI-compatible base URL, e.g. http://127.0.0.1:8080/v1 "
+                                         "(default: $STATEFRAME_ENDPOINT)")
+    endpoint.contract_default_kind = "runtime"
+    endpoint.contract_required_unless_env = "STATEFRAME_ENDPOINT"
+    model = command.add_argument("--model", default=os.environ.get("STATEFRAME_MODEL"),
+                                 required="STATEFRAME_MODEL" not in os.environ,
+                                 help="model name the server serves (default: $STATEFRAME_MODEL)")
+    model.contract_default_kind = "runtime"
+    model.contract_required_unless_env = "STATEFRAME_MODEL"
     command.add_argument("--api-key-env", metavar="VAR",
                          help="environment variable holding the API key (never the key itself)")
     command.add_argument("--max-turns", type=_turns, default=None,
@@ -318,6 +322,12 @@ def build_parser(*, json_errors: bool = False) -> argparse.ArgumentParser:
     view.add_argument("--frame", action="store_true", help="the typed StateFrame, pretty JSON")
     view.add_argument("--bytes", action="store_true", help="the exact request bytes sent")
     view.add_argument("--messages", action="store_true", help="every message of the request")
+
+    contract_cmd = commands.add_parser("contract", help="show the command and artifact contract")
+    contract_output = contract_cmd.add_mutually_exclusive_group()
+    contract_output.add_argument("--json", action="store_true", help="print the contract as canonical JSON")
+    contract_output.add_argument("--schema-version", action="store_true",
+                                 help="print only the contract schema version")
 
     gc_cmd = commands.add_parser("gc", help="inspect or reclaim run-directory storage")
     gc_cmd.add_argument("roots", nargs="*", type=Path,
@@ -712,12 +722,26 @@ def main(argv: list[str] | None = None) -> int:
         for token in option_argv
     ))
     try:
-        args = build_parser(json_errors=args.json).parse_args(argv)
+        parser = build_parser(json_errors=args.json)
+        args = parser.parse_args(argv)
         container_boundary = _container_boundary_for_command(args)
         _yolo_notice(args)
         refusal = _mutation_platform_refusal(args)
         if refusal is not None:
             return _report_error(args, f"stateframe: refused: {refusal}")
+        if args.command == "contract":
+            from . import contract
+
+            if args.schema_version:
+                print(contract.schema_version())
+                return 0
+            document = contract.document(parser)
+            if args.json:
+                sys.stdout.buffer.write(contract.render(document))
+                sys.stdout.flush()
+            else:
+                print(contract.readable_summary(document))
+            return 0
         if args.command == "mutations":
             from . import mutations_cli
             return mutations_cli.dispatch(args)

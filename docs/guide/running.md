@@ -10,6 +10,8 @@
 | `stateframe chat --repo R` | Interactive session: tasks, follow-ups, `/diff`, `/undo`, `/apply`. |
 | `stateframe hooks trust --repo R` | Review and trust the exact `.stateframe/hooks.json` configuration for repository `R`. |
 
+Use `stateframe contract --json` to print the canonical machine-readable CLI, run-artifact and event contract. Run `stateframe contract` for a short summary, or `stateframe contract --schema-version` to print only the schema version. `notes.settings: pending` means setting rows are not published yet, so an empty `settings` list does not mean there are no settings. An empty `promised_lines` list means no text line of that command is promised; read its JSON or exit code instead.
+
 ## Common flags
 
 `STATEFRAME_REQUIRED_TEST_LEDGER=off|on` (host environment, default `off`) collects outcomes during the selected baseline and final pytest checks. The summary compares baseline passes with the last complete final check and lists failed and missing tests using repository-relative pytest node IDs, such as `tests/test_math.py::TestMath::test_add[small]`. A completed check that collects no tests can establish that baseline tests are missing. The summary reports `unknown` when either side lacks a complete report, for example after an interrupted check, an unsupported launcher, or a report that exceeds the size limit. The ledger is advisory and preserves the check's stdout, stderr, exit status and configured JUnit output. Incomplete reasons are written as fixed codes to its bounded report; if no report can be read, the summary says `pytest report was not produced`.

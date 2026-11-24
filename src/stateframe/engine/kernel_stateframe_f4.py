@@ -378,8 +378,148 @@ def _receipt_candidates(frame: Mapping[str, object], revision: str) -> list[tupl
     return candidates
 
 
+def _execution_stop_cause(value: object) -> str | None:
+    row = _mapping(value)
+    if not row:
+        return None
+    from kernel_verdict import execution_stop_cause
+    return execution_stop_cause(row)
+
+
+def _receipt_selectors(row: Mapping[str, object]) -> list[str]:
+    for key in ("selectors", "required_selectors"):
+        selected = _strings(row.get(key))
+        if selected:
+            return selected
+    for key in ("selector", "check_id", "test_selector", "name"):
+        selected = _strings(row.get(key))
+        if selected:
+            return selected
+    return []
+
+
+def _receipt_order(row: Mapping[str, object], position: int) -> tuple[int, int | float]:
+    sequence = row.get("sequence")
+    if type(sequence) in {int, float}:
+        return 2, sequence
+    for key in ("event_sequence", "timestamp_ns", "timestamp"):
+        value = row.get(key)
+        if type(value) in {int, float}:
+            return 1, value
+    return 0, position
+
+
+def _receipt_execution_ids(row: Mapping[str, object]) -> set[str]:
+    """Collect stable execution references shared by its journal rows."""
+    result: set[str] = set()
+    for key in ("execution_id", "host_execution_id", "check_execution_id"):
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            result.add(value.strip())
+    for key in ("execution_ids", "canonical_check_execution_ids"):
+        result.update(_strings(row.get(key)))
+    certificate = row.get("observation_certificate")
+    if isinstance(certificate, Mapping):
+        result.update(_strings(certificate.get("execution_ids")))
+    return result
+
+
+def _latest_stopped_receipts(frame: Mapping[str, object], revision: str) -> dict[bytes, str]:
+    """Identify a stopped newest execution, including its later summary rows."""
+    records: list[tuple[str, tuple[int, int | float], bytes, Mapping[str, object], set[str]]] = []
+    latest: dict[str, tuple[tuple[int, int | float], set[bytes], set[str]]] = {}
+    position = 0
+    for key in ("test_receipts", "host_check_receipts", "receipts"):
+        rows = frame.get(key)
+        if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes, bytearray)):
+            continue
+        for row in rows:
+            row_position = position
+            position += 1
+            if not isinstance(row, Mapping):
+                continue
+            row_revision = row.get("revision", row.get("workspace_revision", row.get("source_revision", revision)))
+            if str(row_revision) != revision:
+                continue
+            if not (_refs(row) or any(row.get(name) not in (None, "", False) for name in (
+                    "ran", "execution_id", "run_id", "started_at", "completed_at"))):
+                continue
+            selectors = _receipt_selectors(row) or ["*"]
+            order = _receipt_order(row, row_position)
+            marker = _canonical(row)
+            execution_ids = _receipt_execution_ids(row)
+            records.extend((selector, order, marker, row, execution_ids)
+                           for selector in selectors)
+            for selector in selectors:
+                previous = latest.get(selector)
+                if previous is None or order > previous[0]:
+                    latest[selector] = (order, {marker}, set(execution_ids))
+                elif order == previous[0]:
+                    previous[1].add(marker)
+                    previous[2].update(execution_ids)
+    stopped: dict[bytes, str] = {}
+    for selector, (latest_order, markers, execution_ids) in latest.items():
+        related = [record for record in records
+                   if record[0] == selector
+                   and (record[1] == latest_order or
+                        (execution_ids and execution_ids.intersection(record[4])))]
+        causes = [(order, cause) for _selected, order, _marker, row, _ids in related
+                  if (cause := _execution_stop_cause(row)) is not None]
+        if not causes:
+            continue
+        _order, cause = max(causes, key=lambda item: item[0])
+        for marker in markers:
+            stopped[marker] = cause
+    return stopped
+
+
+def _has_latest_real_failure(frame: Mapping[str, object], revision: str) -> bool:
+    """Whether any selector's newest current subprocess execution really failed."""
+    from kernel_verdict import _TEST_KINDS, VIOLATED, _exit_state
+
+    latest: dict[str, tuple[tuple[int, int | float], list[Mapping[str, object]]]] = {}
+    for position, (_source, row) in enumerate(_receipt_candidates(frame, revision)):
+        if row.get("producer") != "test_subprocess":
+            continue
+        kind = row.get("kind")
+        if kind is not None and str(kind) not in _TEST_KINDS:
+            continue
+        selectors = _receipt_selectors(row)
+        if not selectors:
+            continue
+        order = _receipt_order(row, position)
+        for selector in selectors:
+            previous = latest.get(selector)
+            if previous is None or order > previous[0]:
+                latest[selector] = (order, [row])
+            elif order == previous[0]:
+                previous[1].append(row)
+
+    for _order, rows in latest.values():
+        if any(_execution_stop_cause(row) is not None for row in rows):
+            continue
+        if any(_real_failure_is_current(row, revision)
+               and _exit_state(row)[0] == VIOLATED for row in rows):
+            return True
+    return False
+
+
+def _real_failure_is_current(row: Mapping[str, object], revision: str) -> bool:
+    if row.get("binding_stable") is not True:
+        return False
+    binding = _mapping(row.get("binding"))
+    after_binding = _mapping(row.get("after_binding"))
+    if binding is None or after_binding is None or binding != after_binding:
+        return False
+    product_revision = binding.get("product_revision", binding.get("product"))
+    if isinstance(product_revision, Mapping):
+        product_revision = product_revision.get("value", product_revision.get("revision"))
+    return product_revision in (None, "") or str(product_revision) == revision
+
+
 def _candidate_statuses(frame: Mapping[str, object], paths: Sequence[Sequence[str]], revision: str,
-                        *, include_receipts: bool = False) -> list[dict[str, object]]:
+                        *, include_receipts: bool = False,
+                        stopped_receipts: Mapping[bytes, str] | None = None) -> list[dict[str, object]]:
     result: list[dict[str, object]] = []
     for path in paths:
         value = _at(frame, path)
@@ -387,17 +527,29 @@ def _candidate_statuses(frame: Mapping[str, object], paths: Sequence[Sequence[st
             continue
         row = _mapping(value)
         row_revision = row.get("revision", row.get("current_revision", row.get("workspace_revision")))
-        result.append({
-            "path": _source_label(path), "state": _status(value),
+        stopped_cause = _execution_stop_cause(value)
+        candidate = {
+            "path": _source_label(path), "state": "UNRESOLVED" if stopped_cause else _status(value),
             "revision": str(row_revision) if row_revision not in (None, "") else revision,
             "evidence": _refs(row),
-        })
+        }
+        if stopped_cause:
+            candidate["reason"] = "CHECK_STOPPED:" + stopped_cause
+        result.append(candidate)
     if include_receipts:
         for source, row in _receipt_candidates(frame, revision):
-            result.append({
-                "path": "public-check receipt", "state": _status(row.get("result_class", row.get("result", row.get("status")))),
+            stopped_cause = ((stopped_receipts or {}).get(_canonical(row))
+                             if stopped_receipts is not None
+                             else _execution_stop_cause(row))
+            candidate = {
+                "path": "public-check receipt",
+                "state": "UNRESOLVED" if stopped_cause else _status(row.get(
+                    "result_class", row.get("result", row.get("status")))),
                 "revision": str(row.get("revision", revision)), "evidence": _refs(row),
-            })
+            }
+            if stopped_cause:
+                candidate["reason"] = "CHECK_STOPPED:" + stopped_cause
+            result.append(candidate)
     return result
 
 
@@ -533,12 +685,15 @@ def _reduce_status(candidates: Sequence[Mapping[str, object]], revision: str,
         state = unknown
     evidence: list[dict[str, object]] = []
     for row in chosen:
-        evidence.append({
+        item = {
             "source": str(row.get("path", "host")),
             "state": str(row.get("state", "UNKNOWN")),
             "revision": str(row.get("revision", revision)),
             "references": list(row.get("evidence", ())) if isinstance(row.get("evidence"), Sequence) else [],
-        })
+        }
+        if row.get("reason"):
+            item["reason"] = str(row["reason"])
+        evidence.append(item)
     return state, evidence, [str(row.get("path", "host")) for row in chosen]
 
 
@@ -601,10 +756,18 @@ def project_f4_state(frame: Mapping[str, object] | None, *,
     check_revision = (current_product_revision.strip() if current_product_revision is not None
                       else revision)
     selector_values = _selector_values(source, selectors)
+    stopped_receipts = _latest_stopped_receipts(source, check_revision)
     check_candidates = _candidate_statuses(
-        source, _PUBLIC_CHECK_PATHS, check_revision, include_receipts=True)
+        source, _PUBLIC_CHECK_PATHS, check_revision, include_receipts=True,
+        stopped_receipts=stopped_receipts)
     check_state, check_evidence, check_sources = _reduce_status(check_candidates, check_revision)
+    current_stop_reasons = list(dict.fromkeys(
+        str(row["reason"]) for row in check_candidates
+        if str(row.get("revision", check_revision)) == check_revision and row.get("reason")
+    ))
     public_check_state = (
+        ("FAILED" if _has_latest_real_failure(source, check_revision) else "UNRESOLVED")
+        if current_stop_reasons else
         check_state if _has_current_check_execution(source, check_candidates, check_revision)
         else "NOT_RUN"
     )
@@ -723,6 +886,7 @@ def project_f4_state(frame: Mapping[str, object] | None, *,
             "state": public_check_state, "selectors": selector_values or ["not recorded"],
             "revision": check_revision, "evidence": check_evidence,
             "establishes": check_claim["establishes"],
+            **({"reason_code": current_stop_reasons[0]} if current_stop_reasons else {}),
         },
         "blockers": bind_rows(
             blocker_rows, "blockers", F4_PREDICATE_GLOSSARY["blockers"]),

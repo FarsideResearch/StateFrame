@@ -960,7 +960,14 @@ def _stopped_check_wire_outputs(
     }
     stateframe_runtime.StateFrameRuntime._record_test_completion_receipt(
         runtime, event, (public_receipt,))
-    check_ref = kernel_wire_truth_facts._current_public_check(runtime, BINDING)[1]
+    # A stopped check is unresolved, so it has no current check fact. Its verdict still
+    # names the evidence by the same wire reference.
+    verdict = kernel_verdict.evaluate_required_tests(
+        BINDING, [SELECTOR], runtime.test_receipts,
+        wire_seed=kernel_wire_identity.wire_run_seed(journal), wire_step=owner.current_step)
+    assert verdict.state == "UNRESOLVED"
+    assert len(verdict.supporting_evidence) == 1 and verdict.supporting_evidence[0]
+    check_ref = verdict.supporting_evidence[0]
     return {
         "check_execution_ref": check_ref,
         "rendered_wire_fact": kernel_wire_truth_facts.render_fact_messages(

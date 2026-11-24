@@ -16,7 +16,9 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
-from kernel_verdict import CONFLICT, SATISFIED, VIOLATED, evaluate_required_tests
+from kernel_verdict import (
+    CONFLICT, SATISFIED, VIOLATED, evaluate_required_tests, execution_stop_cause,
+)
 
 
 MODE_ENV = "STATEFRAME_UNIFIED"
@@ -90,6 +92,8 @@ def _jobs_block(frame: Mapping[str, object]) -> str | None:
 
 
 def _status(row: Mapping[str, object]) -> str:
+    if execution_stop_cause(row) is not None:
+        return "UNRESOLVED"
     for key in ("result_class", "result", "status", "outcome", "verdict"):
         if row.get(key) is not None:
             return str(row[key]).upper()
