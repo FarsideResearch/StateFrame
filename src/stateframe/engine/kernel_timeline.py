@@ -110,11 +110,11 @@ def _extract_entities(value: object, *, depth: int = 0) -> tuple[str, ...]:
             for nested in raw:
                 if isinstance(nested, Mapping):
                     result.extend(_extract_entities(nested, depth=depth + 1))
-    normalized: list[str] = []
+    normalized: dict[str, None] = {}
     for item in result:
         entity = _normalise_entity(item)
         if entity and entity not in normalized:
-            normalized.append(entity)
+            normalized[entity] = None
     return tuple(normalized)
 
 
@@ -360,12 +360,15 @@ class TimelineIndex:
         event_ident = event_id or self._new_id(event_kind)
         payload_copy = _copy(payload)
         all_entities = list(_extract_entities({"entities": entities, "payload": payload_copy}))
+        seen_entities = set(all_entities)
         for entity in _extract_entities(payload_copy):
-            if entity not in all_entities:
+            if entity not in seen_entities:
+                seen_entities.add(entity)
                 all_entities.append(entity)
         changed = list(_extract_entities({"entities": changed_entities}))
         for entity in changed:
-            if entity not in all_entities:
+            if entity not in seen_entities:
+                seen_entities.add(entity)
                 all_entities.append(entity)
         return TimelineEvent(
             event_id=event_ident,

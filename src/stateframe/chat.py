@@ -100,7 +100,11 @@ class Session:
             private_directory(self.home)
         work = workcopy.create(self.repo, self.copy)
         self.baseline = dict(work.baseline)
-        shutil.copytree(self.copy, self.start_snapshot)  # immutable session-start state
+        try:
+            workcopy.copy_tree_checked(self.copy, self.start_snapshot)
+        except BaseException:
+            shutil.rmtree(self.copy, ignore_errors=True)  # a session without its start state cannot start
+            raise
 
     def facts(self) -> dict[str, object] | None:
         """Typed CURRENT state of the session copy (no earlier task texts, no diffs)."""
@@ -113,7 +117,7 @@ class Session:
             status = "added" if rel not in start else "deleted" if rel not in now else "modified"
             entry = {"path": rel, "status": status}
             if rel in now:
-                entry["sha256"] = hashlib.sha256(now[rel]).hexdigest()
+                entry["sha256"] = now[rel]
             changed.append(entry)
         model_tests = sorted(rel for r in kept for rel in r.files
                              if rel.startswith("tests/") or Path(rel).name.startswith("test_"))
@@ -219,8 +223,8 @@ class Session:
     def _promote(self, record: TaskRecord) -> None:
         """Stage the entire next state before changing the active copy; retain both as artifacts."""
         staged = self.home / f"session-{record.attempt:02d}"
-        shutil.copytree(self.copy, staged)
-        baseline = {rel: hashlib.sha256(data).hexdigest() for rel, data in _files(self.copy).items()}
+        workcopy.copy_tree_checked(self.copy, staged)
+        baseline = _files(self.copy)
         workspace = Path(record.run_dir) / "workspace"
         changes = {}
         for rel in record.files:
@@ -321,7 +325,7 @@ class Session:
         self._apply_attempt = attempt
         # Prepare the next baseline before writing the original. Failed staging leaves both intact.
         staged = Path(tempfile.mkdtemp(prefix="applied-", dir=self.home)) / "repo"
-        shutil.copytree(self.copy, staged)
+        workcopy.copy_tree_checked(self.copy, staged)
         applied = workcopy.guarded_apply(self.repo, planned, self.baseline, what="/apply", alternatives=previous)
         # The applied state is the new baseline: later /apply only writes later changes.
         self._baseline_snapshot = staged
@@ -348,8 +352,9 @@ def _attempt_checksum(paths: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _files(root: Path) -> dict[str, bytes]:
-    return {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+def _files(root: Path) -> dict[str, str]:
+    return {p.relative_to(root).as_posix(): workcopy._hash_file(p)
+            for p in root.rglob("*") if p.is_file() and not p.is_symlink()}
 
 
 def _one_line(error: BaseException) -> str:
@@ -365,9 +370,12 @@ def _tree_diff(a: Path, b: Path) -> str:
     import difflib
     out = []
     fa, fb = _files(a), _files(b)
-    for rel in _changed(a, b):
-        old = fa.get(rel, b"").decode("utf-8", "replace").splitlines(keepends=True)
-        new = fb.get(rel, b"").decode("utf-8", "replace").splitlines(keepends=True)
+    for rel in sorted(k for k in set(fa) | set(fb) if fa.get(k) != fb.get(k)):
+        old_path, new_path = a / rel, b / rel
+        old_data = old_path.read_bytes() if rel in fa else b""
+        new_data = new_path.read_bytes() if rel in fb else b""
+        old = old_data.decode("utf-8", "replace").splitlines(keepends=True)
+        new = new_data.decode("utf-8", "replace").splitlines(keepends=True)
         out.extend(difflib.unified_diff(old, new, f"a/{rel}", f"b/{rel}"))
     return "".join(out) or "(no session changes)"
 

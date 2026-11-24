@@ -301,6 +301,12 @@ DROP_GLOBALS = {
         "process-local file observations; never valid across checkpoint restore",
     ("stateframe.engine.kernel_file_digest_memo", "_LAST_CLOCK_NS"):
         "process-local file observations; never valid across checkpoint restore",
+    ("kernel_green_menu_open_obligation", "_FINGERPRINTS"):
+        "rebuildable text of large receipts; never persisted",
+    ("engine.kernel_green_menu_open_obligation", "_FINGERPRINTS"):
+        "rebuildable text of large receipts; never persisted",
+    ("stateframe.engine.kernel_green_menu_open_obligation", "_FINGERPRINTS"):
+        "rebuildable text of large receipts; never persisted",
     ("kernel_fl_checkpoint_capture", "_API"):
         "lazy import holder of checkpoint helper classes; re-created on first use",
     ("repo_intel_core.lsp_resolve", "_PROJECTS"):
@@ -797,6 +803,8 @@ def _module_state(name: str, module: types.ModuleType) -> dict[str, object]:
     for key, value in list(vars(module).items()):
         if key.startswith("__") and key.endswith("__"):
             continue
+        if name.rsplit(".", 1)[-1] == "kernel_callsite_census" and key == "_CENSUS_REVISION_CACHE":
+            value = type(value)()
         if (_workspace_objects_on() and name == "kernel_bridge_evidence"
                 and key == "capture_candidate"):
             continue

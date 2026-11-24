@@ -23,6 +23,14 @@ def fresh_cache():
 
 
 def _measure_parse(source: str) -> tuple[ast.Module, int, int]:
+    # The process-wide table of interned names may grow during one parse and is
+    # then charged to it. It cannot grow in both, so keep the smaller measurement.
+    first = _measure_parse_once(source)
+    second = _measure_parse_once(source)
+    return min(first, second, key=lambda row: row[1])
+
+
+def _measure_parse_once(source: str) -> tuple[ast.Module, int, int]:
     tracing_before = tracemalloc.is_tracing()
     if not tracing_before:
         tracemalloc.start()
@@ -405,7 +413,7 @@ def test_two_threads_parse_within_bounded_estimate(
     with ThreadPoolExecutor(max_workers=2) as pool:
         trees = list(pool.map(lambda row: cache.parse(row[1], f"worker-{row[0]}.py"), enumerate(sources)))
 
-    estimates = [cache._TREES[cache.source_digest(source)][2] for source in sources]
+    estimates = [cache._TREES[cache.parse_cache_key(source)][2] for source in sources]
     assert all(isinstance(tree, ast.Module) for tree in trees)
     for actual, estimate in zip(actuals, estimates, strict=True):
         assert actual / max(estimate, 1) <= 1.5

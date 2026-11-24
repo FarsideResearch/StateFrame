@@ -153,7 +153,7 @@ def test_lifecycle_partial_repaired_verified_then_retired(tmp_path: Path):
     verified, released_pin, _events = continuation.render(repaired, workspace, budget=3072)
     assert "remaining=[]" in verified
     assert "final_check=PASS; final_integration=VERIFIED" in verified
-    assert "next_action: all units committed and verified" in verified
+    assert "next_action: all subframes committed and verified" in verified
     assert released_pin == ""
 
     retired = copy.deepcopy(repaired)
@@ -260,7 +260,7 @@ def test_max_unit_section_is_deterministically_truncated_under_cap():
     section, _pin, _events = continuation.render(disposition, None, budget=3072)
 
     assert len(section.encode("utf-8")) <= 3072
-    assert "units_truncated=" in section
+    assert "subframes_truncated=" in section
     assert "unit_0000" in section
     assert "unit_1023" not in section
 
@@ -752,5 +752,5 @@ def test_nested_protected_disposition_retains_outer_call_identity():
 def test_duplicate_disposition_unit_ids_are_refused():
     disposition = {"units": [_unit("same"), _unit("same")]}
 
-    with pytest.raises(continuation.FanoutContinuationError, match="duplicate unit ids"):
+    with pytest.raises(continuation.FanoutContinuationError, match="duplicate subframe ids"):
         continuation.render(disposition, None, budget=3072)

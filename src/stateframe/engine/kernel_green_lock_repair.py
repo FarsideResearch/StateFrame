@@ -1126,6 +1126,8 @@ class RepairController:
             return False
 
     def after_edit(self, path: object) -> dict[str, object] | None:
+        if not self._before:
+            return None
         try:
             candidate = self._resolve(path)
         except (OSError, TypeError, ValueError):

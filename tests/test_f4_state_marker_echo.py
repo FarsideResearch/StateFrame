@@ -133,6 +133,7 @@ def test_str_replace_uses_real_marker_bytes_and_never_writes_prompt_escape(tmp_p
             product_revision=lambda: "after"),
         _applied=lambda *_args: "Edit applied.",
         _declared_sources=lambda: (),
+        task_scope=(),
         hooks=SimpleNamespace(sibling_fact=lambda *_args: None))
     assert PlainHost._str_replace(host, {"path": "marker.txt", "old": old,
                                          "new": new}) == "Edit applied."

@@ -72,6 +72,38 @@ def _fault(kind: str) -> None:
     raise KeyboardInterrupt
 
 
+def test_large_text_survives_chat_promotion_and_apply_without_loading_unchanged_files(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    original = "".join(f"row {index:07d}\n" for index in range(120_000))
+    changed = original.replace("row 0000005\n", "row changed\n")
+    (repo / "large.txt").write_text(original)
+    (repo / "steady.txt").write_text("steady\n" * 200_000)
+    session = chat.Session(repo=repo, home=tmp_path / "session", base=None)
+    session.start(printer=lambda *_: None)
+
+    run = session.home / "task-01"
+    workspace = run / "workspace"
+    workspace.mkdir(parents=True)
+    (workspace / "large.txt").write_text(changed)
+    record = chat.TaskRecord("change large file", "DONE", True, ["large.txt"], "",
+                             str(run), False, attempt=1)
+    read_bytes = Path.read_bytes
+    unchanged_paths = {repo / "steady.txt", session.copy / "steady.txt",
+                       session.start_snapshot / "steady.txt"}
+
+    def reject_unchanged(path):
+        if path in unchanged_paths:
+            raise AssertionError("unchanged large files must not be loaded")
+        return read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", reject_unchanged)
+    session._promote(record)
+    assert "+row changed" in session.session_diff()
+    assert session.apply() == ["large.txt"]
+    assert (repo / "large.txt").read_text() == changed
+
+
 @pytest.mark.parametrize("hooks_enabled", [False, True])
 @pytest.mark.parametrize(
     "operation,index,phase,failure",
@@ -572,7 +604,7 @@ def test_apply_refuses_symlink_with_existing_text_without_following_its_target(t
     followed_links = []
 
     def reject_following(path, *args, **kwargs):
-        if Path(path) == destination and kwargs.get("dir_fd") is None:
+        if not isinstance(path, int) and Path(path) == destination and kwargs.get("dir_fd") is None:
             followed_links.append(path)
             raise AssertionError("destination lookup followed a link outside the repository")
         return original_stat(path, *args, **kwargs)

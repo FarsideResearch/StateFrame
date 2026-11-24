@@ -405,12 +405,40 @@ def render_work_record(state: Mapping[str, object] | "WorkRecordStore",
         payload["omitted"]["render_compacted"] = True
         encoded = _canonical(payload)
     if len(encoded) > payload_limit:
-        # This final case is only reachable with an unusually small custom cap.
-        # Keep a typed, parseable summary rather than silently clipping JSON.
-        compact = {"schema": SCHEMA, "goals": {"open": [], "done": [], "dropped": []},
-                   "steps": {"open": [], "done": [], "dropped": []}, "decisions": [],
-                   "omitted": {"render_compacted": True}}
+        compact = {
+            "schema": SCHEMA,
+            "goals": {"open": [{"id": row["id"], "status": row["status"],
+                                "title": row["title"]} for row in goals_open],
+                      "done": [], "dropped": []},
+            "steps": {"open": [{"id": row["id"], "status": row["status"],
+                                "text": row["text"]} for row in steps_open],
+                      "done": [], "dropped": []},
+            "decisions": [],
+            "omitted": {"goals_open": goals_open_omitted, "steps_open": steps_open_omitted,
+                        "render_compacted": True},
+        }
         encoded = _canonical(compact)
+        while len(encoded) > payload_limit:
+            goals = compact["goals"]["open"]
+            steps = compact["steps"]["open"]
+            if not goals and not steps:
+                break
+            key = "goals" if len(goals) > len(steps) else "steps"
+            compact[key]["open"].pop()
+            compact["omitted"][key + "_open"] += 1
+            encoded = _canonical(compact)
+        fallback = encoded; visible = compact["steps"]["open"]
+        _obligation_notice(compact, validated["steps"], visible); encoded = _canonical(compact)
+        while len(encoded) > payload_limit:
+            goals, steps = compact["goals"]["open"], compact["steps"]["open"]
+            if not goals and not steps:
+                encoded = fallback
+                break
+            key = "goals" if len(goals) > len(steps) else "steps"
+            compact[key]["open"].pop()
+            compact["omitted"][key + "_open"] += 1
+            _obligation_notice(compact, validated["steps"], compact["steps"]["open"])
+            encoded = _canonical(compact)
     return "[WORK RECORD]\n" + encoded + "\n[/WORK RECORD]"
 
 

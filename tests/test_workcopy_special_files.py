@@ -30,7 +30,7 @@ def _create_worker(repo: str, destination: str) -> None:
 
 def _no_files_worker(repo: str, destination: str) -> None:
     try:
-        create(Path(repo), Path(destination), admit_snapshot=False)
+        print(json.dumps(sorted(create(Path(repo), Path(destination), admit_snapshot=False).baseline)))
     except WorkCopyError as error:
         print(json.dumps(str(error)))
 
@@ -54,6 +54,9 @@ def _fifo_race_worker(repo: str, destination: str) -> None:
 
         def __exit__(self, *args):
             return self.stream.__exit__(*args)
+
+        def fileno(self):
+            return self.stream.fileno()
 
         def read(self, *args, **kwargs):
             if not stat.S_ISREG(real_fstat(self.stream.fileno()).st_mode):
@@ -176,14 +179,12 @@ def test_create_skips_fifo_without_a_writer(tmp_path, relative):
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFOs require POSIX")
-def test_repository_with_only_fifo_still_has_no_files(tmp_path):
+def test_repository_with_only_fifo_starts_empty(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     os.mkfifo(repo / "only.py")
 
-    error = _run_worker("_no_files_worker", str(repo), str(tmp_path / "copy"))
-
-    assert error == "repository has no files to work on"
+    assert _run_worker("_no_files_worker", str(repo), str(tmp_path / "copy")) == []
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFOs require POSIX")
@@ -303,7 +304,7 @@ def test_file_removed_after_listing_keeps_typed_scan_error(tmp_path, monkeypatch
     removed = []
 
     def remove_before_stat(path, *args, **kwargs):
-        if Path(os.fspath(path)).name == "removed.py" and not removed:
+        if not isinstance(path, int) and Path(os.fspath(path)).name == "removed.py" and not removed:
             (repo / "removed.py").unlink()
             removed.append(True)
         return real_stat(path, *args, **kwargs)
@@ -356,6 +357,12 @@ def test_enospc_and_edquot_have_the_same_error_and_leave_no_partial_copy(
         def flush(self):
             self.stream.flush()
 
+        def seek(self, *args):
+            return self.stream.seek(*args)
+
+        def truncate(self, *args):
+            return self.stream.truncate(*args)
+
         def write(self, value):
             self.stream.write(value[:1])
             raise OSError(quota_errno, "injected quota failure")
@@ -372,7 +379,8 @@ def test_enospc_and_edquot_have_the_same_error_and_leave_no_partial_copy(
         create(repo, destination, admit_snapshot=admit_snapshot)
 
     assert injected
-    assert str(caught.value) == "cannot create working copy: No space left on device"
+    assert str(caught.value).startswith("repository copy needs ")
+    assert "bytes are free (injected quota failure);" in str(caught.value)
     assert not destination.exists()
     assert not list(tmp_path.glob(".workspace-start-*"))
     assert not list(tmp_path.glob(".workcopy-*"))

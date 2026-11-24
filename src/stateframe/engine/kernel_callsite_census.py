@@ -219,6 +219,7 @@ class _CensusStructure:
     importers_by_path: dict[str, set[str]]
     cached_file_count: int | None = None
     complete: bool = True
+    read_failed: bool = False
 
 
 @dataclass(slots=True)
@@ -234,9 +235,61 @@ class _IndexReuseReport:
 
 _CENSUS_REVISION_CACHE_MAX_ENTRIES = 4
 _CENSUS_REVISION_CACHE_MAX_CALLS = 40_000
-_CENSUS_REVISION_CACHE: OrderedDict[str, tuple[str, _CensusStructure]] = OrderedDict()
+_CENSUS_REVISION_CACHE: OrderedDict[str, tuple[str, _CensusStructure, bool]] = OrderedDict()
 _CENSUS_REVISION_CACHE_PENDING: set[tuple[str, str]] = set()
 _CENSUS_REVISION_CACHE_CONDITION = threading.Condition()
+
+
+def _compact_census_structure(structure: _CensusStructure, *, revision: str,
+                              scope_key: str, parser_version: str) -> _CensusStructure:
+    return replace(
+        structure, revision=revision, scope_key=scope_key, parser_version=parser_version,
+        parsed={}, trees={}, definitions={}, calls_by_path=dict(structure.calls_by_path),
+        unresolved_by_path=dict(structure.unresolved_by_path),
+        partial_paths=set(structure.partial_paths), skipped_paths=set(structure.skipped_paths),
+        importers_by_path={},
+        cached_file_count=(structure.cached_file_count if structure.cached_file_count is not None
+                           else len(structure.trees)),
+        complete=False,
+    )
+
+
+def _copy_cached_census_structure(structure: _CensusStructure, *, revision: str,
+                                  scope_key: str, parser_version: str) -> _CensusStructure:
+    return replace(structure, revision=revision, scope_key=scope_key, parser_version=parser_version,
+                   calls_by_path=dict(structure.calls_by_path),
+                   unresolved_by_path=dict(structure.unresolved_by_path),
+                   partial_paths=set(structure.partial_paths), skipped_paths=set(structure.skipped_paths))
+
+
+def _compact_census_structure_bytes(structure: _CensusStructure) -> int:
+    """Count retained compact facts, including their reachable Python objects."""
+    pending: list[object] = [structure]
+    seen: set[int] = set()
+    total = 0
+    while pending:
+        value = pending.pop()
+        identity = id(value)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        total += sys.getsizeof(value)
+        if isinstance(value, _CensusStructure):
+            pending.extend((value.revision, value.scope_key, value.parser_version,
+                            value.parsed, value.trees, value.definitions,
+                            value.calls_by_path, value.unresolved_by_path,
+                            value.partial_paths, value.skipped_paths, value.importers_by_path,
+                            value.cached_file_count, value.complete, value.read_failed))
+        elif isinstance(value, _Call):
+            pending.extend((value.identity, value.display, value.resolution, value.strategy,
+                            value.owner, value.path, value.source_handle,
+                            value.start_byte, value.end_byte, value.line, value.column, value.shown))
+        elif isinstance(value, Mapping):
+            pending.extend(value.keys())
+            pending.extend(value.values())
+        elif isinstance(value, (tuple, list, set, frozenset)):
+            pending.extend(value)
+    return total
 
 
 def _digest(value: object) -> str:
@@ -269,6 +322,22 @@ def _census_revision_cache_key(
         return None
 
 
+def _compact_census_sources_readable(index: object, structure: _CensusStructure) -> bool:
+    """Recheck source access on compact-fact hits without parsing cached inputs."""
+    parsed_paths = set(structure.calls_by_path)
+    for module in getattr(index, "modules", ()):
+        path = str(getattr(module, "path", ""))
+        if _excluded(path) or not path.endswith(".py"):
+            continue
+        try:
+            handle, raw = index.read_content(path)
+            raw.decode(handle.encoding, errors="strict")
+        except (LookupError, UnicodeError, OSError, StructuralIndexError, ValueError):
+            if path in parsed_paths:
+                return False
+    return True
+
+
 def _census_structure_for_revision(
     key: tuple[str, str],
     *,
@@ -282,43 +351,53 @@ def _census_structure_for_revision(
     root_identity, cache_revision = key
     pending_key = (root_identity, cache_revision)
     condition = _CENSUS_REVISION_CACHE_CONDITION
-    with condition:
-        while True:
+    skip_cached_entry = False
+    while True:
+        cached_legacy_admission = False
+        with condition:
             cached = _CENSUS_REVISION_CACHE.get(root_identity)
-            if cached is not None and cached[0] == cache_revision:
+            if (not skip_cached_entry and cached is not None
+                    and cached[0] == cache_revision):
                 _CENSUS_REVISION_CACHE.move_to_end(root_identity)
-                return replace(
-                    cached[1], revision=revision, scope_key=scope_key,
-                    parser_version=parser_version,
-                )
-            if pending_key not in _CENSUS_REVISION_CACHE_PENDING:
-                _CENSUS_REVISION_CACHE_PENDING.add(pending_key)
-                break
-            condition.wait()
+                cached_structure = cached[1]
+                cached_legacy_admission = cached[2]
+            else:
+                cached_structure = None
+            if cached_structure is None:
+                if pending_key not in _CENSUS_REVISION_CACHE_PENDING:
+                    _CENSUS_REVISION_CACHE_PENDING.add(pending_key)
+                    break
+                condition.wait()
+                continue
+        if (cached_legacy_admission
+                or _compact_census_sources_readable(index, cached_structure)):
+            return _copy_cached_census_structure(
+                cached_structure, revision=revision, scope_key=scope_key,
+                parser_version=parser_version,
+            )
+        skip_cached_entry = True
 
     try:
         structure = build()
         call_count = sum(len(calls) for calls in structure.calls_by_path.values())
-        if (_analysis_source_size(index) <= MAX_CACHED_ANALYSIS_SOURCE_BYTES
-                and call_count <= _CENSUS_REVISION_CACHE_MAX_CALLS):
-            compact = replace(
-                structure,
-                revision=cache_revision,
-                scope_key="",
-                parsed={},
-                trees={},
-                definitions={},
-                importers_by_path={},
-                cached_file_count=(structure.cached_file_count
-                                   if structure.cached_file_count is not None
-                                   else len(structure.trees)),
-                complete=False,
-            )
+        compact = _compact_census_structure(
+            structure, revision=cache_revision, scope_key="", parser_version=parser_version,
+        )
+        legacy_admitted = (_analysis_source_size(index) <= MAX_CACHED_ANALYSIS_SOURCE_BYTES
+                           and call_count <= _CENSUS_REVISION_CACHE_MAX_CALLS)
+        if (legacy_admitted or (not structure.read_failed
+                and call_count <= _CENSUS_REVISION_CACHE_MAX_CALLS
+                and _compact_census_structure_bytes(compact) <= MAX_CACHED_ANALYSIS_SOURCE_BYTES)):
             with condition:
-                _CENSUS_REVISION_CACHE[root_identity] = (cache_revision, compact)
+                _CENSUS_REVISION_CACHE[root_identity] = (cache_revision, compact, legacy_admitted)
                 _CENSUS_REVISION_CACHE.move_to_end(root_identity)
                 while len(_CENSUS_REVISION_CACHE) > _CENSUS_REVISION_CACHE_MAX_ENTRIES:
                     _CENSUS_REVISION_CACHE.popitem(last=False)
+            if not legacy_admitted:
+                return _copy_cached_census_structure(
+                    compact, revision=revision, scope_key=scope_key,
+                    parser_version=parser_version,
+                )
         return structure
     finally:
         with condition:
@@ -969,7 +1048,7 @@ class _Collector(ast.NodeVisitor):
 # Catalog outlines are language-generic; this relation extractor is not. Its binding
 # and shadowing rules are built on Python's ast.Module/import semantics, so other code
 # languages remain explicitly partial until they have a parser-backed resolver.
-def _source_paths(index: object) -> tuple[
+def _source_paths(index: object, read_failures: set[str] | None = None) -> tuple[
         dict[str, tuple[object, bytes, str]], dict[str, ast.Module], set[str], set[str]]:
     parsed: dict[str, tuple[object, bytes, str]] = {}
     trees: dict[str, ast.Module] = {}
@@ -987,8 +1066,14 @@ def _source_paths(index: object) -> tuple[
             continue
         try:
             handle, raw = index.read_content(path)
+        except (LookupError, OSError, StructuralIndexError, ValueError):
+            if read_failures is not None:
+                read_failures.add(path)
+            partial.add(path)
+            continue
+        try:
             source = raw.decode(handle.encoding, errors="strict")
-            tree = _parse_cache.parse(source, path)
+            tree = _parse_cached_source(source, path)
         except (LookupError, UnicodeError, OSError, StructuralIndexError, SyntaxError, ValueError):
             partial.add(path)
             continue
@@ -997,6 +1082,21 @@ def _source_paths(index: object) -> tuple[
         if bool(getattr(module, "degraded", False)):
             partial.add(path)
     return parsed, trees, partial, skipped
+
+
+def _parse_cached_source(source: str, path: str) -> ast.Module:
+    """Use the catalog's content-keyed AST when it already parsed this source."""
+    lock = getattr(_parse_cache, "_LOCK", None)
+    trees = getattr(_parse_cache, "_TREES", None)
+    cache_key = getattr(_parse_cache, "parse_cache_key", None)
+    if lock is not None and trees is not None and callable(cache_key):
+        key = cache_key(source)
+        with lock:
+            cached = trees.get(key)
+            if cached is not None:
+                trees.move_to_end(key)
+                return cached[0]
+    return _parse_cache.parse(source, path)
 
 
 def _runtime_task_scope(runtime: object) -> str:
@@ -1018,7 +1118,7 @@ def _runtime_task_scope(runtime: object) -> str:
 
 
 def _index_scope_key(runtime: object, root: Path) -> str:
-    parser_version = f"{EXTRACTOR_VERSION}:ast-{sys.version_info.major}.{sys.version_info.minor}"
+    parser_version = f"{EXTRACTOR_VERSION}:{_parse_cache.parse_settings_version()}"
     return _digest({
         "root": root.resolve().as_posix(),
         "runtime_task_scope": _runtime_task_scope(runtime),
@@ -1033,6 +1133,14 @@ def _analysis_source_size(index: object) -> int:
         if str(getattr(module, "path", "")).endswith(".py")
         and not _excluded(str(getattr(module, "path", "")))
     )
+
+
+def _analysis_delta_paths(index: object, previous: _CensusStructure) -> set[str]:
+    old = {path: source[0].content_digest for path, source in previous.parsed.items()}
+    current = {str(module.path): module.content.content_digest
+               for module in getattr(index, "modules", ())
+               if str(module.path).endswith(".py") and not _excluded(str(module.path))}
+    return {path for path in old.keys() | current.keys() if old.get(path) != current.get(path)}
 
 
 def _parse_census_source(
@@ -1052,7 +1160,7 @@ def _parse_census_source(
     try:
         handle, raw = index.read_content(path)
         source = raw.decode(handle.encoding, errors="strict")
-        tree = _parse_cache.parse(source, path)
+        tree = _parse_cached_source(source, path)
     except (LookupError, UnicodeError, OSError, StructuralIndexError, SyntaxError, ValueError):
         return None, None, None, True, False
     return (handle, raw, source), tree, _definitions(tree, path), bool(module.degraded), False
@@ -1082,7 +1190,8 @@ def _build_census_structure(
     scope_key: str,
     parser_version: str,
 ) -> _CensusStructure:
-    parsed, trees, partial_paths, skipped_paths = _source_paths(index)
+    read_failures: set[str] = set()
+    parsed, trees, partial_paths, skipped_paths = _source_paths(index, read_failures)
     definitions = {path: _definitions(tree, path) for path, tree in trees.items()}
     modules = _module_names(tuple(parsed))
     calls_by_path: dict[str, tuple[_Call, ...]] = {}
@@ -1096,11 +1205,13 @@ def _build_census_structure(
         structural_revision(index, scope_key=scope_key, parser_version=parser_version),
         scope_key, parser_version, parsed, trees, definitions, calls_by_path,
         unresolved_by_path, partial_paths, skipped_paths, importers,
+        complete=not partial_paths,
+        read_failed=bool(read_failures),
     )
 
 
 def _parser_version() -> str:
-    return f"{EXTRACTOR_VERSION}:ast-{sys.version_info.major}.{sys.version_info.minor}"
+    return f"{EXTRACTOR_VERSION}:{_parse_cache.parse_settings_version()}"
 
 
 def build_background_census(root: Path) -> tuple[StructuralIndex, _CensusStructure]:
@@ -1487,6 +1598,7 @@ def _census_structure_from_payload(
         structural_revision(index, scope_key=scope_key, parser_version=parser_version),
         scope_key, parser_version, parsed, trees, definitions, calls_by_path,
         unresolved_by_path, set(partial_paths), set(skipped_paths), importers,
+        complete=not partial_paths,
     )
 
 
@@ -1696,6 +1808,7 @@ def _refresh_census_structure(
         structural_revision(index, scope_key=scope_key, parser_version=parser_version),
         scope_key, parser_version, parsed, trees, definitions, calls_by_path,
         unresolved_by_path, partial_paths, skipped_paths, importers,
+        complete=not partial_paths,
     )
 
 
@@ -2131,14 +2244,14 @@ def _build_packet(runtime: object, root: Path, messages: Sequence[Mapping[str, o
                 and previous_structure.revision == current_structure_revision
                 and not lease.changed_paths):
             structure = previous_structure
-        elif (isinstance(previous_structure, _CensusStructure) and previous_structure.complete
-              and lease.incremental
+        elif (isinstance(previous_structure, _CensusStructure) and lease.incremental
               and previous_structure.scope_key == cache_scope_key
               and previous_structure.parser_version == parser_version
               and incremental_mode in {"on", "shadow"}):
+            refresh_paths = set(lease.changed_paths) | _analysis_delta_paths(index, previous_structure)
             try:
                 incremental_structure = _refresh_census_structure(
-                    index, previous_structure, changed_paths=lease.changed_paths,
+                    index, previous_structure, changed_paths=tuple(sorted(refresh_paths)),
                     scope_key=cache_scope_key or "", parser_version=parser_version,
                 )
             except Exception:
@@ -2207,11 +2320,17 @@ def _build_packet(runtime: object, root: Path, messages: Sequence[Mapping[str, o
                             parser_version=parser_version,
                             journal=journal,
                         )
-        if (lease.cache is not None and structure.complete
+        if (lease.cache is not None
+                and structure.cached_file_count is None
                 and _analysis_source_size(index) <= MAX_CACHED_ANALYSIS_SOURCE_BYTES):
             lease.cache.analysis = structure
         elif lease.cache is not None:
-            lease.cache.analysis = None
+            lease.cache.analysis = (
+                previous_structure if isinstance(previous_structure, _CensusStructure)
+                and lease.incremental
+                and previous_structure.scope_key == cache_scope_key
+                and previous_structure.parser_version == parser_version else None
+            )
         if (previous_structure is not None
                 and previous_structure is not structure
                 and lease.incremental

@@ -734,6 +734,9 @@ def assess(run: Path, *, max_turns: int | None = None, model: str | None = None,
     run = run.resolve()
     spec_path = run / "spec.json"
     if not spec_path.is_file():
+        if any(run.glob(".workspace-start-*")) or (run / "workspace").is_dir():
+            raise ResumeRefused(f"the run stopped before its start copy finished, so there is nothing to resume: "
+                                f"{run}; start it again with a new run directory")
         raise ResumeRefused(f"not a stateframe run directory (no spec.json): {run}")
     try:
         spec = json.loads(spec_path.read_text())
@@ -810,19 +813,25 @@ def assess(run: Path, *, max_turns: int | None = None, model: str | None = None,
         raise ResumeRefused(terminal_refusal)
     previous_turns = int(spec["max_turns"])
     turns = previous_turns if max_turns is None else max_turns
-    if status in outcomes.BUDGET_STOPS | outcomes.INCOMPLETE and not (
-            turns == 0 or (previous_turns != 0 and turns > previous_turns)):
+    budget_stop = status in outcomes.BUDGET_STOPS or status == "STEP_BUDGET_EXHAUSTED"
+    # Older receipts can record budget exhaustion without a step count.
+    steps = terminal.get("steps", previous_turns if budget_stop else None)
+    stopped_at_limit = (
+        previous_turns > 0 and type(steps) is int and steps >= previous_turns
+        and (budget_stop or (status in outcomes.INCOMPLETE and terminal.get("reason_code") is None))
+    )
+    if stopped_at_limit and turns != 0 and turns <= previous_turns:
         raise ResumeRefused(f"the last attempt stopped at its limit ({status}, step limit "
                             f"{previous_turns or 'none'}); pass a larger --max-turns (0 = no limit) to continue; "
                             "the run then restarts live from request 1, because the limit is part of the first request")
-    if max_turns is not None and turns != previous_turns and status not in outcomes.BUDGET_STOPS | outcomes.INCOMPLETE:
+    if turns != previous_turns and not stopped_at_limit:
         # The step limit is part of request 1: a different one cannot replay the recorded run. Only a run that
         # stopped AT its limit may raise it (and then restarts live from request 1, with a warning).
         def name(limit: int) -> str:
             return "no limit (0)" if limit == 0 else str(limit)
         raise ResumeRefused(f"this run was started with --max-turns {name(previous_turns)}; resume keeps the original "
                             f"budget (drop --max-turns, or pass --max-turns {previous_turns}). Only a run that stopped "
-                            "at its step limit can continue with a larger one")
+                            "at its step limit can continue with a larger one; to use a different limit, start a fresh run")
     if external and not replay_external:
         names = ", ".join(f"{item['call_id']} ({item['tool']})" for item in external)
         raise ResumeRefused(f"external operation {names} requires --replay-external")
@@ -1207,12 +1216,11 @@ def _report_checkpoint_compaction_error(error: OSError) -> None:
 
 def fresh_workcopy(run: Path, repo: Path, *, preserve_symlinks: bool = False) -> workcopy.WorkCopy:
     """A new working copy of the start state, with the start-state hashes as its baseline."""
+    run = Path(run).resolve()
     parent = run / "parent"
-    shutil.copytree(parent, run / "workspace", symlinks=preserve_symlinks)
-    baseline = {p.relative_to(parent).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
-                for p in sorted(parent.rglob("*")) if p.is_file() and not p.is_symlink()}
-    work = workcopy.WorkCopy(original=repo.resolve(), copy=run / "workspace", baseline=baseline,
-                             snapshot=parent)
+    work = workcopy.WorkCopy(original=repo.resolve(), copy=run / "workspace", snapshot=parent)
+    workcopy.copy_tree_checked(parent, work.copy, work=work,
+                               preserve_symlinks=preserve_symlinks)
     _restore_committed_mutation_effects(run, work)
     return work
 

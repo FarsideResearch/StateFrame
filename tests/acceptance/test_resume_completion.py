@@ -93,6 +93,18 @@ def _interrupted_run(tmp_path, *, network="none", script_name="resume.script.jso
                     raise AssertionError("checkpoint was not saved before the deadline")
                 time.sleep(min(0.1, remaining))
             assert pointer.is_file(), "checkpoint was not saved before the paused request"
+            if shell != "off":
+                # The first save alone satisfies LATEST; wait for the save taken after the shell step.
+                events_path = run_dir / "checkpoints" / "events.jsonl"
+                needed = pause_at - 1
+                while not any(row.get("event") == "checkpoint_saved" and row.get("sends", 0) >= needed
+                              for row in (json.loads(line) for line in events_path.read_text().splitlines(True)
+                                           if line.endswith("\n"))):
+                    assert runner.poll() is None, "run ended before the needed checkpoint was saved"
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise AssertionError("the needed checkpoint was not saved before the deadline")
+                    time.sleep(min(0.1, remaining))
         child = _engine_child(runner.pid)
         assert child is not None
         identity = record_identity(child, launched_after=launched_after, command_fragment="_child.py")

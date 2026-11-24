@@ -11,7 +11,7 @@ from stateframe.task_row import (
     auto_scope,
     build_row,
 )
-from stateframe.workcopy import Limits, create
+from stateframe.workcopy import create
 
 ROOT = Path(__file__).resolve().parents[1]
 TEST_SRC = "from app.pricing import total\n\ndef test_total():\n    assert total(80, 25) == 60\n"
@@ -131,9 +131,28 @@ def test_6800_file_repo_with_unnamed_task_starts_read_only_discovery(tmp_path):
         (package / f"mod_{index:05d}.py").write_text(f"VALUE = {index}\n")
     (repo / "tests").mkdir()
     (repo / "tests" / "test_values.py").write_text("def test_values():\n    assert True\n")
-    # The copy step has its own file ceiling (Limits.max_files=5000); lift it here so the test
-    # exercises the task-row path rather than the copy refusal, which is a separate limit.
-    work = create(repo, tmp_path / "copy", Limits(max_files=7000))
+    work = create(repo, tmp_path / "copy")
     row = build_row(work, task="Make the numbers add up.")
     assert row["scope_source"] == "discovery"
     assert row["scoped_edits"] is True and row["files"] == {}
+
+
+@pytest.mark.parametrize("runner_kind", ["pytest", "generic"])
+def test_files_that_cannot_be_in_the_row_are_not_read(tmp_path, monkeypatch, runner_kind):
+    from pathlib import Path
+
+    from stateframe.task_row import build_row
+    from stateframe.workcopy import create
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "app.py").write_text("VALUE = 1\n")
+    (repo / "test_app.py").write_text("def test_app():\n    pass\n")
+    (repo / "data.bin").write_text("text in a binary name\n")
+    (repo / "notes.md").write_text("notes\n")
+    work = create(repo, tmp_path / "run" / "workspace", admit_snapshot=False)
+    seen = []
+    read_text = Path.read_text
+    monkeypatch.setattr(Path, "read_text", lambda self, *a, **k: (seen.append(self.name), read_text(self, *a, **k))[1])
+    build_row(work, task="Update app.py.", target="app.py", runner_kind=runner_kind)
+    assert "data.bin" not in seen and "notes.md" in seen

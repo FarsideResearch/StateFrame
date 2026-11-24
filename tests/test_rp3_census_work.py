@@ -247,7 +247,10 @@ def test_deferred_catalog_preserves_source_facts(relation_workspace, monkeypatch
         parsed_paths.append(path)
         return parse_cache.parse(source, path)
 
-    monkeypatch.setattr(census, "_parse_cache", SimpleNamespace(parse=shared_parse))
+    monkeypatch.setattr(census, "_parse_cache", SimpleNamespace(
+        parse=shared_parse, parse_cache_key=parse_cache.parse_cache_key,
+        parse_settings_version=parse_cache.parse_settings_version,
+    ))
     later = _prepare(runtime, [_page("left.py", caller)], kind="edit", request_id=2)
     assert later.status == "fired"
     assert sorted(parsed_paths) == ["left.py", "model.py", "right.py"]

@@ -738,6 +738,18 @@ def publish_host_effects(runtime, bolt, created: set[str], *, changed, created_p
     created_paths = frozenset(created_paths)
     deleted = frozenset(deleted)
     target = runtime.target
+    lock = getattr(runtime, "green_lock", None)
+    cache_binding = bool(paths) and (
+        (lock is not None and getattr(runtime, "stateframe_post_green_work_menu_mode", "off") == "on")
+        or (getattr(lock, "mode", None) == "terminal"
+            and getattr(lock, "_terminal_fallback_revision", None) is not None)
+    )
+    binding = None
+    if cache_binding:
+        try:
+            binding = runtime.binding()
+        except (AttributeError, LookupError, OSError, TypeError, UnicodeError, ValueError):
+            cache_binding = False
     for relative in paths:
         path = Path(bolt.root) / relative
         if relative in deleted:
@@ -745,7 +757,12 @@ def publish_host_effects(runtime, bolt, created: set[str], *, changed, created_p
             target = rebind_after_file_operation(runtime, relative, None)
         elif relative in created_paths:
             created.add(str(path))
-        note_applied_product_edit(path)
+        # The last notice decides what is pending, so it reads the binding again: a file may have
+        # changed since the first one.
+        if cache_binding and relative != paths[-1]:
+            note_applied_product_edit(relative, binding=binding)
+        else:
+            note_applied_product_edit(relative)
     if paths:
         bolt.product_edits += 1
     if paths:

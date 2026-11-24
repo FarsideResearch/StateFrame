@@ -71,7 +71,7 @@ def test_all_children_finished_but_final_check_failed_renders_failed(tmp_path):
     assert "final_check=FAIL; final_integration=FAILED" in section
     assert "final_check=PASS" not in section
     assert "integration=VERIFIED" not in section
-    assert "all units committed and verified" not in section
+    assert "all subframes committed and verified" not in section
 
 
 def test_legacy_records_without_unit_scopes_still_render_without_pins(tmp_path):

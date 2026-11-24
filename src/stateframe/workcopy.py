@@ -16,6 +16,7 @@ import secrets
 import shutil
 import stat
 import sys
+import tempfile
 import tokenize
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
@@ -39,6 +40,10 @@ IGNORE_DIRS = {".git", ".hg", ".svn", "__pycache__", ".pytest_cache", ".mypy_cac
                ".tox", ".nox", ".venv", "venv", "env", "node_modules", "dist", "build",
                ".idea", ".vscode", ".eggs", "site-packages", ".stateframe"} | SECRET_DIRS
 IGNORE_GLOBS = ("*.pyc", "*.pyo", "*.so", "*.dylib", "*.egg-info", ".DS_Store")
+_LARGE_COPY_BYTES = 64 << 20
+_MIN_RESERVE_BYTES = 1 << 30
+_MAX_RESERVE_BYTES = 20 << 30
+_TEXT_FILE_BYTES = 1 << 20
 
 
 class WorkCopyError(RuntimeError):
@@ -74,9 +79,208 @@ def _repository_scan_error(path: Path | str, error: OSError) -> WorkCopyScanErro
 
 @dataclass
 class Limits:
-    max_files: int = 5000
     max_file_bytes: int = 1024 * 1024
-    max_total_bytes: int = 64 * 1024 * 1024
+
+
+_Stamp = tuple[int, int, int, int, int, int, int, int, int]
+
+
+def _stamp(info: os.stat_result) -> _Stamp:
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns,
+            info.st_ctime_ns, info.st_nlink, info.st_uid, info.st_gid)
+
+
+def _reflink(source: int, target: int) -> None:
+    if sys.platform != "linux":
+        raise OSError(errno.ENOTSUP, "file clone unavailable")
+    import fcntl
+
+    fcntl.ioctl(target, 0x40049409, source)  # FICLONE
+
+
+class _SourceChanged(OSError):
+    """The file got shorter while it was copied."""
+
+
+class _Copies:
+    """Copy regular files to independent inodes, including after a partial clone."""
+
+    def __init__(self, clone: bool = True) -> None:
+        self.clone, self.last_reflink = clone, False
+        self.mode_only = False  # the copy of the user's repository holds new files: no times or attributes
+
+    def file(self, source: int, target: Path, info: os.stat_result, *,
+             data: bytes | None = None, writable: bool = False,
+             before_write: Callable[[int], None] | None = None) -> _Stamp:
+        self.last_reflink = False
+        with target.open("xb") as output:
+            if self.clone:
+                try:
+                    _reflink(source, output.fileno())
+                except OSError:
+                    output.seek(0)
+                    output.truncate()
+                    self.clone = False
+                else:
+                    if os.fstat(output.fileno()).st_size == info.st_size:
+                        self.last_reflink = True
+                        return self._metadata(source, output.fileno(), info, writable)
+                    output.seek(0)
+                    output.truncate()
+                    self.clone = False
+            if data is None:
+                os.lseek(source, 0, os.SEEK_SET)
+                # The source is checked again by the caller. Bound the copy if
+                # a file grows after its admitted size was checked.
+                remaining = info.st_size
+                if before_write is not None:
+                    before_write(remaining)
+                while remaining:
+                    block = os.read(source, min(remaining, 1 << 20))
+                    if not block:
+                        raise _SourceChanged(errno.EIO, "snapshot source became shorter")
+                    output.write(block)
+                    remaining -= len(block)
+            else:
+                if before_write is not None:
+                    before_write(len(data))
+                output.write(data)
+            output.flush()
+            return self._metadata(source, output.fileno(), info, writable)
+
+    def _metadata(self, source: int, fd: int, info: os.stat_result, writable: bool) -> _Stamp:
+        mode = stat.S_IMODE(info.st_mode)
+        if self.mode_only:
+            os.fchmod(fd, mode)
+        elif sys.platform == "linux":
+            # Use open inodes, including for extended attributes and ACLs.
+            shutil.copystat(source, fd)
+            if writable and not mode & stat.S_IWUSR:
+                os.fchmod(fd, mode | stat.S_IWUSR)
+        else:
+            os.utime(fd, ns=(info.st_atime_ns, info.st_mtime_ns))
+            os.fchmod(fd, mode | stat.S_IWUSR if writable else mode)
+        return _stamp(os.fstat(fd))
+
+
+def _free_space(destination: Path) -> tuple[int | None, int]:
+    """Free bytes where the copy goes, and how many a large copy must leave for everything else."""
+    where = destination.parent
+    while not os.path.lexists(where) and where != where.parent:  # the run directory is made later
+        where = where.parent
+    try:
+        space = os.statvfs(where)
+    except (AttributeError, OSError):
+        return None, 0
+    total = getattr(space, "f_blocks", 0) * space.f_frsize
+    return space.f_bavail * space.f_frsize, min(max(_MIN_RESERVE_BYTES, total // 20), _MAX_RESERVE_BYTES)
+
+
+def _copy_bytes(original: Path, max_file_bytes: int) -> int:
+    """Bytes the copy would take. A part that cannot be listed is left to the copy, which reports it."""
+    needed = 0
+    for directory, dirnames, filenames in os.walk(original, followlinks=False):
+        here = Path(directory)
+        dirnames[:] = [name for name in dirnames
+                       if not _copy_ignored(name, True) and not (here / name).is_symlink()]
+        for name in filenames:
+            if _copy_ignored(name, False):
+                continue
+            try:
+                info = (here / name).lstat()
+            except OSError:
+                continue
+            if stat.S_ISREG(info.st_mode):
+                needed += info.st_size
+    return needed
+
+
+def _probe_reflink(original: Path, destination: Path) -> bool:
+    """Whether files can be cloned here. Uses its own file; a repository file is never opened for this."""
+    where = destination.parent
+    while not os.path.lexists(where) and where != where.parent:
+        where = where.parent
+    try:
+        if original.stat().st_dev != where.stat().st_dev:
+            return False  # no promise about space; the copy itself still tries to clone
+        with tempfile.NamedTemporaryFile(dir=where) as source, tempfile.NamedTemporaryFile(dir=where) as target:
+            source.write(b"x" * 4096)
+            source.flush()
+            _reflink(source.fileno(), target.fileno())
+            return os.fstat(target.fileno()).st_size == 4096
+    except OSError:
+        return False
+
+
+def _check_copy_space(original: Path, destination: Path, max_file_bytes: int,
+                      error: OSError | None = None, *, copies_required: int = 2) -> bool:
+    """Refuse a start whose copies do not fit; a large repository must also leave a reserve."""
+    free, reserve = _free_space(destination)
+    cloned = error is None and _probe_reflink(original, destination)
+    if error is None and free is None:
+        return cloned
+    size = _copy_bytes(original, max_file_bytes)
+    needed = 0 if cloned else copies_required * size
+    if size <= _LARGE_COPY_BYTES:
+        reserve = 0
+    if error is not None or (free is not None and needed + reserve > free):
+        detail = f" ({error.strerror or error})" if error is not None else ""
+        available = "unknown" if free is None else str(free)
+        kept = f" and {reserve} bytes to stay free" if reserve else ""
+        raise WorkCopyError(
+            f"repository copy needs {needed} bytes{kept}; {available} bytes are free{detail}; "
+            "choose a smaller tree with --repo")
+    return cloned
+
+
+class _CopySpace:
+    """Looks at the disk again while a large copy grows: the repository can grow meanwhile."""
+
+    def __init__(self, destination: Path) -> None:
+        self.destination, self.written, self.checked = destination, 0, 0
+
+    def add(self, count: int) -> None:
+        self.written += count
+        if self.written <= _LARGE_COPY_BYTES or self.written - self.checked < _LARGE_COPY_BYTES:
+            return
+        self.checked = self.written
+        free, reserve = _free_space(self.destination)
+        if free is not None and free < reserve:
+            raise OSError(errno.ENOSPC, "the disk is nearly full")
+
+
+def _cleanup_partial_copy(paths: tuple[Path, ...], error: OSError) -> None:
+    for path in paths:
+        try:
+            shutil.rmtree(path)
+        except FileNotFoundError:
+            pass
+        except OSError as cleanup_error:
+            raise WorkCopyError(f"partial working copy cleanup failed: {cleanup_error}") from error
+
+
+def _check_apply_space(destination: Path, changes: Mapping[str, bytes | None]) -> None:
+    needed = sum(len(data) for data in changes.values() if data is not None)
+    free, _reserve = _free_space(destination / "file")
+    if free is not None and needed > free:
+        raise WorkCopyError(f"applying the result needs {needed} bytes; {free} bytes are free")
+
+
+def _raise_disk_full(original: Path, destination: Path, max_file_bytes: int,
+                     paths: tuple[Path, ...], error: OSError, *, copies_required: int = 2) -> None:
+    codes = {errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)}
+    if isinstance(error, shutil.Error):  # copytree reports its failures as text
+        failures = error.args[0] if error.args and isinstance(error.args[0], list) else []
+        text = " ".join(str(failure[-1]) for failure in failures)
+        code = next((code for code in codes if f"[Errno {code}]" in text), None)
+        if code is None:
+            return
+        error = OSError(code, os.strerror(code))
+    if error.errno not in codes:
+        return
+    _cleanup_partial_copy(paths, error)
+    _check_copy_space(original, destination, max_file_bytes, error,
+                      copies_required=copies_required)
 
 
 @dataclass
@@ -87,13 +291,34 @@ class WorkCopy:
     skipped: list[str] = field(default_factory=list)
     snapshot: Path | None = None  # immutable copy of the start state (diff baseline), if the run made one
     snapshot_reader: Callable[[str], bytes] | None = field(default=None, repr=False)
+    skip_reasons: dict[str, str] = field(default_factory=dict)
+    large_files: set[str] = field(default_factory=set)
+    _copies: _Copies | None = field(default=None, init=False, repr=False)
     _admission: object | None = field(default=None, init=False, repr=False, compare=False)
 
-    def text_files(self) -> dict[str, str]:
-        """Text files in the copy, keyed by POSIX relative path."""
+    def note_skipped(self, rel: str, reason: str) -> None:
+        self.skipped.append(rel)
+        self.skip_reasons[rel] = reason
+
+    def text_files(self, wanted: Callable[[str], bool] | None = None,
+                   large: Callable[[str], bool] | None = None) -> dict[str, str]:
+        """Text files in the copy, keyed by POSIX relative path; only ``wanted`` ones are read.
+
+        An unchanged file over 1 MiB is read only when ``large`` selects it.
+        """
         out: dict[str, str] = {}
         for rel in sorted(self.baseline):
             path = self.copy / rel
+            if wanted is not None and path.suffix.lower() not in {".py", ".pyi"} and not wanted(rel):
+                continue
+            if rel in self.large_files and not (large is not None and large(rel)):
+                if path.is_symlink() or not path.is_file():
+                    continue
+                try:
+                    if _hash_file(path) == self.baseline[rel]:
+                        continue
+                except OSError as error:
+                    raise WorkCopyError(f"cannot read working copy file {rel}") from error
             try:
                 if path.suffix.lower() in {".py", ".pyi"}:
                     with tokenize.open(path) as source:
@@ -117,8 +342,121 @@ def _is_copy_storage_full(error: OSError) -> bool:
     return error.errno in {errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)}
 
 
-def _copy_storage_error() -> WorkCopyError:
-    return WorkCopyError("cannot create working copy: No space left on device")
+def _hash_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while block := stream.read(1 << 20):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def copy_tree(source: Path, destination: Path, copies: _Copies | None = None, *,
+              work: WorkCopy | None = None, space: _CopySpace | None = None,
+              preserve_symlinks: bool = False,
+              preserve_directory_modes: bool = True) -> Path:
+    source, destination = Path(source).absolute(), Path(destination).absolute()
+    if os.path.lexists(destination):
+        raise WorkCopyError(f"working copy destination already exists: {destination}")
+    destination.mkdir(parents=True)
+    copier = copies or _Copies(False)
+    directories = []
+
+    def scan_error(error: OSError) -> None:
+        path = error.filename or source
+        raise _repository_scan_error(path, error) from error
+
+    def note_skip(path: Path, reason: str) -> None:
+        if work is not None:
+            work.note_skipped(path.relative_to(source).as_posix(), reason)
+
+    for directory, dirnames, filenames in os.walk(source, followlinks=False, onerror=scan_error):
+        here = Path(directory)
+        relative_dir = here.relative_to(source)
+        target_dir = destination / relative_dir
+        target_dir.mkdir(parents=True, exist_ok=True)
+        directories.append((here, target_dir))
+        kept_dirs = []
+        for name in sorted(dirnames):
+            path = here / name
+            try:
+                info = path.lstat()
+            except OSError as error:
+                raise _repository_scan_error(path, error) from error
+            if stat.S_ISLNK(info.st_mode):
+                if preserve_symlinks:
+                    (target_dir / name).symlink_to(os.readlink(path), target_is_directory=True)
+                continue
+            kept_dirs.append(name)
+        dirnames[:] = kept_dirs
+        for name in sorted(filenames):
+            path = here / name
+            rel = path.relative_to(source).as_posix()
+            try:
+                before = path.lstat()
+            except OSError as error:
+                raise WorkCopyScanError(f"cannot inspect repository file {path}: {error}") from error
+            if stat.S_ISLNK(before.st_mode):
+                if preserve_symlinks:
+                    (target_dir / name).symlink_to(os.readlink(path))
+                else:
+                    note_skip(path, "symbolic link")
+                continue
+            if not stat.S_ISREG(before.st_mode):
+                note_skip(path, "special file")
+                continue
+            try:
+                source_fd = os.open(path, _READ_FLAGS)
+            except OSError as error:
+                raise WorkCopyScanError(f"cannot read repository file {path}: {error}") from error
+            with os.fdopen(source_fd, "rb"):
+                info = os.fstat(source_fd)
+                if not stat.S_ISREG(info.st_mode):
+                    note_skip(path, "special file")
+                    continue
+                if (info.st_dev, info.st_ino) != (before.st_dev, before.st_ino):
+                    raise WorkCopyError(f"repository file changed before copy: {rel}")
+                if work is not None and info.st_size > _TEXT_FILE_BYTES:
+                    work.large_files.add(rel)
+                target = target_dir / name
+                try:
+                    copier.file(source_fd, target, info,
+                                before_write=space.add if space is not None else None)
+                except OSError as error:
+                    if error.errno in {errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)}:
+                        raise
+                    raise WorkCopyScanError(f"cannot copy repository file {path}: {error}") from error
+                if _stamp(os.fstat(source_fd)) != _stamp(info):
+                    raise WorkCopyError(f"copy source changed during copy: {path}")
+                if work is not None:
+                    work.baseline[rel] = _hash_file(target)
+    if preserve_directory_modes:
+        for path, target in reversed(directories):
+            shutil.copystat(path, target, follow_symlinks=False)
+    return destination
+
+
+def copy_tree_checked(source: Path, destination: Path, *, work: WorkCopy | None = None,
+                      max_file_bytes: int = 1 << 20, copies_required: int = 1,
+                      preserve_symlinks: bool = False,
+                      preserve_directory_modes: bool = True) -> Path:
+    # A run copying its own trees keeps files the first copy would leave out.
+    source, destination = Path(source).resolve(), Path(destination).absolute()
+    if not source.is_dir():
+        raise WorkCopyError(f"copy source is not a directory: {source}")
+    if os.path.lexists(destination):
+        raise WorkCopyError(f"working copy destination already exists: {destination}")
+    _check_copy_space(source, destination, max_file_bytes, copies_required=copies_required)
+    copies = _Copies()
+    if work is not None:
+        work._copies = copies
+    try:
+        return copy_tree(source, destination, copies, work=work,
+                         space=_CopySpace(destination), preserve_symlinks=preserve_symlinks,
+                         preserve_directory_modes=preserve_directory_modes)
+    except OSError as error:
+        _raise_disk_full(source, destination, max_file_bytes, (destination,), error,
+                         copies_required=copies_required)
+        raise
 
 
 def _ignored(name: str, is_dir: bool) -> bool:
@@ -130,6 +468,9 @@ def _ignored(name: str, is_dir: bool) -> bool:
     if is_dir:
         return name in IGNORE_DIRS or name.casefold() in SECRET_DIRS or name.endswith(".egg-info")
     return is_secret_file(name) or any(fnmatch.fnmatch(name, pattern) for pattern in IGNORE_GLOBS)
+
+
+_copy_ignored = _ignored
 
 
 def frame_source_path_allowed(path: str) -> bool:
@@ -199,6 +540,27 @@ def _source_file_error(operation: str, path: Path, error: OSError) -> WorkCopySc
     return WorkCopyScanError(f"cannot {operation} repository file {path}: {error}")
 
 
+def _copy_start_file(copies: _Copies, source: int, target: Path, rel: str, space: _CopySpace) -> bool:
+    """Copy one open repository file; retry once if it changes meanwhile.
+
+    False means a file over 1 MiB, such as a growing log, kept changing and is left out.
+    """
+    large = False
+    for _attempt in range(2):
+        info = os.fstat(source)
+        large = large or info.st_size > _TEXT_FILE_BYTES
+        try:
+            copies.file(source, target, info, before_write=space.add)
+            if _stamp(os.fstat(source)) == _stamp(info):
+                return True
+        except _SourceChanged:
+            pass
+        target.unlink()
+    if large:
+        return False
+    raise WorkCopyError(f"repository file changed during copy: {rel}")
+
+
 def create(original: Path, destination: Path, limits: Limits | None = None, *,
            admit_snapshot: bool | None = None) -> WorkCopy:
     """Copy ``original`` into ``destination`` (which must not exist), recording hashes."""
@@ -211,86 +573,80 @@ def create(original: Path, destination: Path, limits: Limits | None = None, *,
         raise WorkCopyError(f"working copy destination already exists: {destination}")
     if destination.is_relative_to(original):
         raise WorkCopyError("run directory must be outside the repository")
+    _check_copy_space(original, destination, limits.max_file_bytes)
     work = WorkCopy(original=original, copy=destination)
+    copies = _Copies()
+    work._copies = copies
     if admit_snapshot is None:
         admit_snapshot = _startup_optimization_enabled()
     if admit_snapshot:
         from .workspace_start_snapshot import admit_workcopy
 
-        admit_workcopy(work, limits)
+        try:
+            admit_workcopy(work, limits)
+        except OSError as error:
+            _raise_disk_full(original, destination, limits.max_file_bytes,
+                             (destination,), error)
+            raise
         return work
-    total = 0
+    space = _CopySpace(destination)
 
     def scan_error(path: Path, error: OSError) -> None:
         raise _repository_scan_error(path, error) from error
 
+    copies.mode_only = True
     try:
         destination.mkdir(parents=True)
-    except OSError as error:
-        if _is_copy_storage_full(error):
-            raise _copy_storage_error() from error
-        raise
-    for directory, filenames, dir_fd in _walk_source(original, onerror=scan_error):
-        here = directory.relative_to(original)
-        for name in filenames:
-            relative = here / name
-            rel = relative.as_posix()
-            if _ignored(name, False):
-                work.skipped.append(rel)
-                continue
-            source = directory / name
-            try:
-                before = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
-            except OSError as error:
-                raise _source_file_error("inspect", source, error) from error
-            if not stat.S_ISREG(before.st_mode) or before.st_size > limits.max_file_bytes:
-                work.skipped.append(rel)
-                continue
-            try:
-                descriptor = os.open(name, _READ_FLAGS, dir_fd=dir_fd)
-            except OSError as error:
-                if error.errno in {errno.ELOOP, errno.ENXIO}:
-                    work.skipped.append(rel)
+        for directory, filenames, dir_fd in _walk_source(original, onerror=scan_error):
+            here = directory.relative_to(original)
+            for name in filenames:
+                relative = here / name
+                rel = relative.as_posix()
+                if _ignored(name, False):
+                    work.note_skipped(rel, "excluded by file name")
                     continue
-                if _is_copy_storage_full(error):
-                    shutil.rmtree(destination, ignore_errors=True)
-                    raise _copy_storage_error() from error
-                raise _source_file_error("read", source, error) from error
-            with os.fdopen(descriptor, "rb") as stream:
-                info = os.fstat(descriptor)
-                # An editor's atomic save may have replaced the file since the listing: copy the new one.
-                if not stat.S_ISREG(info.st_mode) or info.st_size > limits.max_file_bytes:
-                    work.skipped.append(rel)
+                source = directory / name
+                try:
+                    before = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+                except OSError as error:
+                    raise _source_file_error("inspect", source, error) from error
+                if not stat.S_ISREG(before.st_mode):
+                    work.note_skipped(rel, "symbolic link" if stat.S_ISLNK(before.st_mode) else "special file")
                     continue
                 try:
-                    data = stream.read(limits.max_file_bytes + 1)
+                    descriptor = os.open(name, _READ_FLAGS, dir_fd=dir_fd)
                 except OSError as error:
+                    if error.errno in {errno.ELOOP, errno.ENXIO}:
+                        work.note_skipped(rel, "symbolic link" if error.errno == errno.ELOOP else "special file")
+                        continue
                     if _is_copy_storage_full(error):
-                        shutil.rmtree(destination, ignore_errors=True)
-                        raise _copy_storage_error() from error
+                        raise
                     raise _source_file_error("read", source, error) from error
-                if len(data) > limits.max_file_bytes:
-                    work.skipped.append(rel)
-                    continue
-            total += len(data)
-            if len(work.baseline) >= limits.max_files or total > limits.max_total_bytes:
-                raise WorkCopyError(
-                    f"repository is larger than the run limits ({limits.max_files} files, "
-                    f"{limits.max_total_bytes // (1024 * 1024)} MB); point --repo at a smaller tree")
-            target = destination / relative
-            try:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with target.open("xb") as output:
-                    output.write(data)
-                    os.fchmod(output.fileno(), stat.S_IMODE(info.st_mode))
-            except OSError as error:
-                if _is_copy_storage_full(error):
-                    shutil.rmtree(destination, ignore_errors=True)
-                    raise _copy_storage_error() from error
-                raise
-            work.baseline[rel] = _sha(data)
-    if not work.baseline:
-        raise WorkCopyError("repository has no files to work on")
+                with os.fdopen(descriptor, "rb"):
+                    info = os.fstat(descriptor)
+                    # An editor's atomic save may have replaced the file since the listing: copy the new one.
+                    if not stat.S_ISREG(info.st_mode):
+                        work.note_skipped(rel, "special file")
+                        continue
+                    target = destination / relative
+                    try:
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        copied = _copy_start_file(copies, descriptor, target, rel, space)
+                    except OSError as error:
+                        if _is_copy_storage_full(error):
+                            raise
+                        raise _source_file_error("copy", source, error) from error
+                    if not copied:
+                        work.note_skipped(rel, "changed while copying")
+                        continue
+                work.baseline[rel] = _hash_file(target)
+                if target.stat().st_size > _TEXT_FILE_BYTES:
+                    work.large_files.add(rel)
+    except OSError as error:
+        _raise_disk_full(original, destination, limits.max_file_bytes, (destination,), error)
+        raise
+    finally:
+        copies.mode_only = False
     return work
 
 
@@ -316,7 +672,7 @@ def changed_files(work: WorkCopy) -> dict[str, str]:
                 continue
             rel = path.relative_to(work.copy).as_posix()
             try:
-                current[rel] = _sha(path.read_bytes())
+                current[rel] = _hash_file(path)
             except OSError as error:
                 raise WorkCopyScanError(f"cannot read working copy file {path}: {error}") from error
     for rel, digest in current.items():
@@ -1069,6 +1425,7 @@ def apply_in_place(work: WorkCopy, *, merged: list[str] | None = None,
     merged_paths: list[str] = []
     if _drift_merge_enabled():
         changes, baseline, merged_paths = _merge_outside_edits(work, changes, baseline)
+    _check_apply_space(work.original, changes)
     applied = guarded_apply(work.original, changes, baseline, what="--in-place")
     if merged is not None:
         merged.extend(sorted(merged_paths))

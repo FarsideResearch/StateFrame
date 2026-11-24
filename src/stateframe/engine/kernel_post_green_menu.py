@@ -511,6 +511,7 @@ def _v15_identical_green(lock: object, selector: object = None) -> bool:
 
 # Stored as the pending binding when runtime.binding() raised: fail closed, never "no binding".
 BINDING_UNREADABLE = "__stateframe_binding_unreadable__"
+_BINDING_UNSET = object()
 
 
 def _binding_now(runtime: object) -> object:
@@ -523,7 +524,7 @@ def _binding_now(runtime: object) -> object:
         return BINDING_UNREADABLE
 
 
-def note_edit(lock: object, path: object) -> None:
+def note_edit(lock: object, path: object, *, binding: object = _BINDING_UNSET) -> None:
     """Arm explicit verification for every applied product edit; count only window edits."""
     runtime = getattr(lock, "runtime", None)
     if not owns_lock(lock):
@@ -533,8 +534,9 @@ def note_edit(lock: object, path: object) -> None:
     has_lineage = state.get("base") is not None
     seq = int(state.get("edit_seq") or 0) + 1
     state["edit_seq"] = seq
+    current_binding = _binding_now(runtime) if binding is _BINDING_UNSET else _product_key(binding)
     pending = {"path": str(path), "from_revision": _key(getattr(lock, "_green_revision", None)),
-               "edit_seq": seq, "binding": _binding_now(runtime)}
+               "edit_seq": seq, "binding": current_binding}
     request_id = getattr(runtime, "current_request_id", None)
     if isinstance(request_id, str) and request_id.strip():
         pending["request_id"] = request_id

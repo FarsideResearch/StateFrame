@@ -63,7 +63,7 @@ def _create(root, run, *, admitted):
     if admitted:
         snapshot.pin_parent(work, run / "parent")
     else:
-        work.snapshot = Path(shutil.copytree(work.copy, run / "parent"))
+        work.snapshot = workcopy.copy_tree(work.copy, run / "parent", work._copies)
     return work
 
 
@@ -109,7 +109,7 @@ def test_membership_modes_and_independent_copies(original, tmp_path, monkeypatch
         os.write(target, b"partial clone with excess bytes\n")
         raise OSError(clone_error, os.strerror(clone_error))
 
-    monkeypatch.setattr(snapshot, "_reflink", failed_clone)
+    monkeypatch.setattr(workcopy, "_reflink", failed_clone)
     eager = _create(original, tmp_path / "off", admitted=False)
     admitted = _create(original, tmp_path / "on", admitted=True)
     assert admitted.baseline == eager.baseline
@@ -130,21 +130,93 @@ def test_membership_modes_and_independent_copies(original, tmp_path, monkeypatch
     assert _inventory(admitted.snapshot) == _inventory(eager.snapshot)
 
 
-def test_admission_hashes_the_copied_bytes(original, tmp_path, monkeypatch):
-    original_bytes = (original / "app.py").read_bytes()
+def test_admission_detects_source_change_during_copy(original, tmp_path, monkeypatch):
+    original_file = original / "app.py"
+    original_bytes = original_file.read_bytes()
+    copy_file = snapshot._Copies.file
 
-    def replace_after_read(source, target):
-        if os.fstat(source).st_size == len(original_bytes):
-            (original / "app.py").write_bytes(original_bytes.replace(b"0", b"2"))
-        raise OSError(errno.EIO, "no clone")
+    def replace_during_copy(self, source, target, info, *, data=None, writable=False, before_write=None):
+        result = copy_file(self, source, target, info, data=data, writable=writable,
+                           before_write=before_write)
+        if target.name == "app.py" and target.parent.name == "workspace":
+            original_file.write_bytes(original_bytes.replace(b"0", b"2"))
+        return result
 
-    monkeypatch.setattr(snapshot, "_reflink", replace_after_read)
-    work = _create(original, tmp_path / "run", admitted=True)
-    assert (original / "app.py").read_bytes() != original_bytes
-    assert work.baseline["app.py"] == hashlib.sha256(original_bytes).hexdigest()
-    assert (work.snapshot / "app.py").read_bytes() == original_bytes
-    (work.copy / "app.py").write_bytes(b"VALUE = 4\r\n")
-    assert "-VALUE = 0\r\n+VALUE = 4" in workcopy.unified_diff(work)
+    monkeypatch.setattr(snapshot._Copies, "file", replace_during_copy)
+    with pytest.raises(workcopy.WorkCopyError, match="changed during"):
+        workcopy.create(original, tmp_path / "run" / "workspace", admit_snapshot=True)
+
+
+def test_clone_refusal_mid_start_disables_further_clone_attempts(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "a.bin").write_bytes(b"first payload")
+    (source / "b.bin").write_bytes(b"second payload")
+    calls = []
+
+    def copy_bytes(source_fd, target_fd):
+        os.lseek(source_fd, 0, os.SEEK_SET)
+        while block := os.read(source_fd, 1 << 20):
+            os.write(target_fd, block)
+
+    def clone(source_fd, target_fd):
+        calls.append((os.fstat(source_fd).st_ino, os.fstat(target_fd).st_ino))
+        if len(calls) == 3:
+            os.write(target_fd, b"partial clone")
+            raise OSError(errno.EIO, "clone refused midway")
+        if len(calls) > 3:
+            pytest.fail("cloning continued after a clone error")
+        copy_bytes(source_fd, target_fd)
+
+    monkeypatch.setattr(workcopy, "_reflink", clone)
+    work = workcopy.create(source, tmp_path / "run" / "workspace", admit_snapshot=True)
+    snapshot.pin_parent(work, tmp_path / "run" / "parent")
+
+    assert len(calls) == 3  # probe, first workspace file, then the refused parent clone
+    for path in ("a.bin", "b.bin"):
+        assert (work.copy / path).read_bytes() == (work.snapshot / path).read_bytes()
+        assert not (work.copy / path).samefile(source / path)
+        assert not (work.snapshot / path).samefile(source / path)
+
+
+def test_file_growth_during_start_copy_is_detected(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    original = source / "large.bin"
+    original.write_bytes(b"original payload")
+    calls = 0
+
+    def clone(source_fd, target_fd):
+        nonlocal calls
+        calls += 1
+        os.lseek(source_fd, 0, os.SEEK_SET)
+        os.write(target_fd, os.read(source_fd, 1 << 20))
+        if calls >= 2:  # a single change is copied again
+            with original.open("ab") as stream:
+                stream.write(b" grew")
+
+    monkeypatch.setattr(workcopy, "_reflink", clone)
+    with pytest.raises(workcopy.WorkCopyError, match="changed during"):
+        workcopy.create(source, tmp_path / "run" / "workspace", admit_snapshot=True)
+
+
+def test_unreadable_regular_file_is_reported_as_skipped(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "unreadable.bin").write_bytes(b"secretly unreadable")
+    (source / "readable.bin").write_bytes(b"readable")
+    real_open = os.open
+
+    def deny_unreadable(path, flags, *args, **kwargs):
+        if path == "unreadable.bin" and kwargs.get("dir_fd") is not None:
+            raise PermissionError(errno.EACCES, "permission denied", path)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", deny_unreadable)
+    work = workcopy.create(source, tmp_path / "run" / "workspace", admit_snapshot=True)
+
+    assert "unreadable.bin" in work.skipped
+    assert "unreadable" in work.skip_reasons["unreadable.bin"]
 
 
 def test_path_replaced_with_symlink_during_admission(original, tmp_path, monkeypatch):
@@ -167,11 +239,45 @@ def test_path_replaced_with_symlink_during_admission(original, tmp_path, monkeyp
     assert not (work.snapshot / "app.py").exists()
 
 
-def test_limits_refuse_before_publication(original, tmp_path):
-    run = tmp_path / "failed"
-    with pytest.raises(workcopy.WorkCopyError, match="larger than the run limits"):
-        workcopy.create(original, run / "workspace", workcopy.Limits(max_files=1),
-                        admit_snapshot=True)
+def test_start_admission_copies_files_above_configured_limit(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "kept.bin").write_bytes(b"x")
+    (source / "oversized.bin").write_bytes(b"xx")
+
+    work = workcopy.create(source, tmp_path / "run" / "workspace",
+                           workcopy.Limits(max_file_bytes=1), admit_snapshot=True)
+
+    assert work.baseline == {"kept.bin": hashlib.sha256(b"x").hexdigest(),
+                             "oversized.bin": hashlib.sha256(b"xx").hexdigest()}
+    assert work.skipped == []
+    assert (work.copy / "kept.bin").read_bytes() == b"x"
+    assert (work.copy / "oversized.bin").read_bytes() == b"xx"
+
+
+@pytest.mark.parametrize("admitted", [False, True])
+def test_enospc_cleans_partial_start_copy(tmp_path, monkeypatch, admitted):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "a.bin").write_bytes(b"first")
+    (source / "b.bin").write_bytes(b"second")
+    run = tmp_path / "run"
+    destination = run / "workspace"
+    monkeypatch.setattr(workcopy.os, "statvfs",
+                        lambda _path: SimpleNamespace(f_bavail=1 << 30, f_frsize=1))
+
+    def fail_after_partial(_self, _source, target, _info, **_kwargs):
+        if target.name == "a.bin":
+            with target.open("xb") as stream:
+                stream.write(b"x")
+            raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+
+    monkeypatch.setattr(snapshot._Copies, "file", fail_after_partial)
+
+    with pytest.raises(workcopy.WorkCopyError, match=r"needs 22 bytes; .* bytes are free"):
+        workcopy.create(source, destination, admit_snapshot=admitted)
+
+    assert run.is_dir()
     assert list(run.iterdir()) == []
 
 
@@ -183,13 +289,14 @@ def test_admission_preserves_empty_and_exact_limit_bytes(tmp_path):
     for name, data in {**files, "oversize.bin": exact + b"\x00"}.items():
         (source / name).write_bytes(data)
 
-    limits = workcopy.Limits(max_files=2, max_file_bytes=len(exact), max_total_bytes=len(exact))
+    limits = workcopy.Limits(max_file_bytes=len(exact))
+    files["oversize.bin"] = exact + b"\x00"
     expected = {name: hashlib.sha256(data).hexdigest() for name, data in files.items()}
     for admitted in (False, True):
         run = tmp_path / str(admitted)
         work = workcopy.create(source, run / "workspace", limits, admit_snapshot=admitted)
         assert work.baseline == expected
-        assert work.skipped == ["oversize.bin"]
+        assert work.skipped == []
         copies = [work.copy]
         if admitted:
             copies.append(snapshot.pin_parent(work, run / "parent"))
@@ -197,10 +304,24 @@ def test_admission_preserves_empty_and_exact_limit_bytes(tmp_path):
             assert {path.name: path.read_bytes() for path in root.iterdir()} == files
 
 
+@pytest.mark.parametrize("admitted", [False, True])
+def test_start_copy_accepts_more_than_64_mib(tmp_path, admitted):
+    source = tmp_path / "source"
+    source.mkdir()
+    payload = b"x" * (1024 * 1024)
+    for index in range(65):
+        (source / f"part-{index:02d}.bin").write_bytes(payload)
+
+    work = workcopy.create(source, tmp_path / "run" / "workspace", admit_snapshot=admitted)
+
+    assert len(work.baseline) == 65
+    assert sum((work.copy / path).stat().st_size for path in work.baseline) == 65 * len(payload)
+
+
 @pytest.mark.parametrize("platform", ["native", "darwin"])
 def test_workspace_admission_uses_portable_copy_at_a_relocated_root(tmp_path, monkeypatch, platform):
     if platform == "darwin":
-        monkeypatch.setattr(snapshot, "sys", SimpleNamespace(platform="darwin"))
+        monkeypatch.setattr(workcopy, "sys", SimpleNamespace(platform="darwin"))
 
         def unexpected_ioctl(*_args):
             pytest.fail("the macOS copy attempted the Linux clone ioctl")

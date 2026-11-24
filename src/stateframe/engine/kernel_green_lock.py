@@ -36,6 +36,7 @@ _EDIT_ACTIONS = frozenset({
 _TERMINAL_ACTIONS = frozenset({"done", "run_tests"})
 _PROGRESS_ACTIONS = _EDIT_ACTIONS | frozenset({"read", "work"})
 _PARENT_COMPARISON_LOCK = RLock()
+_BINDING_UNSET = object()
 
 
 def _repair_blocks_done_enabled(runtime: object) -> bool:
@@ -1796,17 +1797,22 @@ class GreenLock:
         except (AttributeError, TypeError):
             pass
 
-    def applied_product_edit(self, path: object) -> None:
+    def applied_product_edit(self, path: object, *, binding: object = _BINDING_UNSET) -> None:
         """Clear the lock after an applied product edit changes the revision."""
         if self.mode in {"on", "terminal"} and is_product_path(self._workspace_path(path)):
             self._remember_product_edit_request(self.runtime)
             if getattr(self.runtime, "stateframe_post_green_work_menu_mode", "off") == "on":
                 # Count the post-green work cycle while the lock still shows the green it left.
                 from kernel_post_green_menu import note_edit
-                note_edit(self, self._workspace_path(path))
+                workspace_path = self._workspace_path(path)
+                if binding is _BINDING_UNSET:
+                    note_edit(self, workspace_path)
+                else:
+                    note_edit(self, workspace_path, binding=binding)
             fallback_same_revision = False
-            if self.mode == "terminal":
-                current_revision = self._current_revision()
+            if self.mode == "terminal" and self._terminal_fallback_revision is not None:
+                current_revision = (_product_revision(binding) if binding is not _BINDING_UNSET
+                                    else self._current_revision())
                 fallback_same_revision = (
                     not isinstance(current_revision, UnavailableEvidence)
                     and current_revision is not None
@@ -1943,7 +1949,7 @@ def guard_action(kind: object, arguments: Mapping[str, object] | None = None) ->
     return lock.before_action(kind, arguments) if lock is not None else None
 
 
-def note_applied_product_edit(path: object) -> None:
+def note_applied_product_edit(path: object, *, binding: object = _BINDING_UNSET) -> None:
     """Notify the active runtime after a low-level editor actually writes."""
     try:
         from kernel_pilot import ACTIVE_RUNTIME
@@ -1963,7 +1969,10 @@ def note_applied_product_edit(path: object) -> None:
             pass
     lock = getattr(runtime, "green_lock", None)
     if enabled() and lock is not None:
-        lock.applied_product_edit(path)
+        if binding is _BINDING_UNSET:
+            lock.applied_product_edit(path)
+        else:
+            lock.applied_product_edit(path, binding=binding)
     try:
         from kernel_green_lock_repair import controller_for
         controller = controller_for(runtime)

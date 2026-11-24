@@ -94,25 +94,25 @@ def _selectors(unit: Mapping[str, object]) -> list[str]:
 
 def _writer_detail_map(details: object) -> dict[str, Sequence[object]]:
     if not _is_sequence(details):
-        raise FanoutContinuationError("fan-out disposition has invalid unit details")
+        raise FanoutContinuationError("fan-out disposition has invalid subframe details")
     by_id: dict[str, Sequence[object]] = {}
     for detail in details:
         if (not _is_sequence(detail) or not detail or not isinstance(detail[0], str)
                 or detail[0] in by_id):
-            raise FanoutContinuationError("fan-out disposition has a malformed unit detail")
+            raise FanoutContinuationError("fan-out disposition has a malformed subframe detail")
         by_id[detail[0]] = detail
     return by_id
 
 
 def _writer_scope_map(scopes: object) -> dict[str, Sequence[object]]:
     if not _is_sequence(scopes):
-        raise FanoutContinuationError("fan-out disposition has invalid unit scopes")
+        raise FanoutContinuationError("fan-out disposition has invalid subframe scopes")
     by_id: dict[str, Sequence[object]] = {}
     for scope in scopes:
         if not _is_sequence(scope) or len(scope) != len(WRITER_SCOPE_FIELDS):
-            raise FanoutContinuationError("fan-out disposition has a malformed unit scope")
+            raise FanoutContinuationError("fan-out disposition has a malformed subframe scope")
         if not isinstance(scope[0], str) or scope[0] in by_id:
-            raise FanoutContinuationError("fan-out disposition has a malformed unit scope")
+            raise FanoutContinuationError("fan-out disposition has a malformed subframe scope")
         by_id[scope[0]] = scope
     return by_id
 
@@ -124,7 +124,7 @@ def _writer_unit_mapping(
     """Map one writer identity row plus its detail and scope rows onto the renderer's unit fields."""
     if (len(identity) != len(WRITER_UNIT_FIELDS) or not isinstance(identity[0], str)
             or not isinstance(identity[1], str)):
-        raise FanoutContinuationError("fan-out disposition contains a malformed unit")
+        raise FanoutContinuationError("fan-out disposition contains a malformed subframe")
     row: dict[str, object] = dict(zip(WRITER_UNIT_FIELDS, identity))
     scope = scopes.get(identity[0])
     if scope is not None:
@@ -134,7 +134,7 @@ def _writer_unit_mapping(
     if detail is None:
         return row
     if len(detail) != len(WRITER_DETAIL_FIELDS):
-        raise FanoutContinuationError("fan-out disposition has a malformed unit detail")
+        raise FanoutContinuationError("fan-out disposition has a malformed subframe detail")
     values = dict(zip(WRITER_DETAIL_FIELDS, detail))
     changed = values["changed_files"]
     if not _is_sequence(changed):
@@ -164,18 +164,18 @@ def _canonical_unit_rows(raw_units: Sequence[object], disposition: Mapping[str, 
 def _unit_rows(disposition: Mapping[str, object]) -> list[dict[str, object]]:
     raw_units = disposition.get("units", disposition.get("unit_dispositions", ()))
     if not _is_sequence(raw_units) or len(raw_units) > MAX_UNITS:
-        raise FanoutContinuationError("fan-out disposition has invalid unit rows")
+        raise FanoutContinuationError("fan-out disposition has invalid subframe rows")
     raw_units = _canonical_unit_rows(raw_units, disposition)
     rows: list[dict[str, object]] = []
     seen_ids: set[str] = set()
     for raw in raw_units:
         if not isinstance(raw, Mapping):
-            raise FanoutContinuationError("fan-out disposition contains a malformed unit")
+            raise FanoutContinuationError("fan-out disposition contains a malformed subframe")
         unit_id = _clean(raw.get("id", raw.get("unit_id", "")), limit=120)
         if not unit_id:
-            raise FanoutContinuationError("fan-out unit has no id")
+            raise FanoutContinuationError("fan-out subframe has no id")
         if unit_id in seen_ids:
-            raise FanoutContinuationError("fan-out disposition contains duplicate unit ids")
+            raise FanoutContinuationError("fan-out disposition contains duplicate subframe ids")
         seen_ids.add(unit_id)
         check_result = _clean(
             raw.get("check_result", raw.get("check_status", raw.get("check", "NOT_RUN"))), limit=32
@@ -238,7 +238,7 @@ def disposition_from_records(
     planned = request.get("units", ())
     outcomes = result.get("outcomes", ())
     if not _is_sequence(planned) or len(planned) > MAX_UNITS or not _is_sequence(outcomes):
-        raise FanoutContinuationError("parallel result or plan has invalid unit rows")
+        raise FanoutContinuationError("parallel result or plan has invalid subframe rows")
     by_id = {
         str(item.get("unit_id", item.get("id", ""))): item
         for item in outcomes if isinstance(item, Mapping)
@@ -249,7 +249,7 @@ def disposition_from_records(
     units: list[dict[str, object]] = []
     for plan in planned:
         if not isinstance(plan, Mapping):
-            raise FanoutContinuationError("parallel request has a malformed unit")
+            raise FanoutContinuationError("parallel request has a malformed subframe")
         unit_id = str(plan.get("id") or "")
         outcome = by_id.get(unit_id)
         if outcome is None:
@@ -321,7 +321,7 @@ def _unit_line(unit: Mapping[str, object]) -> str:
     contract = unit.get("contract")
     contract_text = "True" if contract is True else "False" if contract is False else "None"
     return (
-        f"unit={_clean(unit.get('id'), limit=120)}; owns={_truncate_utf8(owns, 180)}; "
+        f"subframe={_clean(unit.get('id'), limit=120)}; owns={_truncate_utf8(owns, 180)}; "
         f"check={_truncate_utf8(checks, 180)}; status={_clean(unit.get('status'), limit=48)}; "
         f"check_result={_clean(unit.get('check_result'), limit=32)}; "
         f"child_sends={int(unit.get('child_sends', 0))}; changed_paths={_truncate_utf8(changed, 180)}; "
@@ -350,7 +350,7 @@ def _failure_lines(unit: Mapping[str, object], failure: Mapping[str, object] | N
     if failure is None:
         reason = unit.get("reason")
         if not reason and unit.get("check_result") == "FAIL":
-            reason = "unit check failed"
+            reason = "subframe check failed"
         if not reason:
             return []
         path = next(iter(_selectors(unit)), next(iter(_paths(unit.get("owns"))), "unknown"))
@@ -386,7 +386,7 @@ def _fit_section(
     while True:
         lines = [fixed[0], *(line for _required, line in rows)]
         if omitted:
-            lines.append(f"units_truncated={omitted}")
+            lines.append(f"subframes_truncated={omitted}")
         lines.extend(fixed[1:])
         text = "\n".join(lines)
         if _bytes(text) <= cap:
@@ -521,13 +521,13 @@ def render(
         check_paths = [selector for unit in units if str(unit["id"]) in remaining
                        for selector in _selectors(unit)]
         remaining_wording = ",".join(remaining)
-        completed_wording = f"{'/'.join(completed)} committed+PASS, don't reopen" if completed else "don't reopen completed units"
-        checks_wording = ",".join(check_paths) or "the remaining unit check"
+        completed_wording = f"{'/'.join(completed)} committed+PASS, don't reopen" if completed else "don't reopen completed subframes"
+        checks_wording = ",".join(check_paths) or "the remaining subframe check"
         next_action = f"repair only {remaining_wording}; {completed_wording}; run {checks_wording} then the full check"
     elif final_check == "PASS" and units:
-        next_action = "all units committed and verified; finish unless a concrete mismatch"
+        next_action = "all subframes committed and verified; finish unless a concrete mismatch"
     else:
-        next_action = (f"units finished but parent final check is {final_check}, not verified; "
+        next_action = (f"subframes finished but parent final check is {final_check}, not verified; "
                        "resolve the parent final check, then run the full check before finishing")
     fixed.append(f"next_action: {_truncate_utf8(next_action, 500)}")
 

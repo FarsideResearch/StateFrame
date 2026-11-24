@@ -254,9 +254,14 @@ def test_sparse_publication_and_metadata_update_work(cas):
 def _policy(**changes):
     return codec.CheckoutPolicy(**{
         "allow_symlinks": False, "allow_internal_hardlinks": False,
-        "mode_mask": 0o777, "max_entries": 30, "max_file_bytes": 1024,
-        "max_total_bytes": 1024, **changes,
+        "mode_mask": 0o777, "max_file_bytes": 1024, **changes,
     })
+
+
+def test_run_checkout_keeps_existing_per_file_limit():
+    from kernel_workspace_consumers import _default_checkout_policy
+
+    assert _default_checkout_policy().max_file_bytes == 256 << 20
 
 
 def test_private_checkout_modes_links_and_metadata(cas, tmp_path):
@@ -334,20 +339,31 @@ def test_malformed_tree_fails_closed(cas, tmp_path, defect):
     assert list(tmp_path.iterdir()) == []
 
 
-def test_restore_limits_count_logical_aliases_and_refuse_external_group(cas, tmp_path):
+def test_restore_counts_logical_aliases_and_refuses_external_group(cas, tmp_path):
     blob = _store(cas, b"bytes")
     file = tree.File(0o644, 5, bytes.fromhex(blob), hardlinked=True)
     subtree = tree.directory(0o755, [(b"file", file)])
     oid = codec.write_tree(cas, tree.directory(0o755, [(b"a", subtree), (b"b", subtree)]))
     for policy, reason in [
-        (_policy(allow_internal_hardlinks=True, max_total_bytes=9), "byte limit"),
-        (_policy(allow_internal_hardlinks=True, max_entries=3), "entry limit"),
         (_policy(allow_internal_hardlinks=True), "no internal group"),
         (_policy(), "disallows hardlinks"),
     ]:
         with pytest.raises(ObjectIntegrityError, match=reason):
             codec.checkout_tree(cas, oid, tmp_path / "checkout", metadata=None, policy=policy)
     assert list(tmp_path.iterdir()) == []
+
+
+def test_checkout_manifest_accepts_more_than_20000_entries(cas):
+    blob = _store(cas, b"x")
+    file = tree.File(0o644, 1, bytes.fromhex(blob))
+    source = tree.directory(0o755, (
+        (f"file-{index:05d}".encode(), file) for index in range(20_001)
+    ))
+    root = codec.write_tree(cas, source)
+
+    entries = codec._checkout_entries(cas, root, _policy())
+
+    assert len(entries) == 20_002
 
 
 def test_checkout_rolls_back_failed_finalization(cas, tmp_path, monkeypatch):

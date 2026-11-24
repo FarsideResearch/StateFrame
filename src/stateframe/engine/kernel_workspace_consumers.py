@@ -313,10 +313,9 @@ def _included(path: tuple[bytes, ...], exclude: Callable[[str], bool]) -> bool:
 
 
 def _live_manifest(tree: Directory, exclude: Callable[[str], bool]):
-    from kernel_effects import EffectError, MAX_FILE_BYTES, MAX_WORKSPACE_BYTES, MAX_WORKSPACE_ENTRIES
+    from kernel_effects import EffectError
 
     entries = {}
-    size = 0
     pending = [((), iter(children(tree)))]
     while pending:
         parent, iterator = pending[-1]
@@ -329,12 +328,9 @@ def _live_manifest(tree: Directory, exclude: Callable[[str], bool]):
         relative = _relative(path)
         if exclude(relative):
             continue
-        if len(entries) >= MAX_WORKSPACE_ENTRIES:
-            raise EffectError("workspace exceeds entry-count limit")
         if isinstance(entry, File):
-            size += entry.size
-            if entry.size > MAX_FILE_BYTES or size > MAX_WORKSPACE_BYTES:
-                raise EffectError("workspace exceeds per-file or aggregate byte limit")
+            if entry.size < 0:
+                raise EffectError("workspace file has an invalid size")
         if isinstance(entry, Directory):
             pending.append((path, iter(children(entry))))
         entries[relative] = _effect_entry(entry)
@@ -370,6 +366,17 @@ class EffectBlobs:
         except (OSError, ValueError) as error:
             raise EffectError("workspace effect object unavailable") from error
 
+    def copy_to(self, digest: str, output) -> None:
+        from kernel_effects import EffectError
+        from kernel_workspace_objects import MAX_STREAM_BYTES
+
+        try:
+            with self.store.lease() as lease:
+                lease.copy_verified(lease.resolve(digest, max_bytes=MAX_STREAM_BYTES), output,
+                                    max_bytes=MAX_STREAM_BYTES)
+        except (OSError, ValueError) as error:
+            raise EffectError(f"workspace effect object unavailable: {error}") from error
+
 
 def _stored_effect_entry(entry):
     from hashlib import sha256
@@ -385,20 +392,16 @@ def _stored_effect_entry(entry):
 
 
 def effect_manifest(lease: ObjectLease, tree: str, *, exclude: Callable[[str], bool]):
-    from kernel_effects import EffectError, MAX_FILE_BYTES, MAX_WORKSPACE_BYTES, MAX_WORKSPACE_ENTRIES
+    from kernel_effects import EffectError
     from kernel_workspace_tree_io import iter_entries
 
     result = {}
-    total = 0
     for path, _, entry in iter_entries(lease, tree):
         if not path or not _included(path, exclude):
             continue
-        if len(result) >= MAX_WORKSPACE_ENTRIES:
-            raise EffectError("workspace exceeds entry-count limit")
         if entry.kind == "file":
-            total += entry.size
-            if entry.size > MAX_FILE_BYTES or total > MAX_WORKSPACE_BYTES:
-                raise EffectError("workspace exceeds per-file or aggregate byte limit")
+            if entry.size < 0:
+                raise EffectError("workspace file has an invalid size")
         result[_relative(path)] = _stored_effect_entry(entry)
     return result
 
@@ -804,7 +807,7 @@ def bind_run_consumers(run: Path, root: Path, *, parent: Path,
         if parent == root and parent_paths is not None:
             # Without a separate host parent, retain the live start before edits.
             shell.baseline()
-        policy = CheckoutPolicy(True, True, 0o7777, 20_000, 256 << 20, 1 << 30)
+        policy = _default_checkout_policy()
         consumers = WorkspaceConsumers(state, shell=shell, checkout=(store, policy),
                                        admitted_parent=retained_parent.oid if retained_parent else None)
         consumers._admitted_parent = admitted_parent
@@ -814,6 +817,12 @@ def bind_run_consumers(run: Path, root: Path, *, parent: Path,
     except BaseException:
         private.cleanup()
         raise
+
+
+def _default_checkout_policy() -> CheckoutPolicy:
+    from kernel_workspace_tree_io import CheckoutPolicy
+
+    return CheckoutPolicy(True, True, 0o7777, 256 << 20)
 
 
 def rebind_after_checkpoint_activation(run: Path, root: Path) -> None:

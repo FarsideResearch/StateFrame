@@ -400,7 +400,7 @@ def inventory_ticket_sites(runtime: object) -> tuple[TicketSite, ...] | None:
             if isinstance(literal_sites, UnavailableEvidence):
                 return None
             if len(literal_sites) >= source_window._MAX_SITES:
-                continue
+                return None
             resolved_patterns += 1
             for site in literal_sites:
                 if site.role == "executable" and literal in str(site.text):
@@ -431,12 +431,15 @@ def decide_green_nag(
     if sites is None:
         return GreenNagDecision(None, False, None, True, True)
     remaining = len(sites)
-    if remaining == 0:
-        return GreenNagDecision(nudge, True, 0, True, True)
-
     revision = str(tested_revision or "").strip().lower()
     if re.fullmatch(r"[0-9a-f]{8}", revision) is None:
         return GreenNagDecision(None, False, remaining, True, True)
+    if remaining == 0:
+        current_revision = str(current_workspace_revision(runtime) or "").strip().lower()
+        if current_revision != revision:
+            return GreenNagDecision(None, False, remaining, True, True)
+        return GreenNagDecision(nudge, True, 0, True, True)
+
     locations = ", ".join(f"{site.path}:{site.line}" for site in sites)
     noun, verb = ("site", "remains") if remaining == 1 else ("sites", "remain")
     message = (

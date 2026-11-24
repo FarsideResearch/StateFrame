@@ -1,7 +1,7 @@
 [FANOUT CONTINUATION]
-unit=invoicing; owns=shop/invoicing.py; check=tests/test_invoicing.py; status=COMMITTED; check_result=PASS; child_sends=1; changed_paths=shop/invoicing.py; contract=True
-unit=pricing; owns=shop/pricing.py; check=tests/test_pricing.py; status=COMMITTED; check_result=PASS; child_sends=1; changed_paths=shop/pricing.py; contract=True
-unit=shipping; owns=shop/shipping.py; check=tests/test_shipping.py; status=COMMITTED; check_result=PASS; child_sends=1; changed_paths=shop/shipping.py; contract=True
+subframe=invoicing; owns=shop/invoicing.py; check=tests/test_invoicing.py; status=COMMITTED; check_result=PASS; child_sends=1; changed_paths=shop/invoicing.py; contract=True
+subframe=pricing; owns=shop/pricing.py; check=tests/test_pricing.py; status=COMMITTED; check_result=PASS; child_sends=1; changed_paths=shop/pricing.py; contract=True
+subframe=shipping; owns=shop/shipping.py; check=tests/test_shipping.py; status=COMMITTED; check_result=PASS; child_sends=1; changed_paths=shop/shipping.py; contract=True
 final_check=PASS; final_integration=VERIFIED
 remaining=[]
-next_action: all units committed and verified; finish unless a concrete mismatch
+next_action: all subframes committed and verified; finish unless a concrete mismatch

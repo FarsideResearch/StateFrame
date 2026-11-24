@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import hashlib
 import json
+import marshal
 import os
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -252,13 +254,42 @@ def _candidate_id(row: object, fallback: str, ordinal: int) -> str:
     return str(value)
 
 
+# The text of large receipts, keyed by a digest of their exact content. Receipts
+# are mutable, so identity is never trusted: the content is read on every call,
+# but marshal is several times cheaper than sorted JSON. Equal marshal bytes mean
+# equal plain values, hence equal JSON. Anything marshal refuses is not reused.
+_FINGERPRINT_MIN_BYTES = 4096
+_FINGERPRINT_CHARS = 64 * 1024 * 1024
+_FINGERPRINTS: dict[bytes, str] = {}
+
+
+def _fingerprint_key(mapped: object) -> bytes | None:
+    try:
+        payload = marshal.dumps(mapped)
+    except ValueError:
+        return None
+    if len(payload) < _FINGERPRINT_MIN_BYTES:
+        return None
+    return hashlib.sha256(payload).digest()
+
+
 def _fingerprint(row: object) -> str:
     mapped = _mapping(row)
+    key = _fingerprint_key(mapped)
+    if key is not None:
+        cached = _FINGERPRINTS.get(key)
+        if cached is not None:
+            return cached
     try:
-        return json.dumps(mapped, sort_keys=True, ensure_ascii=False, default=str,
+        text = json.dumps(mapped, sort_keys=True, ensure_ascii=False, default=str,
                           separators=(",", ":"))
     except (TypeError, ValueError):
         return repr(row)
+    if key is not None and len(text) <= _FINGERPRINT_CHARS:
+        if sum(map(len, _FINGERPRINTS.values())) + len(text) > _FINGERPRINT_CHARS:
+            _FINGERPRINTS.clear()
+        _FINGERPRINTS[key] = text
+    return text
 
 
 def open_counterexamples(runtime: object | None = None,
