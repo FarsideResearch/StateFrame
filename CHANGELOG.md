@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Docs: container mode is opt-in and for trusted repositories only; the container guide lists what was run.
+- Fixed: passing checks on captured candidates with no changed files now use an explicit no-change result label, and `summary.json` records `no_change`.
+
+
 ## 0.9.5 (2026-11-24)
 
 - Fixed: a run continues after the host stopped a check, when the stop and its cleanup are proven. The check stays unresolved and still blocks done. A check that may still be running never settles.

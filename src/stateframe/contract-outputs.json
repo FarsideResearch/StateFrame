@@ -406,6 +406,13 @@
           "optional": false
         },
         {
+          "name": "no_change",
+          "type": "boolean|null",
+          "since": "unknown",
+          "stable": true,
+          "optional": true
+        },
+        {
           "name": "wall_seconds",
           "type": "number",
           "since": "unknown",
