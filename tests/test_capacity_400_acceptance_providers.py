@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from test_capacity_400_acceptance import Case, _assert_base_terminal, _run_case
+from test_capacity_400_acceptance import Case, _run_case
 
 
 pytestmark = pytest.mark.host_sandbox
@@ -89,22 +89,22 @@ def test_provider_capacity_400_matches_fixture_expectation(
 ) -> None:
     case = capacity_cases[provider].result()
     if provider == "vllm":
-        assert any(event.get("kind") == "transport_error"
-                   and event.get("transport_class") == "capacity"
-                   for event in case.events), case.events
+        # The working-set allocator cannot admit a request under the learned limit, so the run
+        # suspends with a typed, resumable stop instead of resending or ending as a transport error.
         learned = [event for event in case.events
                    if event.get("kind") == "capacity_context_limit_learned"]
         assert any(event.get("provider_limit_tokens") == 16_384 for event in learned), learned
-        assert any(event.get("kind") == "capacity_retry_refit_failed"
-                   for event in case.events), case.events
+        assert any(event.get("kind") == "working_set_blocked" for event in case.events), case.events
         assert len(case.requests) == 1, (len(case.requests), case.summary, case.output)
-        _assert_base_terminal(case, "HARNESS_TRANSPORT", "missing_result")
-        visible_result = case.output + json.dumps(case.summary, ensure_ascii=False)
-        assert "maximum context length is 16384 tokens" in visible_result, (
-            "the CLI result or summary must expose the readable provider capacity reason",
-            case.output,
-            case.summary,
-        )
+        assert case.exit_code == 1, case.output
+        assert case.summary["engine_result"] == "BLOCKED", case.summary
+        assert case.summary["runtime_outcome"] == "suspended", case.summary
+        assert case.summary["succeeded"] is False, case.summary
+        terminal = case.summary["engine_terminal"]
+        assert terminal["reason_code"] == "WORKING_SET_ALLOCATION_BLOCKED", terminal
+        assert terminal["resumable"] is True, terminal
+        suspension = terminal["suspension"]
+        assert suspension["violated_limits"] == ["prompt_tokens"], suspension
     else:
         _assert_recovered(case)
 

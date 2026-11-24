@@ -297,6 +297,8 @@ def project(summary: dict[str, object], *, cancelled: bool = False,
     sealed_digest = sealed_artifact_digest(terminal)
     stored = sealed_digest is not None and summary.get("candidate_artifact_digest") == sealed_digest
     captured = summary.get("candidate_captured") is True
+    files_changed = summary.get("files_changed")
+    no_change = not files_changed if captured and isinstance(files_changed, list) else None
     if summary.get("candidate_error"):
         artifact = "partial"
     elif not captured:
@@ -305,7 +307,8 @@ def project(summary: dict[str, object], *, cancelled: bool = False,
         artifact = "saved"
     else:
         artifact = "partial"
-    projected = {"runtime_outcome": runtime, "check_outcome": check, "artifact": artifact}
+    projected = {"runtime_outcome": runtime, "check_outcome": check, "artifact": artifact,
+                 "no_change": no_change}
     if runtime == "provider_transport_failure":
         failure = terminal.get("provider_transport_failure")
         projected["provider_transport_failure"] = (
@@ -335,6 +338,15 @@ def project(summary: dict[str, object], *, cancelled: bool = False,
     elif (summary.get("runner_kind") == "pytest" and summary.get("protect_tests") != "all"
           and runtime == "completed" and check == "pass" and artifact == "saved"):
         projected["verification"] = test_label or "verified by check command"
+    if no_change is True:
+        passed_check = runtime == "completed" and artifact == "saved" and check == "pass"
+        if passed_check or str(projected.get("verification") or "").startswith("verified by"):
+            # Only executed-test evidence may say "tests"; everything else is a check.
+            projected["verification"] = (
+                "no files changed; agent-written check passes"
+                if projected.get("verification") == "verified by an agent-written check" else
+                "no files changed; existing tests pass" if test_label else
+                "no files changed; existing check passes")
     if projected.get("verification") and summary.get("test_weakening_findings"):
         findings = summary["test_weakening_findings"]
         detail = "; ".join(f"{item['test']} ({item['reason']}; heuristic)" for item in findings)
