@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.1 (2026-11-24)
 
 - Completion recovery retries after source, result, evidence, or obligation progress and records a digest proof before refusing an unchanged retry; progress baselines survive resume.
 - Completion progress proofs now persist as per-reason deltas in existing journal state rows.
