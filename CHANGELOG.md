@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.0 (2026-11-24)
 
 - Optional OTLP trace export for finished runs (off by default).
 
