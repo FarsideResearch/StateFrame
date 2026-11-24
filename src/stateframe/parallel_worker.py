@@ -31,7 +31,8 @@ from .engine.kernel_tool_settings import ToolSettings, ToolSettingsError
 from .engine.kernel_exec_tracker import (ContainmentUnverified, Descendants, LaunchIdentity, ProcessIdentity,
                                           ProcessTable, capture_launch_identity,
                                           child_exited_unreaped, recorded_launch_identity,
-                                          signal_launch_group, kill_launch_unit, load_tolerant_seconds)
+                                          signal_launch_group, kill_launch_unit, live_group_rows,
+                                          load_tolerant_seconds)
 
 
 # Parent process values admitted at the subframe spawn boundary. Run-specific values and the
@@ -60,7 +61,7 @@ CHILD_ENV_ALLOWLIST = frozenset({
 def kernel_start_identity(pid: int, *, row: ProcessIdentity | None = None) -> str | None:
     """Return a kernel birth token, independent of wall time and PID reuse."""
     row = ProcessTable().identity(pid) if row is None else row
-    if row is None:
+    if row is None or row.start is None:
         return None
     if sys.platform == "linux":
         boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
@@ -985,6 +986,8 @@ class WorkerHandle:
         Before the reap is reported every member of the group counts (the safe direction)."""
         family = self._family
         bound = getattr(family, "reaped_bound", None)
+        if sys.platform == "darwin":
+            return bool(live_group_rows(rows, self.pgid, bound))
         return any(row.pgid == self.pgid and not row.zombie
                    and (bound is None or row.start <= bound)
                    for row in rows.values())

@@ -619,7 +619,7 @@ class Supervisor:
             if row.pid in members:
                 return True
             leader = members.get(job.family.leader)
-            if leader is None or row.start < leader.start:
+            if leader is None or row.start is None or row.start < leader.start:
                 continue
             for member in members.values():
                 if member.pid == row.pid:
@@ -656,7 +656,7 @@ class Supervisor:
                     for row in self._unattributed(orphans):
                         # A double-fork between sweeps cannot be attributed to
                         # one command. Stop the entire session, fail closed.
-                        current = self.table.identity(row.pid)
+                        current = self.table.identity(row.pid) if row.start is not None else None
                         if current is not None and current.start == row.start:
                             # serve() alone reaps this direct child; its PID stays
                             # reserved until that waitpid, including after exit.

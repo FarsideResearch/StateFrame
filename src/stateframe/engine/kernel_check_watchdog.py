@@ -103,6 +103,8 @@ def process_snapshot(table: ProcessTable, rows: Sequence[ProcessIdentity], *,
     cpu: dict[Identity, int] = {}
     try:
         for row in rows:
+            if row.start is None:
+                return None
             ticks = table.cpu_ticks(row)
             if ticks is None and sys.platform == "darwin":
                 # libproc task CPU values are cumulative nanoseconds. Validate

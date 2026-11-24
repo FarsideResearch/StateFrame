@@ -158,7 +158,7 @@ class _ContainmentMonitor:
             rows = self.table.snapshot()
         if not self.family.members and self.launch_identity is not None:
             leader = rows.get(self.process.pid)
-            if (leader is not None and leader.start == self.launch_identity.start
+            if (leader is not None and leader.start is not None and leader.start == self.launch_identity.start
                     and leader.pgid == self.launch_identity.pid):
                 self.family.members[self.process.pid] = leader
         family = self.family.update(rows)

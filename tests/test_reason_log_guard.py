@@ -31,8 +31,6 @@ ALLOWLIST = {
         "sandboxed hook driver, stdlib-only (test_process_signal_authority); the host hook wrapper logs the hook kill",
     "src/stateframe/engine/kernel_hook_driver.py:run":
         "sandboxed hook driver, stdlib-only; the host hook wrapper logs the hook kill",
-    "src/stateframe/engine/kernel_exec_tracker.py:signal_launch_group":
-        "low-level signaler; kill_launch_unit and the supervisors log the cause at the caller",
     "src/stateframe/engine/kernel_exec_tracker.py:signal_after_recheck":
         "low-level signaler; the caller that chose the kill logs it",
     "src/stateframe/engine/kernel_exec_tracker.py:signal":
