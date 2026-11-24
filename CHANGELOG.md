@@ -1,10 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.9.5 (2026-11-24)
 
 - Fixed: a run continues after the host stopped a check, when the stop and its cleanup are proven. The check stays unresolved and still blocks done. A check that may still be running never settles.
 - Final provider transport outcomes use only matching request evidence, retain the terminal error when journal evidence is unavailable, and preserve existing engine-error, cancellation and timeout precedence.
-
 
 ## 0.9.4 (2026-11-24)
 
