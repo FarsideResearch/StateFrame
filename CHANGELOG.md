@@ -1,10 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.9.6 (2026-11-24)
 
 - Docs: container mode is opt-in and for trusted repositories only; the container guide lists what was run.
 - Fixed: passing checks on captured candidates with no changed files now use an explicit no-change result label, and `summary.json` records `no_change`.
-
 
 ## 0.9.5 (2026-11-24)
 
