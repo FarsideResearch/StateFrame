@@ -13,6 +13,7 @@ from threading import RLock
 import kernel_file_digest_memo
 from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 from kernel_obligation_assess import UnavailableEvidence, assessment_is_blocking
+from kernel_reason_log import builtin_exception_name, emit_reason
 from kernel_verdict import SATISFIED, evaluate_required_tests
 
 MODE_ENV = "STATEFRAME_GREEN_LOCK"
@@ -404,7 +405,13 @@ def _workspace_product_file_digests(runtime: object,
     if consumers is not None:
         try:
             return consumers.digests(paths)
-        except (OSError, ValueError):
+        except (OSError, ValueError) as exc:
+            emit_reason(
+                "fallback", "green_lock_workspace_digest_unavailable", "green_lock",
+                "workspace product digests were skipped",
+                "the workspace consumer could not read the requested product files",
+                journal=False, dropped=builtin_exception_name(exc),
+            )
             return None
 
     files: dict[str, object] = {}
@@ -676,7 +683,13 @@ def note_unchanged_parent_green_suppressed(
             emit("postgreen_suppressed_unchanged_parent",
                  producer="kernel_green_lock", dispatch=False,
                  revision=revision, reason=f"{reason}: {method}")
-        except Exception:  # noqa: BLE001 - telemetry never changes the gate
+        except Exception as exc:  # noqa: BLE001 - telemetry never changes the gate
+            emit_reason(
+                "fallback", "green_lock_suppression_event_failed", "green_lock",
+                "post-green suppression event was dropped",
+                "journal emission failed; the suppression decision stayed active",
+                journal=False, dropped=builtin_exception_name(exc),
+            )
             return
 
 
@@ -723,7 +736,13 @@ def _read_product_sources(root: Path, paths: set[str]) -> dict[str, str]:
             if path.is_symlink() or not path.is_file():
                 continue
             sources[relative] = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeError, TypeError, ValueError):
+        except (OSError, UnicodeError, TypeError, ValueError) as exc:
+            emit_reason(
+                "fallback", "green_lock_product_source_read_failed", "green_lock",
+                "product source file was skipped",
+                "the source could not be read as UTF-8 text",
+                journal=False, dropped=builtin_exception_name(exc),
+            )
             continue
     return sources
 

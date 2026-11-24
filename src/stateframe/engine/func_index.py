@@ -39,7 +39,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 # words() is REUSED, never reimplemented: a divergent tokenizer would make the
 # function view and the file view incomparable (and the shadow table meaningless).
-from probes.real_repo_baseline_v2 import words, build_index, bm25_rank  # noqa: E402
+from probes.real_repo_baseline_v2 import words, bm25_rank  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +78,7 @@ MENU_SECOND_BONUS = 0.15        # small diminishing-return bonus, applied at mos
 
 
 # ---------------------------------------------------------------- records
-@dataclass
+@dataclass(slots=True)
 class FuncRecord:
     func_id: str                 # path::qualname::lineno — span-scoped, stable
     path: str                    # under overloads/nesting/agent edits 
@@ -160,6 +160,76 @@ def _function_body_bag(node) -> dict:
     return bag
 
 
+def _extract_file_facts(path: str, source: str) -> dict:
+    """Build the file and function projections from one transient syntax tree."""
+    path_words = words(path)
+    lines = source.splitlines()
+    file_bag: dict = {}
+    _add(file_bag, path_words, 3.0)
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return {"status": "syntax_error", "file_bag": file_bag,
+                "imports": [], "records": []}
+
+    import_words: set = set()
+    modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            _add(file_bag, words(node.name), 2.5)
+            _add(file_bag, words((ast.get_docstring(node) or "")[:300]), 1.5)
+        elif isinstance(node, ast.Name):
+            _add(file_bag, words(node.id), 1.0)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                import_words.update(words(alias.name))
+                modules.add(alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            import_words.update(words(node.module))
+            modules.add(node.module.split(".")[0])
+    _add(file_bag, words((ast.get_docstring(tree) or "")[:300]), 2.0)
+
+    records: list[FuncRecord] = []
+    covered = set()
+    for node, qualname in _iter_functions(tree):
+        start = node.lineno
+        end = getattr(node, "end_lineno", node.lineno)
+        body = "\n".join(lines[start - 1:end])
+        doc_bag: dict = {}
+        _add(doc_bag, words((ast.get_docstring(node) or "")[:400]), 1.5)
+        records.append(FuncRecord(
+            func_id=f"{path}::{qualname}::{start}", path=path,
+            name=node.name, qualname=qualname, lineno=start,
+            end_lineno=end, loc=max(1, end - start + 1), is_module=False,
+            ident_bag=_function_body_bag(node), doc_bag=doc_bag,
+            construct_counts=_count_constructs(body),
+            parent_path_words=path_words, parent_import_words=import_words,
+        ))
+        if node.col_offset == 0:
+            covered.update(range(start, end + 1))
+
+    mod_lines = [line for number, line in enumerate(lines, 1) if number not in covered]
+    mod_bag: dict = {}
+    _add(mod_bag, import_words, 1.0)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            _add(mod_bag, words(node.name), 2.5)
+        elif isinstance(node, ast.Name):
+            _add(mod_bag, words(node.id), 0.8)
+    mod_doc: dict = {}
+    _add(mod_doc, words((ast.get_docstring(tree) or "")[:400]), 2.0)
+    records.append(FuncRecord(
+        func_id=f"{path}::<module>::1", path=path, name="<module>",
+        qualname="<module>", lineno=1, end_lineno=max(1, len(lines)),
+        loc=max(1, len(mod_lines)), is_module=True,
+        ident_bag=mod_bag, doc_bag=mod_doc,
+        construct_counts=_count_constructs("\n".join(mod_lines)),
+        parent_path_words=path_words, parent_import_words=import_words,
+    ))
+    return {"status": "ok", "file_bag": file_bag,
+            "imports": sorted(modules), "records": records}
+
+
 def build_func_index(all_files: dict) -> FuncIndex:
     """One record per function, plus one synthetic '<module>' record per file.
 
@@ -168,76 +238,45 @@ def build_func_index(all_files: dict) -> FuncIndex:
     evidence. A file that fails to parse gets a module record built from its raw
     text so it is never silently dropped from the index.
     """
-    file_idx, file_df, file_n, adj = build_index(all_files)
-
+    file_idx: dict = {}
+    file_df: dict = {}
+    paths_by_module: dict[str, str | list[str]] = {}
+    for path in all_files:
+        module = pathlib.Path(path).stem
+        existing = paths_by_module.get(module)
+        if existing is None:
+            paths_by_module[module] = path
+        elif isinstance(existing, list):
+            existing.append(path)
+        else:
+            paths_by_module[module] = [existing, path]
+    adj = {path: set() for path in all_files}
     records: list = []
-    for path, src in all_files.items():
-        path_words = words(path)
-        lines = src.splitlines()
-        try:
-            tree = ast.parse(src)
-        except SyntaxError:
-            # parser_failure: keep the file reachable through a module record built
-            # from the parent bag rather than dropping it from the index entirely.
-            rec = FuncRecord(
+    for path, source in all_files.items():
+        facts = _extract_file_facts(path, source)
+        file_idx[path] = facts["file_bag"]
+        if facts["status"] == "ok":
+            for word in file_idx[path]:
+                file_df[word] = file_df.get(word, 0) + 1
+            records.extend(facts["records"])
+            for module in facts["imports"]:
+                neighbors = paths_by_module.get(module, ())
+                if isinstance(neighbors, str):
+                    neighbors = (neighbors,)
+                for neighbor in neighbors:
+                    if neighbor != path:
+                        adj[path].add(neighbor)
+                        adj[neighbor].add(path)
+        else:
+            lines = source.splitlines()
+            records.append(FuncRecord(
                 func_id=f"{path}::<module>::1", path=path, name="<module>",
                 qualname="<module>", lineno=1, end_lineno=max(1, len(lines)),
                 loc=max(1, len(lines)), is_module=True,
-                ident_bag=dict(file_idx.get(path, {})),
-                construct_counts=_count_constructs(src),
-                parent_path_words=path_words,
-            )
-            records.append(rec)
-            continue
-
-        import_words: set = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for a in node.names:
-                    import_words |= words(a.name)
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                import_words |= words(node.module)
-
-        covered = set()
-        for node, qual in _iter_functions(tree):
-            start = node.lineno
-            end = getattr(node, "end_lineno", node.lineno)
-            text = "\n".join(lines[start - 1:end])
-            doc = ast.get_docstring(node) or ""
-            doc_bag: dict = {}
-            _add(doc_bag, words(doc[:400]), 1.5)
-            records.append(FuncRecord(
-                func_id=f"{path}::{qual}::{start}", path=path, name=node.name,
-                qualname=qual, lineno=start, end_lineno=end,
-                loc=max(1, end - start + 1), is_module=False,
-                ident_bag=_function_body_bag(node), doc_bag=doc_bag,
-                construct_counts=_count_constructs(text),
-                parent_path_words=path_words, parent_import_words=import_words,
+                ident_bag=dict(file_idx[path]),
+                construct_counts=_count_constructs(source),
+                parent_path_words=words(path),
             ))
-            # only TOP-LEVEL function spans are removed from the module record;
-            # nested functions live inside their parent's span already.
-            if node.col_offset == 0:
-                covered.update(range(start, end + 1))
-
-        mod_lines = [l for i, l in enumerate(lines, 1) if i not in covered]
-        mod_text = "\n".join(mod_lines)
-        mod_bag: dict = {}
-        _add(mod_bag, import_words, 1.0)
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ClassDef):
-                _add(mod_bag, words(node.name), 2.5)
-            elif isinstance(node, ast.Name):
-                _add(mod_bag, words(node.id), 0.8)
-        mod_doc: dict = {}
-        _add(mod_doc, words((ast.get_docstring(tree) or "")[:400]), 2.0)
-        records.append(FuncRecord(
-            func_id=f"{path}::<module>::1", path=path, name="<module>",
-            qualname="<module>", lineno=1, end_lineno=max(1, len(lines)),
-            loc=max(1, len(mod_lines)), is_module=True,
-            ident_bag=mod_bag, doc_bag=mod_doc,
-            construct_counts=_count_constructs(mod_text),
-            parent_path_words=path_words, parent_import_words=import_words,
-        ))
 
     df: dict = {}
     by_path: dict = {}
@@ -247,7 +286,7 @@ def build_func_index(all_files: dict) -> FuncIndex:
         by_path.setdefault(r.path, []).append(r)
 
     return FuncIndex(records=records, df=df, n=len(records), file_idx=file_idx,
-                     file_df=file_df, file_n=file_n, adj=adj, by_path=by_path)
+                     file_df=file_df, file_n=len(all_files), adj=adj, by_path=by_path)
 
 
 # ---------------------------------------------------------------- scoring

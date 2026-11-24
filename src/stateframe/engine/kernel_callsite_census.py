@@ -26,6 +26,7 @@ from typing import Literal
 
 import kernel_parse_cache as _parse_cache
 import kernel_turn0_persistence as _turn0
+from kernel_reason_log import builtin_exception_name, emit_reason
 from kernel_census_index_reuse import (
     acquire_index,
     admitted_source_digest,
@@ -258,7 +259,13 @@ def _census_revision_cache_key(
             index, scope_key="", parser_version=parser_version, priority_paths=priority_paths,
         )
         return root.resolve().as_posix(), revision
-    except Exception:  # noqa: BLE001 - an unavailable fingerprint only disables reuse
+    except Exception as exc:  # noqa: BLE001 - an unavailable fingerprint only disables reuse
+        emit_reason(
+            "fallback", "callsite_census_revision_unavailable", "repo_intel",
+            "call-site census reuse was skipped",
+            "the structural revision could not be computed",
+            journal=False, dropped=builtin_exception_name(exc),
+        )
         return None
 
 

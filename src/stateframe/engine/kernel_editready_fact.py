@@ -8,6 +8,7 @@ from pathlib import Path, PurePosixPath
 
 from kernel_request_diet import _source_identity
 from kernel_request_source_window import WorkspacePathFacts, path_inputs, project_workspace_paths
+from kernel_reason_log import builtin_exception_name, emit_reason
 
 
 MODE_ENV = "STATEFRAME_EDITREADY"
@@ -71,7 +72,13 @@ def _normalize_repo_path(value: object, root: Path, *, facts: WorkspacePathFacts
                         else candidate.resolve().relative_to(root).as_posix())
         else:
             relative = PurePosixPath(raw).as_posix()
-    except (OSError, RuntimeError, ValueError):
+    except (OSError, RuntimeError, ValueError) as exc:
+        emit_reason(
+            "fallback", "editready_absolute_path_resolution_failed", "editready_fact",
+            "edit-ready source path was skipped",
+            "the absolute path could not be resolved inside the workspace",
+            journal=False, dropped=builtin_exception_name(exc),
+        )
         return None
     normalized = _editable_read_name(relative)
     if normalized is None:
@@ -81,7 +88,13 @@ def _normalize_repo_path(value: object, root: Path, *, facts: WorkspacePathFacts
             facts.contained_path(Path(normalized))
         else:
             (root / normalized).resolve().relative_to(root)
-    except (OSError, RuntimeError, ValueError):
+    except (OSError, RuntimeError, ValueError) as exc:
+        emit_reason(
+            "fallback", "editready_path_containment_failed", "editready_fact",
+            "edit-ready source path was skipped",
+            "the normalized path failed workspace containment validation",
+            journal=False, dropped=builtin_exception_name(exc),
+        )
         return None
     return normalized
 

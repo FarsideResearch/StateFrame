@@ -159,6 +159,77 @@ def _source_delivery_sources(capture, runtime):
     }
 
 
+def _source_binding_digest(value):
+    return hashlib.sha256(json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")).hexdigest()
+
+
+def _source_binding_inputs(sources, source_contents):
+    return {path: sources.get(path, content) for path, content in source_contents.items()}
+
+
+def capture_source_witness_binding(certificate, plan, sources, witnesses):
+    """Bind verified carrier witnesses to their request, source plan and source bytes."""
+    source_contents = plan.get("source_contents") if isinstance(plan, Mapping) else None
+    snapshot = getattr(certificate, "snapshot", None)
+    if (not witnesses or not isinstance(source_contents, Mapping)
+            or not isinstance(sources, Mapping)
+            or not isinstance(getattr(snapshot, "request_id", None), str)):
+        return None
+    try:
+        plan_digest = _source_binding_digest(plan)
+        sources_digest = _source_binding_digest(_source_binding_inputs(sources, source_contents))
+    except (RecursionError, TypeError, UnicodeError, ValueError):
+        return None  # no binding: the final check verifies without witnesses, as before
+    return {
+        "request_id": snapshot.request_id,
+        "body_sha256": certificate.body_sha256,
+        "snapshot_digest": certificate.snapshot_digest,
+        "assignment_digest": certificate.assignment_digest,
+        "plan_sha256": plan_digest,
+        "sources_sha256": sources_digest,
+        "witnesses": tuple(witnesses),
+    }
+
+
+def _final_capture_witnesses(capture, frozen_inputs, plan, sources, wire):
+    """Witnesses proven for exactly this request; none on any mismatch, so the verifier decides alone."""
+    from kernel_read_receipts import enabled
+
+    if not enabled():
+        return ()
+    frame_inputs = getattr(capture, "_frame_candidate_inputs", None)
+    stored = (frame_inputs.get("source_delivery_witness_binding")
+              if isinstance(frame_inputs, Mapping) else None)
+    frozen = (frozen_inputs.get("source_delivery_witness_binding")
+              if isinstance(frozen_inputs, Mapping) else None)
+    if stored is None and frozen is None:
+        return ()
+    if (not isinstance(stored, Mapping) or not isinstance(frozen, Mapping)
+            or dict(stored) != dict(frozen) or not isinstance(plan, Mapping)):
+        return ()
+    certificate = getattr(capture, "_working_set_certificate", None)
+    try:
+        from kernel_working_set_proof import verify_certificate
+        if not isinstance(wire, bytes):
+            return ()
+        verify_certificate(wire, certificate)
+        if certificate.snapshot.request_id != str(getattr(capture, "request_id", "")):
+            return ()
+        assignment = dict(certificate.assignment)
+        capture_slots = {slot.key for slot in certificate.snapshot.sources
+                         if slot.capture_ids and assignment[slot.key] == "FULL"}
+        expected = tuple(item for item in certificate.witnesses
+                         if item.slot_id in capture_slots)
+        expected_binding = capture_source_witness_binding(certificate, plan, sources, expected)
+        if expected_binding is None or dict(frozen) != expected_binding:
+            return ()
+    except (AttributeError, IndexError, KeyError, RecursionError, TypeError, UnicodeError, ValueError):
+        return ()
+    return expected
+
+
 _MISSING = object()
 
 
@@ -182,13 +253,19 @@ def snapshot_revalidation_inputs(capture, runtime, body):
     if not isinstance(plan, Mapping):
         plan = getattr(runtime, "_request_source_closure", None)
     receipt = getattr(capture, "request_budget_final_wire", None)
-    return {
+    frozen = {
         "tools_digest": schema_digest(tools),
         "plan": copy.deepcopy(dict(plan)) if isinstance(plan, Mapping) else None,
         "sources": copy.deepcopy(_source_delivery_sources(capture, runtime)),
         "max_request_bytes": (receipt.get("max_request_bytes", _MISSING)
                               if isinstance(receipt, Mapping) else _MISSING),
     }
+    frame_inputs = getattr(capture, "_frame_candidate_inputs", None)
+    binding = (frame_inputs.get("source_delivery_witness_binding")
+               if isinstance(frame_inputs, Mapping) else None)
+    if isinstance(binding, Mapping):
+        frozen["source_delivery_witness_binding"] = copy.deepcopy(dict(binding))
+    return frozen
 
 
 def _stateframe_json_failures(body: Mapping[str, object]) -> tuple[str, ...]:
@@ -386,9 +463,15 @@ def reconcile_frozen_budget(capture, runtime, body, *, frozen_inputs=None):
         )
         sources = (copy.deepcopy(frozen_inputs["sources"]) if frozen_inputs is not None
                    else _source_delivery_sources(capture, runtime))
+        verified_capture_witnesses = _final_capture_witnesses(
+            capture, frozen_inputs, plan, sources, wire,
+        )
         # Receipt recomputation must not rewrite the snapshotted source authority.
+        verify_args = {"sources": sources, "payload": wire}
+        if verified_capture_witnesses:
+            verify_args["verified_capture_witnesses"] = verified_capture_witnesses
         receipt["source_delivery"] = verify_final_source_delivery(
-            copy.deepcopy(plan), body["messages"], sources=sources, payload=wire)
+            copy.deepcopy(plan), body["messages"], **verify_args)
         if not source_delivery_satisfied(receipt["source_delivery"]):
             failures.append("source_delivery_unqualified")
     receipt["status"] = "HOST_BLOCKED" if failures else "READY"

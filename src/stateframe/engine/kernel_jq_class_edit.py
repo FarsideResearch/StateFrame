@@ -13,6 +13,7 @@ import json
 import os
 import pathlib
 import textwrap
+import tokenize
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
@@ -127,6 +128,58 @@ def _line_offsets(source: str) -> tuple[int, ...]:
     return tuple(offsets)
 
 
+# Tokens that open and close one string. Python 3.12+ splits f-strings (3.14 t-strings) into parts.
+_STRING_OPENERS = frozenset(
+    getattr(tokenize, name) for name in ("FSTRING_START", "TSTRING_START") if hasattr(tokenize, name))
+_STRING_CLOSERS = frozenset(
+    getattr(tokenize, name) for name in ("FSTRING_END", "TSTRING_END") if hasattr(tokenize, name))
+
+
+def _newline_lines(source: str) -> list[str]:
+    """Lines cut at "\n" only, as textwrap.dedent cuts them; the ends are kept."""
+    lines = [line + "\n" for line in source.split("\n")]
+    lines[-1] = lines[-1][:-1]
+    return lines if lines[-1] else lines[:-1]
+
+
+def _literal_blank_line_indexes(source: str) -> set[int] | None:
+    lines = _newline_lines(source)
+    blank: set[int] = set()
+    starts: list[int] = []
+    try:
+        for token in tokenize.generate_tokens(iter(lines).__next__):
+            if token.type == tokenize.STRING:
+                first = token.start[0]
+            elif token.type in _STRING_OPENERS:
+                starts.append(token.start[0])
+                continue
+            elif token.type in _STRING_CLOSERS and starts:
+                first = starts.pop()
+            else:
+                continue
+            # The opening line's head is code; every later line of the literal is its content.
+            blank.update(index for index in range(first, min(token.end[0], len(lines)))
+                         if not lines[index].strip(" \t\f\r\n"))
+    except (SyntaxError, tokenize.TokenError):
+        # Invalid payloads keep legacy normalization; the AST parser owns refusal.
+        return None
+    return blank
+
+
+def _dedent_source_preserving_literal_blank_lines(source: str) -> str:
+    """Dedent a payload without erasing whitespace-only lines inside strings."""
+    dedented = textwrap.dedent(source)
+    blank = _literal_blank_line_indexes(source)
+    if not blank:
+        return dedented
+    lines, kept = _newline_lines(source), _newline_lines(dedented)
+    if len(lines) != len(kept):
+        return dedented
+    for index in blank:
+        kept[index] = lines[index]
+    return "".join(kept)
+
+
 def _char_column(line: str, byte_column: int) -> int:
     """Convert an AST col_offset (a UTF-8 BYTE count, per the Python grammar) into
     a character index within ``line``.  Treating col_offset as a character index
@@ -185,12 +238,18 @@ def _reindent(segment: str, column: int) -> str:
     every line double-indents the first one and can produce an unparsable nested
     replacement (or, harmlessly, an over-indented top-level one).
     """
-    normalized = textwrap.dedent(segment)
+    normalized = _dedent_source_preserving_literal_blank_lines(segment)
     lines = normalized.splitlines()
     if not lines:
         return normalized
     prefix = " " * column
-    reindented = [lines[0]] + [prefix + line if line else line for line in lines[1:]]
+    literal_blank_lines = _literal_blank_line_indexes(normalized) or set()
+    if len(lines) != len(_newline_lines(normalized)):
+        literal_blank_lines = set()  # another line terminator is in the text: keep legacy reindent
+    reindented = [lines[0]] + [
+        prefix + line if line and index not in literal_blank_lines else line
+        for index, line in enumerate(lines[1:], start=1)
+    ]
     return "\n".join(reindented)
 
 
@@ -276,7 +335,7 @@ def prepare_class_edit(
         return ClassEditPlan(handled=False)
     targets = _matching_targets(_class_targets(source_tree), target)
 
-    replacement = textwrap.dedent(replacement)
+    replacement = _dedent_source_preserving_literal_blank_lines(replacement)
     try:
         replacement_tree = ast.parse(replacement, filename=str(path))
     except SyntaxError:

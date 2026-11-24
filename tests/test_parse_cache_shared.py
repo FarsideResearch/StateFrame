@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ast
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import kernel_coordinated_change_ledger as ledger
@@ -16,6 +17,17 @@ def fresh_cache():
     cache.clear()
     yield
     cache.clear()
+
+
+def _estimated_bytes(source: str) -> int:
+    blocks_before = cache._allocated_blocks()
+    tree = ast.parse(source)
+    blocks_after = cache._allocated_blocks() if blocks_before is not None else None
+    return cache._estimate_tree_retained_bytes(
+        source.encode("utf-8", "surrogatepass"), tree,
+        max(0, blocks_after - blocks_before)
+        if blocks_before is not None and blocks_after is not None else 0,
+    )
 
 
 @pytest.mark.parametrize("registry_first", [False, True])
@@ -65,12 +77,17 @@ def test_package_parsed_once_across_ledger_and_registry(
 
 
 @pytest.mark.parametrize("literal", ["x", "é"])
-def test_source_byte_limit_evicts_least_recent_tree(
+def test_source_accounting_evicts_with_retained_byte_limit(
     monkeypatch: pytest.MonkeyPatch, literal: str,
 ) -> None:
     sources = [f"v = '{literal}{index}'\n" for index in range(3)]
     size = len(sources[0].encode("utf-8"))
-    monkeypatch.setattr(cache, "MAX_TREE_SOURCE_BYTES", 2 * size, raising=False)
+    estimate = 4096
+    monkeypatch.setattr(
+        cache, "_estimate_tree_retained_bytes",
+        lambda _source, _tree, _allocated_blocks=0: estimate,
+    )
+    monkeypatch.setattr(cache, "MAX_TREE_RETAINED_BYTES", 2 * estimate)
     first = cache.parse(sources[0], "first.py")
     second = cache.parse(sources[1], "second.py")
     assert cache.parse(sources[0], "first.py") is first  # refresh LRU order
@@ -78,16 +95,100 @@ def test_source_byte_limit_evicts_least_recent_tree(
 
     assert cache.stats()["trees"] == 2
     assert cache.stats()["tree_source_bytes"] == 2 * size
+    assert cache.stats()["tree_retained_bytes"] == 2 * estimate
     assert cache.parse(sources[0], "first.py") is first
     assert cache.parse(sources[1], "second.py") is not second
     assert cache.stats()["tree_source_bytes"] == 2 * size
 
 
+def test_retained_byte_counter_tracks_estimated_retained_trees(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = "def calculate(value):\n    return value + 1\n"
+    estimate = 8192
+    monkeypatch.setattr(
+        cache, "_estimate_tree_retained_bytes",
+        lambda _source, _tree, _allocated_blocks=0: estimate,
+    )
+    cache.parse(source, "calculate.py")
+    source_bytes = len(source.encode("utf-8"))
+
+    assert cache.stats()["tree_source_bytes"] == source_bytes
+    assert cache.stats()["tree_retained_bytes"] == estimate
+    assert cache.stats()["tree_retained_bytes"] >= cache.stats()["tree_source_bytes"]
+
+
+def test_retained_byte_limit_evicts_lru_tree(monkeypatch: pytest.MonkeyPatch) -> None:
+    sources = [f"value = {index}\n" for index in range(3)]
+    estimate = 1024
+    monkeypatch.setattr(
+        cache, "_estimate_tree_retained_bytes",
+        lambda _source, _tree, _allocated_blocks=0: estimate,
+    )
+    budget = 2 * estimate
+    monkeypatch.setattr(cache, "MAX_TREE_RETAINED_BYTES", budget, raising=False)
+    first = cache.parse(sources[0], "first.py")
+    second = cache.parse(sources[1], "second.py")
+    assert cache.parse(sources[0], "first.py") is first
+    cache.parse(sources[2], "third.py")
+
+    assert cache.stats()["trees"] == 2
+    assert cache.stats()["tree_retained_bytes"] == 2 * estimate
+    assert cache.stats()["tree_retained_bytes"] <= budget
+    assert cache.parse(sources[0], "first.py") is first
+    assert cache.parse(sources[1], "second.py") is not second
+
+
+def test_retained_oversize_tree_preserves_warm_entries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    warm_source = "def warm(): pass\n"
+    oversized_source = warm_source + "".join(
+        f"def additional_{index}():\n    pass\n" for index in range(100)
+    )
+    budget = 2 * _estimated_bytes(warm_source)
+    monkeypatch.setattr(cache, "MAX_TREE_RETAINED_BYTES", budget, raising=False)
+    warm = cache.parse(warm_source, "warm.py")
+
+    first = cache.parse(oversized_source, "large.py")
+    second = cache.parse(oversized_source, "large.py")
+
+    assert first is not second
+    assert ast.dump(first) == ast.dump(second)
+    assert cache.parse(warm_source, "warm.py") is warm
+    assert cache.stats()["trees"] == 1
+    assert 0 < cache.stats()["tree_retained_bytes"] <= budget
+
+
+def test_concurrent_retained_byte_accounting_stays_within_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sources = [
+        f"def function_{index:03}(value):\n    return value + {1000 + index}\n"
+        for index in range(96)
+    ]
+    estimate = _estimated_bytes(sources[0])
+    budget = 12 * estimate
+    monkeypatch.setattr(cache, "MAX_TREE_RETAINED_BYTES", budget, raising=False)
+
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        trees = list(pool.map(lambda row: cache.parse(row[1], f"{row[0]}.py"), enumerate(sources)))
+
+    assert len(trees) == len(sources)
+    assert all(isinstance(tree, ast.Module) for tree in trees)
+    assert cache.stats()["tree_retained_bytes"] <= budget
+    assert cache.stats()["tree_source_bytes"] <= cache.stats()["tree_retained_bytes"]
+
+
 def test_oversized_parse_preserves_warm_trees(monkeypatch: pytest.MonkeyPatch) -> None:
     source = "v = 1\n"
-    monkeypatch.setattr(cache, "MAX_TREE_SOURCE_BYTES", len(source), raising=False)
+    budget = 2 * _estimated_bytes(source)
+    monkeypatch.setattr(cache, "MAX_TREE_RETAINED_BYTES", budget)
     warm = cache.parse(source, "warm.py")
-    large = source + "# larger than the budget\n"
+    large = source + "".join(
+        f"def additional_{index}(value):\n    return value + {index}\n"
+        for index in range(100)
+    )
     first = cache.parse(large, "large.py")
     second = cache.parse(large, "large.py")
 

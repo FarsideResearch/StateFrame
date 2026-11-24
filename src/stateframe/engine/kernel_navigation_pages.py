@@ -11,8 +11,10 @@ import hashlib
 import json
 import os
 import re
+import stat
 from collections import OrderedDict
 from collections.abc import Iterator, Mapping, Sequence
+from contextlib import closing
 from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
@@ -61,7 +63,6 @@ def page_size(args: object, *, default: int = DEFAULT_PAGE_SIZE) -> int:
 
 
 def _rooted(root: Path, scope: object, *, journal: object = None) -> Path:
-    root = root.resolve()
     requested = root if scope in (None, "", ".") else Path(str(scope))
     candidate = requested if requested.is_absolute() else root / requested
     resolved = candidate.resolve()
@@ -100,11 +101,103 @@ def _walk_files(root: Path, scope: object, *,
     return tuple(rows)
 
 
-def _read_text(path: Path) -> tuple[str | None, str]:
+def _open_search_directory(path: Path | str, parent: int | None = None) -> int:
+    return os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+
+
+def _reopen_search_directory(root_fd: int, parts: Sequence[str]) -> int:
+    fd = root_fd
     try:
-        raw = path.read_bytes()
+        for name in parts:
+            child = _open_search_directory(name, fd)
+            if fd != root_fd:
+                os.close(fd)
+            fd = child
+        return fd if fd != root_fd else os.dup(root_fd)
+    except BaseException:
+        if fd != root_fd:
+            os.close(fd)
+        raise
+
+
+def _fd_paths(root: Path, start: Path, errors: list[OSError]) -> Iterator[tuple[str, int]]:
+    root_fd = -1
+    try:
+        root_fd = _open_search_directory(root)
+        parts = start.relative_to(root).parts
+        if parts:
+            parent = _reopen_search_directory(root_fd, parts[:-1])
+            try:
+                mode = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False).st_mode
+            finally:
+                os.close(parent)
+            if stat.S_ISREG(mode):
+                yield "/".join(parts), root_fd
+                return
+            if stat.S_ISLNK(mode):
+                raise OSError("search scope became a symlink")
+            if not stat.S_ISDIR(mode):
+                return
+        pending = [parts]
+        while pending:
+            prefix = pending.pop()
+            directories = []
+            try:
+                fd = _reopen_search_directory(root_fd, prefix)
+                try:
+                    for name in sorted(os.listdir(fd)):
+                        try:
+                            mode = os.stat(name, dir_fd=fd, follow_symlinks=False).st_mode
+                        except OSError as error:
+                            errors.append(error)
+                            continue
+                        if stat.S_ISDIR(mode) and name not in _SKIP_DIRS:
+                            directories.append((*prefix, name))
+                        elif stat.S_ISREG(mode):
+                            yield "/".join((*prefix, name)), root_fd
+                finally:
+                    os.close(fd)
+            except OSError as error:
+                errors.append(error)
+            pending.extend(reversed(directories))
+    except OSError as error:
+        errors.append(error)
+    finally:
+        if root_fd >= 0:
+            os.close(root_fd)
+
+
+def _read_text(relative: str, root_fd: int) -> tuple[str | None, str]:
+    dirname, _, name = relative.rpartition("/")
+    parent = root_fd
+    try:
+        if dirname:
+            parts = dirname.split("/")
+            parent = _reopen_search_directory(root_fd, parts)
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                return None, "unreadable"
+            raw = os.read(fd, 8192) if info.st_size < 8192 else b""
+            if len(raw) != info.st_size:
+                with os.fdopen(fd, "rb", buffering=0, closefd=False) as stream:
+                    raw += stream.read()
+        finally:
+            os.close(fd)
+        if parent != root_fd:
+            # Rewalk from the root after reading, while the original parent is still open.
+            current = _reopen_search_directory(root_fd, parts)
+            try:
+                if not os.path.samestat(os.fstat(parent), os.fstat(current)):
+                    return None, "unreadable"
+            finally:
+                os.close(current)
     except OSError:
         return None, "unreadable"
+    finally:
+        if parent != root_fd:
+            os.close(parent)
     if b"\x00" in raw:
         return None, "non_text"
     try:
@@ -346,6 +439,10 @@ class _SearchCache:
         return type(self), ()
 
 
+def _escape_search_name(name: str) -> str:
+    return name if name.isascii() else name.encode("utf-8", "backslashreplace").decode("utf-8")
+
+
 def _row(path: str, line: int | None = None, text: str = "") -> bytes:
     row: dict[str, object] = {"path": path}
     if line is not None:
@@ -434,6 +531,9 @@ def _scan_pinned_search(
     page_rows: list[bytes] = []
     all_rows: list[bytes] | None = []
     all_weight = 0
+    if matcher is not None:
+        try: root_fd = _open_search_directory(root)
+        except OSError: root_fd = -1
 
     def append(row: bytes) -> None:
         nonlocal total, all_rows, all_weight
@@ -456,7 +556,7 @@ def _scan_pinned_search(
                 continue
             if matcher is None:
                 if query in relative:
-                    append(_row(relative))
+                    append(_row(_escape_search_name(relative)))
                 continue
             if file.size > _SEARCH_MAX_FILE_BYTES:
                 limited = True
@@ -473,7 +573,7 @@ def _scan_pinned_search(
                     append(hit)
                 non_text += status == "non_text"
                 continue
-            text, status = _read_text(root / relative)
+            text, status = _read_text(relative, root_fd) if root_fd >= 0 else (None, "unreadable")
             if text is None:
                 unreadable += status == "unreadable"
                 non_text += status == "non_text"
@@ -482,7 +582,7 @@ def _scan_pinned_search(
                 continue
             weight = len(relative) * 4 + len(query) * 4 + 512
             file_rows: list[bytes] = []
-            for hit in _match_rows(relative, text, matcher):
+            for hit in _match_rows(_escape_search_name(relative), text, matcher):
                 append(hit)
                 weight += len(hit) + 64
                 if weight <= _SEARCH_FILE_RESULT_BYTES:
@@ -491,6 +591,8 @@ def _scan_pinned_search(
                 cache.files.put(key, (status, tuple(file_rows)), weight)
     except _SearchCoverageLimit:
         limited = True
+    finally:
+        if matcher is not None and root_fd >= 0: os.close(root_fd)
     digest.update(b"]")
     return _SearchResult(
         digest.hexdigest()[:24], total, unreadable, non_text, limited,
@@ -508,11 +610,12 @@ def _pinned_search(
 
     boundary = "navigation-search"
     # Refuse bad scopes before opening a workspace observation.
-    _rooted(root, scope, journal=journal)
+    if (scoped := scope not in (None, "", ".")):
+        _rooted(root, scope, journal=journal)
     matcher = _matcher(parameters[0], parameters[1])
     try:
         with consumers.state.pin(boundary) as observation:
-            start = _rooted(root, scope, journal=journal)
+            start = _rooted(root, scope, journal=journal) if scoped else root
             home = _installation_home().resolve()
             if home.is_relative_to(root) and (home.is_relative_to(start) or start.is_relative_to(home)):
                 # This workspace observation intentionally excludes the installation home.
@@ -560,9 +663,12 @@ def search_repository(root: Path, pattern: str, scope: object = None, *,
         raise ValueError("grep mode must be regex, literal, or path")
     page = _bounded_int(requested_page_size, DEFAULT_PAGE_SIZE)
     root = root.resolve()
-    query = str(pattern)
+    query, preserve_legacy_names = str(pattern), requested_page_size is None and cursor in (None, "")
     pinned = None
-    if os.environ.get("STATEFRAME_WORKSPACE_OBJECTS") == "on":
+    safe_fds = (os.open in os.supports_dir_fd and os.stat in os.supports_dir_fd
+                and os.listdir in os.supports_fd
+                and all(hasattr(os, flag) for flag in ("O_NOFOLLOW", "O_DIRECTORY", "O_NONBLOCK")))
+    if safe_fds and os.environ.get("STATEFRAME_WORKSPACE_OBJECTS") == "on":
         from kernel_workspace_consumers import consumers_for
 
         consumers = consumers_for(root)
@@ -575,58 +681,58 @@ def search_repository(root: Path, pattern: str, scope: object = None, *,
         unreadable_files, non_text_files = pinned.unreadable, pinned.non_text
         limited = pinned.limited
     else:
-        files = _walk_files(root, scope, journal=journal)
+        start = _rooted(root, scope, journal=journal) if safe_fds else None
         matcher = _matcher(normalized_mode, query)
-        unreadable_files = non_text_files = 0
+        unreadable_files, non_text_files = int(not safe_fds), 0
         limited = False
 
         def matching_rows() -> Iterator[dict[str, object]]:
             nonlocal unreadable_files, non_text_files
-            for relative, path in files:
-                if not _matches_file_glob(relative, file_glob):
-                    continue
-                if matcher is None:
-                    if query in relative:
-                        yield {"path": relative}
-                    continue
-                text, status = _read_text(path)
-                if text is None:
-                    unreadable_files += status == "unreadable"
-                    non_text_files += status == "non_text"
-                    continue
-                for line_number, line in enumerate(text.splitlines(), 1):
-                    if matcher.search(line):
-                        yield {"path": relative, "line": line_number, "text": line}
+            if start is None:
+                return
+            errors: list[OSError] = []
+            with closing(_fd_paths(root, start, errors)) as files:
+                for relative, root_fd in files:
+                    if not _matches_file_glob(relative, file_glob):
+                        continue
+                    if matcher is None:
+                        if query in relative:
+                            yield {"path": relative if preserve_legacy_names else _escape_search_name(relative)}
+                        continue
+                    text, status = _read_text(relative, root_fd)
+                    if text is None:
+                        unreadable_files += status == "unreadable"
+                        non_text_files += status == "non_text"
+                        continue
+                    display = relative if preserve_legacy_names else _escape_search_name(relative)
+                    for line_number, line in enumerate(text.splitlines(), 1):
+                        if matcher.search(line):
+                            yield {"path": display, "line": line_number, "text": line}
+            unreadable_files += sum(not isinstance(error, PermissionError) for error in errors)
 
         small_first_page = cursor is None or (type(cursor) is str and not cursor)
-        rows = matching_rows()
-        if small_first_page:
-            initial_page = list(islice(rows, page + 1))
-            if len(initial_page) <= page:
+        with closing(matching_rows()) as rows:
+            initial_page = list(islice(rows, page + 1)) if small_first_page else None
+            if initial_page is not None and len(initial_page) <= page:
                 shown, metadata = _page_rows(initial_page, cursor=cursor, size=page)
             else:
-                overflow = initial_page.pop()
-                page_rows = _SearchPageAccumulator(
-                    cursor, page, initial_page=initial_page,
-                )
-                page_rows.add(overflow)
+                overflow = initial_page.pop() if initial_page is not None else None
+                page_rows = _SearchPageAccumulator(cursor, page, initial_page=initial_page)
+                if overflow is not None:
+                    page_rows.add(overflow)
                 for row in rows:
                     page_rows.add(row)
                 shown, metadata = page_rows.finish()
-        else:
-            page_rows = _SearchPageAccumulator(cursor, page)
-            for row in rows:
-                page_rows.add(row)
-            shown, metadata = page_rows.finish()
 
     if normalized_mode == "path":
         rendered = [str(row["path"]) for row in shown]
     else:
         rendered = [f"{row['path']}:{row['line']}:{row['text']}" for row in shown]
-    metadata = {**metadata, "mode": normalized_mode, "pattern": query,
-                "scope": str(scope or "."), "file_glob": file_glob,
+    metadata = {**metadata, "mode": normalized_mode, "pattern": _escape_search_name(query),
+                "scope": _escape_search_name(str(scope or ".")),
+                "file_glob": None if file_glob is None else _escape_search_name(file_glob),
                 "page_size": page}
-    if normalized_mode != "path" or limited:
+    if normalized_mode != "path" or limited or unreadable_files:
         metadata.update({"scan_complete": unreadable_files == 0 and not limited,
                          "unreadable_files": unreadable_files,
                          "non_text_files": non_text_files})

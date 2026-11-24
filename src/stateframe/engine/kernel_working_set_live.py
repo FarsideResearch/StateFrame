@@ -245,6 +245,7 @@ def prepare_live(capture, runtime, body, *, dialect, reasoning_mode):
     from kernel_request_budget import _request_token_meter
     from kernel_request_candidate import candidate_source_plan
     from kernel_request_source_window import verify_final_source_delivery, source_delivery_satisfied
+    from kernel_final_wire_budget import capture_source_witness_binding
     from kernel_stateframe_framefit5 import _state_payload, _workspace_root
     from kernel_working_set_prepare import Blocked, prepare_candidate
     from kernel_working_set_shadow import freeze_shadow, SnapshotFailure
@@ -301,7 +302,10 @@ def prepare_live(capture, runtime, body, *, dialect, reasoning_mode):
         receipt = verify_final_source_delivery(closure, body["messages"], sources=sources,
                                                payload=prepared.wire,
                                                verified_capture_witnesses=verified_capture_witnesses)
-        return body, closure, sources, receipt
+        binding = (capture_source_witness_binding(
+            certificate, closure, sources, verified_capture_witnesses,
+        ) if source_delivery_satisfied(receipt) else None)
+        return body, closure, sources, receipt, binding
 
     def proof_failures(receipt):
         return sorted({str(row.get("kind", "unknown")) for row in
@@ -321,7 +325,7 @@ def prepare_live(capture, runtime, body, *, dialect, reasoning_mode):
             proof = qualify(stable)
             if source_delivery_satisfied(proof[3]):
                 snapshot, prepared = stable_snapshot, stable
-                body, closure, sources, receipt = proof
+                body, closure, sources, receipt, witness_binding = proof
             else:
                 capture.journal.emit("final_cache_layout_failed_open", request_id=capture.request_id,
                                      reason="stable_first_closure_proof_failed",
@@ -330,7 +334,7 @@ def prepare_live(capture, runtime, body, *, dialect, reasoning_mode):
         prepared = prepare_candidate(snapshot, measure=measure)
         if isinstance(prepared, Blocked):
             _blocked(runtime, snapshot, prepared)
-        body, closure, sources, receipt = qualify(prepared)
+        body, closure, sources, receipt, witness_binding = qualify(prepared)
     retried_plain = False
     if (not source_delivery_satisfied(receipt)
             and prepared.rendered.certificate.layout == "final_cache"
@@ -346,7 +350,7 @@ def prepare_live(capture, runtime, body, *, dialect, reasoning_mode):
         prepared = prepare_candidate(snapshot, measure=measure)
         if isinstance(prepared, Blocked):
             _blocked(runtime, snapshot, prepared)
-        body, closure, sources, receipt = qualify(prepared)
+        body, closure, sources, receipt, witness_binding = qualify(prepared)
     if not source_delivery_satisfied(receipt):
         emit_refusal("working_set_live", what="working-set closure proof refused",
                      why="closure proof failed: " + str(receipt.get("status")), journal=False)
@@ -368,6 +372,8 @@ def prepare_live(capture, runtime, body, *, dialect, reasoning_mode):
         "optional_inputs": optional, "byte_ceiling": certificate.snapshot.byte_cap,
         "token_ceiling": certificate.snapshot.prompt_limit, "measurement_identity": measured.method,
     }
+    if witness_binding is not None:
+        capture._frame_candidate_inputs["source_delivery_witness_binding"] = witness_binding
     capture.journal.emit("working_set_prepared", request_id=capture.request_id,
         body_sha256=certificate.body_sha256, assignment_digest=prepared.assignment_digest,
         proof_passed=True, floor=prepared.floor_bytes, total=prepared.total_bytes,

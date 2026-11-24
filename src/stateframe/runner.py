@@ -67,6 +67,7 @@ PASS_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "USER", "LOG
 USER_ENV = ("LLAMA_CPP_TOKENIZE_URL",)
 # The engine child's test interpreter (absolute path); the engine's test_python() helper reads exactly this key.
 TEST_PYTHON_ENV = "STATEFRAME_TEST_PYTHON"
+REQUIRED_TEST_LEDGER_ENV = "STATEFRAME_REQUIRED_TEST_LEDGER"
 RUNNER_HOME_IDENTITY_ENV = "STATEFRAME_RUNNER_HOME_IDENTITY"
 _STARTUP_HOME_IDENTITY_UNSET = object()
 _DEFAULT_PROVIDER_EPOCH = object()
@@ -323,6 +324,96 @@ def checkpoint_resume_off(spec: dict) -> bool:
 
 class RunError(RuntimeError):
     pass
+
+
+def _required_test_ledger_enabled() -> bool:
+    value = os.environ.get(REQUIRED_TEST_LEDGER_ENV, "off")
+    if value not in {"off", "on"}:
+        raise RunError(f"{REQUIRED_TEST_LEDGER_ENV} must be exactly 'off' or 'on'")
+    return value == "on"
+
+
+def _required_test_ledger_reason(prefix: str, error: BaseException | None = None) -> str:
+    detail = f"{prefix}: {type(error).__name__}" if error is not None else prefix
+    return " ".join(detail.split())[:160]
+
+
+def _new_required_test_ledger(enabled: bool):
+    if not enabled:
+        return None, None
+    try:
+        from .engine.kernel_required_tests import RequiredTests
+        return RequiredTests(), None
+    except Exception as error:  # noqa: BLE001 - optional reporting never stops a run
+        return None, _required_test_ledger_reason("ledger unavailable", error)
+
+
+def _required_test_has_observation(ledger, kind: str) -> bool:
+    try:
+        return bool(ledger.has_observation(kind))
+    except Exception:  # noqa: BLE001 - advisory bookkeeping never stops a run
+        return False
+
+
+def _observe_required_test_run(ledger, kind: str, check: dict[str, object], *,
+                               reasons: dict[str, str] | None = None):
+    if ledger is None:
+        return None, None
+    report = check.get("required_test_report")
+    complete = isinstance(report, dict) and report.get("complete") is True
+    outcomes = report.get("outcomes") if isinstance(report, dict) else None
+    reason = None
+    if not complete:
+        raw_reason = check.get("required_test_report_reason")
+        reason = _required_test_ledger_reason(
+            raw_reason if isinstance(raw_reason, str) and raw_reason else "pytest report is incomplete")
+    try:
+        ledger.observe(kind, complete=complete,
+                       outcomes=outcomes if isinstance(outcomes, dict) else {})
+    except Exception as error:  # noqa: BLE001 - malformed optional evidence is unknown, never fatal
+        reason = _required_test_ledger_reason("ledger evidence was rejected", error)
+        if reasons is not None:
+            if _required_test_has_observation(ledger, kind):
+                reasons.pop(kind, None)
+            else:
+                reasons[kind] = reason
+        return ledger, reason
+    if reasons is not None:
+        if complete or _required_test_has_observation(ledger, kind):
+            reasons.pop(kind, None)
+        elif reason is not None:
+            reasons[kind] = reason
+    return ledger, reason
+
+
+def _required_test_ledger_summary(
+        ledger, reason: str | dict[str, str] | None) -> dict[str, object]:
+    try:
+        report = (ledger.report() if ledger is not None else
+                  {"missing": [], "failed": [], "passed": [], "state": "unknown"})
+        if (not isinstance(report, dict) or set(report) != {"missing", "failed", "passed", "state"}
+                or report.get("state") not in {"unknown", "ok", "regressed"}
+                or any(not isinstance(report[name], list)
+                       or any(not isinstance(item, str) for item in report[name])
+                       for name in ("missing", "failed", "passed"))):
+            raise ValueError("ledger report has an invalid shape")
+    except Exception as error:  # noqa: BLE001 - advisory reporting never stops a run
+        report = {"missing": [], "failed": [], "passed": [], "state": "unknown"}
+        fallback = _required_test_ledger_reason("ledger report was rejected", error)
+        if isinstance(reason, dict):
+            reason = {**reason, "ledger": fallback}
+        elif reason is None:
+            reason = fallback
+    if report["state"] == "unknown":
+        if isinstance(reason, dict):
+            details = [f"{kind}: {_required_test_ledger_reason(reason[kind])}"
+                       for kind in ("baseline", "current", "ledger") if reason.get(kind)]
+            report["reason"] = "; ".join(details) or "no complete baseline and current check reports"
+        elif reason is not None:
+            report["reason"] = _required_test_ledger_reason(reason)
+        else:
+            report["reason"] = "no complete baseline and current check reports"
+    return report
 
 
 class HookContainmentRunError(RunError):
@@ -652,7 +743,8 @@ def run_test_cmd(command: str, cwd: Path, timeout_s: float | None = None,
                  pytest_plugins: str | None = None,
                  deadline: float | None = None, test_python: str | None = None,
                  runner_kind: str = "pytest", capture_output: bool = False,
-                 check_settings: dict[str, str] | None = None) -> dict[str, object]:
+                 check_settings: dict[str, str] | None = None,
+                 required_test_ledger: bool = False) -> dict[str, object]:
     """Check a throwaway copy through the engine policy in a fresh interpreter.
 
     ``test_python``: the interpreter the command runs, handed to an engine that reads STATEFRAME_TEST_PYTHON so its
@@ -662,6 +754,7 @@ def run_test_cmd(command: str, cwd: Path, timeout_s: float | None = None,
                                 deadline=deadline, test_env=validate_test_env(test_env or {}),
                                 pytest_plugins=pytest_plugins, test_python=test_python,
                                 runner_kind=runner_kind, capture_output=capture_output,
+                                required_test_ledger=required_test_ledger,
                                 **({"check_settings": check_settings} if check_settings is not None else {}))
     except (outer_checks.OuterCheckError, OSError) as error:
         raise RunError(str(error)) from error
@@ -998,6 +1091,7 @@ OPT_IN_ALIASES = {"STATEFRAME_EVICTFIX": {"off": "legacy"}}
 # These settings are read by the host before the engine child starts; they must not enter the engine spec.
 # Parallel and launch inputs cross the child boundary as typed spec records.
 HOST_ONLY_SWITCHES = (frozenset({"STATEFRAME_ENV_SEED", "STATEFRAME_KEEP_RUN_ENV",
+                                 "STATEFRAME_REQUIRED_TEST_LEDGER",
                                  "STATEFRAME_PARALLEL_SLOTS", "STATEFRAME_TURN_MINIMAL_LAUNCH"})
                       | PARALLEL_LIMIT_SHELL_SWITCHES)
 # Legacy unless the user opts in, on every engine that reads the switch (read eviction fix: slower on long runs
@@ -1018,6 +1112,22 @@ def _check_settings(environment: Mapping[str, str]) -> dict[str, str]:
         except ValueError as error:
             raise RunError(f"{name}: {error}") from error
     return settings
+
+
+def _resolve_optional_source_settings(environment: dict[str, str]) -> list[tuple[str, str]]:
+    rules = (
+        ("STATEFRAME_SOURCE_PRESENTATION", {"json", "blocks", "current_blocks"},
+         "blocks" if environment.get("STATEFRAME_VIEW") == "operational" else "json"),
+        ("STATEFRAME_WORKING_SOURCE_SCOPE", {"0", "1"}, "0"),
+        ("STATEFRAME_REREAD_FIX", {"on", "off", "auto"}, "auto"),
+    )
+    recovered = []
+    for name, allowed, fallback in rules:
+        value = environment.get(name)
+        if name in environment and (not isinstance(value, str) or value not in allowed):
+            environment[name] = fallback
+            recovered.append((name, fallback))
+    return recovered
 
 
 def resolve_opt_in_switches(engine_dir: Path = ENGINE_DIR, *,
@@ -2004,6 +2114,13 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
         if options.pytest_plugins != "installed":
             raise RunError("--pytest-plugins only accepts 'installed'")
         environment["STATEFRAME_TASK_PYTEST_PLUGINS"] = "installed"
+    optional_recoveries = _resolve_optional_source_settings(environment)
+    if optional_recoveries:
+        try:
+            printer("Recovered optional engine settings: " + ", ".join(
+                f"{name}={value}" for name, value in optional_recoveries))
+        except OSError:
+            pass  # Console failure cannot change the persisted recovery decision.
     environment_sources = {k: "profile:" + options.profile for k in environment}
     if stateframe_home is not None:
         environment_sources["STATEFRAME_HOME"] = "runner:resolved-stateframe-home"
@@ -2020,6 +2137,8 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
         environment_sources["SF_PROMPT_CACHE_PIN_DEGRADED_REASON"] = "runner:provider-capability-degradation"
     if selected_slot is not None:
         environment_sources["REACT_SLOT_ID"] = "runner:" + (options._cache_slot_selection or "explicit")
+    for name, _value in optional_recoveries:
+        environment_sources[name] = "runner:optional-setting-recovery"
     provider_records = _provider_preflight_records(options)
     spec = {
         "schema": "stateframe-run/1",
@@ -4903,6 +5022,18 @@ def _check_summary(check: dict[str, object]) -> dict[str, object]:
 
 def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: workcopy.WorkCopy,
              spec: dict) -> dict[str, object]:
+    required_ledger_enabled = _required_test_ledger_enabled()
+    required_ledger, initial_ledger_reason = _new_required_test_ledger(required_ledger_enabled)
+    required_ledger_reasons = ({"ledger": initial_ledger_reason}
+                              if initial_ledger_reason is not None else {})
+
+    def observe_required_run(kind: str, check: dict[str, object]) -> None:
+        nonlocal required_ledger
+        required_ledger, reason = _observe_required_test_run(
+            required_ledger, kind, check, reasons=required_ledger_reasons)
+        if required_ledger is None and reason is not None:
+            required_ledger_reasons["ledger"] = reason
+
     def atomic_bytes(path: Path, data: bytes) -> None:
         temporary = None
         try:
@@ -4937,8 +5068,11 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
                           test_env=options.test_env, python=_tests_python(options),
                           pytest_plugins=options.pytest_plugins, deadline=options._deadline,
                           check_settings=check_settings, test_python=_outer_test_python(options),
-                           runner_kind=options.runner_kind,
-                           capture_output=options.protect_tests in {"task", "off"}))
+                          runner_kind=options.runner_kind,
+                          capture_output=options.protect_tests in {"task", "off"},
+                          required_test_ledger=(required_ledger_enabled and required_ledger is not None
+                                                and options.runner_kind == "pytest")))
+    observe_required_run("baseline", before)
     printer(f"before: {test_cmd or '(none)'} -> {outcomes.check_label(before)} "
             f"(exit {before['exit_code']})")
     before_failed = before["passed"] is False and before.get("execution_complete") is not False
@@ -5036,8 +5170,11 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
                                  if test_cmd.startswith("python ") else test_cmd, work.copy,
                                  test_env=options.test_env, python=_tests_python(options),
                                  pytest_plugins=options.pytest_plugins, deadline=options._deadline,
-                                 check_settings=check_settings, test_python=_outer_test_python(options), runner_kind=options.runner_kind,
-                                  capture_output=True)
+                                 check_settings=check_settings, test_python=_outer_test_python(options),
+                                 runner_kind=options.runner_kind, capture_output=True,
+                                 required_test_ledger=(required_ledger_enabled and required_ledger is not None
+                                                       and options.runner_kind == "pytest"))
+            observe_required_run("current", after)
             post_check_digests = {} if candidate_file_digests is not None else None
             post_check_digest = candidate_digest(work.copy, file_digests=post_check_digests)
             post_check_outside = (
@@ -5121,6 +5258,25 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
         "engine_source_hash": spec["engine_source"].get("source_hash"),
         "engine_shipped_hash": spec["engine_source"].get("shipped_hash"),
     })
+    if required_ledger_enabled:
+        ledger_report = _required_test_ledger_summary(required_ledger, required_ledger_reasons)
+        summary["required_test_ledger"] = ledger_report
+        state = str(ledger_report["state"])
+        if state == "regressed":
+            details = []
+            for label in ("missing", "failed"):
+                identifiers = ledger_report[label]
+                if identifiers:
+                    shown = ", ".join(str(test_id) for test_id in identifiers[:20])
+                    remaining = len(identifiers) - 20
+                    if remaining > 0:
+                        shown += f", and {remaining} more"
+                    details.append(f"{label} ({len(identifiers)}): {shown}")
+            printer("required test ledger: regressed; " + "; ".join(details))
+        elif state == "unknown":
+            printer(f"required test ledger: unknown ({ledger_report['reason']})")
+        else:
+            printer("required test ledger: ok")
     if test_changes is not None:
         test_paths = {item["path"] for item in test_changes}
         summary["test_files_changed"] = test_changes

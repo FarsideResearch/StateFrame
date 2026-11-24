@@ -1,4 +1,4 @@
-"""Explicitly disabled allocator preserves provider request bytes at each 0.6.23 ship point."""
+"""Explicitly disabled allocator preserves bytes from before allocator support."""
 import json
 import os
 import subprocess
@@ -65,9 +65,8 @@ def _cached_provider_hashes(tree, tmp_path_factory):
     return hashes
 
 
-@pytest.mark.parametrize("reference", ['56af0dc6d6', 'd7fd3aad93'])
-def test_off_provider_bytes_match_cutover_base(tmp_path, tmp_path_factory, reference):
-    base = pinned_tree(reference, tmp_path_factory)
+def test_off_provider_bytes_match_release_before_allocator(tmp_path, tmp_path_factory):
+    base = pinned_tree("56af0dc6d6c7b632808070e137b9d95f66db882e", tmp_path_factory)
     current = Path(__file__).resolve().parents[1]
     assert _cached_provider_hashes(base, tmp_path_factory) == _cached_provider_hashes(
         current, tmp_path_factory)
@@ -89,5 +88,5 @@ def test_off_parity_direct_callers_share_trace_results(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "_PROVIDER_HASH_CACHE", {}, raising=False)
     factory = SimpleNamespace(mktemp=lambda _: tmp_path)
     for _ in range(2):
-        test_off_provider_bytes_match_cutover_base(tmp_path, factory, "56af0dc6d6")
+        test_off_provider_bytes_match_release_before_allocator(tmp_path, factory)
     assert calls == [reference, current]

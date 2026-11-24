@@ -198,15 +198,15 @@ def test_unreadable_file_keeps_partial_evidence_and_recovers(pinned_workspace, m
     (root / "b.py").write_text("hit\n")
     blocked = root / "c.py"
     blocked.write_text("miss\n")
-    read = Path.read_bytes
+    open_file = os.open
     attempts = 0
 
-    def read_denied(path):
+    def read_denied(path, *args, **kwargs):
         nonlocal attempts
-        if path == blocked:
+        if path == blocked.name and kwargs.get("dir_fd") is not None:
             attempts += 1
             raise PermissionError("cannot read file")
-        return read(path)
+        return open_file(path, *args, **kwargs)
 
     @contextmanager
     def unavailable(_boundary):
@@ -214,7 +214,8 @@ def test_unreadable_file_keeps_partial_evidence_and_recovers(pinned_workspace, m
         yield
 
     with monkeypatch.context() as denying:
-        denying.setattr(Path, "read_bytes", read_denied)
+        denying.setattr(os, "open", read_denied)
+        denying.setattr(os, "supports_dir_fd", os.supports_dir_fd | {read_denied})
         if not available:
             denying.setattr(consumers.state, "pin", unavailable)
         args = {"mode": "literal", "requested_page_size": 1}

@@ -316,3 +316,178 @@ def test_suffix_cannot_supply_revision_owner_or_embedded_source_authority(tmp_pa
     prepared = prepare_candidate(snap, measure=lambda wire: (100, 100, "test"))
     assert isinstance(prepared, PreparedCandidate)
     assert suffix[0] in json.loads(prepared.wire)["messages"]
+
+
+def _live_allocator_witness_case(tmp_path, monkeypatch, *, prepare_with_plan=False):
+    import kernel_final_wire_budget as final_budget
+    import kernel_working_set_live as live
+    from kernel_request_diet import RequestTokenMeter
+
+    text = "captured source\n"
+    rt, _, _, plan = retained(tmp_path, monkeypatch, text, 1, 1)
+    rt._request_source_closure = (plan if prepare_with_plan else {
+        "paths": [], "units": [], "source_contents": {}, "revisions": {},
+        "new_output_target": True,
+        "workspace_authorization": {"scope": str(tmp_path), "generation": "0"},
+    })
+    (tmp_path / "a.py").write_text(text, encoding="utf-8")
+    rt.owner = SimpleNamespace(root=tmp_path)
+    rt.frame_ceiling = 33_344
+    rt.binding = lambda: {"product_revision": "test"}
+    rt._empirical_frame_sources = {"a.py": {"content": text}}
+    meter = RequestTokenMeter(disabled=True)
+    meter.bind_request("final-witness", "final-witness")
+    monkeypatch.setattr("kernel_request_budget._request_token_meter",
+                        lambda *_args, **_kwargs: meter)
+    capture = SimpleNamespace(
+        request_id="final-witness", step=1, journal=rt.journal,
+        request_action_contract={"admitted_tool_schemas": []},
+        request_budget_final_wire={}, final_tool_surface=None,
+    )
+    body = {"model": "local", "max_tokens": 100, "tools": [], "messages": [
+        {"role": "system", "content": "rules"},
+        {"role": "user", "content": "Task: fix"},
+        {"role": "user", "content": "[StateFrame]\n" + json.dumps({"state": {
+            "framefit5": {"mode": "FRAME_ONLY", "owner_protocol": {
+                "admitted_actions": ["read"]}}}})},
+        {"role": "user", "content": "[WIRE VOLATILE TAIL]"},
+    ]}
+
+    body, prepared = live.prepare_live(
+        capture, rt, body, dialect="llama.cpp", reasoning_mode="on",
+    )
+    assert verify_certificate(prepared.wire, prepared.rendered.certificate)
+    final_body = json.loads(prepared.wire)
+    assignment = dict(prepared.rendered.certificate.assignment)
+    capture_slots = {slot.key for slot in prepared.rendered.certificate.snapshot.sources
+                     if slot.capture_ids and assignment[slot.key] == FULL.name}
+    verified_capture_witnesses = tuple(
+        witness for witness in prepared.rendered.certificate.witnesses
+        if witness.slot_id in capture_slots
+    )
+    assert verified_capture_witnesses
+    assert "source_delivery_witness_binding" in capture._frame_candidate_inputs
+    if prepare_with_plan:
+        initial_plan = copy.deepcopy(capture._request_source_closure_override)
+        initial_receipt = capture.request_source_final_delivery
+    else:
+        initial_plan = copy.deepcopy(plan)
+        initial_receipt = verify_final_source_delivery(
+            initial_plan, final_body["messages"], sources={"a.py": text},
+            payload=prepared.wire, verified_capture_witnesses=verified_capture_witnesses,
+        )
+        assert source_delivery_satisfied(initial_receipt), initial_receipt
+        capture.request_source_final_delivery = initial_receipt
+        capture._request_source_closure_override = initial_plan
+    binding = final_budget.capture_source_witness_binding(
+        prepared.rendered.certificate, initial_plan, {"a.py": text},
+        verified_capture_witnesses,
+    )
+    assert binding is not None
+    if not prepare_with_plan:
+        capture._frame_candidate_inputs["source_delivery_witness_binding"] = binding
+    return final_budget, capture, rt, final_body, initial_plan, initial_receipt, verified_capture_witnesses
+
+
+def test_live_allocator_witness_reaches_real_final_revalidation(tmp_path, monkeypatch):
+    final_budget, capture, rt, final_body, _plan, initial_receipt, witnesses = (
+        _live_allocator_witness_case(tmp_path, monkeypatch)
+    )
+    frozen = final_budget.snapshot_revalidation_inputs(capture, rt, final_body)
+    receipt = final_budget.reconcile_frozen_budget(
+        capture, rt, final_body, frozen_inputs=frozen,
+    )
+    capture_locations = {
+        f"$.messages[{witness.message_index}].content"
+        for witness in witnesses
+    }
+    initial_locations = {proof["final_message_location"]
+                         for proof in initial_receipt["delivery_proofs"]["a.py"]}
+    assert initial_locations == capture_locations, initial_receipt
+    assert source_delivery_satisfied(receipt["source_delivery"]), receipt
+    assert "source_delivery_unqualified" not in receipt["final_validation_failures"]
+    final_locations = {proof["final_message_location"]
+                       for proof in receipt["source_delivery"].get("delivery_proofs", {}).get("a.py", ())}
+    assert final_locations == initial_locations, receipt
+
+
+def test_live_allocator_binds_its_real_closure_proof(tmp_path, monkeypatch):
+    final_budget, capture, rt, body, _plan, initial_receipt, _witnesses = (
+        _live_allocator_witness_case(tmp_path, monkeypatch, prepare_with_plan=True)
+    )
+    frozen = final_budget.snapshot_revalidation_inputs(capture, rt, body)
+    receipt = final_budget.reconcile_frozen_budget(capture, rt, body, frozen_inputs=frozen)
+    assert source_delivery_satisfied(initial_receipt), initial_receipt
+    assert source_delivery_satisfied(receipt["source_delivery"]), receipt
+
+    # The same inputs are splatted into the allocation capture: a key it does not take ends the run.
+    import inspect
+
+    from kernel_final_wire_allocation import allocation_keywords
+    from kernel_frame_allocation_capture import capture_candidate
+
+    assert "source_delivery_witness_binding" in capture._frame_candidate_inputs
+    assert set(allocation_keywords(capture)) <= set(inspect.signature(capture_candidate).parameters)
+
+
+def test_no_call_site_splats_the_raw_candidate_inputs():
+    from pathlib import Path
+
+    import kernel_final_wire_allocation
+
+    source = Path(kernel_final_wire_allocation.__file__).read_text(encoding="utf-8")
+    assert "**candidate._frame_candidate_inputs" not in source
+
+
+@pytest.mark.parametrize("drift", [
+    "source_snapshot", "current_source", "plan", "carrier", "forged_witness",
+    "stale_witness", "missing_witness",
+])
+def test_final_revalidation_refuses_capture_witness_drift(tmp_path, monkeypatch, drift):
+    final_budget, capture, rt, body, _plan, _initial_receipt, witnesses = (
+        _live_allocator_witness_case(tmp_path, monkeypatch)
+    )
+    if drift == "carrier":
+        index = witnesses[0].message_index
+        body["messages"][index]["content"] += "\nchanged carrier"
+    frozen = final_budget.snapshot_revalidation_inputs(capture, rt, body)
+    if drift == "source_snapshot":
+        frozen["plan"]["source_contents"]["a.py"] = "changed source\n"
+    elif drift == "current_source":
+        frozen["sources"]["a.py"] = "changed source\n"
+    elif drift == "plan":
+        frozen["plan"]["units"][0]["end_line"] = 2
+    elif drift == "forged_witness":
+        binding = frozen["source_delivery_witness_binding"]
+        binding["witnesses"] = (replace(witnesses[0], message_index=witnesses[0].message_index + 1),)
+    elif drift == "stale_witness":
+        binding = capture._frame_candidate_inputs["source_delivery_witness_binding"]
+        binding["snapshot_digest"] = "sha256:" + "0" * 64
+        frozen = final_budget.snapshot_revalidation_inputs(capture, rt, body)
+    elif drift == "missing_witness":
+        del capture._frame_candidate_inputs["source_delivery_witness_binding"]
+        frozen = final_budget.snapshot_revalidation_inputs(capture, rt, body)
+
+    receipt = final_budget.reconcile_frozen_budget(capture, rt, body, frozen_inputs=frozen)
+    assert "source_delivery_unqualified" in receipt["final_validation_failures"], receipt
+    assert not source_delivery_satisfied(receipt["source_delivery"]), receipt
+
+
+def test_allocator_off_keeps_final_source_verification_and_wire_unchanged(tmp_path, monkeypatch):
+    import kernel_body_serialization_memo as serialization
+    import kernel_read_receipts
+
+    final_budget, capture, rt, body, _plan, _initial_receipt, _witnesses = (
+        _live_allocator_witness_case(tmp_path, monkeypatch)
+    )
+    frozen = final_budget.snapshot_revalidation_inputs(capture, rt, body)
+    before = serialization.plain_wire(body)
+    monkeypatch.setenv("STATEFRAME_WORKING_SET_ALLOCATOR", "off")
+    assert not kernel_read_receipts.enabled()
+    baseline = verify_final_source_delivery(
+        copy.deepcopy(frozen["plan"]), body["messages"],
+        sources=frozen["sources"], payload=before,
+    )
+    receipt = final_budget.reconcile_frozen_budget(capture, rt, body, frozen_inputs=frozen)
+    assert serialization.plain_wire(body) == before
+    assert receipt["source_delivery"] == baseline

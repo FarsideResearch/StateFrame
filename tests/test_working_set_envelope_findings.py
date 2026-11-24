@@ -69,8 +69,9 @@ def test_off_pretrim_matches_pinned_base_bytes(tmp_path, monkeypatch):
     monkeypatch.delenv("STATEFRAME_WORKING_SET_ALLOCATOR", raising=False)
     monkeypatch.setenv("STATEFRAME_HEADCARRY", "on")
     root = Path(__file__).resolve().parents[1]
-    original = subprocess.check_output(["git", "show",
-        "56af0dc6d6:src/stateframe/engine/kernel_request_budget.py"], cwd=root)
+    original = subprocess.check_output(
+        ["git", "show", "56af0dc6d6c7b632808070e137b9d95f66db882e:"
+         "src/stateframe/engine/kernel_request_budget.py"], cwd=root)
     baseline = ModuleType("_review_budget_base")
     baseline.__file__ = str(root / "src/stateframe/engine/kernel_request_budget.py")
     monkeypatch.setitem(sys.modules, baseline.__name__, baseline)

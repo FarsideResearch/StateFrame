@@ -1,8 +1,8 @@
 """Deterministic, opt-in grounding for repository paths and Python symbols.
 
-This module deliberately does not interpret prose.  It only extracts path-like
+This module deliberately does not interpret prose. It only extracts path-like
 and code-like tokens, resolves paths against the live workspace, and resolves
-symbols from a small AST index rebuilt at each inspection boundary.
+symbols from a small AST index cached at each inspection boundary.
 """
 from __future__ import annotations
 
@@ -70,9 +70,10 @@ _BACKTICK = re.compile(r"`([^`]+)`")
 _AST_INDEX_CACHE_LIMIT = 4
 _AST_PERSIST_SCHEMA = "claim-ast-symbols/1"
 _AST_INDEX_CACHE_LOCK = threading.RLock()
+_SymbolLocations = dict[str, str | tuple[str, ...]]
 _AST_INDEX_CACHE: OrderedDict[
     tuple[object, ...],
-    tuple[tuple[str, ...], tuple[str, ...], dict[str, tuple[str, ...]]],
+    tuple[tuple[str, ...], tuple[str, ...], _SymbolLocations],
 ] = OrderedDict()
 _INVENTORY_CACHE_LIMIT = 4
 _INVENTORY_CACHE_LOCK = threading.RLock()
@@ -170,7 +171,7 @@ class _AstIndex:
         self.product_revision = product_revision
         self._closest_by_name: dict[str, tuple[str, ...]] = {}
         self._python_candidates, self.paths, self.files, signature = self._inventory()
-        self.symbols: dict[str, tuple[str, ...]] = {}
+        self.symbols: _SymbolLocations = {}
         cache_key = (self.root.as_posix(), signature)
         with _AST_INDEX_CACHE_LOCK:
             cached = _AST_INDEX_CACHE.get(cache_key)
@@ -288,7 +289,7 @@ class _AstIndex:
                  tuple(signature)), complete)
 
     def _build(self) -> None:
-        symbols: dict[str, set[str]] = {}
+        symbols: dict[str, str | list[str]] = {}
         for relative, candidate in self._python_candidates:
             try:
                 source = candidate.read_text(encoding="utf-8")
@@ -296,9 +297,18 @@ class _AstIndex:
             except (OSError, UnicodeError, SyntaxError):
                 continue
             for name in names:
-                symbols.setdefault(name, set()).add(relative)
+                existing = symbols.get(name)
+                if existing is None:
+                    symbols[name] = relative
+                elif isinstance(existing, str):
+                    if existing != relative:
+                        symbols[name] = [existing, relative]
+                elif existing[-1] != relative:
+                    # Candidates are sorted by path, so duplicates arrive in canonical order.
+                    existing.append(relative)
         self.symbols = {
-            name: tuple(sorted(files)) for name, files in sorted(symbols.items())
+            name: tuple(paths) if isinstance(paths, list) else paths
+            for name, paths in sorted(symbols.items())
         }
 
     @staticmethod
@@ -326,26 +336,26 @@ class _AstIndex:
 
     def _symbol_names(self, tree: ast.AST, relative: str, module: str) -> frozenset[str]:
         """Every name ``_walk`` records for one file (cacheable: pure in the tree)."""
-        local: dict[str, set[str]] = {}
-        self._add(module, relative, local)
+        local: set[str] = set()
+        self._add(module, local)
         self._walk(tree, relative, (), local, module)
         return frozenset(local)
 
-    def _add(self, name: str, relative: str, symbols: dict[str, set[str]]) -> None:
+    def _add(self, name: str, symbols: set[str]) -> None:
         if not name:
             return
-        symbols.setdefault(name, set()).add(relative)
+        symbols.add(name)
 
     def _walk(self, node: ast.AST, relative: str, prefix: tuple[str, ...],
-              symbols: dict[str, set[str]], module: str) -> None:
+              symbols: set[str], module: str) -> None:
         for child in ast.iter_child_nodes(node):
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 name = child.name
                 qualified = ".".join((*prefix, name))
-                self._add(name, relative, symbols)
-                self._add(qualified, relative, symbols)
+                self._add(name, symbols)
+                self._add(qualified, symbols)
                 if module:
-                    self._add(f"{module}.{qualified}", relative, symbols)
+                    self._add(f"{module}.{qualified}", symbols)
                 self._walk(child, relative, (*prefix, name), symbols, module)
                 continue
             if isinstance(child, ast.Assign):
@@ -357,19 +367,22 @@ class _AstIndex:
             for target in targets:
                 for name in self._target_names(target):
                     qualified = ".".join((*prefix, name))
-                    self._add(name, relative, symbols)
-                    self._add(qualified, relative, symbols)
+                    self._add(name, symbols)
+                    self._add(qualified, symbols)
                     if module:
-                        self._add(f"{module}.{qualified}", relative, symbols)
+                        self._add(f"{module}.{qualified}", symbols)
             self._walk(child, relative, prefix, symbols, module)
 
     def resolve_symbol(self, cited: str, *, include_closest: bool = True,
                        memoize_closest: bool = False) -> ClaimCheck:
         name = cited.strip().replace("::", ".")
-        files = self.symbols.get(name, ())
-        if files:
+        locations = self.symbols.get(name)
+        if isinstance(locations, str):
             return ClaimCheck(cited=cited, kind="symbol", exists=True,
-                              resolved_path=files[0], closest=())
+                              resolved_path=locations, closest=())
+        if locations:
+            return ClaimCheck(cited=cited, kind="symbol", exists=True,
+                              resolved_path=locations[0], closest=())
         if not include_closest:
             choices = ()
         elif memoize_closest:
@@ -460,7 +473,7 @@ def _remember_ast_index(
     cache_key: tuple[object, ...],
     paths: tuple[str, ...],
     files: tuple[str, ...],
-    symbols: Mapping[str, tuple[str, ...]],
+    symbols: Mapping[str, str | tuple[str, ...]],
 ) -> None:
     with _AST_INDEX_CACHE_LOCK:
         for previous_key in tuple(_AST_INDEX_CACHE):
@@ -476,7 +489,7 @@ def _ast_symbols_from_payload(
     value: object,
     *,
     files: tuple[str, ...],
-) -> dict[str, tuple[str, ...]]:
+) -> _SymbolLocations:
     if not isinstance(value, Mapping) or set(value) != {"schema", "symbols"}:
         raise ValueError("AST index payload is malformed")
     if value.get("schema") != _AST_PERSIST_SCHEMA:
@@ -485,7 +498,7 @@ def _ast_symbols_from_payload(
     if not isinstance(raw_symbols, Mapping):
         raise ValueError("AST symbol mapping is malformed")
     file_set = set(files)
-    symbols: dict[str, tuple[str, ...]] = {}
+    symbols: _SymbolLocations = {}
     for symbol, raw_paths in raw_symbols.items():
         if (not isinstance(symbol, str) or not symbol
                 or not isinstance(raw_paths, list)
@@ -494,7 +507,7 @@ def _ast_symbols_from_payload(
         paths = tuple(raw_paths)
         if paths != tuple(sorted(set(paths))):
             raise ValueError("AST symbol paths are not canonical")
-        symbols[symbol] = paths
+        symbols[symbol] = paths[0] if len(paths) == 1 else paths
     return symbols
 
 
@@ -504,7 +517,7 @@ def _load_persisted_ast_symbols(
     task_id: str,
     journal: object | None,
     signature: tuple[object, ...],
-) -> tuple[_turn0.CacheContext | None, dict[str, tuple[str, ...]] | None]:
+) -> tuple[_turn0.CacheContext | None, _SymbolLocations | None]:
     if not _turn0.enabled():
         return None, None
     python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
@@ -558,7 +571,10 @@ def _save_persisted_ast_symbols(
         return
     payload = {
         "schema": _AST_PERSIST_SCHEMA,
-        "symbols": {key: list(value) for key, value in sorted(index.symbols.items())},
+        "symbols": {
+            key: [value] if isinstance(value, str) else list(value)
+            for key, value in sorted(index.symbols.items())
+        },
     }
     reason = _turn0.write_payload(context, payload)
     if reason:

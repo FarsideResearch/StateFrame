@@ -12,11 +12,14 @@ Contract:
 - check_execution_count (which numbers every check execution) matches on and off
   at every step, and so do the execution ids and receipt handles derived from it.
 - check_receipt_count (stored rows) may differ, and only on identical re-records.
-- Off mode journals the same bytes as the base release (clock and run id pinned).
+- Off mode preserves the base journal event payloads. Runtime switch registries can
+  gain or retire entries across releases, so only switches present in both snapshots
+  are compared; the receipt-dedup switch must still be recorded as off.
 
 Normalization (applied identically to both runs, nothing else):
 - journal envelope position fields (sequence, event_id, hashes, timestamps) are
   dropped; a suppressed row shifts every later position by design;
+- runtime_mode_snapshot compares only switch keys shared with the base fixture;
 - each journal's random run_id is replaced by a placeholder, since two separate
   journal instances can never share one.
 The progress view's cache_key and projection_digest are hashes over the raw
@@ -25,6 +28,7 @@ event stream, so they are excluded; the rendered view content is compared.
 from __future__ import annotations
 
 import copy
+import json
 import os
 import unittest.mock
 import uuid
@@ -32,6 +36,8 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 import kernel_continuation_journal
 from kernel_check_receipts import _next_check_execution_ordinal, record_check_output
@@ -100,6 +106,61 @@ def _normalize(value: object, run_ids: frozenset[str]) -> object:
     if isinstance(value, str) and value in run_ids:
         return RUN_PLACEHOLDER
     return value
+
+
+def _journal_rows(raw: bytes) -> list[dict[str, object]]:
+    rows = []
+    for line in raw.splitlines():
+        row = json.loads(line)
+        assert isinstance(row, dict), "journal lines must be JSON objects"
+        rows.append(row)
+    return rows
+
+
+def _with_shared_runtime_switches(
+        actual: dict[str, object], expected: dict[str, object]
+        ) -> tuple[dict[str, object], dict[str, object]]:
+    actual_snapshot = actual.get("modes")
+    expected_snapshot = expected.get("modes")
+    assert isinstance(actual_snapshot, Mapping) and isinstance(expected_snapshot, Mapping)
+    actual_switches = actual_snapshot.get("modes")
+    expected_switches = expected_snapshot.get("modes")
+    assert isinstance(actual_switches, Mapping) and isinstance(expected_switches, Mapping)
+
+    shared = sorted(set(actual_switches) & set(expected_switches))
+    actual_copy = dict(actual)
+    expected_copy = dict(expected)
+    actual_snapshot_copy = dict(actual_snapshot)
+    expected_snapshot_copy = dict(expected_snapshot)
+    actual_snapshot_copy["modes"] = {key: actual_switches[key] for key in shared}
+    expected_snapshot_copy["modes"] = {key: expected_switches[key] for key in shared}
+    actual_copy["modes"] = actual_snapshot_copy
+    expected_copy["modes"] = expected_snapshot_copy
+    return actual_copy, expected_copy
+
+
+def _assert_off_mode_journal_matches_base(actual: bytes, expected: bytes) -> None:
+    actual_rows = _journal_rows(actual)
+    expected_rows = _journal_rows(expected)
+    assert len(actual_rows) == len(expected_rows)
+    actual_run_ids = frozenset(
+        str(row["run_id"]) for row in actual_rows if isinstance(row.get("run_id"), str))
+    expected_run_ids = frozenset(
+        str(row["run_id"]) for row in expected_rows if isinstance(row.get("run_id"), str))
+    actual_snapshots = [row for row in actual_rows if row.get("kind") == "runtime_mode_snapshot"]
+    assert len(actual_snapshots) == 1
+    snapshot = actual_snapshots[0].get("modes")
+    assert isinstance(snapshot, Mapping)
+    switch_values = snapshot.get("modes")
+    assert isinstance(switch_values, Mapping)
+    assert switch_values.get(DEDUP_ENV) == "off"
+
+    for index, (actual_row, expected_row) in enumerate(zip(actual_rows, expected_rows)):
+        if (actual_row.get("kind") == "runtime_mode_snapshot"
+                and expected_row.get("kind") == "runtime_mode_snapshot"):
+            actual_row, expected_row = _with_shared_runtime_switches(actual_row, expected_row)
+        assert _normalize(actual_row, actual_run_ids) == _normalize(expected_row, expected_run_ids), (
+            f"off-mode journal row {index} differs from the base fixture")
 
 
 def _kinds(records: list[dict]) -> list[str]:
@@ -321,6 +382,18 @@ def test_resume_rebuilds_the_same_execution_count_in_both_modes(tmp_path):
             resumed.close()
 
 
-def test_off_mode_journal_bytes_match_base(tmp_path):
+def test_off_mode_journal_matches_base_event_payloads(tmp_path):
     actual = _off_journal_bytes(tmp_path / "off")
-    assert actual == GOLDEN_OFF_JOURNAL.read_bytes()
+    _assert_off_mode_journal_matches_base(actual, GOLDEN_OFF_JOURNAL.read_bytes())
+
+
+def test_off_mode_base_match_catches_a_suppressed_receipt_mutant(tmp_path):
+    actual_rows = _journal_rows(_off_journal_bytes(tmp_path / "off"))
+    receipt = next(row for row in actual_rows if row.get("kind") == CHECK_RECEIPT)
+    receipt["kind"] = CHECK_RECEIPT_UNCHANGED
+    mutated = b"\n".join(
+        json.dumps(row, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        for row in actual_rows) + b"\n"
+
+    with pytest.raises(AssertionError, match="journal row"):
+        _assert_off_mode_journal_matches_base(mutated, GOLDEN_OFF_JOURNAL.read_bytes())

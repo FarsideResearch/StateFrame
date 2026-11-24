@@ -19,6 +19,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from kernel_safe_paths import safe_expanduser
+from kernel_reason_log import builtin_exception_name, emit_reason
 
 MODE_ENV = "STATEFRAME_REPO_SIGNALS"
 SCHEMA = "repo-signals/1"
@@ -118,7 +119,13 @@ def _inventory_paths(root: Path, *, source_only: bool) -> list[Path]:
                     continue
                 try:
                     path.relative_to(root)
-                except ValueError:
+                except ValueError as exc:
+                    emit_reason(
+                        "fallback", "repo_signals_inventory_path_outside_root", "repo_signals",
+                        "repository inventory entry was skipped",
+                        "the entry was outside the selected workspace",
+                        journal=False, dropped=builtin_exception_name(exc),
+                    )
                     continue
                 paths.append(path)
     except (OSError, RuntimeError):
@@ -143,7 +150,13 @@ def _read_source(path: Path) -> str:
         # the rest of the file is not explicitly scanned for UTF-8 validity.
         with path.open("r", encoding="utf-8") as source:
             return source.read(200_000)
-    except (OSError, UnicodeError):
+    except (OSError, UnicodeError) as exc:
+        emit_reason(
+            "fallback", "repo_signals_source_read_failed", "repo_signals",
+            "repository source text was omitted",
+            "the bounded UTF-8 read failed",
+            journal=False, dropped=builtin_exception_name(exc),
+        )
         return ""
 
 

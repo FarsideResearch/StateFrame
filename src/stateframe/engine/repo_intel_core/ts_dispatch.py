@@ -715,9 +715,39 @@ def _python_ast_definition_line(
     first_line = min(decorator_lines, default=fallback)
     body = getattr(node, "body", ())
     last_line = int(getattr(body[0], "lineno", fallback) or fallback) if body else fallback
-    declaration = re.compile(rf"^[ \t]*(?:async[ \t]+)?{keyword}[ \t]+{re.escape(name)}\b")
     for line_number in range(first_line, last_line + 1):
-        if line_number <= len(source_lines) and declaration.match(source_lines[line_number - 1]):
+        if line_number > len(source_lines):
+            continue
+        line = source_lines[line_number - 1]
+        position = 0
+        while position < len(line) and line[position] in " \t":
+            position += 1
+
+        async_end = position + len("async")
+        if (line.startswith("async", position) and async_end < len(line)
+                and line[async_end] in " \t"):
+            position = async_end
+            while position < len(line) and line[position] in " \t":
+                position += 1
+
+        if not line.startswith(keyword, position):
+            continue
+        position += len(keyword)
+        if position >= len(line) or line[position] not in " \t":
+            continue
+        while position < len(line) and line[position] in " \t":
+            position += 1
+        if not name or not line.startswith(name, position):
+            continue
+
+        after_name = position + len(name)
+        previous = name[-1]
+        left_word = previous == "_" or previous.isalnum()
+        right_word = False
+        if after_name < len(line):
+            following = line[after_name]
+            right_word = following == "_" or following.isalnum()
+        if left_word != right_word:
             return line_number
     return fallback
 

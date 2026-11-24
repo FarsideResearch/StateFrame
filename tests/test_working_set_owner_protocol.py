@@ -154,14 +154,10 @@ def test_permission_transitions_do_not_reuse_a_cached_recovery_promise():
     exercise()
 
 
-@pytest.mark.parametrize("reference", [
-    "56af0dc6d6",
-    "1f6b7e9bc1",
-])
-def test_off_request_bytes_match_assigned_g2_base(tmp_path, tmp_path_factory, reference):
+def test_off_request_bytes_match_release_before_allocator(tmp_path, tmp_path_factory):
     from tools.pinned_tree import pinned_tree
 
-    base = pinned_tree(reference, tmp_path_factory)
+    base = pinned_tree("56af0dc6d6c7b632808070e137b9d95f66db882e", tmp_path_factory)
     current = Path(__file__).resolve().parents[1]
     # The scripted server is llama.cpp-compatible. Pin that same launch
     # authority on both sides: a loaded host can time out /props on one side

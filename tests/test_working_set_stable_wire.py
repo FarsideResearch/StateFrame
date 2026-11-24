@@ -114,7 +114,7 @@ def test_refusal_preserves_existing_stable_epoch_and_prefix(monkeypatch):
 def test_allocator_off_provider_bytes_match_carried_3b(tmp_path, tmp_path_factory, stable_mode):
     """Exercise actual provider serialization with both stable switch settings."""
     root = Path(__file__).resolve().parents[1]
-    base = pinned_tree("1f6b7e9bc1", tmp_path_factory)
+    base = pinned_tree("56af0dc6d6c7b632808070e137b9d95f66db882e", tmp_path_factory)
     driver = '''
 import json, sys
 from pathlib import Path

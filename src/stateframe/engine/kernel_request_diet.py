@@ -45,9 +45,9 @@ from kernel_obligation_assess import UnavailableEvidence
 from kernel_request_auth_identity import auth_binding_for_key as _auth_binding_for_key
 
 try:
-    from kernel_reason_log import emit_refusal, emit_reason, emit_timeout
+    from kernel_reason_log import builtin_exception_name, emit_refusal, emit_reason, emit_timeout
 except ImportError:
-    from .kernel_reason_log import emit_refusal, emit_reason, emit_timeout
+    from .kernel_reason_log import builtin_exception_name, emit_refusal, emit_reason, emit_timeout
 
 
 SCHEMA = "stateframe-request-diet/1"
@@ -464,7 +464,13 @@ def _tokenize_url_for_endpoint(endpoint: object) -> str | None:
         if (parsed.scheme not in {"http", "https"} or not parsed.hostname
                 or parsed.username is not None or parsed.password is not None):
             return None
-    except ValueError:
+    except ValueError as exc:
+        emit_reason(
+            "fallback", "tokenizer_endpoint_url_parse_failed", "request_diet",
+            "tokenizer endpoint candidate was skipped",
+            "the endpoint URL could not be parsed",
+            journal=False, dropped=builtin_exception_name(exc),
+        )
         return None
     path = parsed.path.rstrip("/")
     if not path.endswith("/tokenize"):

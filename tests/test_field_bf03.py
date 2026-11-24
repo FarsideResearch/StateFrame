@@ -161,12 +161,11 @@ def test_incomplete_grep_page_reuses_its_continuation_digest(tmp_path):
 
 
 def test_complete_grep_retains_scan_warning_and_trailing_annotation(tmp_path, monkeypatch):
-    from kernel_navigation_pages import _read_text
+    from test_grep_retained_rows import _open_trace
 
     (tmp_path / "rows.txt").write_text(("match " + "x" * 650 + "\n") * 8, encoding="utf-8")
     (tmp_path / "unreadable.txt").touch()
-    monkeypatch.setattr("kernel_navigation_pages._read_text",
-                        lambda path: (None, "unreadable") if path.name == "unreadable.txt" else _read_text(path))
+    _open_trace(monkeypatch, tmp_path, fail_names=frozenset({"unreadable.txt"}))
     page = search_repository(tmp_path, "match")
     assert page.metadata["complete"] and not page.metadata["scan_complete"]
     original_header, original_footer, *original = page.text.splitlines()

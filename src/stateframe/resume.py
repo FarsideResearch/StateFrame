@@ -223,10 +223,10 @@ def _interrupted_archive(run: Path, spec: dict) -> Path | None:
                       and int(p.name) >= active_attempt
                       and p.is_dir() and not p.is_symlink()), key=lambda p: int(p.name), reverse=True)
     for folder in folders:
-        if not any(path.is_dir() and not path.is_symlink()
-                   for path in (folder / "worker", folder / "wire")):
-            continue
+        # spec.json is copied before the first attempt-file move, so it alone can identify a killed archive.
         try:
+            if (folder / "spec.json").is_symlink():
+                continue
             archived = json.loads((folder / "spec.json").read_bytes())
             archived_attempt = (archived.get("resume") or {}).get("attempt", 1)
         except (OSError, ValueError, AttributeError):

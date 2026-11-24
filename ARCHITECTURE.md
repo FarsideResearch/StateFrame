@@ -58,31 +58,41 @@ flowchart LR
     K --> A[After: your checks again on the candidate]
     A --> O[Outcome and diff]
     O -->|in-place and passing| I[Applied to your repository]
-    P[Protected tests] -. cannot be edited .-> W
+    P[Test edit policy] -. applies to selected test files .-> W
 ```
 
-The model can say it is done; the engine decides. A candidate is stored only after the engine's checks pass, the tests that decide pass or fail cannot be edited by the agent, and StateFrame runs your checks again on the stored result before it reports an outcome. Your repository changes only with `--in-place`, and then only when those checks pass. Your tests run with your project's Python (`--test-python`, the repository's virtual environment, or `python3` on PATH).
+The model can say it is done; the engine decides. A candidate is stored only after the engine's checks pass, and StateFrame runs your checks again on the stored result before it reports an outcome. The run's `--protect-tests` setting controls which test files the agent may edit: `all` protects every test, `task` protects the checks selected for the run, and `off` disables test-specific protection. The shipped profile uses `off`. Your repository changes only with `--in-place`, and then only when those checks pass. Your tests run with your project's Python (`--test-python`, the repository's virtual environment, or `python3` on PATH).
 
 ## Checkpoints and resume
 
 ```mermaid
 flowchart TB
-    RUN[Run in progress] -->|every engine step by default| CP[Signed checkpoint]
+    RUN[Run in progress] -->|eligible step after a new model send| CP[Signed checkpoint]
     RUN -->|every request| REC[Recorded request bytes and responses]
     X[Stopped: Ctrl-C, kill -9, crash, lost server] --> RS[stateframe resume]
-    RS --> L{Newest checkpoint usable?}
+    RS --> LIM{Step-limit rules allow resume?}
+    LIM -->|unchanged and resumable| EL{Checkpoint restore eligible?}
+    LIM -->|changed: larger or 0 after budget or incomplete outcome| NEW[Start a fresh live attempt at request 1]
+    LIM -->|otherwise| REF[Refuse resume]
+    EL -->|yes| L{Newest checkpoint usable?}
+    EL -->|no: replay| FULL[Full replay of recorded responses]
     L -->|yes| LD[Restore engine state]
-    LD --> RP[Replay the few exchanges after it]
-    L -->|no| FULL[Full replay of recorded responses]
-    RP --> CHK{Next request matches its record byte for byte?}
+    LD --> RP[Replay recorded tail and verify rebuilt request]
+    L -->|no| FULL
+    RP --> CHK{Rebuilt request matches after replay normalization?}
     FULL --> CHK
-    CHK -->|yes| LIVE[Continue live]
-    CHK -->|no| DIV[Request divergence: record and continue live]
+    CHK -->|yes: response recorded| REP[Use recorded response]
+    REP --> CHK
+    CHK -->|yes: request unanswered| LIVE[Send request live]
+    CHK -->|no| MODE{Checkpoint replay?}
+    MODE -->|yes| FULL
+    MODE -->|no: completed request or route/identity refusal| REF
+    MODE -->|no: unanswered request; route matches if present; no identity| DIV[Record mismatch and send live]
 ```
 
-Every request and response is recorded. Checkpoints are on by default: the engine attempts a signed save at every engine step boundary, skipping a save while its prior writer is still running, and keeps the newest two. `stateframe resume` loads the newest usable checkpoint. Every recorded exchange after it and the first request that was in flight are compared with the rebuilt request as raw bytes before going live. Only an explicitly requested model name swap may replace the leading top-level `model` value. A missing, damaged, foreign or unfaithful checkpoint falls back to full replay, which uses the same raw request comparison. Replayed operations can still refuse an incomplete, divergent or unapproved external effect.
+Every request and response is recorded. The shipped profile enables checkpoint saves. At an eligible step boundary, the engine attempts a signed save after a new model send; the default cadence is one send, and a busy writer may skip a boundary. Save failures do not stop the run. It keeps up to the newest two checkpoints by default and removes them after a completed run unless retention is requested with `--keep-checkpoints` or the equivalent setting. If checkpoint support is unavailable or disabled, resume replays.
 
-Shell-enabled runs replay from the start. The tool tape serves recorded observations, compares repeated local effects, and refuses an incomplete operation or external effect without `--replay-external`. Native file deletion and moves follow the edit replay path. Tool-tape divergence also refuses resume during checkpoint fallback.
+Resume restores a checkpoint only when the recorded endpoint, model and step limit still match and no per-step routing, hooks or edit-scope widening are configured. Only a budget or incomplete outcome can resume with a changed step limit, and then only with a larger limit or 0 (no limit); that starts a fresh live attempt at request 1. Other changed limits are refused. Shell-enabled runs can restore checkpoints too; tool operations after the saved point are reconciled through the recorded tool tape. File deletions and moves follow the edit replay path. After restore, recorded exchanges since the checkpoint and the first rebuilt request are checked after replay normalization. Replay normalizes the remaining-time countdown to its recorded value. For an explicitly requested model-name swap, replay may substitute only the leading top-level `model` value. A missing, damaged, foreign or unfaithful checkpoint falls back to full replay, which uses the same request comparison. Full replay refuses a mismatch in a completed request. A mismatch in the unanswered in-flight request is recorded and sent live only if its recorded route matches, when present, and no endpoint identity is attached. Tool-tape or external-effect state can still refuse resume; use `--replay-external` when an external effect requires it.
 
 ## History on disk and identical requests
 
@@ -157,7 +167,7 @@ Hook configuration and project digest trust are resolved by the runner. Start an
 ## Safety
 
 - **Your repository is not touched** unless you ask. Without `--in-place`, the result stays in the run directory. With `--in-place`, a result is applied only when its checks pass.
-- **Protected tests stay protected.** The agent cannot edit the tests that decide pass or fail; an attempted edit never lands in the result.
+- **Test-file protection follows `--protect-tests`.** `all` protects every test file, `task` protects the checks selected for the run, and `off` disables test-specific protection. The shipped profile uses `off`.
 - **Commands run under a declared policy** (`sandbox-exec` on macOS, bubblewrap on Linux). Shell networking defaults to loopback; full network and host execution require explicit flags. Reconciliation stops without promoting effects beyond 16 MiB per file, 256 MiB aggregate or 20,000 entries. Executable-bit changes are refused and restored. Host PATH discovery admits executables and their symlink and shebang chains without admitting whole parent directories. The [tool guide](docs/guide/tools.md) states the platform limits.
 - **Repository-code diagnostics stay inside the execution sandbox.** Imports before the first request, post-edit imports, obligation checks and optional Git indexing use sandboxed execution. Git history `show` is rooted at a commit, so raw blob and tree IDs are refused.
 - **The shipped profile uses the composed loop.** Lean mode is not supported by the product profile. The plain loop refuses Git, web and custom-tool settings and background jobs before execution.

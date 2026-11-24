@@ -436,9 +436,9 @@ def _audit(event, args):
 sys.addaudithook(_audit)
 sys.dont_write_bytecode = True
 _exit = 0
+_namespace = {"__name__": "__main__", "__file__": "<stateframe-probe>"}
 try:
-    exec(compile(%r, "<stateframe-probe>", "exec"),
-         {"__name__": "__main__", "__file__": "<stateframe-probe>"}, {})
+    exec(compile(%r, "<stateframe-probe>", "exec"), _namespace)
 except SystemExit as error:
     _exit = error.code if isinstance(error.code, int) else 1
 except BaseException:

@@ -19,10 +19,9 @@ Two host mechanisms, one switch:
    in-frame bytes are the edit precondition source and how many times this unchanged revision
    has already been re-read.  No task text, no directive.
 
-Switch values: ``on`` | ``off`` | ``auto`` (default).  ``auto`` is ON exactly when plain
-source labels are enabled (the frame arm that renders ``[Current source: ...]``); with legacy
-labels no plain blocks exist, so behaviour is byte-identical.  ``off`` restores the baseline
-everywhere.
+Switch values: ``on`` | ``off`` | ``auto`` (default). ``auto`` enables these changes only with plain source
+labels; with legacy labels it leaves READ_UNCHANGED receipt fields and plain-label source candidates disabled.
+``on`` enables both consumers for either label mode. ``off`` restores the baseline everywhere.
 """
 from __future__ import annotations
 
@@ -38,9 +37,7 @@ PLAIN_PREFIX = f"[{PLAIN_SOURCE_LABEL}: "
 
 def reread_fix_mode() -> str:
     value = os.environ.get(REREAD_FIX_ENV, "auto")
-    if value not in {"on", "off", "auto"}:
-        raise ValueError(f"{REREAD_FIX_ENV} must be on, off, or auto")
-    return value
+    return value if value in {"on", "off", "auto"} else "auto"
 
 
 def enabled() -> bool:

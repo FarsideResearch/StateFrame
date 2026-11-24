@@ -36,7 +36,8 @@ def strip_callsite_census(content: str) -> str:
 def configuration() -> str:
     mode = os.environ.get('STATEFRAME_SOURCE_PRESENTATION', 'json')
     if mode not in {'json', 'blocks', 'current_blocks'}:
-        raise ValueError('STATEFRAME_SOURCE_PRESENTATION must be json, blocks or current_blocks')
+        return ('blocks' if os.environ.get('STATEFRAME_VIEW', 'existing') == 'operational'
+                else 'json')
     return mode
 
 
@@ -80,8 +81,6 @@ def source_block(evidence: dict, *, label: str,
 
 def scope_labels_enabled() -> bool:
     value = os.environ.get("STATEFRAME_WORKING_SOURCE_SCOPE", "0")
-    if value not in {"0", "1"}:
-        raise ValueError("STATEFRAME_WORKING_SOURCE_SCOPE must be 0 or 1")
     return value == "1"
 
 

@@ -16,6 +16,7 @@ import selectors
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -125,7 +126,8 @@ def run(command: str, cwd: Path, *, python: str, timeout_s: float | None = None,
         deadline: float | None = None, test_env: dict[str, str] | None = None,
         pytest_plugins: str | None = None, test_python: str | None = None,
         runner_kind: str = "pytest", capture_output: bool = False,
-        check_settings: dict[str, str] | None = None) -> dict[str, object]:
+        check_settings: dict[str, str] | None = None,
+        required_test_ledger: bool = False) -> dict[str, object]:
     """Copy and check with progress supervision and bounded IPC.
 
     ``timeout_s`` selects inactivity, not total lifetime. Only an explicit
@@ -159,6 +161,8 @@ def run(command: str, cwd: Path, *, python: str, timeout_s: float | None = None,
             "stall_seconds": config.stall_seconds, "cpu_seconds": cpu_seconds,
             "test_env": test_env or {}, "pytest_plugins": pytest_plugins, "test_python": test_python,
             "runner_kind": runner_kind, "capture_output": capture_output}
+    if required_test_ledger:
+        spec["required_test_ledger"] = True
     env = {key: os.environ[key] for key in PASS_ENV if key in os.environ}
     env["PYTHONHASHSEED"] = "0"
     env["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -341,6 +345,104 @@ def run(command: str, cwd: Path, *, python: str, timeout_s: float | None = None,
     return result
 
 
+_PYTHON_NAME = re.compile(r"(?:python|pypy)(?:\d+(?:\.\d+)*)?\Z")
+_PYTHON_FLAGS = frozenset({"-B", "-E", "-I", "-P", "-s", "-u"})
+
+
+def _pytest_console_script(program: str, copy: Path, env: dict[str, str]) -> tuple[str, str] | None:
+    """Recognize the stock installed console script and retain its interpreter."""
+    if "/" in program:
+        path = str(copy / program)
+    else:
+        search_path = os.pathsep.join(str(copy / entry) for entry in os.get_exec_path(env))
+        path = shutil.which(program, path=search_path)
+    if path is None or not Path(path).is_file() or not os.access(path, os.X_OK):
+        return None
+    selected = Path(sys.executable)
+    if not Path(path).resolve().is_relative_to(selected.parent.resolve()):
+        return None
+    with open(path, "rb") as stream:
+        header = stream.read(4096).splitlines()
+    if not header or not header[0].startswith(b"#!"):
+        return None
+    interpreter = Path(os.fsdecode(header[0][2:]).strip())
+    if (interpreter.parent != selected.parent or interpreter.resolve() != selected.resolve()
+            or b"from pytest import console_main" not in header
+            or b"    sys.exit(console_main())" not in header):
+        return None
+    return str(interpreter), path
+
+
+def _pytest_ledger_command(arguments: list[str], copy: Path, report_path: Path,
+                          env: dict[str, str]) -> list[str] | None:
+    """Attach a passive pytest plugin to a known launch without adding pytest flags."""
+    from kernel_required_tests import MAX_PYTEST_REPORT_BYTES, PYTEST_LEDGER_SOURCE
+
+    offset = 0
+    managed = False
+    command_env = dict(env)
+    while offset < len(arguments):
+        wrapper = Path(arguments[offset]).name
+        if wrapper == "env":
+            offset += 1
+            while (offset < len(arguments)
+                   and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", arguments[offset], re.DOTALL)):
+                key, value = arguments[offset].split("=", 1)
+                command_env[key] = value
+                offset += 1
+        elif wrapper in {"uv", "poetry", "pipenv"} and arguments[offset + 1:offset + 2] == ["run"]:
+            offset += 2
+            managed = True
+        else:
+            break
+    if offset >= len(arguments):
+        return None
+    program = arguments[offset]
+    name = Path(program).name
+    console_script = None
+    flags = []
+    if _PYTHON_NAME.fullmatch(name):
+        index = offset + 1
+        while index < len(arguments) and arguments[index] in _PYTHON_FLAGS:
+            index += 1
+        if arguments[index:index + 2] != ["-m", "pytest"]:
+            return None
+        flags = arguments[offset + 1:index]
+        pytest_args = arguments[index + 2:]
+        original_args = [*flags, "-m", "pytest"]
+    elif name in {"pytest", "py.test"} and not managed:
+        console = _pytest_console_script(program, copy, command_env)
+        if console is None:
+            return None
+        program, console_script = console
+        pytest_args = arguments[offset + 1:]
+        original_args = [console_script]
+    else:
+        return None
+    settings = (str(copy), str(report_path), MAX_PYTEST_REPORT_BYTES, console_script, original_args)
+    source = f"repo, report_path, report_limit, console_script, original_args = {settings!r}\n"
+    wrapped = [*arguments[:offset], program, *flags, "-c", source + PYTEST_LEDGER_SOURCE, *pytest_args]
+    # Keep the original check if the optional instrumentation would exceed argv policy.
+    return wrapped if len(wrapped) <= 128 and sum(map(len, wrapped)) <= 64 * 1024 else None
+
+
+def _read_required_test_report(path: Path, exit_code: int | None) -> tuple[dict[str, object], str | None]:
+    from kernel_required_tests import (MAX_PYTEST_REPORT_BYTES, PYTEST_REPORT_NOT_PRODUCED,
+                                       parse_pytest_report_with_reason)
+
+    flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
+    directory = os.open(path.parent, flags | os.O_DIRECTORY)
+    try:
+        descriptor = os.open(path.name, flags, dir_fd=directory)
+    finally:
+        os.close(directory)
+    with os.fdopen(descriptor, "rb") as stream:
+        metadata = os.fstat(stream.fileno())
+        if stat.S_ISREG(metadata.st_mode) and metadata.st_size <= MAX_PYTEST_REPORT_BYTES:
+            return parse_pytest_report_with_reason(stream.read(MAX_PYTEST_REPORT_BYTES + 1), exit_code)
+    return {"complete": False, "outcomes": {}}, PYTEST_REPORT_NOT_PRODUCED
+
+
 def _helper() -> int:
     """Only this fresh process imports engine policy and runs repository code."""
     spec = json.load(sys.stdin)
@@ -373,6 +475,9 @@ def _helper() -> int:
         on_progress=lambda sequence, kind: progress.advance("check"))
     original_spawn = policy.sandboxed_popen
     original_kill_group = policy._kill_group
+    required_report_path = None
+    required_report = {"complete": False, "outcomes": {}}
+    required_report_reason = "pytest report was not produced"
 
     def tracked_spawn(*args, **kwargs):
         nonlocal spawned, process_cleaned
@@ -405,10 +510,29 @@ def _helper() -> int:
 
         shutil.copytree(spec["cwd"], copy, symlinks=True, copy_function=copy_file)
         progress.advance("copy")
+        check_command = shlex.split(spec["command"])
+        if spec.get("required_test_ledger") is True and spec.get("runner_kind") == "pytest":
+            try:
+                report_directory = copy / ".test-tmp"
+                if report_directory.is_symlink():
+                    raise ValueError("cannot place a ledger report in symlinked check scratch")
+                report_directory.mkdir(exist_ok=True)
+                with tempfile.NamedTemporaryFile(prefix=".stateframe-pytest-", dir=report_directory,
+                                                 delete=False) as report_file:
+                    report_path = Path(report_file.name)
+                wrapped = _pytest_ledger_command(check_command, copy, report_path, env)
+                if wrapped is not None:
+                    check_command, required_report_path = wrapped, report_path
+                    required_report_reason = "pytest report was not produced"
+                else:
+                    report_path.unlink()
+                    required_report_reason = "pytest report was not produced"
+            except Exception:  # noqa: BLE001 - report setup is advisory
+                required_report_reason = "pytest report was not produced"
         if spec.get("deadline") is not None and time.monotonic() >= spec["deadline"]:
             raise OuterCheckError("run deadline exhausted copying outer check")
         for attempt in range(SANDBOX_FORK_RETRIES + 1):
-            result = policy.run_sandboxed(shlex.split(spec["command"]), copy,
+            result = policy.run_sandboxed(check_command, copy,
                                           env=env, timeout=None, check_watchdog=watchdog_config,
                                           cpu_seconds=spec.get("cpu_seconds"),
                                           output_limit=OUTPUT_LIMIT,
@@ -430,6 +554,14 @@ def _helper() -> int:
                     and spec["deadline"] - time.monotonic() <= pause + 1):
                 break
             time.sleep(pause)
+        if required_report_path is not None and execution_stop is None and not result.timed_out:
+            try:
+                required_report, required_report_reason = _read_required_test_report(
+                    required_report_path, result.completed.returncode)
+            except Exception:  # noqa: BLE001 - unreadable reports remain unknown
+                required_report_reason = "pytest report was not produced"
+        elif spec.get("required_test_ledger") is True and spec.get("runner_kind") == "pytest":
+            required_report_reason = "pytest report was not produced"
         if execution_stop is None:
             sandbox_error = result.completed.stderr
             denial = sandbox_open_denial(
@@ -460,7 +592,15 @@ def _helper() -> int:
                            execution_complete=False, reached_observation=False)
         if spec.get("capture_output"):
             payload["output"] = output.decode("utf-8", errors="replace")
+        if spec.get("required_test_ledger") is True:
+            payload["required_test_report"] = required_report
+            if not required_report["complete"]:
+                payload["required_test_report_reason"] = required_report_reason
         encoded = json.dumps({"result": payload})
+        if required_report["complete"] and len(encoded) + len('{"cleanup_ok": false}\n') + 1 > WIRE_LIMIT:
+            payload["required_test_report"] = {"complete": False, "outcomes": {}}
+            payload["required_test_report_reason"] = "pytest report exceeded its size bound"
+            encoded = json.dumps({"result": payload})
         progress.advance("serialize", len(encoded))
         print(encoded, flush=True)
     except (RuntimeError, OSError, ValueError) as error:
