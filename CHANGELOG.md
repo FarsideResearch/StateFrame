@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.2 (2026-11-24)
 
 - Added missing licence notices for adapted code in repo_intel_core.
 
