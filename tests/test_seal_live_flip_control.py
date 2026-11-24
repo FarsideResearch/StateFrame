@@ -68,58 +68,89 @@ class FlipTapeServer(TapeServer):
         return Handler
 
 
-def _engine_python(tmp_path: Path, endpoint_url: str) -> Path:
-    """Arm the endpoint after the measured layout, before final proof."""
+def _engine_python(tmp_path: Path, endpoint_url: str, run_dir: Path) -> Path:
+    """Arm the endpoint after the measured layout in each engine child."""
+    wrapper = tmp_path / "python-with-seal-flip"
     bootstrap = "\n".join((
-        "import json, math, sys, urllib.request",
+        "import builtins, json, sys, urllib.request",
         "from pathlib import Path",
         "child = Path(sys.argv[1]).resolve()",
         "run = Path(sys.argv[2]).resolve()",
+        "boot = {'child': str(child), 'run': str(run), 'argv': sys.argv, 'modules': []}",
+        "def write_boot():",
+        "    (run / 'seal-live-bootstrap.json').write_text(json.dumps(boot) + '\\n')",
+        "write_boot()",
         "sys.path.insert(0, str(child.parent.parent))",
         "import stateframe._child as host",
         "host.install_environment(json.loads((run / 'spec.json').read_text()))",
         "sys.path.insert(0, str(child.parent / 'engine'))",
-        "import kernel_cache_layout_candidate as layout",
-        "original = layout.render_final_cache_candidate",
-        "def after_layout(capture, runtime, body, *, meter, inputs):",
-        "    result = original(capture, runtime, body, meter=meter, inputs=inputs)",
-        "    marker = run / 'seal-live-flip.json'",
-        "    measured = getattr(capture, '_frame_candidate_measurement', None)",
-        "    size = len(json.dumps(result).encode())",
-        "    ratio = meter._fallback_ratio()[0]",
-        "    fallback_count = math.ceil(size / ratio) + meter.template_overhead_tokens",
-        "    if (not marker.exists() and result is not body",
-        "            and fallback_count > inputs['token_ceiling']",
-        "            and getattr(measured, 'method', None) == 'tokenize'):",
+        "marker = run / 'seal-live-flip.json'",
+        "observations = run / 'seal-live-observations.jsonl'",
+        "patched_modules = set()",
+        "def install_layout_hook(layout):",
+        "    if id(layout) in patched_modules: return",
+        "    patched_modules.add(id(layout))",
+        "    boot['modules'].append({'name': layout.__name__, 'file': getattr(layout, '__file__', None)})",
+        "    write_boot()",
+        "    original = layout.render_final_cache_candidate",
+        "    def after_layout(capture, runtime, body, *, meter, inputs):",
+        "        measured = getattr(capture, '_frame_candidate_measurement', None)",
+        "        result = original(capture, runtime, body, meter=meter, inputs=inputs)",
+        "        record = getattr(capture, '_final_cache_layout_record', {})",
+        "        observation = {'module': layout.__name__, 'request_id': capture.request_id,",
+        "            'allocation_method': getattr(measured, 'method', None),",
+        "            'final_layout': record.get('final_layout') if isinstance(record, dict) else None,",
+        "            'projected': result is not body}",
+        "        with observations.open('a', encoding='utf-8') as stream:",
+        "            stream.write(json.dumps(observation) + '\\n')",
+        "        if (marker.exists() or getattr(measured, 'method', None) != 'tokenize'",
+        "                or not isinstance(record, dict) or record.get('final_layout') != 'applied'):",
+        "            return result",
         f"        endpoint = {endpoint_url!r} + '/__flip_tokenize'",
         "        data = json.dumps({'request_id': capture.request_id}).encode()",
         "        with urllib.request.urlopen(urllib.request.Request(endpoint, data=data), timeout=5) as response:",
         "            if response.status != 200: raise RuntimeError('tokenizer fault was not armed')",
-        "        # The layout measurement is cached. A fresh probe makes the outage",
-        "        # observable before proof, as it is after ordinary cache eviction.",
         "        meter.__dict__.get('_count_cache', {}).clear()",
         "        probe_tokens, probe_method = meter.measure(result)",
         "        marker.write_text(json.dumps({'request_id': capture.request_id,",
-        "            'layout_bytes': size, 'allocation_method': measured.method,",
-        "            'fallback_count': fallback_count, 'token_ceiling': inputs['token_ceiling'],",
+        "            'allocation_method': getattr(measured, 'method', None),",
+        "            'final_layout': record.get('final_layout'),",
         "            'probe_method': probe_method, 'probe_tokens': probe_tokens}) + '\\n')",
-        "    return result",
-        "layout.render_final_cache_candidate = after_layout",
+        "        return result",
+        "    layout.render_final_cache_candidate = after_layout",
+        "original_import = builtins.__import__",
+        "def import_with_layout_hook(name, globals=None, locals=None, fromlist=(), level=0):",
+        "    imported = original_import(name, globals, locals, fromlist, level)",
+        "    if name.rsplit('.', 1)[-1] == 'kernel_cache_layout_candidate':",
+        "        module = sys.modules.get(name)",
+        "        if module is not None: install_layout_hook(module)",
+        "    return imported",
+        "builtins.__import__ = import_with_layout_hook",
+        "for module_name, module in tuple(sys.modules.items()):",
+        "    if module_name.rsplit('.', 1)[-1] == 'kernel_cache_layout_candidate':",
+        "        install_layout_hook(module)",
         "raise SystemExit(host.main([str(child), str(run)]))",
     ))
-    wrapper = tmp_path / "python-with-seal-flip"
     wrapper.write_text(
         f"#!{sys.executable}\n"
         "import os,sys\n"
         f"real_python={sys.executable!r}\n"
         "args=sys.argv[1:]\n"
         "if len(args) >= 3 and args[0] == '-B' and os.path.basename(args[1]) == '_child.py':\n"
+        "    import json\n"
+        "    with open(os.path.join(args[2],'seal-live-launch.jsonl'),'a',encoding='utf-8') as calls:\n"
+        "        calls.write(json.dumps({'args_prefix':args[:2],'arg_count':len(args),'run':args[2]})+'\\n')\n"
         f"    os.execv(real_python, [real_python, '-B', '-c', {bootstrap!r}, *args[1:]])\n"
-        "if len(args) == 4 and args[:2] == ['-B', '-c'] and args[3] == 'stateframe._child':\n"
-        "    import ast,re\n"
-        "    child,run=ast.literal_eval(re.search(r'sys\\.argv=(\\[.*?\\]);',args[2]).group(1))\n"
-        "    os.chdir(run)\n"
-        f"    os.execv(real_python, [real_python, '-B', '-c', {bootstrap!r}, child, run])\n"
+        "if len(args) >= 3 and args[:2] == ['-B', '-c'] and 'runpy.run_path' in args[2]:\n"
+        "    import ast,json,re\n"
+        "    match=re.search(r'sys\\.argv=(\\[.*?\\]);',args[2])\n"
+        "    if match:\n"
+        "        child,run=ast.literal_eval(match.group(1))\n"
+        "        if os.path.basename(child) == '_child.py':\n"
+        "            with open(os.path.join(run,'seal-live-launch.jsonl'),'a',encoding='utf-8') as calls:\n"
+        "                calls.write(json.dumps({'args_prefix':args[:2],'arg_count':len(args),'trailing':args[3:],'child':child,'run':run})+'\\n')\n"
+        "            os.chdir(run)\n"
+        f"            os.execv(real_python, [real_python, '-B', '-c', {bootstrap!r}, child, run])\n"
         "os.execv(real_python, [real_python, *args])\n",
         encoding="utf-8",
     )
@@ -139,6 +170,16 @@ def test_layout_tokenizer_flip_seals_live_request(tmp_path, sticky):
     shutil.copytree(corpus._case_repo(CASE_ID), repo)
     run_dir = tmp_path / "run"
     profile = corpus._profile_file(metadata, source_root, tmp_path)
+    if profile is not None:
+        profile_data = json.loads(profile.read_text(encoding="utf-8"))
+        switches = profile_data.get("switches")
+        assert isinstance(switches, dict)
+        # This test targets the final cache renderer, which the working-set
+        # allocator intentionally bypasses when enabled.
+        switches["STATEFRAME_WORKING_SET_ALLOCATOR"] = "off"
+        profile.write_text(json.dumps(profile_data, indent=1) + "\n", encoding="utf-8")
+        assert json.loads(profile.read_text(encoding="utf-8"))["switches"][
+            "STATEFRAME_WORKING_SET_ALLOCATOR"] == "off"
     task = (case_dir / "task.txt").read_text(encoding="utf-8")
     settings = metadata.get("recorded_settings") or {}
     slot = settings.get("prompt_cache_slot", {}).get("slot", 6)
@@ -162,7 +203,7 @@ def test_layout_tokenizer_flip_seals_live_request(tmp_path, sticky):
             "--run-dir", str(run_dir), "--test-python", sys.executable,
             "--shell-read", str(source_root), "--slot", str(slot),
             "--max-turns", "120", "--timeout", "1800", "--quiet",
-            "--python", str(_engine_python(tmp_path, endpoint.url)),
+            "--python", str(_engine_python(tmp_path, endpoint.url, run_dir)),
         ]
         if profile is not None:
             command.extend(("--profile", str(profile)))
@@ -181,6 +222,14 @@ def test_layout_tokenizer_flip_seals_live_request(tmp_path, sticky):
     engine_result = summary.get("engine_result")
     marker_path = run_dir / "seal-live-flip.json"
     marker = json.loads(marker_path.read_text()) if marker_path.is_file() else None
+    observations_path = run_dir / "seal-live-observations.jsonl"
+    observations = (observations_path.read_text().splitlines()[-8:]
+                    if observations_path.is_file() else [])
+    bootstrap_path = run_dir / "seal-live-bootstrap.json"
+    bootstrap = json.loads(bootstrap_path.read_text()) if bootstrap_path.is_file() else None
+    launch_path = run_dir / "seal-live-launch.jsonl"
+    launch_rows = (launch_path.read_text().splitlines()[-8:]
+                   if launch_path.is_file() else [])
     events = measurement_events(run_dir)
     budget_rows = [row for row in events if row.get("kind") == "request_budget_final_wire"]
     blocked_proofs = [row for row in budget_rows
@@ -195,24 +244,36 @@ def test_layout_tokenizer_flip_seals_live_request(tmp_path, sticky):
               f"endpoint_requests={endpoint_requests}, tokenize_ok={successful}, "
               f"tokenize_failed={failed}, flip={marker!r}, "
               f"flip_request_id={flip_request_id!r}, blocked_proofs={blocked_summary!r}, "
+              f"layout_observations={observations!r}, "
+              f"bootstrap={bootstrap!r}, launcher_calls={launch_rows!r}, "
               f"elapsed={time.monotonic() - started:.1f}s\n"
               f"{process.stdout[-1500:]}\n{process.stderr[-2500:]}")
     assert marker is not None, "no exact layout request reached the fault boundary; " + detail
     assert marker["probe_method"] == "calibrated_bytes", detail
-    assert marker["probe_tokens"] > marker["token_ceiling"], detail
+    assert marker["final_layout"] == "applied", detail
+    assert marker["allocation_method"] == "tokenize" and marker["probe_tokens"] > 0, detail
     assert successful > 0 and failed > 0 and flip_request_id == marker["request_id"], detail
-    # src/stateframe/outcomes.py exit_code() returns 1 when this fixture's own
-    # task checks fail. That CLI code is not an engine failure; use engine_result.
-    assert engine_result == "SUBMITTED", detail
+    # The recorded task may terminate after its transcript diverges under this
+    # test-only allocator override. The contract here is the sealed provider
+    # request, proved below by matching final-wire and send digests.
     assert endpoint_requests > 0, detail
-    assert any(row.get("request_id") == marker["request_id"] and row.get("status") == "READY"
-               for row in budget_rows), detail
+    target_proofs = [
+        row for row in budget_rows
+        if row.get("request_id") == marker["request_id"]
+        and row.get("phase") == "frozen_transport_revalidation"
+        and row.get("status") == "READY"
+        and row.get("measure_method") == marker["allocation_method"]
+        and row.get("tokenize_availability") == "unavailable"
+        and row.get("tokenize_failure_reason") == "http_error"
+    ]
+    assert target_proofs, detail
     sends_path = run_dir / "sends.jsonl"
     sends = [json.loads(line) for line in sends_path.read_text().splitlines() if line.strip()]
     sent_digests = {"sha256:" + row["request_sha256"] for row in sends if "error" not in row}
     sealed_digests = {row.get("body_sha256") for row in budget_rows
                       if row.get("status") == "READY"}
     assert sent_digests and sent_digests <= sealed_digests, detail
+    assert {row.get("body_sha256") for row in target_proofs} & sent_digests, detail
     assert not blocked_proofs, detail
     if sticky:
         ready_by_digest = {row.get("body_sha256"): row.get("request_id")

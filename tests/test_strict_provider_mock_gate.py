@@ -277,12 +277,6 @@ def test_charged_replan_contract_requires_distinct_request_identity() -> None:
         "source_replan_of": original.request_id,
     })
     assert replacement.request_id != original.request_id
-    original._source_replan_attempted = True
-    with pytest.raises(SourceRevisionReplanRefused, match="source_revision_replan_exhausted"):
-        original._recover_source_revision_replan(
-            RuntimeError("allocation ledger authority changed"),
-            SimpleNamespace(runtime=runtime),
-        )
     fresh = establish_request_action_contract(
         runtime, replacement_messages, tools, request_id=replacement.request_id,
         preserve_input_surface=True, framefit5_preassembly=True,

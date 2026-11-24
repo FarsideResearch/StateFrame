@@ -489,7 +489,7 @@ def _emit_prepare_timing(journal, runtime, started, *, enabled):
 
 
 def _reprepare_on_source_change(function):
-    """Retry one unsent preparation when its source authority changes mid-build."""
+    """Reprepare an unsent request while each failed build sees new source revisions."""
     @functools.wraps(function)
     def wrapped(self, messages, *, uncapped, tools, provider_request=True,
                 request_host_text_preparer=None, **route_options):
@@ -507,12 +507,14 @@ def _reprepare_on_source_change(function):
                 request_host_text_preparer=request_host_text_preparer,
                 **route_options,
             )
-        # The first attempt may mutate its input lists. Preserve caller-owned
-        # material before it runs so a retry cannot inherit a stale projection.
-        fresh_messages = copy.deepcopy(messages)
-        fresh_uncapped = (fresh_messages if messages is uncapped
-                          else copy.deepcopy(uncapped))
-        fresh_tools = copy.deepcopy(tools)
+        # Preserve the caller's inputs; every retry starts from the same request.
+        original_messages = copy.deepcopy(messages)
+        messages_are_uncapped = messages is uncapped
+        original_uncapped = (original_messages if messages_are_uncapped
+                             else copy.deepcopy(uncapped))
+        original_tools = copy.deepcopy(tools)
+        missing_revision_set = object()
+        last_revision_set = missing_revision_set
         try:
             return function(
                 self, messages, uncapped=uncapped, tools=tools,
@@ -520,36 +522,59 @@ def _reprepare_on_source_change(function):
                 request_host_text_preparer=request_host_text_preparer,
                 **route_options,
             )
-        except FrameAllocationReplanNeeded:
+        except FrameAllocationReplanNeeded as initial_replan:
+            last_revision_set = getattr(
+                initial_replan, "_source_revision_set", missing_revision_set,
+            )
             emit_reason("fallback", "frame_allocation_replan", "stateframe_runtime",
                         "frame allocation replanned with fresh source",
-                        "first frame allocation needed replan; retrying once", level="WARN", journal=False)
-            pass
+                        "frame allocation needed replan; retrying with fresh source",
+                        level="WARN", journal=False)
         from kernel_request_reprepare import (
-            SourceRevisionReplanRefused, source_replan_preparation,
+            SourceRevisionReplanRefused, prepared_source_revision_set,
+            same_source_revision_report, source_replan_preparation,
         )
-        try:
-            with source_replan_preparation(self, getattr(self, "_active_capture", None)):
-                prepared = function(
-                    self, fresh_messages, uncapped=fresh_uncapped,
-                    tools=fresh_tools, provider_request=provider_request,
-                    request_host_text_preparer=request_host_text_preparer,
-                    **route_options,
+        if last_revision_set is missing_revision_set:
+            last_revision_set = prepared_source_revision_set(self)
+        while True:
+            attempt_messages = copy.deepcopy(original_messages)
+            attempt_uncapped = (attempt_messages if messages_are_uncapped
+                                else copy.deepcopy(original_uncapped))
+            attempt_tools = copy.deepcopy(original_tools)
+            try:
+                with source_replan_preparation(self, getattr(self, "_active_capture", None)):
+                    prepared = function(
+                        self, attempt_messages, uncapped=attempt_uncapped,
+                        tools=attempt_tools, provider_request=provider_request,
+                        request_host_text_preparer=request_host_text_preparer,
+                        **route_options,
+                    )
+                return prepared
+            except FrameAllocationReplanNeeded as repeated:
+                current_revision_set = getattr(
+                    repeated, "_source_revision_set", missing_revision_set,
                 )
-            capture = getattr(prepared, "capture", None)
-            if capture is not None:
-                capture._source_replan_attempted = True
-            return prepared
-        except FrameAllocationReplanNeeded as repeated:
-            emit_reason("refusal", "frame_allocation_replan_repeated", "stateframe_runtime",
-                        "frame allocation replan repeated after fresh source",
-                        "replan needed again after one retry; refusing the source revision",
-                        level="ERROR", journal=False)
-            raise SourceRevisionReplanRefused(
-                "source_revision_replan_exhausted") from repeated
-        except Exception as failure:
-            raise SourceRevisionReplanRefused(
-                "source_revision_replan_failed") from failure
+                if current_revision_set is missing_revision_set:
+                    current_revision_set = prepared_source_revision_set(self)
+                if same_source_revision_report(last_revision_set, current_revision_set):
+                    emit_reason(
+                        "refusal", "frame_allocation_replan_repeated", "stateframe_runtime",
+                        "frame allocation replan repeated without source progress",
+                        "the same source revision set was reported on consecutive preparations",
+                        level="ERROR", journal=False,
+                    )
+                    raise SourceRevisionReplanRefused(
+                        "source_revision_replan_exhausted") from repeated
+                last_revision_set = current_revision_set
+                emit_reason(
+                    "fallback", "frame_allocation_replan", "stateframe_runtime",
+                    "frame allocation replanned with fresh source",
+                    "a new source revision set needs another preparation",
+                    level="WARN", journal=False,
+                )
+            except Exception as failure:
+                raise SourceRevisionReplanRefused(
+                    "source_revision_replan_failed") from failure
 
     return wrapped
 
@@ -23050,7 +23075,7 @@ class StateFrameRuntime:
                  frozen_route_capture: object | None = None) -> PreparedRequest:
         _host_authorship.open_step(self, getattr(getattr(self, "owner", None), "current_step", 0))
         # Retain the caller's inputs before any host projection or source closure
-        # is frozen. A single unsent source replan can then run normal preparation
+        # is frozen. Each unsent source replan can then run normal preparation
         # against the current workspace instead of relabeling stale proof bytes.
         # Every re-entry into prepare (notice dedup, source replan) must keep a routed second
         # leg's forced role and frozen frame; unrouted requests carry none.
@@ -25606,7 +25631,16 @@ class StateFrameRuntime:
                     }
                     if framefit_on and getattr(capture, "request_budget_prepared", False):
                         from kernel_frame_source_snapshot import frame_source_snapshot
-                        source_contents = frame_source_snapshot(self, source_plan)
+                        from kernel_frame_optional_allocation import FrameAllocationReplanNeeded
+                        try:
+                            source_contents = frame_source_snapshot(self, source_plan)
+                        except FrameAllocationReplanNeeded as source_error:
+                            from kernel_request_reprepare import prepared_source_revision_set
+                            setattr(
+                                source_error, "_source_revision_set",
+                                prepared_source_revision_set(self, capture, source_plan),
+                            )
+                            raise
                     final_source_delivery = verify_final_source_delivery(
                         source_plan,
                         prepared,
@@ -25818,7 +25852,16 @@ class StateFrameRuntime:
                     capture._framefit5_pending_qualification = True
                 if allocation_requested:
                     from kernel_frame_source_snapshot import frame_source_snapshot
-                    source_contents = frame_source_snapshot(self, source_plan)
+                    from kernel_frame_optional_allocation import FrameAllocationReplanNeeded
+                    try:
+                        source_contents = frame_source_snapshot(self, source_plan)
+                    except FrameAllocationReplanNeeded as source_error:
+                        from kernel_request_reprepare import prepared_source_revision_set
+                        setattr(
+                            source_error, "_source_revision_set",
+                            prepared_source_revision_set(self, capture, source_plan),
+                        )
+                        raise
                 else:
                     # Source/budget interventions may be disabled. Keep the
                     # unallocated rendering contract without inventing a closure
