@@ -127,7 +127,11 @@ class LlamaSensor(Sensor):
                                      headers={"Content-Type": "application/json",
                                               **({"Authorization": f"Bearer {self.api_key}"}
                                                  if self.api_key else {})})
-        return json.loads(urllib.request.urlopen(req, timeout=self.timeout).read())
+        try:
+            from kernel_redirect_policy import provider_urlopen
+        except ImportError:
+            from stateframe.engine.kernel_redirect_policy import provider_urlopen
+        return json.loads(provider_urlopen(req, timeout=self.timeout).read())
 
     @staticmethod
     def _parse(content):

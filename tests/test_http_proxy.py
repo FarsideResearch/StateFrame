@@ -168,12 +168,25 @@ def test_engine_child_global_opener_ignores_proxy(monkeypatch, servers):
 def test_engine_child_installs_opener_after_environment():
     tree = ast.parse((ROOT / "src/stateframe/_child.py").read_text())
     main = next(node for node in tree.body
-                if isinstance(node, ast.FunctionDef) and node.name == "main")
-    calls = [node.value.func.id for node in main.body
-             if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
-             and isinstance(node.value.func, ast.Name)]
-    index = calls.index("install_environment")
-    assert calls[index + 1] == "_install_direct_opener"
+                if isinstance(node, ast.FunctionDef) and node.name == "_main")
+    for index, statement in enumerate(main.body):
+        if not isinstance(statement, ast.If):
+            continue
+        installs_environment = any(
+            isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id == "install_environment"
+            for branch in (statement.body, statement.orelse) for root in branch
+            for node in ast.walk(root)
+        )
+        if not installs_environment:
+            continue
+        assert index + 1 < len(main.body)
+        following = main.body[index + 1]
+        assert (isinstance(following, ast.Expr) and isinstance(following.value, ast.Call)
+                and isinstance(following.value.func, ast.Name)
+                and following.value.func.id == "_install_direct_opener")
+        return
+    raise AssertionError("_main must select install_environment in an if/else")
 
 
 def _urllib_request(node, name):

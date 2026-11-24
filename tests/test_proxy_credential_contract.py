@@ -28,6 +28,7 @@ EXPECTED_SITES = {
     ("endpoint.py", "provider_epoch", "OpenerDirector"),
     ("engine/kernel_bounded_http.py", "_child", "helper"),
     ("engine/kernel_plain_http.py", "opener", "helper"),
+    (HELPER, "provider_urlopen", "helper"),
     (HELPER, "build_credential_scoped_opener", "build_opener"),
     (HELPER, "build_credential_scoped_opener", "ProxyHandler"),
     (HELPER, "build_credential_scoped_opener", "_ProxyHeaderScrubber"),
@@ -36,7 +37,8 @@ EXPECTED_SITES = {
     (LEGACY, "_build_tokenize_opener", "ProxyHandler"),
 }
 EXPECTED_MODES = {
-    site: ("environment" if site[2] == "_CredentialScopedProxyHandler" else "direct")
+    site: ("forwarded" if site[1] == "provider_urlopen" else
+           "environment" if site[2] == "_CredentialScopedProxyHandler" else "direct")
     for site in EXPECTED_SITES
 }
 
@@ -132,7 +134,12 @@ def _calls(path: str, source: str) -> tuple[list[tuple[str, str, str]], list[str
                     mode = next((keyword.value.value for keyword in node.keywords
                                  if keyword.arg == "proxy_mode"
                                  and isinstance(keyword.value, ast.Constant)), None)
-                    if mode != EXPECTED_MODES.get(site):
+                    forwarded = next((keyword.value for keyword in node.keywords
+                                      if keyword.arg == "proxy_mode"), None)
+                    valid_forward = (EXPECTED_MODES.get(site) == "forwarded"
+                                     and isinstance(forwarded, ast.Name)
+                                     and forwarded.id == "proxy_mode")
+                    if not valid_forward and mode != EXPECTED_MODES.get(site):
                         violations.append(f"{path}:{node.lineno}: wrong proxy mode {mode!r}")
                 if kind == "ProxyHandler":
                     if (len(node.args) != 1 or node.keywords
@@ -344,6 +351,36 @@ def test_environment_mode_uses_proxy_and_honors_no_proxy(monkeypatch) -> None:
 
 
 @pytest.mark.host_sandbox
+def test_environment_proxy_keeps_credentials_on_same_origin_redirect(monkeypatch) -> None:
+    with _Servers() as servers:
+        _proxy_environment(monkeypatch, servers.proxy_url)
+        origin_url = "http://origin.example.test/start"
+        opener = build_credential_scoped_opener(
+            proxy_mode="environment", credential_origin=origin_url,
+        )
+
+        class RedirectOnce(_Server):
+            def do_GET(self) -> None:  # noqa: N802
+                self.server.redirect = not self.server.records
+                self.server.redirect_target = "http://origin.example.test/final"
+                super().do_GET()
+
+        servers.proxy.RequestHandlerClass = RedirectOnce
+        request = urllib.request.Request(origin_url, headers={
+            "Authorization": "Bearer origin-secret", "Cookie": "session=origin-secret",
+            "X-Api-Key": "origin-secret",
+        })
+        with opener.open(request, timeout=scaled(5)) as response:
+            assert response.read() == b"ok"
+        assert len(servers.proxy.records) == 2
+        for _url, headers in servers.proxy.records:
+            assert headers["Authorization"] == "Bearer origin-secret"
+            assert headers["Cookie"] == "session=origin-secret"
+            assert headers["X-Api-Key"] == "origin-secret"
+            assert "Proxy-Authorization" in headers
+
+
+@pytest.mark.host_sandbox
 def test_direct_scrubber_preserves_default_request_headers(monkeypatch) -> None:
     with _Servers() as servers:
         _proxy_environment(monkeypatch, servers.proxy_url)
@@ -374,7 +411,9 @@ def test_direct_mode_scrubs_caller_proxy_authorization(monkeypatch) -> None:
 
 
 @pytest.mark.host_sandbox
-def test_proxy_credentials_and_origin_secrets_stop_after_cross_origin_redirect(monkeypatch) -> None:
+def test_proxy_credentials_and_origin_secrets_stop_before_cross_origin_followup(monkeypatch) -> None:
+    from stateframe.engine.kernel_redirect_policy import ProviderRedirectRefused
+
     with _Servers() as servers:
         _proxy_environment(monkeypatch, servers.proxy_url)
         origin_url = "http://origin.example.test/start"
@@ -385,30 +424,27 @@ def test_proxy_credentials_and_origin_secrets_stop_after_cross_origin_redirect(m
             "Authorization": "Bearer origin-secret", "Cookie": "session=origin-secret",
             "X-Api-Key": "origin-secret",
         })
-        # Only the first proxy response redirects; the second request reaches the same proxy.
+        # The proxy redirects once; the cross-origin follow-up is refused before another proxy request.
         class RedirectOnce(_Server):
             def do_GET(self) -> None:  # noqa: N802
-                if not self.server.records:
-                    self.server.redirect = True
-                else:
-                    self.server.redirect = False
+                self.server.redirect = not self.server.records
                 super().do_GET()
         servers.proxy.RequestHandlerClass = RedirectOnce
-        with opener.open(request, timeout=scaled(5)) as response:
-            assert response.read() == b"ok"
-        first, second = servers.proxy.records
+        with pytest.raises(ProviderRedirectRefused, match="target host other.example.test"):
+            opener.open(request, timeout=scaled(5))
+        assert len(servers.proxy.records) == 1
+        first = servers.proxy.records[0]
         expected = "Basic " + base64.b64encode(b"user:secret").decode("ascii")
         assert first[1]["Proxy-Authorization"] == expected
         assert first[1]["Authorization"] == "Bearer origin-secret"
-        assert second[0] == "http://other.example.test/final"
-        _assert_proxy_authorization_absent(second[1])
-        for name in ("Proxy-Authorization", "Authorization", "Cookie", "X-Api-Key"):
-            assert name not in second[1]
+        for name, value in (("Cookie", "session=origin-secret"), ("X-Api-Key", "origin-secret")):
+            assert first[1][name] == value
 
 
 @pytest.mark.host_sandbox
-def test_proxy_reinjection_control_after_redirect_stripping(monkeypatch) -> None:
+def test_proxy_reinjection_control_cannot_allow_cross_origin_followup(monkeypatch) -> None:
     from stateframe.engine import kernel_redirect_policy
+    from stateframe.engine.kernel_redirect_policy import ProviderRedirectRefused
 
     monkeypatch.setattr(kernel_redirect_policy, "_proxy_without_credentials", lambda proxy: proxy)
     with _Servers() as servers:
@@ -424,13 +460,10 @@ def test_proxy_reinjection_control_after_redirect_stripping(monkeypatch) -> None
                 super().do_GET()
 
         servers.proxy.RequestHandlerClass = RedirectOnce
-        with opener.open(origin_url, timeout=scaled(5)) as response:
-            assert response.read() == b"ok"
-        _first, second = servers.proxy.records
-        assert second[0] == "http://other.example.test/final"
-        assert "Proxy-Authorization" in second[1]
-        with pytest.raises(AssertionError, match="Proxy-Authorization"):
-            _assert_proxy_authorization_absent(second[1])
+        with pytest.raises(ProviderRedirectRefused):
+            opener.open(origin_url, timeout=scaled(5))
+        assert len(servers.proxy.records) == 1
+        assert "Proxy-Authorization" in servers.proxy.records[0][1]
 
 
 @pytest.mark.host_sandbox

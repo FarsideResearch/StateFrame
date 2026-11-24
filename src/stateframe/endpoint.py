@@ -356,6 +356,7 @@ class Endpoint:
         connection fails immediately.
         """
         limit = _max_json_bytes()
+        from stateframe.engine.kernel_redirect_policy import is_provider_redirect_refused
         for attempt in (1, 2):
             request = urllib.request.Request(url, headers=self._headers(), method="GET")
             # The socket timeout bounds each wait, not the whole read: a server that trickles bytes
@@ -378,6 +379,9 @@ class Endpoint:
                                     time.monotonic() - (deadline - self.timeout_s))
                 if attempt == 2 or not timed_out or isinstance(error, urllib.error.HTTPError):
                     raise
+            except ValueError as error:
+                if is_provider_redirect_refused(error): raise EndpointError(str(error)) from None
+                raise
         raise AssertionError("unreachable")
 
     def get_json(self, path: str) -> object:

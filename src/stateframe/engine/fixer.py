@@ -3189,12 +3189,13 @@ def _post(body, url, timeout=600):
         body, profile=reasoning_profile(), dialect=capabilities.dialect,
     )
     req = urllib.request.Request(url, data=json.dumps(body).encode(), headers=headers)
+    from kernel_redirect_policy import is_provider_redirect_refused, provider_urlopen
     last = None
     for attempt in range(1, _TRANSPORT_RETRIES + 1):
         try:
-            return json.loads(urllib.request.urlopen(req, timeout=timeout).read())
+            return json.loads(provider_urlopen(req, timeout=timeout).read())
         except Exception as exc:                       # noqa: BLE001 - re-raised below
-            if not _is_transport_blip(exc) or attempt == _TRANSPORT_RETRIES:
+            if is_provider_redirect_refused(exc) or not _is_transport_blip(exc) or attempt == _TRANSPORT_RETRIES:
                 raise
             last = exc
             time.sleep(_TRANSPORT_BACKOFF * attempt)

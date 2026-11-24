@@ -172,7 +172,7 @@ def test_explicit_different_origin_tokenizer_does_not_receive_generation_key(mon
         generation_server.server_close()
 
 
-def test_same_origin_redirect_strips_key_before_cross_origin_tokenizer(monkeypatch, fallback_events):
+def test_cross_origin_tokenizer_redirect_is_refused_before_external_contact(monkeypatch, fallback_events):
     import ssl
 
     external_authorization = []
@@ -247,17 +247,21 @@ def test_same_origin_redirect_strips_key_before_cross_origin_tokenizer(monkeypat
                 if isinstance(handler, kernel_request_diet._TokenizeHTTPSHandler)
             )
             assert https_handler._context_provider() is cached_context
-            assert kernel_request_diet._http_tokenize(
-                content,
-                redirect_base + "/tokenize",
-                auth_key=_KEY,
-                generation_endpoint=generation_endpoint,
-                opener=opener,
-            ) == [1]
+            with pytest.raises(Exception) as caught:
+                kernel_request_diet._http_tokenize(
+                    content,
+                    redirect_base + "/tokenize",
+                    auth_key=_KEY,
+                    generation_endpoint=generation_endpoint,
+                    opener=opener,
+                )
+            assert type(caught.value).__name__ == "ProviderRedirectRefused"
+            assert _KEY not in str(caught.value)
+            assert "tokenize" not in str(caught.value)
 
         assert contexts == 1
         assert redirect_authorization == [f"Bearer {_KEY}", f"Bearer {_KEY}"]
-        assert external_authorization == [None, None]
+        assert external_authorization == []
         assert not fallback_events
     finally:
         redirect_server.shutdown()
