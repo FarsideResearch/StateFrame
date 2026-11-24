@@ -87,13 +87,13 @@ def test_prune_objects_keeps_linked_and_drops_orphans_and_temporaries(tmp_path):
     root = tmp_path / "checkpoints"
     objects = root / checkpoint.OBJECT_DIR
     objects.mkdir(parents=True)
-    kept, orphan = objects / "kept", objects / "orphan"
+    kept, orphan = objects / ("a" * 64 + "-600"), objects / ("b" * 64 + "-644")
     kept.write_text("k")
     orphan.write_text("o")
     os.link(kept, root / "snapshot-link")
     (objects / ".123-1.tmp").write_text("partial")
     checkpoint._prune_objects(root)
-    assert sorted(p.name for p in objects.iterdir()) == ["kept"]
+    assert sorted(p.name for p in objects.iterdir()) == [kept.name]
 
 
 def test_save_point_saves_at_most_once_per_send(tmp_path, monkeypatch):

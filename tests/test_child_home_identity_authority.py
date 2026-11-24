@@ -1,6 +1,8 @@
 """Environment bootstrap must preserve the runner's pin without trusting the run spec."""
 from __future__ import annotations
 
+import errno
+import time
 import json
 import os
 from pathlib import Path
@@ -214,6 +216,45 @@ def test_live_effective_home_switch_refuses_save_without_capturing_new_key(
         assert all(secret not in path.read_bytes() for path in root.rglob("*") if path.is_file())
 
 
+
+@pytest.mark.parametrize("links", [True, False])
+@pytest.mark.parametrize("background", [False, True])
+def test_refused_save_keeps_only_bytes_an_accepted_checkpoint_holds(
+        child_identity, monkeypatch: pytest.MonkeyPatch, links: bool, background: bool) -> None:
+    _home, run, _spec, _pin = child_identity
+    _reach_identity_check(run, monkeypatch)
+    checkpoint.verify_stateframe_home_identity(run)
+    _prepare_checkpoint_save(monkeypatch)
+    if not links:
+        def no_link(*_args, **_kwargs):
+            raise PermissionError(errno.EPERM, "no links here")
+        monkeypatch.setattr(checkpoint.os, "link", no_link)
+    (run / "kept.txt").write_bytes(b"accepted bytes")
+    saved = checkpoint.save(None, 1, run)
+    root = run / "checkpoints"
+    (run / "late.txt").write_bytes(b"refused bytes")
+    original = checkpoint._fsync_snapshot
+
+    def refuse(*args, **kwargs):
+        original(*args, **kwargs)
+        raise checkpoint.CheckpointError("STATEFRAME_HOME_IDENTITY_CHANGED")
+
+    monkeypatch.setattr(checkpoint, "_fsync_snapshot", refuse)
+    if background:
+        monkeypatch.setattr(checkpoint, "_note_failure", lambda *_args, **_kwargs: None)
+        checkpoint.save(None, 2, run, background=True)
+        while not checkpoint._reap():
+            time.sleep(0.05)
+    else:
+        with pytest.raises(checkpoint.CheckpointError, match="STATEFRAME_HOME_IDENTITY_CHANGED"):
+            checkpoint.save(None, 2, run)
+    files = [path.read_bytes() for path in root.rglob("*") if path.is_file()]
+    assert all(b"refused bytes" not in data for data in files)
+    assert any(b"accepted bytes" in data for data in files)
+    assert checkpoint.validate(saved)["step"] == 1
+    monkeypatch.setattr(checkpoint, "_fsync_snapshot", original)
+    assert checkpoint.validate(checkpoint.save(None, 3, run))["step"] == 3
+
 @pytest.mark.parametrize("absolute_override", [False, True])
 def test_home_change_only_refused_when_it_changes_effective_home(
         child_identity, monkeypatch: pytest.MonkeyPatch, absolute_override: bool) -> None:
@@ -262,3 +303,92 @@ def test_child_startup_refuses_effective_home_different_from_runner_pin(
     assert _child.main(["_child.py", str(run)]) == 1
     assert "STATEFRAME_HOME_IDENTITY_CHANGED" in capsys.readouterr().out
     assert not (run / "checkpoints").exists()
+
+
+@pytest.mark.parametrize("background", [False, True])
+@pytest.mark.parametrize("kind", ["symlink", "directory"])
+def test_refused_save_leaves_files_the_store_did_not_write(
+        child_identity, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, kind: str, background: bool) -> None:
+    _home, run, _spec, _pin = child_identity
+    _reach_identity_check(run, monkeypatch)
+    checkpoint.verify_stateframe_home_identity(run)
+    _prepare_checkpoint_save(monkeypatch)
+    folder = run / "checkpoints" / checkpoint.OBJECT_DIR
+    folder.parent.mkdir(exist_ok=True)
+    target = tmp_path / "elsewhere" if kind == "symlink" else folder
+    target.mkdir()
+    if kind == "symlink":
+        folder.symlink_to(target, target_is_directory=True)
+    kept = [target / "notes.tmp", target / "notes.txt"]
+    if kind == "symlink":
+        kept.append(target / ("a" * 64 + "-600"))
+    for path in kept:
+        path.write_bytes(b"not ours")
+    (run / "late.txt").write_bytes(b"refused bytes")
+
+    def refuse(*_args, **_kwargs):
+        raise checkpoint.CheckpointError("STATEFRAME_HOME_IDENTITY_CHANGED")
+
+    monkeypatch.setattr(checkpoint, "_fsync_snapshot", refuse)
+    monkeypatch.setattr(checkpoint, "_note_failure", lambda *_args, **_kwargs: None)
+    try:
+        checkpoint.save(None, 1, run, background=background)
+    except checkpoint.CheckpointError:
+        pass
+    while background and not checkpoint._reap():
+        time.sleep(0.05)
+    assert all(path.read_bytes() == b"not ours" for path in kept)
+    assert {path.name for path in target.iterdir()} == {path.name for path in kept}
+
+
+@pytest.mark.parametrize("links", ["on", "off", "other-device"])
+@pytest.mark.parametrize("background", [False, True])
+def test_refused_save_removes_published_pool_files(
+        child_identity, monkeypatch: pytest.MonkeyPatch, links: str, background: bool) -> None:
+    home, run, _spec, _pin = child_identity
+    _reach_identity_check(run, monkeypatch)
+    checkpoint.verify_stateframe_home_identity(run)
+    _prepare_checkpoint_save(monkeypatch)
+    (run / "kept.txt").write_bytes(b"accepted bytes")
+    kept = run / "worker" / "candidates" / "kept.txt"
+    kept.parent.mkdir(parents=True)
+    kept.write_bytes(b"accepted pool bytes")
+    accepted = checkpoint.save(None, 1, run)
+    selected = home.parent / "replacement-home"
+    selected.mkdir()
+    key = bytes(range(32))
+    for path in (selected / "identity.key", kept.parent / "identity.key"):
+        path.write_bytes(key)
+        path.chmod(0o600)
+    if links != "on":
+        def no_link(*_args, **_kwargs):
+            raise PermissionError(errno.EPERM, "no links here")
+        monkeypatch.setattr(checkpoint.os, "link", no_link)
+    if links == "other-device":
+        rename = os.rename
+
+        def no_move(source, target, *args, **kwargs):
+            if checkpoint.POOL_DIR in Path(target).parts:
+                raise OSError(errno.EXDEV, "other device")
+            return rename(source, target, *args, **kwargs)
+        monkeypatch.setattr(checkpoint.os, "rename", no_move)
+    publish = checkpoint._publish_staged_artifacts
+
+    def publish_then_switch(root: Path, temporary: Path) -> None:
+        publish(root, temporary)
+        monkeypatch.setenv("STATEFRAME_HOME", str(selected))
+
+    monkeypatch.setattr(checkpoint, "_publish_staged_artifacts", publish_then_switch)
+    if background:
+        monkeypatch.setattr(checkpoint, "_note_failure", lambda *_args, **_kwargs: None)
+        checkpoint.save(None, 2, run, background=True)
+        while not checkpoint._reap():
+            time.sleep(0.05)
+    else:
+        with pytest.raises(checkpoint.CheckpointError, match="STATEFRAME_HOME_IDENTITY_CHANGED"):
+            checkpoint.save(None, 2, run)
+    files = [path for path in (run / "checkpoints").rglob("*") if path.is_file()]
+    assert [path for path in files if key in path.read_bytes()] == []
+    assert any(b"accepted pool bytes" in path.read_bytes() for path in files)
+    assert checkpoint.latest(run) == accepted
+    assert checkpoint.validate(accepted)["step"] == 1

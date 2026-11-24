@@ -149,7 +149,7 @@
   "kernel_check_receipts.py": "6a24fc8c3af6164240acbccf02a5a1ea972ca609ba7000f0d54b980bfd4a72e7",
   "kernel_check_truth_adapter.py": "1f58a3b3f3bfba521a8411a4b08ce289b756716d56e82c23855d3493e70ced38",
   "kernel_check_watchdog.py": "2ae364b47e56447edd78e044bb1e0de918fd148c24d783f0f71edf2a0bd504ae",
-  "kernel_checkpoint.py": "11648320e2b8ef5a7e2d729a136d9dc7b43f61124e18684c56a7dbf70176f9bc",
+  "kernel_checkpoint.py": "277cd18c1db1f6fed0f9d9979014492f4f2f53f77841e79c6e18e7417b6d1460",
   "kernel_claim_grounding.py": "422dc28784c8fb6ee5091e499d1b1455f9db6f502f83b2825e2bcf56f9579d16",
   "kernel_clause_discriminator.py": "91f384d15e8a06d5b7282a04e6b09ae79033a6d9b562454d7df179359bababd8",
   "kernel_clause_review.py": "bcbe5c364178503f6eebe09ca96787dfbd6017017ecfc4d3afb14ad2208f23c6",

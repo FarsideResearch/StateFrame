@@ -3275,19 +3275,32 @@ def _copy_pooled_fallback(source: Path, target: Path) -> None:
         raise CheckpointError("checkpoint artifact identity conflict")
 
 
+_OBJECT_NAME = re.compile(r"[0-9a-f]{64}-[0-7]+|\.[0-9]+-[^/]*\.tmp")
+
+
 def _prune_objects(root: Path) -> None:
-    """Drop objects no checkpoint links any more, and temporaries a killed writer left behind."""
-    folder = root / OBJECT_DIR
+    """Drop objects no checkpoint links any more, and temporaries a killed writer left behind.
+
+    Only names this store writes, in the store's own folder: a replaced folder is never followed.
+    """
     try:
-        entries = list(os.scandir(folder))
+        folder = os.open(root / OBJECT_DIR, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except OSError:
         return
-    for entry in entries:
-        try:
-            if entry.name.endswith(".tmp") or entry.stat(follow_symlinks=False).st_nlink <= 1:
-                os.unlink(entry.path)
-        except OSError:
-            pass
+    try:
+        for name in os.listdir(folder):
+            if _OBJECT_NAME.fullmatch(name) is None:
+                continue
+            try:
+                info = os.stat(name, dir_fd=folder, follow_symlinks=False)
+                if stat.S_ISREG(info.st_mode) and (name.endswith(".tmp") or info.st_nlink <= 1):
+                    os.unlink(name, dir_fd=folder)
+            except OSError:
+                pass
+    except (OSError, NotImplementedError):
+        pass
+    finally:
+        os.close(folder)
 
 
 def _sends(run_dir: Path) -> int:
@@ -3391,14 +3404,14 @@ def _artifact_path(root: Path, relative: str) -> Path:
     return root.joinpath(*parts)
 
 
-def _write_artifact_transaction(tmp: Path, artifacts: list[str]) -> None:
+def _write_artifact_transaction(tmp: Path, artifacts: list[str], placed: frozenset[str] | set[str] = frozenset()) -> None:
+    """Record the files this save owns; ``placed`` ones already left staging for their shared place."""
     marker = tmp / ARTIFACT_TRANSACTION_FILE
     temporary = tmp / f"{ARTIFACT_TRANSACTION_FILE}.tmp"
     staged_root = tmp / ARTIFACT_STAGE_DIR
     entries = []
     for relative in sorted(set(artifacts)):
-        source = _artifact_path(staged_root, relative)
-        info = source.lstat()
+        info = _artifact_path(tmp.parent if relative in placed else staged_root, relative).lstat()
         if not stat.S_ISREG(info.st_mode):
             raise CheckpointError("checkpoint artifact staging contains a non-file")
         entries.append({"path": relative, "device": info.st_dev, "inode": info.st_ino})
@@ -3452,6 +3465,7 @@ def _publish_staged_artifacts(root: Path, tmp: Path) -> None:
     if owned:
         _write_artifact_transaction(tmp, owned)
     owned_set = set(owned)
+    placed: set[str] = set()
     published_dirs: set[Path] = set()
     published_files: list[tuple[Path, tuple[int, str]]] = []
     for relative, source in staged_files:
@@ -3474,11 +3488,26 @@ def _publish_staged_artifacts(root: Path, tmp: Path) -> None:
                 raise CheckpointError("checkpoint artifact identity conflict")
             # A target created after the preflight is not owned by this transaction.
             owned_set.remove(relative)
-            _write_artifact_transaction(tmp, sorted(owned_set))
+            _write_artifact_transaction(tmp, sorted(owned_set), placed)
         except OSError as error:
             if error.errno not in LINK_FALLBACK_ERRNOS:
                 raise
-            _copy_pooled_fallback(source, target)
+            if os.path.lexists(target):
+                raise CheckpointError("checkpoint artifact identity conflict") from error
+            os.chmod(source, 0o444)
+            try:
+                os.rename(source, target)  # keeps the recorded inode, so a refused save can remove it
+                placed.add(relative)
+            except OSError as moved:
+                if moved.errno not in LINK_FALLBACK_ERRNOS:
+                    raise
+                try:
+                    _copy_pooled_fallback(source, target)
+                    placed.add(relative)
+                    _write_artifact_transaction(tmp, sorted(owned_set), placed)
+                except BaseException:
+                    target.unlink(missing_ok=True)
+                    raise
             _record(root.parent, event="link_fallback", target=relative)
         published_dirs.add(target.parent)
 
@@ -3511,7 +3540,7 @@ def _checkpoint_artifact_references(root: Path) -> set[str] | None:
     checkpoints = []
     try:
         for path in root.iterdir():
-            if path.name.startswith(".") or path.name in {POOL_DIR, CACHE_DIR}:
+            if path.name.startswith(".") or path.name in {POOL_DIR, CACHE_DIR, OBJECT_DIR}:
                 continue
             info = path.lstat()
             if stat.S_ISLNK(info.st_mode):
@@ -3703,6 +3732,7 @@ def save(frame, step: int, run_dir: Path, *, background: bool = False) -> Path:
         except BaseException:
             if _STATE.get("child_tmp") != tmp:
                 _cleanup_checkpoint_transaction(root, tmp)
+                _prune_objects(root)  # a refused save leaves no run-file bytes behind
             raise
         finally:
             _SAVE.clear()
@@ -3879,6 +3909,8 @@ def _save_into(payload, ctx, step, run_dir, root, final, tmp, clocks, started, c
     _STATE["next_seq"] = seq + 1
     home, home_subtree, excluded = _snapshot_home_exclusions(run_dir)
     _SAVE["snapshot_exclusions"] = (home, home_subtree, excluded)
+    if (root / OBJECT_DIR).is_symlink():
+        raise CheckpointError("checkpoint object store is a symlink")
     _SAVE["snapshot_objects"] = root / OBJECT_DIR
     entries = sorted(
         path.name for path in run_dir.iterdir()
@@ -4107,6 +4139,7 @@ def _reap() -> bool:
             with (tmp.parent / ".checkpoint.lock").open("a+b") as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX)
                 _cleanup_checkpoint_transaction(tmp.parent, tmp)
+                _prune_objects(tmp.parent)  # a refused save leaves no run-file bytes behind
             _sweep_stale(tmp.parent)
         _SCANS.clear()  # the writer may have failed on a stale scan: rescan at the next boundary
         reason = _writer_failure_reason(
@@ -4288,6 +4321,7 @@ def _fork_writer(run_dir: Path, step: int, final: Path, write, tmp: Path,
             code = 0
         except BaseException as error:  # noqa: BLE001 - recorded, then exit
             _cleanup_checkpoint_transaction(tmp.parent, tmp)
+            _prune_objects(tmp.parent)  # a refused save leaves no run-file bytes behind
             reason = _failure_reason(error)
             if (diagnostic_payload is not None and not _serialization_failure_fields(error)
                     and (isinstance(error, pickle.PicklingError)

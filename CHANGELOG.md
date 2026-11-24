@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Security: a refused checkpoint save no longer leaves copies of run files, such as a new home key found in the run directory, in the checkpoint store. A checkpoint object folder that is a symlink is refused.
+
 ## 0.8.31 (2026-11-24)
 
 - Fixed: final source-delivery revalidation retains certified capture witnesses bound to the request, source plan, source bytes, and certificate.
