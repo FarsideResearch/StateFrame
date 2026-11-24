@@ -2489,6 +2489,71 @@
       "baseline": null,
       "witness_schema": "assertion_match",
       "witness_assertion": "assert not pinned_show.findall(source)"
+    },
+    {
+      "scenario_id": "otel_test_off_parity_test_off_imports_are_baseline",
+      "nodeid": "tests/otel/test_off_parity.py::test_off_imports_are_baseline",
+      "item_nodeids": [
+        "tests/otel/test_off_parity.py::test_off_imports_are_baseline"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert product_import.stdout.strip() == \"[]\""
+    },
+    {
+      "scenario_id": "otel_test_off_parity_test_native_product_tree_matches_feature_parent",
+      "nodeid": "tests/otel/test_off_parity.py::test_native_product_tree_matches_feature_parent",
+      "item_nodeids": [
+        "tests/otel/test_off_parity.py::test_native_product_tree_matches_feature_parent"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert not native_changes, native_changes.decode(errors='replace')"
+    },
+    {
+      "scenario_id": "otel_test_off_parity_test_native_raw_requests_journals_receipts",
+      "nodeid": "tests/otel/test_off_parity.py::test_native_raw_requests_journals_receipts",
+      "item_nodeids": [
+        "tests/otel/test_off_parity.py::test_native_raw_requests_journals_receipts[true]",
+        "tests/otel/test_off_parity.py::test_native_raw_requests_journals_receipts[false]"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert actual == expected, \"native requests, journals and receipts differ\""
+    },
+    {
+      "scenario_id": "otel_test_off_parity_test_on_uuid_stream_and_checkpoint_fingerprint_unchanged",
+      "nodeid": "tests/otel/test_off_parity.py::test_on_uuid_stream_and_checkpoint_fingerprint_unchanged",
+      "item_nodeids": [
+        "tests/otel/test_off_parity.py::test_on_uuid_stream_and_checkpoint_fingerprint_unchanged"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert hashlib.sha256(feature).digest() == hashlib.sha256(original).digest(), name"
     }
   ],
   "optional_dependencies": [

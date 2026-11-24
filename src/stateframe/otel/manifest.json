@@ -1,0 +1,24 @@
+{
+  "files": {
+    "__init__.py": "ef726ae4636e7dcc6c9943623a009ed7afaf5fec42f9476b07c6d1ce2c806f52",
+    "accounting.py": "0fe68b3829ce2e46c9eb7b8c2b1ddf8dc0969176f9e18edb8bcc140d6e013bd6",
+    "authority.py": "4e5648e7b09e015b4cc9ff58e7b62cdac3c1aa0dbee4e231b2d6ea37126b0d17",
+    "cli.py": "442365529c94cd138fb31be6f54c9473b0838780bc2d28d05078b9ef94d93b3d",
+    "codec.py": "2cd5761eb805ac9a0828113e5bf4515bef151d32474f788663a8f9d09cf8d338",
+    "companion.py": "7a5c710dda8af0956987e890dc656a73940945ca9531c77820ae02b7ef8c0b16",
+    "config.py": "7b27fa518f42acd2297e204dab9f046ca23c77d27abdcc5f2165b67a90f43e0a",
+    "identity.py": "a09f69b6c77653a6143b7f1766127d5bae2cb598bdf9b081e9a07361e11452ec",
+    "levels.py": "7dfca14f27064eb0195b47cd8d70594cdb8a50a0846d91d9a83729d4c9a17333",
+    "operations.py": "3ef5c922d0366cc8b472de41bd20c4fe185c1cf41429b1339506d6e87ecd21a4",
+    "projection.py": "39fa2bd8e589bf3a15c00976615239873906bdabbf91e9d9c31a83421b043588",
+    "schema.py": "a8851af7d50c28ea0772f1f653ad5f1ca7b87bb0b3ddac5e8ac33c8990e6af71",
+    "sources.py": "10dfe3e97228e73b7497a41d7ee214cbd898d5781671d268702eaa37327f7412",
+    "store.py": "eeb437d7435a538462c3694f3b9eb1445c643a599e4e484a70cfb61e55bbd5cf",
+    "switch-registry.json": "acb7927b5af75133a575f315e60862b75326fbb232e5537c92f80a3276464709",
+    "transport.py": "b2040db1a3e5bd3c50e3138bc96685b0f270ed2d17b3e9289ff8f4392ea7a0d9",
+    "types.py": "49df63a54af92f1b16296d4b80729f3c67993c78b61bffa7eb9f9033390f965e"
+  },
+  "schema": "stateframe-otel-manifest/1",
+  "source_baseline": "package-version",
+  "version": 1
+}

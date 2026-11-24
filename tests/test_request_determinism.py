@@ -331,6 +331,9 @@ RANDOM_CALL_ALLOWLIST = {
             1, "Fallback suffix for the backup directory of a replaced powerup when its tree cannot be hashed; host-only."
         ),
     },
+    "src/stateframe/otel/companion.py": {
+        "os.urandom": (1, "Creates the install identity key for local export storage, outside model requests."),
+    },
     "src/stateframe/engine/prompt_ledger.py": {
         "uuid.uuid4": (
             2, "Adds entropy to offline prompt-log row IDs only; those IDs do not alter the captured request body."

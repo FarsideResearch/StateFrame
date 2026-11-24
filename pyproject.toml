@@ -39,3 +39,4 @@ repomap = [  # all MIT
 
 [project.scripts]
 stateframe = "stateframe.cli:main"
+stateframe-otel = "stateframe.otel.cli:main"

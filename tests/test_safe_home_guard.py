@@ -177,4 +177,8 @@ def test_home_call_scan_detects_a_planted_violation():
 
 def test_passwd_uid_lookup_is_confined_to_safe_home():
     sites = list(_source_tree_scan().passwd_uid_calls)
-    assert sites == [("src/stateframe/engine/kernel_safe_paths.py", "safe_home", "pwd.getpwuid")]
+    # The exporter reads the account database for group membership only, never for a home directory.
+    assert sites == [
+        ("src/stateframe/engine/kernel_safe_paths.py", "safe_home", "pwd.getpwuid"),
+        ("src/stateframe/otel/authority.py", "_private_primary_group", "pwd.getpwuid"),
+    ]

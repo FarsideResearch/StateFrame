@@ -163,6 +163,10 @@ EXPECTED_ENTRIES = (
     ("tests/test_view_ladder_integration.py::test_frozen_selection_re_renders_byte_identically_across_requests", "all"),
     ("tests/test_wave4_probe_provider.py::test_cross_process_static_work_and_wire_parity", "linux"),
     ("tests/test_working_set_off_parity_base.py::test_off_parity_direct_callers_share_trace_results", "all"),
+    ("tests/otel/test_off_parity.py::test_off_imports_are_baseline", "all"),
+    ("tests/otel/test_off_parity.py::test_native_product_tree_matches_feature_parent", "all"),
+    ("tests/otel/test_off_parity.py::test_native_raw_requests_journals_receipts", "all"),
+    ("tests/otel/test_off_parity.py::test_on_uuid_stream_and_checkpoint_fingerprint_unchanged", "all"),
     ("tests/test_must_run_gate.py::test_must_run_manifest_matches_reviewed_inventory", "all"),
     ("tests/test_must_run_gate.py::test_planted_controls_reject_unqualified_runs", "all"),
     ("tests/test_must_run_gate.py::test_optional_dependency_present_absent_and_touch_controls", "all"),
@@ -532,6 +536,14 @@ EXPECTED_ASSERTIONS = {
         "assert len(set(provider.wire)) == 1",
     "tests/test_working_set_off_parity_base.py::test_off_parity_direct_callers_share_trace_results":
         "assert calls == [reference, current]",
+    "tests/otel/test_off_parity.py::test_off_imports_are_baseline":
+        'assert product_import.stdout.strip() == "[]"',
+    "tests/otel/test_off_parity.py::test_native_product_tree_matches_feature_parent":
+        "assert not native_changes, native_changes.decode(errors='replace')",
+    "tests/otel/test_off_parity.py::test_native_raw_requests_journals_receipts":
+        'assert actual == expected, "native requests, journals and receipts differ"',
+    "tests/otel/test_off_parity.py::test_on_uuid_stream_and_checkpoint_fingerprint_unchanged":
+        "assert hashlib.sha256(feature).digest() == hashlib.sha256(original).digest(), name",
     "tests/test_must_run_gate.py::test_must_run_manifest_matches_reviewed_inventory":
         "assert expected_cells and len(expected_cells) == len(actual_cells) and cell_violated == 0",
     "tests/test_must_run_gate.py::test_planted_controls_reject_unqualified_runs":
@@ -589,6 +601,7 @@ PARAMETERIZED_ITEM_SUFFIXES = {
         ("rerender", "headroom",),
     "tests/test_unit_planner_v2.py::test_switch_off_is_byte_identical_to_v059_planner":
         ("False-sha256:61e7d39e826af02cbf7538fec1e78462dff90598790e229e7857814dd9e2a9e5-8a0c367becbb11333fc2e739a86110d2c3927fa5fe583352f2bb46e2473e82ac", "True-sha256:9b69a57efe8eb515474414d23757c0383e9e2688aef83a1baca4050adc875847-24dfb3237af7eb13e41df508d4b5d321838a31ac68f03fca5ae6167fa1b3b683",),
+    "tests/otel/test_off_parity.py::test_native_raw_requests_journals_receipts": ("true", "false"),
 }
 
 

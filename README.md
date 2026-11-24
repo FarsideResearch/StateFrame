@@ -73,6 +73,16 @@ and commits accepted changes to the shared workspace before dependent work start
 for server prefill can make a run slower; subframes do not promise a general speedup. See the
 [subframes guide](docs/guide/subframes.md) for the contract, limits, result records, and recovery behavior.
 
+## Observability
+
+OpenTelemetry export is off by default. The supported `stateframe-otel` commands are `export`,
+`status`, and `purge`: export sends allowlisted traces from a finished run over OTLP/HTTP, status
+reports local delivery, and `purge --yes` clears the local outbox and acknowledgement ledger after
+exports stop. The exporter covers run and attempt outcomes, model calls, and recorded action,
+check, and worker activity. Timing depends on the records that survived. Live following and metrics
+are outside this release. See the
+[observability guide](docs/guide/observability.md) for coverage, settings, and delivery behavior.
+
 ## Coming next
 
 Upcoming, not in this release:

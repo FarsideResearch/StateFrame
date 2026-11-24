@@ -14,6 +14,24 @@ its per-path check. The run stops with an apply error and exit status 2, keeps t
 edit, and leaves earlier replacements in place. The error names the conflict and
 paths already applied. Compare the repository with `final.diff` in the run directory.
 
+## OpenTelemetry export
+
+OpenTelemetry export reads traces from finished runs. Live following and metrics are outside
+this release. Run and attempt outcomes, model requests, worker activity, and recorded action and
+check outcomes depend on the surviving native records. Incomplete coverage is reported when
+records are oversize, corrupt, or ambiguous, or when a summary send count differs from the
+observed sends. Exported values are limited to numbers, booleans, fixed enums, strict versions,
+and keyed identities. Model names become installation-keyed hashes; path, tool, check-command,
+endpoint, task, and source-content text is not exported. Cost is the only optional detail and
+contains numeric values. Endpoints cannot contain queries, fragments, or user information;
+plain HTTP is limited to loopback IP literals.
+
+Native process lifetime and individual frame construction and token-count timings are
+unavailable. Duration-only observations use point spans with a duration attribute.
+Receiver acknowledgement can be lost, causing redelivery with the same span IDs. Acknowledgement
+does not establish downstream queryability or retention. See the
+[observability guide](docs/guide/observability.md) for coverage and delivery details.
+
 ## Opt-in unit coalescing: evidence and escalation
 
 `STATEFRAME_UNIT_COALESCE` is **EXPERIMENTAL** and **off by default**. It requires

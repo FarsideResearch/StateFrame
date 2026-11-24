@@ -1,0 +1,46 @@
+{
+  "title": "Historical attempt outcomes",
+  "schemaVersion": 39,
+  "version": 1,
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "__inputs": [
+    {
+      "name": "TEMPO",
+      "label": "Tempo",
+      "type": "datasource",
+      "pluginId": "tempo",
+      "pluginName": "Tempo"
+    }
+  ],
+  "panels": [
+    {
+      "id": 1,
+      "title": "Historical run outcomes",
+      "type": "table",
+      "datasource": {
+        "type": "tempo",
+        "uid": "${TEMPO}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "tempo",
+            "uid": "${TEMPO}"
+          },
+          "queryType": "traceql",
+          "query": "{ resource.service.name = \"stateframe\" && name = \"stateframe.attempt.outcome\" }"
+        }
+      ]
+    }
+  ]
+}

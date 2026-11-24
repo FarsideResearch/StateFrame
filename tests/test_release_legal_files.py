@@ -39,6 +39,8 @@ ASSET_PROVENANCE: dict[str, tuple[str, str]] = {
     "mutations_prebuilt/file_facts/unit.json": (
         "Repository-authored unit metadata", "Root license"
     ),
+    "otel/manifest.json": ("Generated exporter file manifest", "Root license"),
+    "otel/switch-registry.json": ("Repository-authored exporter settings registry", "Root license"),
     "mutations_prebuilt/html_extract/fixtures/sample.html": (
         "Repository-authored fixture markup", "Root license"
     ),
