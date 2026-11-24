@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.3 (2026-11-24)
 
 - Fixed: a check the host stopped is shown as unresolved with a `CHECK_STOPPED:<cause>` reason instead of as a failure; it continues to block done. A real failure of another check stays visible.
 - Fixed: checks that run Node no longer stop at startup on hosts without a writable memory cgroup. The resident-memory budget is unchanged and still enforced.
