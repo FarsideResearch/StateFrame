@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.34 (2026-11-24)
 
 - Fixed: provider liveness now renews when a child reports new cumulative response bytes; repeated or replaced output does not extend the wait.
 - Schema 2 withholds a well-formed tool batch from its first cross-route call onward; malformed batches keep the base unsplit behavior, and schema 1 stays unchanged.
@@ -22,7 +22,6 @@
 - Fixed: directory and repository layout pages use search's display-only labels for names with undecodable filesystem bytes.
 - Fixed: repository and unit-policy regex searches report timed-out lines as undecided and continue searching later lines and files, until slow lines have used 30 s of CPU in one call, after which the remaining lines and files are reported as not searched; the guard arms only when SIGVTALRM is SIG_DFL and the virtual CPU timer is free, then drains pending ticks before restoring SIG_DFL. Literal and path searches remain unguarded.
 - Fixed: a search that could not cover every file no longer leaves an unresolved effect that ends the run.
-
 
 ## 0.8.33 (2026-11-24)
 
