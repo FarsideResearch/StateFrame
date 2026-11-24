@@ -67,7 +67,11 @@ def ask(prompt: str, *, seed: int = 1, max_tokens: int = 2500,
                                      headers={"Content-Type": "application/json",
                                               **({"Authorization": f"Bearer {key}"}
                                                  if key else {})})
-        r = json.loads(urllib.request.urlopen(req, timeout=timeout).read())
+        try:
+            from kernel_redirect_policy import provider_urlopen
+        except ImportError:
+            from stateframe.engine.kernel_redirect_policy import provider_urlopen
+        r = json.loads(provider_urlopen(req, timeout=timeout).read())
         c = (r["choices"][0]["message"].get("content") or "").strip()
         if not c:
             last_note = "empty-content"

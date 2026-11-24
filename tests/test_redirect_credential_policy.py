@@ -737,20 +737,21 @@ def test_routed_redirect_policy_imports_in_isolated_http_child() -> None:
         )
 
         first = servers.state["requests"][(servers.a.server_port, "/child/start")]
-        redirected = servers.state["requests"][(servers.b.server_port, "/child/final")]
+        redirected = servers.state["requests"].get((servers.b.server_port, "/child/final"))
 
-    assert child.returncode == 0, child.stderr.decode("utf-8", errors="replace")
-    assert child.stdout == b"ok"
+    diagnostic = child.stderr.decode("utf-8", errors="replace")
+    assert child.returncode != 0
+    assert child.stdout == b""
+    assert "fixture-key" not in diagnostic
+    record = json.loads(diagnostic.splitlines()[-1])
+    assert record["error_type"] == "ProviderRedirectRefused"
+    assert record["redirect_target_host"] == "127.0.0.1"
     assert first == {
         "method": "POST",
         "body": wire,
         "authorization": "Bearer fixture-key",
     }
-    assert redirected == {
-        "method": "GET",
-        "body": b"",
-        "authorization": None,
-    }
+    assert redirected is None
 
 
 @pytest.mark.host_sandbox
@@ -798,4 +799,5 @@ def test_routed_redirect_after_request_deadline_does_not_start_followup() -> Non
     assert child.returncode == 1
     assert child.stdout == b""
     diagnostic = json.loads(child.stderr.splitlines()[-1])
-    assert diagnostic["error_type"] == "RequestBodyDeadlineTimeout"
+    assert diagnostic["error_type"] == "ProviderRedirectRefused"
+    assert diagnostic["redirect_target_host"] == "127.0.0.1"

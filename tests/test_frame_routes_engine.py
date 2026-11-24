@@ -371,11 +371,12 @@ def test_routed_http_redirect_is_refused_on_actual_transport():
     thread.start()
     try:
         endpoint = f"http://127.0.0.1:{server.server_address[1]}/v1/chat/completions"
-        with pytest.raises(kernel_bounded_http.BoundedTransportError) as caught:
+        with pytest.raises(ValueError) as caught:
             kernel_bounded_http.request_bytes(b'{"model":"reader","messages":[]}', endpoint, "",
                 deadline=time.monotonic() + 10, socket_timeout=5, route_meta={"role": "read"})
-        assert caught.value.error_type == "ValueError"
-        with pytest.raises(ValueError, match="not on this machine"):
+        assert type(caught.value).__name__ == "ProviderRedirectRefused"
+        assert caught.value.target_host == "example.com"
+        with pytest.raises(ValueError, match="provider redirect refused for target host example.com"):
             kernel_request_diet._http_tokenize("routed prompt", endpoint,
                                                route_allow_remote=False)
     finally:

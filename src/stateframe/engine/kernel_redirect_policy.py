@@ -40,10 +40,28 @@ def _normalized_host(host: str) -> str | None:
     except ValueError:
         if ":" in host:
             return None
+        host = host.removesuffix(".")
         try:
             return host.encode("idna").decode("ascii").lower()
         except UnicodeError:
             return None
+
+
+class ProviderRedirectRefused(ValueError):
+    _stateframe_provider_redirect_refused = True
+
+    def __init__(self, target_url: str) -> None:
+        try:
+            host = urllib.parse.urlsplit(target_url).hostname
+            if any(c.isspace() or ord(c) < 33 or c == "@" for c in target_url): host = None
+        except ValueError:
+            host = None
+        self.target_host = (_normalized_host(host) or "unknown") if host else "unknown"
+        super().__init__(f"provider redirect refused for target host {self.target_host}")
+
+
+def is_provider_redirect_refused(error: object) -> bool:
+    return getattr(type(error), "_stateframe_provider_redirect_refused", False) is True
 
 
 def _origin(value: object) -> Origin | None:
@@ -168,17 +186,24 @@ class _ProxyHeaderScrubber(urllib.request.BaseHandler):
     https_request = http_request
 
 
+def require_same_origin_redirect(request: urllib.request.Request, newurl: str) -> Origin:
+    origin = _origin(getattr(request, REDIRECT_CREDENTIAL_ORIGIN_ATTRIBUTE, request.full_url))
+    if origin is None or _origin(newurl) != origin:
+        raise ProviderRedirectRefused(newurl)
+    return origin
+
+
 def _scoped_redirect_handler(
-        handler: urllib.request.HTTPRedirectHandler, credential_origin: Origin,
+        handler: urllib.request.HTTPRedirectHandler,
 ) -> urllib.request.HTTPRedirectHandler:
     scoped = copy.copy(handler)
     original = scoped.redirect_request
 
     def redirect_request(req, fp, code, msg, headers, newurl):
+        origin = require_same_origin_redirect(req, newurl)
         redirected = original(req, fp, code, msg, headers, newurl)
         if redirected is None:
             return None
-        origin = getattr(req, REDIRECT_CREDENTIAL_ORIGIN_ATTRIBUTE, credential_origin)
         return scope_redirect_credentials(
             redirected, credential_origin=origin, secret_headers=REDIRECT_SECRET_HEADERS,
         )
@@ -214,26 +239,34 @@ def build_credential_scoped_opener(
     if use_environment and origin is None:
         raise ValueError("environment mode requires credential_origin")
 
-    # The literal handler also keeps the existing proxy-free opener guard true.
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    selected_redirect = next((handler for handler in selected
+                              if isinstance(handler, urllib.request.HTTPRedirectHandler)), None)
+    redirect_handler = _scoped_redirect_handler(
+        copy.copy(selected_redirect or urllib.request.HTTPRedirectHandler()))
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), redirect_handler)
+    for handler in selected:
+        if handler is selected_redirect:
+            continue
+        configured = copy.copy(handler)
+        if isinstance(configured, urllib.request.HTTPRedirectHandler):
+            configured = _scoped_redirect_handler(configured)
+        elif isinstance(configured, (urllib.request.HTTPHandler, urllib.request.HTTPSHandler)):
+            configured.handler_order = min(configured.handler_order, 499)
+        opener.add_handler(configured)
     opener.add_handler(_ProxyHeaderScrubber())
     if use_environment:
         assert origin is not None
         opener.add_handler(_CredentialScopedProxyHandler(origin))
 
-    has_redirect_handler = False
-    for handler in selected:
-        configured = copy.copy(handler)
-        if use_environment and isinstance(configured, urllib.request.HTTPRedirectHandler):
-            assert origin is not None
-            configured = _scoped_redirect_handler(configured, origin)
-            has_redirect_handler = True
-        elif isinstance(configured, (urllib.request.HTTPHandler, urllib.request.HTTPSHandler,
-                                     urllib.request.HTTPRedirectHandler)):
-            # Defaults were installed above; custom transports must run first.
-            configured.handler_order = min(configured.handler_order, 499)
-        opener.add_handler(configured)
-    if use_environment and not has_redirect_handler:
-        assert origin is not None
-        opener.add_handler(_scoped_redirect_handler(urllib.request.HTTPRedirectHandler(), origin))
     return opener
+
+
+def provider_urlopen(request, *, timeout, opener=None, proxy_mode="environment"):
+    if opener is not None:
+        return getattr(opener, "open", opener)(request, timeout=timeout)
+    if (getattr(urllib.request.urlopen, "__module__", None) != urllib.request.__name__
+            or getattr(urllib.request._opener, CHILD_DIRECT_OPENER_ATTRIBUTE, False) is True):
+        return urllib.request.urlopen(request, timeout=timeout)
+    return build_credential_scoped_opener(
+        proxy_mode=proxy_mode, credential_origin=getattr(request, "full_url", request)
+    ).open(request, timeout=timeout)

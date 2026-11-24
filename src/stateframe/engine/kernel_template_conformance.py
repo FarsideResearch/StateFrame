@@ -512,7 +512,11 @@ def _post_json(url: str, payload: Mapping[str, object], key: str, *,
         timeout = min(timeout, deadline - time.monotonic())
         if timeout <= 0:
             raise TimeoutError("template conformance deadline expired")
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    try:
+        from kernel_redirect_policy import provider_urlopen
+    except ImportError:
+        from stateframe.engine.kernel_redirect_policy import provider_urlopen
+    with provider_urlopen(request, timeout=timeout) as response:
         raw = response.read(_MAX_LIVE_RESPONSE_BYTES + 1)
     if len(raw) > _MAX_LIVE_RESPONSE_BYTES:
         raise ConformanceError("template endpoint response exceeds bounded size")

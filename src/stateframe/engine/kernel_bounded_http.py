@@ -809,6 +809,18 @@ def _child_transport_error(diagnostic: bytes, key: str, endpoint: str) -> Except
     kind = failure.get("error_type", "ChildProcessError")
     if not isinstance(kind, str) or not kind.isidentifier() or len(kind) > 80:
         kind = "ChildProcessError"
+    if kind == "ProviderRedirectRefused":
+        target_host = failure.get("redirect_target_host")
+        if not isinstance(target_host, str) or (key and key.lower() in target_host.lower()):
+            target_host = "unknown"
+        if __package__:
+            from .kernel_redirect_policy import ProviderRedirectRefused
+        else:
+            from kernel_redirect_policy import ProviderRedirectRefused
+        host = f"[{target_host}]" if ":" in target_host else target_host
+        error = ProviderRedirectRefused("//" + host)
+        error.response_bytes_received = failure.get("response_bytes_received") is True
+        return error
     status = failure.get("http_status")
     relay_error = failure.get("relay_error")
     if not isinstance(relay_error, str) or relay_error not in RELAY_ERROR_LABELS:
@@ -1642,6 +1654,7 @@ if __name__ == "__main__":
         status = getattr(error, "code", None)
         relay_error = getattr(error, "relay_error", None)
         server_error = getattr(error, "server_error", None)
+        redirect_target_host = getattr(error, "target_host", None)
         sys.stderr.write(json.dumps({"error_type": type(error).__name__,
                                      "error_detail": safe_transport_detail(error),
                                      "http_status": status if type(status) is int else None,
@@ -1655,6 +1668,8 @@ if __name__ == "__main__":
                                          error, "pre_response_failure", False) is True,
                                      "response_bytes_received": getattr(
                                          error, "response_bytes_received", False) is True,
+                                     **({"redirect_target_host": redirect_target_host}
+                                        if type(redirect_target_host) is str else {}),
                                       **({"bytes_sent": error.bytes_sent,
                                           "bytes_total": error.bytes_total,
                                           "seconds_stalled": error.seconds_stalled}

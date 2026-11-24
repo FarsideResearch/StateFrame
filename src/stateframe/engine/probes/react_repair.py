@@ -3956,7 +3956,8 @@ def ask_tools(messages, mt=4000, temp=None, tools=None, known_refs=None):
         req = urllib.request.Request(
             API, data=json.dumps(body).encode(),
             headers={"Content-Type": "application/json", "Authorization": f"Bearer {KEY}"})
-        with urllib.request.urlopen(req, timeout=call_timeout) as r:
+        from kernel_redirect_policy import provider_urlopen
+        with provider_urlopen(req, timeout=call_timeout) as r:
             return json.loads(r.read())["choices"][0]
 
     if tools is None:
@@ -4164,10 +4165,12 @@ def ask_tools(messages, mt=4000, temp=None, tools=None, known_refs=None):
             from kernel_stateframe_framefit5 import FrameFit5Error
             from kernel_tool_schema_lint import ToolSchemaContractError
             from kernel_wire_truth_gate import WireTruthBlocked
-            if isinstance(_te, (FrameRequestAllocationError, FrameAllocationReplanNeeded,
+            from kernel_request_diet import redirect_refused
+            if (redirect_refused(_te) or isinstance(_te, (FrameRequestAllocationError,
+                                FrameAllocationReplanNeeded,
                                 FrameFit5ImpossibleMinimum, RequestActionContractError,
                                 RequestPreparationContractError, RequestSealError,
-                                FrameFit5Error, ToolSchemaContractError, WireTruthBlocked)):
+                                FrameFit5Error, ToolSchemaContractError, WireTruthBlocked))):
                 raise
             if timeout_retry_active and is_provider_request_timeout_error(_te):
                 if frozen_timeout_retry_active:
@@ -4399,7 +4402,8 @@ def ask(messages, mt=4000, temp=None):
         req = urllib.request.Request(
             API, data=json.dumps(body).encode(),
             headers={"Content-Type": "application/json", "Authorization": f"Bearer {KEY}"})
-        with urllib.request.urlopen(req, timeout=call_timeout) as r:
+        from kernel_redirect_policy import provider_urlopen
+        with provider_urlopen(req, timeout=call_timeout) as r:
             return json.loads(r.read())["choices"][0]
 
     from kernel_pilot import POLICY, charge
@@ -4473,6 +4477,9 @@ def ask(messages, mt=4000, temp=None):
             raise
         except Exception as _te:                                  # noqa: BLE001
             _ex.shutdown(wait=False)
+            from kernel_request_diet import redirect_refused
+            if redirect_refused(_te):
+                raise
             if timeout_retry_active and is_provider_request_timeout_error(_te):
                 if frozen_timeout_retry_active:
                     raise _te

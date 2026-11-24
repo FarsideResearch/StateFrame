@@ -9,6 +9,9 @@ from typing import Iterable, Mapping
 
 
 ALLOWLIST = {
+    "src/stateframe/engine/kernel_redirect_policy.py:provider_urlopen":
+        ("Preserves an installed process opener and injected urlopen for test compatibility; "
+         "the stock urlopen path uses the credential-scoped opener."),
     "src/stateframe/engine/kernel_web_fetch.py:fetch_raw":
         ("Sends a bounded GET through vetted destinations with a bounded, validated caller-supplied Accept header; "
          "it fetches user-selected page content "

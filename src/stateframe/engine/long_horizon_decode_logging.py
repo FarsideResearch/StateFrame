@@ -134,6 +134,7 @@ def observe_slots(capture: object, endpoint: str, *, key: str = "",
     """
     if not enabled():
         return None
+    from kernel_redirect_policy import provider_urlopen
     try:
         parsed = urllib.parse.urlsplit(endpoint)
         if parsed.scheme != "http" or parsed.hostname != "127.0.0.1":
@@ -145,7 +146,7 @@ def observe_slots(capture: object, endpoint: str, *, key: str = "",
         request = urllib.request.Request(
             base + "/slots", method="GET",
             headers={"Authorization": f"Bearer {key}"} if key else {})
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with provider_urlopen(request, timeout=timeout) as response:
             raw = response.read(1024 * 1024 + 1)
         if len(raw) > 1024 * 1024:
             return None

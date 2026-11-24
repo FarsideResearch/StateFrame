@@ -809,12 +809,27 @@ class _TokenizeHTTPSHandler(urllib.request.HTTPSHandler):
                             context=self._context)
 
 
+def redirect_refused(error: BaseException) -> bool:
+    # Marker only: startup must not import the redirect policy module.
+    return getattr(type(error), "_stateframe_provider_redirect_refused", False) is True
+
+
 def _build_tokenize_opener(
         context_provider: Callable[[], ssl.SSLContext] | None = None,
 ) -> urllib.request.OpenerDirector:
     """Build a fresh opener; only its TLS context may be shared across calls."""
+    redirects = _TokenizeRedirects()
+    follow = redirects.redirect_request
+
+    def same_origin_only(req, fp, code, msg, headers, newurl):
+        # Imported on a redirect only: startup must not load the policy module.
+        from kernel_redirect_policy import require_same_origin_redirect
+        require_same_origin_redirect(req, newurl)
+        return follow(req, fp, code, msg, headers, newurl)
+
+    redirects.redirect_request = same_origin_only
     return urllib.request.build_opener(
-        urllib.request.ProxyHandler({}), _TokenizeRedirects(), _TokenizeHTTPHandler(),
+        urllib.request.ProxyHandler({}), redirects, _TokenizeHTTPHandler(),
         _TokenizeHTTPSHandler(context_provider),
     )
 
@@ -1493,6 +1508,8 @@ class RequestTokenMeter:
                 self._consecutive_failures += 1
                 self._failure_reason = _tokenizer_failure_reason(error)
                 self._last_tokenizer_error = type(error).__name__
+                if redirect_refused(error):
+                    break
                 continue
             self._last_latency_ms = (time.monotonic() - start) * 1000.0
             if self._deadline is not None and time.monotonic() >= self._deadline:
@@ -1670,7 +1687,11 @@ class RequestTokenMeter:
                         )
                     else:
                         token_count = count_exact_content()
-                except Exception:
+                except Exception as error:
+                    if redirect_refused(error):
+                        if self._deadline is not None and time.monotonic() >= self._deadline:
+                            raise TimeoutError("tokenizer request deadline expired") from None
+                        break
                     continue
                 if self._deadline is not None and time.monotonic() >= self._deadline:
                     raise TimeoutError("tokenizer request deadline expired")
@@ -1720,8 +1741,7 @@ class RequestTokenMeter:
                     self._consecutive_failures += 1
                     self._failure_reason = _tokenizer_failure_reason(error)
                     self._last_tokenizer_error = type(error).__name__
-                    if reprobe:
-                        break
+                    if redirect_refused(error) or reprobe: break
                     continue
                 self._last_latency_ms = (time.monotonic() - start) * 1000.0
                 if self._deadline is not None and time.monotonic() >= self._deadline:

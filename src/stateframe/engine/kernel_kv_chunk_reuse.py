@@ -257,8 +257,8 @@ def slot_action(endpoint: str, slot: int, action: str, filename: str | None,
         headers={"Content-Type": "application/json",
                  **({"Authorization": f"Bearer {key}"} if key else {})},
         method="POST")
-    open_url = opener or urllib.request.urlopen
-    handle = open_url(request, timeout=timeout)
+    from kernel_redirect_policy import provider_urlopen
+    handle = provider_urlopen(request, timeout=timeout, opener=opener)
     try:
         raw = handle.read()
     finally:
