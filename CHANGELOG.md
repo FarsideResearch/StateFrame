@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.33 (2026-11-24)
 
 - Provider credentials are not sent to a redirected address: cross-origin provider redirects are refused. This includes an `http://` provider that redirects to `https://`: set the final `https://` URL.
 
