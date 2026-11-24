@@ -692,7 +692,8 @@ DOCUMENTED_REJECT: dict[str, str] = {
         prompt_diet_applied provability_completion_record provider_attempt_outcome_unknown
         provider_boundary_contract_asserted provider_boundary_contract_decided provider_boundary_contract_error
         provider_capability_refused provider_dialect provider_feature_degraded provider_malformed_response
-        provider_queue_wait provider_request_timeout provider_transport_retry provider_transport_retry_aborted
+        provider_queue_wait provider_rate_limited provider_request_timeout provider_transport_retry
+        provider_transport_retry_aborted
         ps_counterexamples_fired ps_invariants_fired ps_minimize_fired ps_minimize_rejected ps_minimize_skipped
         ps_router_fired public_probe_executed public_probe_quarantined public_probe_rerun_unavailable
         public_probe_reviewed public_probe_validity public_review_admission public_review_advice_selected

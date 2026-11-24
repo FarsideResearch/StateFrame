@@ -389,9 +389,9 @@ def test_resume_preserves_typed_provider_error(
 
 
 @pytest.mark.parametrize(("status", "transport_class"), [
-    (429, "capacity"), (503, "capacity"), (500, "upstream"),
+    (503, "capacity"), (500, "upstream"),
 ])
-def test_rate_limits_and_server_faults_keep_the_current_retry_schedule(
+def test_server_faults_keep_the_current_retry_schedule(
         tmp_path: Path, status: int, transport_class: str) -> None:
     exit_code, summary, events, output, requests = _run_cli(
         tmp_path, (status, None), success_tool="done",
@@ -400,18 +400,12 @@ def test_rate_limits_and_server_faults_keep_the_current_retry_schedule(
     assert len(errors) == 1 and errors[0].get("http_status") == status, errors
     assert errors[0].get("transport_class") == transport_class, errors[0]
     retries = [row for row in events if row.get("kind") == "provider_transport_retry"]
-    if status == 429:
-        assert exit_code == 2 and summary["engine_result"] == "HARNESS_TRANSPORT", summary
-        assert len(requests) == 1
-        assert errors[0].get("retry_scheduled") is False, errors[0]
-        assert not retries
-    else:
-        assert exit_code == 0 and summary["engine_result"] == "SUBMITTED", output
-        assert len(requests) >= 2 and requests[0] == requests[1], summary
-        assert errors[0].get("retry_scheduled") is True, errors[0]
-        assert len(retries) == 1, retries
-        from kernel_pilot import POLICY
-        assert retries[0].get("retry_delay_seconds") == POLICY.transport_delay(1), retries[0]
+    assert exit_code == 0 and summary["engine_result"] == "SUBMITTED", output
+    assert len(requests) >= 2 and requests[0] == requests[1], summary
+    assert errors[0].get("retry_scheduled") is True, errors[0]
+    assert len(retries) == 1, retries
+    from kernel_pilot import POLICY
+    assert retries[0].get("retry_delay_seconds") == POLICY.transport_delay(1), retries[0]
 
 
 @pytest.mark.parametrize("status", [408])

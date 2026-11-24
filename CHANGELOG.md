@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.9.8 (2026-11-24)
+
+- Note for 0.9.7: the new tool-call reply parser no longer accepts an uppercase `NAME` attribute.
+- Fixed: provider HTTP 429 responses retry the same sealed request after `Retry-After` and the existing backoff, while typed quota errors remain terminal.
+
 ## 0.9.7 (2026-11-24)
 
 - Fixed: a run no longer ends when a planned source file changes more than once while a request is being prepared; it stops only when the same source revisions are reported twice in a row.
