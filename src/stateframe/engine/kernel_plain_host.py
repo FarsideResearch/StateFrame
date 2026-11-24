@@ -31,6 +31,7 @@ from kernel_plain_contracts import (
     ENGINE_ID, ROOT_ALIAS, CheckReceipt, EditAuthority, EditReceipt, PlainContractError, PlainJournal,
     ReadReceipt, ReceiptBook, file_revision, sha256_bytes, validate_schema_agreement,
 )
+from kernel_source_delivery import NonRegularReadPath, decode_source, read_regular_file
 from kernel_plain_hooks import HookSettings, PlainHooks
 from kernel_plain_http import AbortiveHTTPTransport
 from kernel_bounded_http import send_with_gzip_fallback
@@ -154,19 +155,30 @@ class PlainHost:
 
     def _read_file(self, a: dict) -> str:
         path = self.authority.resolve(a["path"])
-        text = path.read_text(encoding="utf-8", errors="replace")
+        relative = path.relative_to(self.root).as_posix()
+        if path.is_dir():
+            path.read_text(encoding="utf-8", errors="replace")
+        try:
+            raw, _ = read_regular_file(path)
+        except NonRegularReadPath:
+            return f"REFUSED NON_REGULAR_FILE: {relative} is not a regular file."
+        if b"\0" in raw:
+            return f"BINARY_FILE: {relative} is binary, {len(raw)} bytes"
+        text, _, note = decode_source(raw)
         lines = text.splitlines()
         s = max(1, int(a.get("start") or 1))
         e = min(len(lines), int(a.get("end") or len(lines)))
-        relative = path.relative_to(self.root).as_posix()
         ranged = bool(a.get("start") or a.get("end"))
         ws, we = self.hooks.widen(relative, text, s, e, ranged=ranged) if e >= s else (s, e)
         out = "\n".join(f"{i}\t{lines[i - 1]}" for i in range(ws, we + 1)) or "(empty)"
+        if note and len(out) + len(note) + 1 <= OUT_CAP:
+            out += "\n" + note
         self.book.reads += 1
         self.journal.receipt("read_receipt", ReadReceipt(
-            path=relative, revision=file_revision(path), requested=(a.get("start"), a.get("end")),
+            path=relative, revision=sha256_bytes(raw), requested=(a.get("start"), a.get("end")),
             returned=(ws, we), total_lines=len(lines), widened=(ws, we) != (s, e), chars=len(out),
-            truncated_by_cap=len(out) > OUT_CAP))
+            truncated_by_cap=len(out) > OUT_CAP),
+            **({"decoding_note": note} if note is not None else {}))
         return out
 
     def _grep(self, a: dict) -> str:

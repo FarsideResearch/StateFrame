@@ -623,7 +623,7 @@ def reduce_receipt(state: CatalogState, receipt: object) -> CatalogState:
 
     if not isinstance(state, CatalogState):
         raise TypeError("state must be a CatalogState")
-    record = normalize_receipt(_receipt_mapping(receipt))
+    record = _normalize_receipt_record(_receipt_mapping(receipt))
     receipt_digest = _digest(record)
     receipt_id = _receipt_id(record, receipt_digest)
     seen = dict(state.receipt_digests)
@@ -758,7 +758,10 @@ def normalize_receipt(receipt: Mapping[str, object]) -> dict[str, object]:
     canonical envelope; it never reads the current workspace to fill a missing
     historical binding.
     """
-    record = copy.deepcopy(dict(receipt))
+    return _normalize_receipt_record(copy.deepcopy(dict(receipt)))
+
+
+def _normalize_receipt_record(record: dict[str, object]) -> dict[str, object]:
     kind = _receipt_kind(record)
     if kind != "check":
         return record
@@ -890,7 +893,9 @@ def coalesce_execution_receipts(receipts: Sequence[Mapping[str, object]]) -> tup
             projection_rank[execution_id] = rank(record)
         else:
             preferred, fallback = merged, record
-        merged = copy.deepcopy(dict(preferred))
+        # Both candidates are private deep copies made above. Reuse the chosen
+        # one; copying it again duplicates the same full receipt on each join.
+        merged = preferred
         for key, value in fallback.items():
             if key in {"receipt_id", "source_receipt_ids"}:
                 continue
@@ -1963,13 +1968,7 @@ def _item_id(value: object) -> str:
 
 
 def _estimate_tokens(value: object) -> int:
-    encoded = json.dumps(
-        _as_public(value),
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        default=str,
-    ).encode("utf-8")
+    encoded = _canonical_value(value).encode("utf-8")
     return max(1, math.ceil(len(encoded) / 4))
 
 
@@ -1986,7 +1985,48 @@ def _as_public(value: object) -> object:
 
 
 def _canonical_value(value: object) -> str:
-    return json.dumps(_as_public(value), sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
+    public = value if _is_native_json(value) else _as_public(value)
+    return json.dumps(public, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
+
+
+def _is_native_json(value: object) -> bool:
+    """Check whether public conversion is identity-preserving for JSON encoding."""
+    if value is None or type(value) in (str, bool, int, float):
+        return True
+    if type(value) not in (list, tuple, dict):
+        return False
+
+    def children(container: object):
+        if type(container) is dict:
+            return iter(container.items())
+        return iter(container)
+
+    active = {id(value)}
+    pending = [(value, children(value))]
+    while pending:
+        container, iterator = pending[-1]
+        try:
+            item = next(iterator)
+        except StopIteration:
+            pending.pop()
+            active.remove(id(container))
+            continue
+
+        if type(container) is dict:
+            key, item = item
+            if type(key) is not str:
+                return False
+        if item is None or type(item) in (str, bool, int, float):
+            continue
+        if type(item) not in (list, tuple, dict):
+            return False
+
+        identity = id(item)
+        if identity in active:
+            return False
+        active.add(identity)
+        pending.append((item, children(item)))
+    return True
 
 
 def _digest(value: object) -> str:

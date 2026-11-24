@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import weakref
 
 # -I deliberately ignores ambient PYTHONPATH and the working directory.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -249,6 +250,7 @@ class Supervisor:
         self.owner_fd = owner_fd
         self.table = ProcessTable()
         self.jobs: dict[str, ManagedProcess] = {}
+        self._capability_cache = weakref.WeakValueDictionary()
         self._next_full_process_scan = time.monotonic()
         self.next_id = 0
         self.closing = False
@@ -259,6 +261,15 @@ class Supervisor:
         self.selector.register(owner_fd, selectors.EVENT_READ, "owner")
         self.incoming = bytearray()
         self.outgoing = bytearray()
+
+    def _capability_for(self, value):
+        """Reuse immutable launch authority when its complete wire value matches."""
+        encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        key = hashlib.sha256(encoded).digest()
+        cached = self._capability_cache.get(key)
+        if cached is not None and cached.as_dict() == value:
+            return cached, key
+        return capability_from_dict(value), key
 
     def _begin_close(self):
         self.closing = True
@@ -303,7 +314,7 @@ class Supervisor:
     def start(self, request):
         if any(job.cleanup is not None and not job.cleanup["ok"] for job in self.jobs.values()):
             raise RuntimeError("session has unresolved cleanup failure")
-        cap = capability_from_dict(request["cap"])
+        cap, cap_key = self._capability_for(request["cap"])
         if cap.purpose == "job" and cap.workspace_writable:
             raise ValueError("background jobs require read-only workspace")
         if sum(job.cleanup is None for job in self.jobs.values()) >= 5:
@@ -484,11 +495,15 @@ class Supervisor:
                 if not identity["ns"]:
                     job.stop(0)
                     raise RuntimeError("mutation launch PID namespace identity unavailable")
-            return {"id": ident, "identity": identity,
-                    "memory_limit_mechanism": memory_mechanism,
-                    "cgroup_leaf_pattern": _cgroup_leaf_pattern_status()}
-        return {"id": ident, "memory_limit_mechanism": memory_mechanism,
-                "cgroup_leaf_pattern": _cgroup_leaf_pattern_status()}
+            result = {"id": ident, "identity": identity,
+                      "memory_limit_mechanism": memory_mechanism,
+                      "cgroup_leaf_pattern": _cgroup_leaf_pattern_status()}
+            self._capability_cache[cap_key] = cap
+            return result
+        result = {"id": ident, "memory_limit_mechanism": memory_mechanism,
+                  "cgroup_leaf_pattern": _cgroup_leaf_pattern_status()}
+        self._capability_cache[cap_key] = cap
+        return result
 
     def _wait_for_final_exec(self, process, final_command):
         """Wait until the supervised PID exposes the argv that will be identity-pinned."""

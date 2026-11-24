@@ -8,7 +8,6 @@ from stateframe.task_row import (
     AUTO_SCOPE_LIMIT,
     DECLARE_ALL_LIMIT,
     SCOPE_INFERRED,
-    TaskRowError,
     auto_scope,
     build_row,
 )
@@ -57,17 +56,19 @@ def test_test_command_operand_steers_the_scope(tmp_path):
     assert sorted(row["files"]) == ["app/pricing.py", "app/rates.py"]
 
 
-def test_nothing_to_go_on_requires_explicit_scope(tmp_path):
+def test_nothing_to_go_on_starts_read_only_discovery(tmp_path):
     work = _large_repo(tmp_path)
-    with pytest.raises(TaskRowError, match="pass --target or --edit"):
-        build_row(work, task="Discounts are charged wrong.")
+    row = build_row(work, task="Discounts are charged wrong.")
+    assert row["scope_source"] == "discovery"
+    assert row["scoped_edits"] is True and row["files"] == {}
 
 
 def test_broad_check_selection_does_not_steer(tmp_path):
     work = _large_repo(tmp_path, extra_tests=task_row.AUTO_SCOPE_CHECK_LIMIT)
-    with pytest.raises(TaskRowError, match="pass --target or --edit"):
-        build_row(work, task="Discounts are charged wrong.", runner_kind="generic",
-                  test_command=("python", "-m", "pytest", "tests/"))
+    row = build_row(work, task="Discounts are charged wrong.", runner_kind="generic",
+                    test_command=("python", "-m", "pytest", "tests/"))
+    assert row["scope_source"] == "discovery"
+    assert row["scoped_edits"] is True and row["files"] == {}
 
 
 def test_named_task_path_still_scopes_broad_check_selection(tmp_path):
@@ -118,8 +119,8 @@ def test_named_file_is_recorded_as_inferred_scope(tmp_path):
     assert row["scope_source"] == SCOPE_INFERRED
 
 
-def test_6800_file_repo_with_unnamed_task_requires_explicit_scope(tmp_path):
-    """Build a real large row and require a target when neither task nor check locates the work.
+def test_6800_file_repo_with_unnamed_task_starts_read_only_discovery(tmp_path):
+    """Build a real large row with an empty edit scope when neither task nor check locates the work.
 
     Built on disk (not mocked) so the real copy, text scan and row assembly run end to end.
     """
@@ -133,5 +134,6 @@ def test_6800_file_repo_with_unnamed_task_requires_explicit_scope(tmp_path):
     # The copy step has its own file ceiling (Limits.max_files=5000); lift it here so the test
     # exercises the task-row path rather than the copy refusal, which is a separate limit.
     work = create(repo, tmp_path / "copy", Limits(max_files=7000))
-    with pytest.raises(TaskRowError, match="pass --target or --edit"):
-        build_row(work, task="Make the numbers add up.")
+    row = build_row(work, task="Make the numbers add up.")
+    assert row["scope_source"] == "discovery"
+    assert row["scoped_edits"] is True and row["files"] == {}

@@ -34,19 +34,24 @@ def envelope(suffix=(), *, tool_content="newest result"):
     ], "tools": [], "max_tokens": 100}
 
 
+def _retain_page(rt, path, text, first, last):
+    args = {"path": path, "start_line": first, "end_line": last}
+    page = deliver_source(text.encode(), path, 0, args=args)
+    captured = capture_read(rt, path=path, metadata=page.metadata,
+        payload=page.content, original_page=page.text, source="disk",
+        arguments=args)
+    request_id = f"exposed-{path}-{first}-{last}"
+    record_submission(rt, request_id=request_id, body_sha256="1" * 64,
+        modes={obligation.obligation_id: "F" for obligation in rt.working_set_state.active_obligations()})
+    record_response(rt, request_id=request_id, response_id=f"accepted-{request_id}",
+        body_sha256="1" * 64, disposition="accepted")
+    return captured, page
+
+
 def retained(tmp_path, monkeypatch, text, first, last):
     monkeypatch.setenv("STATEFRAME_WORKING_SET_ALLOCATOR", "on")
     rt = runtime(tmp_path)
-    page = deliver_source(text.encode(), "a.py", 0,
-        args={"path": "a.py", "start_line": first, "end_line": last})
-    captured = capture_read(rt, path="a.py", metadata=page.metadata,
-        payload=page.content, original_page=page.text, source="disk",
-        arguments={"path": "a.py", "start_line": first, "end_line": last})
-    obligation, = rt.working_set_state.active_obligations()
-    record_submission(rt, request_id="exposed", body_sha256="1" * 64,
-        modes={obligation.obligation_id: "F"})
-    record_response(rt, request_id="exposed", response_id="accepted",
-        body_sha256="1" * 64, disposition="accepted")
+    captured, page = _retain_page(rt, "a.py", text, first, last)
     plan = {"paths": ["a.py"], "units": [{"path": "a.py", "start_line": first,
         "end_line": last, "role": "target", "unit_handle": "target"}],
         "revisions": {"a.py": source_revision(text)},
@@ -428,6 +433,156 @@ def test_live_allocator_binds_its_real_closure_proof(tmp_path, monkeypatch):
 
     assert "source_delivery_witness_binding" in capture._frame_candidate_inputs
     assert set(allocation_keywords(capture)) <= set(inspect.signature(capture_candidate).parameters)
+
+
+@pytest.fixture
+def gate_case(tmp_path, monkeypatch):
+    import kernel_wire_truth_gate as truth
+    from kernel_completion_owner import establish_lean_request_action_contract
+    from test_read_admission_qualification import seal_fixture
+
+    capture, rt, draft, plan, journal, _ = seal_fixture(
+        tmp_path, monkeypatch, identity_content={"fixture": "source witness"}, wire_truth=True,
+    )
+    monkeypatch.setenv(truth.MODE_ENV, "on")
+    monkeypatch.setattr("kernel_request_budget.HARD_MAX_REQUEST_BYTES", 10_500)
+
+    # Give both entry points the same prepared frame, with source placement left to the allocator.
+    def prepared_messages(messages, *args, **kwargs):
+        messages = copy.deepcopy(messages)
+        state = json.loads(messages[2]["content"].split("\n", 1)[1])
+        state["state"]["framefit5"].setdefault("owner_protocol", {})["admitted_actions"] = ["read"]
+        messages[2]["content"] = "[StateFrame]\n" + json.dumps(state)
+        return messages
+
+    monkeypatch.setattr("kernel_stateframe_framefit5.assemble_framefit5_request", prepared_messages)
+    draft["tools"][0]["function"]["parameters"]["properties"]["start_line"] = {"type": "integer"}
+    capture.request_action_contract = establish_lean_request_action_contract(
+        rt, draft["messages"], draft["tools"], request_id=capture.request_id,
+    )
+    capture_context = truth.capture_context
+
+    def source_context(candidate, runtime, body, **kwargs):
+        candidate = copy.copy(candidate)
+        candidate.wire_truth_context = {}
+        return capture_context(candidate, runtime, body, **kwargs)
+
+    monkeypatch.setattr(truth, "capture_context", source_context)
+    for path, source in {"a.py": "# " + "a" * 2500 + "\n# " + "b" * 2500 + "\n",
+                         "b.py": "dependency = True\n"}.items():
+        (tmp_path / path).write_text(source, encoding="utf-8")
+        _retain_page(rt, path, source, 1, len(source.splitlines()))
+        plan["paths"].append(path)
+        plan["units"].append({"path": path, "start_line": 1, "end_line": 1,
+                              "role": "target", "unit_handle": path})
+        plan["source_contents"][path] = source
+        plan["revisions"][path] = source_revision(source)
+    # The read covers a.py's required line. The cap excludes the redundant
+    # standing window. b.py discharges a deferral declared by the plan.
+    plan["deferred_paths"] = ["b.py"]
+    return capture, rt, draft, journal
+
+
+@pytest.mark.parametrize("replacement", [False, True], ids=["first", "replacement"])
+def test_wire_truth_uses_certified_read_pages_after_deferral_discharge(gate_case, replacement):
+    from kernel_final_wire_allocation import build_qualified_request
+    from kernel_request_reprepare import PreparationInput, prepare_replacement
+
+    capture, rt, draft, _ = gate_case
+    request_id = capture.request_id
+    endpoint = {"endpoint": "http://127.0.0.1:1/v1", "key": ""}
+    if replacement:
+        prepare_replacement(rt, capture, PreparationInput.capture(capture, rt, draft), draft,
+                            deadline=None, **endpoint)
+    else:
+        build_qualified_request(capture, rt, draft, **endpoint)
+    assert (capture.request_id != request_id) is replacement
+    wire = capture.qualified_request.wire
+    body = json.loads(wire)
+    plan = capture._request_source_closure_override
+    receipt = capture.request_budget_final_wire["source_delivery"]
+    witnesses = capture._frame_candidate_inputs["source_delivery_witness_binding"]["witnesses"]
+    assert plan["deferred_paths"] == ["b.py"]
+    assert not receipt["deferred_paths"]
+    assert {row["status"] for row in receipt["paths"].values()} == {"COMPLETE"}
+    assert not source_delivery_satisfied(verify_final_source_delivery(
+        copy.deepcopy(plan), body["messages"], payload=wire,
+    ))
+    assert {proof["final_message_location"] for proofs in receipt["delivery_proofs"].values()
+            for proof in proofs} == {
+        f"$.messages[{witness.message_index}].content" for witness in witnesses
+    }
+    assert capture._wire_truth_check.verdict == "PASS"
+    assert capture._wire_truth_check.wire == wire
+
+
+@pytest.mark.parametrize("drift", [
+    "missing_window", "request", "stale_frozen", "wire", "plan", "source", "forged_witness", "duplicate_witness",
+])
+def test_wire_truth_refuses_unbound_capture_witnesses(gate_case, drift):
+    from kernel_final_wire_allocation import build_qualified_request
+    from kernel_final_wire_budget import snapshot_revalidation_inputs
+    from kernel_wire_truth_gate import WireTruthBlocked, check_wire
+
+    capture, rt, draft, _ = gate_case
+    record = build_qualified_request(capture, rt, draft, endpoint="http://127.0.0.1:1/v1", key="")
+    body, wire = record.body, record.wire
+    context = capture._wire_truth_context
+    binding = capture._frame_candidate_inputs["source_delivery_witness_binding"]
+    target = next(w for w in binding["witnesses"] if w.receipt_identity.path == "a.py")
+    if drift == "missing_window":
+        body["messages"][target.message_index]["content"] = "required read page removed"
+        wire = json.dumps(body).encode()
+    elif drift == "request":
+        capture.request_id = context["request_id"] = "another-request"
+    elif drift == "wire":
+        wire += b" "  # Same parsed request, different transport bytes.
+    elif drift == "plan":
+        context["source_plan"]["units"][0]["unit_handle"] = "different-unit"
+    elif drift == "source":
+        context["source_contents"]["a.py"] = "changed source\n"
+    elif drift == "forged_witness":
+        binding["witnesses"] = tuple(
+            replace(witness, message_index=witness.message_index + 1) if witness is target else witness
+            for witness in binding["witnesses"]
+        )
+    elif drift == "duplicate_witness":
+        binding["witnesses"] += (target,)
+    frozen = snapshot_revalidation_inputs(capture, rt, body)
+    if drift == "stale_frozen":
+        capture.request_id = "a-later-request"  # The inputs and context are the earlier request's.
+    with pytest.raises(WireTruthBlocked) as blocked:
+        check_wire(wire, context, capture=capture, frozen_inputs=frozen)
+    assert blocked.value.failed == ("source_delivery_incomplete",)
+
+
+def test_replay_rebuilds_in_flight_request_that_needed_capture_witnesses(gate_case, tmp_path):
+    from kernel_final_wire_allocation import build_qualified_request
+    from kernel_wire_truth_gate import WireTruthBlocked, check_wire
+    from kernel_working_set_state import WorkingSetState, observe_submission, restore_tail
+    from stateframe.replay_tape import Replayer
+
+    capture, rt, draft, journal = gate_case
+    resumed = copy.copy(capture)
+    restored = copy.copy(rt)
+    restored.owner = copy.copy(rt.owner)
+    restored._active_capture = resumed
+    restored.working_set_state = WorkingSetState()
+    endpoint = {"endpoint": "http://127.0.0.1:1/v1", "key": ""}
+    record = build_qualified_request(capture, rt, draft, **endpoint)
+    with pytest.raises(WireTruthBlocked) as blocked:
+        check_wire(record.wire, capture._wire_truth_context)
+    assert blocked.value.failed == ("source_delivery_incomplete",)
+    observe_submission(rt, capture, record.wire)
+    path = tmp_path / "pending.request.json"
+    path.write_bytes(record.wire)
+    tape = Replayer([], strict=True, pending={"send": 3, "request": str(path)})
+    restore_tail(restored, [json.loads(row) for row in journal.path.read_bytes().splitlines()], 0)
+    rebuilt = build_qualified_request(resumed, restored, draft, **endpoint)
+    assert rebuilt.wire == record.wire
+    assert resumed._wire_truth_check.verdict == "PASS"
+    assert tape.answer(rebuilt.wire) is None
+    assert tape.pending_verified["request_sha256"] == record.body_digest
 
 
 def test_no_call_site_splats_the_raw_candidate_inputs():

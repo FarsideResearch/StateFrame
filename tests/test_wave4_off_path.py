@@ -192,16 +192,32 @@ def qualification_records(run):
         "request_source_final_wire", "read_reuse_visibility_checked", "wire_truth_checked",
         "action_receipt", "action_receipt_amended", "native_batch_call_receipt", "read_repeat_assessed",
     }
-    # These fields describe journal writes, so their wall-clock differences
-    # also propagate through the hash chain. The payload and record order stay intact.
-    envelope = {"event_id", "previous_hash", "record_hash", "timestamp_ns"}
+    # Verdict-fact deduplication changes journal positions and position-derived IDs.
+    envelope = {"event_id", "sequence", "previous_hash", "record_hash", "timestamp_ns"}
+    events = list(measurement_events(run))
+    event_counts = {}
+    event_positions = {}
+    for event in events:
+        kind = event["kind"]
+        event_counts[kind] = event_counts.get(kind, 0) + 1
+        if isinstance(event.get("event_id"), str):
+            event_positions[event["event_id"]] = f"{kind}:{event_counts[kind]}"
     records = []
-    for row in measurement_events(run):
+    for row in events:
         if row["kind"] not in selected_kinds:
             continue
         record = {key: value for key, value in row.items() if key not in envelope}
+        if record["kind"] == "working_set_prepared":
+            record.pop("assignment_digest", None)  # hashes read-capture IDs derived from journal positions
         if "receipt" in record:
             record["receipt"].pop("ts", None)
+            reference = record["receipt"].get("continuation_dispatch_ref")
+            if isinstance(reference, str):
+                record["receipt"]["continuation_dispatch_ref"] = event_positions.get(reference, reference)
+        if record["kind"] == "native_batch_call_receipt":
+            reference = record.get("origin_response_event_id")
+            if isinstance(reference, str):
+                record["origin_response_event_id"] = event_positions.get(reference, reference)
         records.append(record)
     assert sum(row["kind"] == "qualified_request_sealed" for row in records) == 2
     assert any(row["kind"] == "action_receipt_amended" for row in records)

@@ -10,6 +10,7 @@ from pathlib import Path
 
 from _timeouts import scaled
 from stateframe import _child, runner
+from stateframe.engine import kernel_checkpoint
 from stateframe.state_dirs import private_directory
 
 
@@ -139,6 +140,28 @@ def test_host_warns_for_engine_save_disable(tmp_path: Path, capsys) -> None:
     runner._warn_checkpoint_journal(tmp_path, set())
     assert capsys.readouterr().err.strip() == (
         "warning: checkpoints are off for this run: three failed saves")
+
+
+def test_host_warns_that_saving_continues_after_new_send(tmp_path: Path, capsys) -> None:
+    previous = kernel_checkpoint._STATE.copy()
+    kernel_checkpoint._STATE.clear()
+    kernel_checkpoint._STATE.update(
+        failed=2, consecutive_failed=2, warned=set(), disabled=None,
+    )
+    try:
+        kernel_checkpoint._note_failure(tmp_path, "unexpected writer error")
+        capsys.readouterr()
+        journal = tmp_path / "checkpoints" / "events.jsonl"
+        rows = [json.loads(line) for line in journal.read_text().splitlines()]
+        assert any(row.get("event") == "checkpoint_warning" for row in rows)
+
+        runner._warn_checkpoint_journal(tmp_path, set())
+        assert capsys.readouterr().err.strip() == (
+            "warning: checkpoint saving continues after a new model send "
+            "(3 consecutive checkpoint failures: unexpected writer error)")
+    finally:
+        kernel_checkpoint._STATE.clear()
+        kernel_checkpoint._STATE.update(previous)
 
 
 def test_key_seen_during_publish_link_window_is_used(tmp_path: Path, monkeypatch) -> None:

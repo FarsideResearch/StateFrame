@@ -623,6 +623,7 @@ def _print_summary(summary: dict) -> None:
         print(result_line or
               "checks passed on the saved candidate; correctness not independently established")
     terminal = summary.get("engine_terminal") or {}
+    if terminal.get("reason_code") == "DISCOVERY_SCOPE_NEEDS_TARGET": print(terminal.get("message", ""))
     labels = terminal.get("labels") if isinstance(terminal.get("labels"), dict) else {}
     facts = terminal.get("done_facts") if isinstance(terminal.get("done_facts"), dict) else {}
     print(f"engine evidence: certification={labels.get('certification', 'unknown')}; "

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from detreason.front_door import build_state, interpret
+from detreason.front_door import build_state, interpret, interpret_complete
 import kernel_obligation_seed as seed
 import kernel_v46_mechanism_wiring as wiring
 from kernel_work_record import WorkRecordStore, brief_for_owner
@@ -44,6 +44,116 @@ def test_intake_without_cached_vocabulary_uses_the_two_argument_contract(monkeyp
     monkeypatch.setattr(wiring, "_working_contract", compile_without_cache)
     wiring.task_start(runtime, row, tmp_path)
     assert runtime._v46_working_contract["verdict"]
+
+
+def test_unquoted_common_term_remains_a_candidate_at_task_intake(monkeypatch, tmp_path):
+    row = {
+        "msg": "Fix key.",
+        "files": {"pkg/lookup.py": "def key():\n    return None\n"},
+    }
+    runtime = SimpleNamespace(
+        owner=SimpleNamespace(task_row=row),
+        journal=SimpleNamespace(emit=lambda *_args, **_kwargs: None),
+    )
+    monkeypatch.setattr(wiring, "enabled", lambda name: name == "front_door")
+
+    wiring.task_start(runtime, row, tmp_path)
+
+    contract = runtime._v46_working_contract
+    assert contract["verdict"] == "PROCEED"
+    assert contract["question"] is None
+    referent = next(item for item in contract["contract"]["referents"]
+                    if item["surface_phrase"].lower() == "key")
+    assert referent["resolved"] == [
+        ("repo_symbol_candidate", "pkg/lookup.py::key", 1.0),
+    ]
+    assert all("unique symbol hit" not in basis
+               for basis in contract["contract"]["confidence_basis"])
+    completed = interpret_complete("Fix key.", extra_context={"files": row["files"]})
+    target = completed.completed.fields["referent_target"]
+    assert target.value == "candidate to inspect: key -> pkg/lookup.py::key"
+    assert target.source == "repo-derived"
+
+
+def _task_intake_contract(monkeypatch, root, msg, files):
+    row = {"msg": msg, "files": files}
+    runtime = SimpleNamespace(
+        owner=SimpleNamespace(task_row=row),
+        journal=SimpleNamespace(emit=lambda *_args, **_kwargs: None),
+    )
+    monkeypatch.setattr(wiring, "enabled", lambda name: name == "front_door")
+    wiring.task_start(runtime, row, root)
+    return runtime._v46_working_contract
+
+
+def test_unquoted_specific_symbol_stays_a_candidate_at_task_intake(monkeypatch, tmp_path):
+    files = {"pkg/lookup.py": "def quartz():\n    return None\n"}
+    contract = _task_intake_contract(monkeypatch, tmp_path, "Fix quartz.", files)
+
+    assert contract["verdict"] == "PROCEED"
+    referent = next(item for item in contract["contract"]["referents"]
+                    if item["surface_phrase"].lower() == "quartz")
+    assert referent["resolved"] == [
+        ("repo_symbol_candidate", "pkg/lookup.py::quartz", 1.0),
+    ]
+    assert all("unique symbol hit" not in basis
+               for basis in contract["contract"]["confidence_basis"])
+    completed = interpret_complete("Fix quartz.", extra_context={"files": files})
+    target = completed.completed.fields["referent_target"]
+    assert target.value == "candidate to inspect: quartz -> pkg/lookup.py::quartz"
+    assert target.source == "repo-derived"
+
+
+def test_explicit_symbol_spellings_remain_targets(monkeypatch, tmp_path):
+    files = {"pkg/lookup.py": "def key():\n    return None\n"}
+    for msg in ('Fix "key".', "Fix `key`."):
+        contract = _task_intake_contract(monkeypatch, tmp_path, msg, files)
+        referent = next(item for item in contract["contract"]["referents"]
+                        if item["surface_phrase"].lower() == "key")
+        assert referent["resolved"] == [
+            ("repo_symbol", "pkg/lookup.py::key", 1.0),
+        ]
+
+
+def test_explicit_path_and_traceback_ground_their_referents(monkeypatch, tmp_path):
+    files = {"pkg/lookup.py": "def key():\n    return None\n"}
+    path_contract = _task_intake_contract(
+        monkeypatch, tmp_path, "Fix key in pkg/lookup.py.", files)
+    path = next(item for item in path_contract["contract"]["referents"]
+                if item["surface_phrase"] == "pkg/lookup.py")
+    assert ("repo_file", "pkg/lookup.py", 1.0) in path["resolved"]
+    symbol = next(item for item in path_contract["contract"]["referents"]
+                  if item["surface_phrase"].lower() == "key")
+    assert symbol["resolved"] == [
+        ("repo_symbol", "pkg/lookup.py::key", 1.0),
+    ]
+
+    traceback_contract = _task_intake_contract(
+        monkeypatch, tmp_path,
+        'Fix the crash. Traceback (most recent call last):\n'
+        '  File "pkg/lookup.py", line 2, in key\n', files)
+    symbol = next(item for item in traceback_contract["contract"]["referents"]
+                  if item["surface_phrase"].lower() == "key")
+    assert symbol["resolved"] == [
+        ("repo_symbol", "pkg/lookup.py::key", 1.0),
+    ]
+
+
+def test_common_word_matches_stay_candidates_when_symbols_are_ambiguous(monkeypatch, tmp_path):
+    files = {
+        "pkg/first.py": "def key():\n    return None\n",
+        "pkg/second.py": "def key():\n    return None\n",
+    }
+    contract = _task_intake_contract(monkeypatch, tmp_path, "Fix key.", files)
+
+    assert contract["verdict"] == "ASK_ONE"
+    assert contract["question"]["kind"] == "referent"
+    referent = next(item for item in contract["contract"]["referents"]
+                    if item["surface_phrase"].lower() == "key")
+    assert referent["resolved"] == [
+        ("repo_symbol_candidate", "pkg/first.py::key", 1.0),
+        ("repo_symbol_candidate", "pkg/second.py::key", 1.0),
+    ]
 
 
 def test_large_declared_intake_work_budget(monkeypatch, tmp_path):
@@ -239,8 +349,8 @@ def test_front_door_definition_and_confidence_parity(switches):
         ("arity_mismatch", "rate"), ("parse_error", "pkg/partial.py"),
     ]
     for brief, verdict, digest in [
-        ("Fix rate which crashes.", "ASK_ONE", "a06d17b17dc966f51a78cb3e76276637e1e72419cb827409507c15dd64f1beea"),
-        ("Fix reconcile.", "PROCEED", "fc1a61d7745d16418e44ef5c441a855a04457cdb7aeb27d7b083203e700eccb8"),
+        ("Fix rate which crashes.", "ASK_ONE", "961ee2e8ae004e3ef1567f46d22dbea8da30c5b1d862895358d3f599b12478c1"),
+        ("Fix reconcile.", "PROCEED", "90a2c24bb56c14ddbf10ae9ecefb5d5b5464636cce98cfadd637d2b8aae13c7b"),
         ("Fix Service.", "PROCEED", "de5aa4b06e876ea5b8f60b778eaf0e1c76b2fb450117a6538e30bbee66f37a77"),
         ("Investigate nonexistent.", "PROCEED", "84462d1f1a339300e257a4975a72cbe55826939b43d83c20513b9ca9fa66d503"),
     ]:

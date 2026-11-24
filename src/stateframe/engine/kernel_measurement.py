@@ -458,7 +458,7 @@ def _request_boundary_contract_error(error: BaseException) -> bool:
 @functools.lru_cache(maxsize=8192, typed=True)
 def _canonical_immutable_bytes(value: object) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"),
-                      ensure_ascii=False, allow_nan=False).encode()
+                      ensure_ascii=False, allow_nan=False).encode("utf-8", "backslashreplace")
 
 
 def canonical_bytes(value: object) -> bytes:
@@ -470,7 +470,7 @@ def canonical_bytes(value: object) -> bytes:
             or type(value) is str and len(value) <= 256):
         return _canonical_immutable_bytes(value)
     return json.dumps(value, sort_keys=True, separators=(",", ":"),
-                      ensure_ascii=False, allow_nan=False).encode()
+                      ensure_ascii=False, allow_nan=False).encode("utf-8", "backslashreplace")
 
 
 def digest(value: object) -> str:
@@ -2529,6 +2529,26 @@ class HarnessTransportError(ConnectionError):
             self.harness_contract = True
 
 
+class ProviderHTTPError(HarnessTransportError):
+    """A terminal provider 4xx response with a fixed, status-specific message."""
+
+    failure_origin = "provider"
+
+    def __init__(self, *, attempts: int, error_type: str, http_status: int | None,
+                 relay_error: str | None, server_error: str | None = None,
+                 attempt_reasons: Sequence[Mapping[str, object]] = ()) -> None:
+        super().__init__(attempts=attempts, error_type=error_type,
+                         http_status=http_status, relay_error=relay_error,
+                         transport_class="contract", server_error=server_error,
+                         attempt_reasons=attempt_reasons)
+        description = {
+            400: "request rejected", 401: "authentication rejected",
+            403: "access denied", 404: "model or endpoint not found",
+        }.get(self.http_status, "request rejected")
+        hint = "; check the API key" if self.http_status == 401 else ""
+        self.args = (f"provider returned HTTP {self.http_status} ({description}){hint}",)
+
+
 class ProviderRequestTimeoutError(HarnessTransportError):
     """A provider call exhausted its host timeout and its one retry."""
 
@@ -4248,6 +4268,10 @@ class RequestCapture:
                     and is_provider_request_timeout_error(exc))
                 if request_timed_out and not model_format_failure:
                     transient = True
+                provider_http_error = (
+                    not model_format_failure and transport_class == "contract"
+                    and capacity_reason is None and http_status in {400, 401, 403, 404}
+                    and relay_error not in {"upstream_timeout", "relay_ttft_timeout"})
                 terminal_outcome = (
                     None if model_format_failure else
                     HARNESS_CONTRACT if transport_class == "contract" else HARNESS_TRANSPORT)
@@ -4584,6 +4608,12 @@ class RequestCapture:
                            if capacity_retry_refit_error is not None else
                            "; the one capacity retry was also rejected")
                     )
+                if provider_http_error:
+                    raise ProviderHTTPError(
+                        attempts=attempt + 1, error_type=error_type,
+                        http_status=http_status, relay_error=relay_error,
+                        server_error=server_error_body,
+                        attempt_reasons=attempt_reasons) from exc
                 raise _transport_error_class(relay_error)(
                     attempts=attempt + 1, error_type=error_type,
                     http_status=http_status, relay_error=relay_error,

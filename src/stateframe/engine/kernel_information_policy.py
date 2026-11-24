@@ -26,7 +26,7 @@ PUBLIC_FIELDS = {
     "instance_id", "test_path", "public_test_path", "FAIL_TO_PASS", "PASS_TO_PASS", "fail_to_pass",
     "pass_to_pass", "files", "public_tests", "public_test_files", "public_test_source",
     "public_test_src", "test_source", "changed_functions", "shape", "public_check_paths",
-    "allowed_product_paths", "scoped_edits", "allow_new_files", "new_file_roots",
+    "allowed_product_paths", "scoped_edits", "scope_source", "allow_new_files", "new_file_roots",
     "entry", "working_path", "_skip_db", "_oracle_preflight",
     "runner_kind", "test_command", "protected_test_paths", "protect_tests", "test_file_paths",
     "test_wrong_selectors", "test_wrong_sources", "test_wrong_hashes",

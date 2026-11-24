@@ -1274,20 +1274,27 @@ class WorkerResume:
 
 def execution_paths(workspace):
     initial = workspace.read("initialized.json")
-    paths = []
-    for parent, key in ((workspace.directory, "root"), (None, "target")):
-        parent = paths[0] if parent is None else parent
-        raw = initial.get(key)
-        if (not isinstance(raw, str) or not raw or Path(raw).is_absolute()
-                or any(part in {".", ".."} for part in raw.split("/"))):
-            raise WorkerResumeError("invalid retained execution path")
-        path = parent / raw
-        if path.is_symlink() or path.resolve() != path or not path.is_relative_to(parent):
-            raise WorkerResumeError("retained execution path escaped or was aliased")
-        paths.append(path)
-    if not paths[0].is_dir() or not paths[1].is_file():
+    raw_root = initial.get("root")
+    if (not isinstance(raw_root, str) or not raw_root or Path(raw_root).is_absolute()
+            or any(part in {".", ".."} for part in raw_root.split("/"))):
+        raise WorkerResumeError("invalid retained execution path")
+    root = workspace.directory / raw_root
+    if root.is_symlink() or root.resolve() != root or not root.is_relative_to(workspace.directory):
+        raise WorkerResumeError("retained execution path escaped or was aliased")
+    if not root.is_dir():
         raise WorkerResumeError("retained execution files are missing")
-    return tuple(paths)
+    raw_target = initial.get("target")
+    if raw_target is None and initial.get("scope_source") == "discovery":
+        return root, None
+    if (not isinstance(raw_target, str) or not raw_target or Path(raw_target).is_absolute()
+            or any(part in {".", ".."} for part in raw_target.split("/"))):
+        raise WorkerResumeError("invalid retained execution path")
+    target = root / raw_target
+    if (target.is_symlink() or target.resolve() != target or not target.is_relative_to(root)):
+        raise WorkerResumeError("retained execution path escaped or was aliased")
+    if not target.is_file():
+        raise WorkerResumeError("retained execution files are missing")
+    return root, target
 
 
 def resume_journal(runtime, output, manifest, descriptor):
@@ -1764,6 +1771,9 @@ def restore_provider_request_count(runtime: object, saved: Mapping[str, object])
 
 
 def restore_runtime(runtime):
+    reset_verdict_marker = getattr(runtime, "_reset_public_test_verdict_fact_marker", None)
+    if callable(reset_verdict_marker):
+        reset_verdict_marker()
     from kernel_true_resume import require_enabled
     try:
         require_enabled()

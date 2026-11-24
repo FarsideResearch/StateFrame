@@ -176,6 +176,24 @@ def _dropped_existing_candidate_paths(work: workcopy.WorkCopy,
                   and (data is None or hashlib.sha256(data).hexdigest() != work.baseline[path]))
 
 
+def _dropped_discovery_candidate_paths(work: workcopy.WorkCopy, row: dict,
+                                       candidate: dict[str, bytes | None],
+                                       declared: set[str]) -> list[str]:
+    """Find changed paths that empty discovery authority did not admit."""
+    if row.get("scope_source") != "discovery":
+        return []
+    dropped = []
+    for path, data in candidate.items():
+        if path in declared:
+            continue
+        baseline_digest = work.baseline.get(path)
+        changed = (data is not None if baseline_digest is None else
+                   data is None or hashlib.sha256(data).hexdigest() != baseline_digest)
+        if changed:
+            dropped.append(path)
+    return sorted(dropped)
+
+
 MUTATION_CANDIDATE_CONFLICT = "mutation_candidate_conflict"
 
 
@@ -265,7 +283,8 @@ TASK_SCOPE_ERROR = "sealed candidate changed files outside the task's file scope
 
 def _apply_sealed_candidate(work: workcopy.WorkCopy, candidate: dict[str, bytes | None],
                             declared: set[str], printer, *,
-                            dropped_paths: list[str] | None = None
+                            dropped_paths: list[str] | None = None,
+                            discovery_scope: bool = False,
                             ) -> tuple[list[str], list[str], str | None]:
     """Apply the in-scope part of a sealed candidate and report what was refused.
 
@@ -281,7 +300,10 @@ def _apply_sealed_candidate(work: workcopy.WorkCopy, candidate: dict[str, bytes 
     printer("warning: candidate changes outside edit scope were dropped: " + ", ".join(dropped_paths))
     in_scope = {path: data for path, data in candidate.items() if path not in dropped_paths}
     written = workcopy.apply_files(work, in_scope, declared=declared)
-    return written, dropped_paths, "sealed candidate changed existing files outside edit scope"
+    error = ("sealed candidate contains paths outside edit scope"
+             if discovery_scope and any(path not in work.baseline for path in dropped_paths) else
+             "sealed candidate changed existing files outside edit scope")
+    return written, dropped_paths, error
 
 
 def _refuse_submitted_delivery(summary: dict) -> None:
@@ -568,6 +590,7 @@ class RunOptions:
     _cache_slot_selection: str | None = field(default=None, init=False, repr=False)
     _cache_slot_reason: str | None = field(default=None, init=False, repr=False)
     _cache_slot_degraded: bool = field(default=False, init=False, repr=False)
+    _run_slot_fd: int | None = field(default=None, init=False, repr=False)
     _capabilities: dict[str, object] = field(default_factory=dict, init=False, repr=False)
     _send1_wave4: bool | None = field(default=None, init=False, repr=False)
     _resuming: bool = field(default=False, init=False, repr=False)
@@ -791,7 +814,8 @@ def _probe_stopped_by_host(result: object) -> bool:
 
 
 def _startup_probe(python: str, code: str, *, label: str,
-                   on_clean_success: Callable[[], None] | None = None) -> bytes:
+                   on_clean_success: Callable[[], None] | None = None,
+                   probe_args: tuple[str, ...] | None = None) -> bytes:
     """Contain interpreter startup itself, before importing any project packages.
 
     A heavily loaded host can push a healthy interpreter past the wall limit, so a timeout (and
@@ -803,10 +827,11 @@ def _startup_probe(python: str, code: str, *, label: str,
 
     base_wall = _startup_probe_seconds()
     walls = (base_wall, 2 * base_wall)
+    argv = [python, *probe_args] if probe_args is not None else [python, "-I", "-B", "-c", code]
     for wall in walls:
         try:
             with tempfile.TemporaryDirectory(prefix="stateframe-startup-") as directory:
-                result = kernel_safe_probe.run_probe([python, "-I", "-B", "-c", code], Path(directory),
+                result = kernel_safe_probe.run_probe(argv, Path(directory),
                                                      timeout=wall)
         except (OSError, ExecSessionError, ValueError) as error:
             raise RunError(f"{label} startup probe could not run safely: {error}") from error
@@ -1507,6 +1532,17 @@ def _select_test_python(options: RunOptions, printer=print) -> str:
         python = preflight.resolve_interpreter(chosen, os.getcwd())
     except (test_interpreter.TestInterpreterError, preflight.PreflightError) as error:
         raise RunError(str(error)) from None
+    # Only the new PATH `python` fallback needs a Python 3 compatibility check.
+    if reason == "python on PATH (no project environment found)":
+        try:
+            version = _startup_probe(python, "", label=f"test interpreter {python} ({reason})",
+                                     probe_args=("--version",))
+        except RunError:
+            pass  # A failed version query leaves the existing interpreter checks in control.
+        else:
+            if re.search(rb"(?m)^Python 2(?:\.|\s|$)", version):
+                raise RunError(f"test interpreter {python} is Python 2; Python 3 is needed. "
+                               "Pass --test-python PATH to choose a compatible interpreter")
     # The engine probe ran "import pytest" from this exact path under the same contained capability,
     # so a second probe proves nothing new; a different path (even a symlink to the same binary,
     # with its own site-packages) is probed.
@@ -2326,10 +2362,10 @@ def _slot_id(entry: dict) -> int | None:
     return slot_id if type(slot_id) is int and slot_id >= 0 else None
 
 
-def _idle_slot(slots: object) -> tuple[int | None, bool]:
-    """Return the lowest uniquely reported idle slot and whether status was usable."""
+def _idle_slots(slots: object) -> tuple[list[int], bool]:
+    """Return uniquely reported idle slots in order and whether status was usable."""
     if not isinstance(slots, list):
-        return None, False
+        return [], False
     by_id: dict[int, bool] = {}
     duplicates: set[int] = set()
     for entry in slots:
@@ -2346,7 +2382,56 @@ def _idle_slot(slots: object) -> tuple[int | None, bool]:
     usable = not slots or bool(by_id)
     idle = sorted(slot_id for slot_id, processing in by_id.items()
                    if not processing and slot_id not in duplicates)
+    return idle, usable
+
+
+def _idle_slot(slots: object) -> tuple[int | None, bool]:
+    """Return the lowest reported idle slot and whether status was usable."""
+    idle, usable = _idle_slots(slots)
     return (idle[0] if idle else None), usable
+
+
+def _acquire_run_slot(endpoint: str, idle: list[int]) -> tuple[int | None, int | None]:
+    """Lock a run's slot separately from the subframe handoff leases."""
+    if not idle:
+        return None, None
+    try:
+        import fcntl
+        home = safe_home()
+        if home is None:
+            return idle[0], None
+        digest = hashlib.sha256(endpoint.encode("utf-8")).hexdigest()[:16]
+        directory = private_directory(home / ".stateframe", "run-slots", digest)
+        flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
+        for slot in idle:
+            descriptor = os.open(directory / f"{slot}.lock", flags, 0o600)
+            try:
+                if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                    raise OSError("run slot lock is not a regular file")
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                os.close(descriptor)
+                continue
+            except (AttributeError, OSError):
+                os.close(descriptor)
+                raise
+            return slot, descriptor
+    except (AttributeError, ImportError, OSError):
+        return idle[0], None
+    return None, None
+
+
+def _release_run_slot(descriptor: int) -> None:
+    """Unlock explicitly: a forked child may still hold a copy of the descriptor."""
+    try:
+        import fcntl
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+    except (AttributeError, ImportError, OSError):
+        pass
+    try:
+        os.close(descriptor)
+    except OSError:
+        pass
 
 
 REQUIRED_SLOT_TOKENS = 65_536  # the default slot; a run uses options._context_tokens
@@ -2403,6 +2488,9 @@ def _select_prompt_cache_slot(
     options: RunOptions, printer=print, observation: Endpoint.SlotObservation | None = None,
 ) -> None:
     """Use an explicit slot or pin one reported idle by a local llama.cpp server."""
+    if options._run_slot_fd is not None:  # selecting again: the provider may have fewer slots now
+        descriptor, options._run_slot_fd = options._run_slot_fd, None
+        _release_run_slot(descriptor)
     options._cache_slot = None
     options._cache_slot_selection = None
     options._cache_slot_reason = None
@@ -2469,14 +2557,19 @@ def _select_prompt_cache_slot(
                                         "prompt-cache slot pin skipped; server slot status unavailable",
                                         type(error).__name__, level="WARN")
                 slots = None
-        slot, usable = _idle_slot(slots)
+        idle, usable = _idle_slots(slots)
+        slot, options._run_slot_fd = _acquire_run_slot(options.endpoint.base_url, idle)
+        all_idle_slots_locked = bool(idle) and slot is None
         if slot is None:
             options._cache_slot_selection = "not_pinned"
             options._cache_slot_reason = (
-                "server did not expose usable slot status" if slots is None or not usable
-                else "server reported no idle slots")
+                "server did not expose usable slot status" if slots is None or not usable else
+                "all idle server slots are pinned by other runs" if all_idle_slots_locked else
+                "server reported no idle slots")
             if slots is None or not usable:
                 printer("cache: server does not expose slots; not pinned")
+            elif all_idle_slots_locked:
+                printer("cache: all idle server slots are pinned by other runs; not pinned")
             else:
                 printer("cache: no idle server slots; not pinned")
             return
@@ -2695,7 +2788,9 @@ def _probe_routes(options: RunOptions, printer=print, *, resume_roles: dict | No
         tokenizer = settings.get("tokenizer")
         if tokenizer:
             try:
-                tokenizer_endpoint = Endpoint(str(tokenizer), endpoint.model, endpoint.api_key_env,
+                tokenizer_key = (endpoint.api_key_env
+                                 if origin_of(str(tokenizer)) == origin_of(endpoint.chat_url) else None)
+                tokenizer_endpoint = Endpoint(str(tokenizer), endpoint.model, tokenizer_key,
                                               endpoint.timeout_s, bool(settings.get("allow_remote")))
                 tokenizer_epoch = (_read_provider_epoch(options, tokenizer_endpoint, f"{role}.tokenizer")
                                    if options._send1_wave4 and not options._resuming else None)
@@ -2991,6 +3086,14 @@ def _warn_checkpoint_disabled(reason: str, warned: set[str]) -> None:
         print(f"warning: checkpoints are off for this run: {detail}", file=sys.stderr, flush=True)
 
 
+def _warn_checkpoint_retry(reason: str, warned: set[str]) -> None:
+    if "checkpoint" not in warned:
+        warned.add("checkpoint")
+        detail = " ".join(str(reason).split())[:240] or "repeated failures"
+        print(f"warning: checkpoint saving continues after a new model send ({detail})",
+              file=sys.stderr, flush=True)
+
+
 def _warn_checkpoint_event(event: dict, warned: set[str]) -> None:
     if event.get("kind") == "checkpoint_key_unusable":
         _warn_checkpoint_disabled(str(event.get("reason") or "checkpoint key is unusable"), warned)
@@ -3007,9 +3110,13 @@ def _warn_checkpoint_journal(run: Path, warned: set[str]) -> None:
                     event = json.loads(line)
                 except ValueError:
                     continue
-                if isinstance(event, dict) and event.get("event") == "checkpoint_disabled":
-                    _warn_checkpoint_disabled(str(event.get("reason") or "saving failed"), warned)
-                    return
+                if isinstance(event, dict):
+                    if event.get("event") == "checkpoint_disabled":
+                        _warn_checkpoint_disabled(str(event.get("reason") or "saving failed"), warned)
+                        return
+                    if event.get("event") == "checkpoint_warning":
+                        _warn_checkpoint_retry(str(event.get("reason") or "repeated failures"), warned)
+                        return
     except OSError:
         pass
 
@@ -4122,7 +4229,7 @@ def summarize(run: Path, started: float) -> dict[str, object]:
         "result", "reason_code", "error", "error_type", "error_message", "failure_origin", "behaviour",
         "done_facts", "submission", "labels", "claims", "resumable", "suspension", "problems",
         "minimum_context_tokens", "configured_context_tokens", "minimum_prompt_tokens",
-        "minimum_measure_method", "message")
+        "minimum_measure_method", "message", "candidate_paths")
         if key in result}
     # Replay refusals keep their actionable detail in the event, not the terminal receipt.
     # Preserve it for the final CLI summary and --json, which suppresses live events.
@@ -4279,6 +4386,9 @@ def run(options: RunOptions, printer=print) -> dict[str, object]:
                         return _run(options, started, printer)
                 return _run(options, started, printer)
     finally:
+        descriptor, options._run_slot_fd = options._run_slot_fd, None
+        if descriptor is not None:
+            _release_run_slot(descriptor)
         options._deadline = None
 
 
@@ -5183,9 +5293,12 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
                 declared.update(_admitted_candidate_paths(run_dir, spec, work, candidate))
             # Committed mutation edits are authorized by the mutation write grant, not the edit scope.
             candidate, mutation_kept = _keep_committed_mutation_effects(run_dir, candidate)
-            declared.update(mutation_kept)
+            if spec["public_row"].get("scope_source") != "discovery":
+                declared.update(mutation_kept)
             # Preserve detected scope violations even if applying retained files raises.
-            dropped_paths = _dropped_existing_candidate_paths(work, candidate, declared)
+            dropped_paths = sorted(set(_dropped_existing_candidate_paths(work, candidate, declared))
+                                   | set(_dropped_discovery_candidate_paths(
+                                       work, spec["public_row"], candidate, declared)))
             if task_scope:
                 out_of_task_scope.update(workcopy.changed_files(work).keys() - task_scope)
                 if mutation_kept:
@@ -5194,7 +5307,8 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
                 candidate = {path: data for path, data in candidate.items() if path in task_scope}
                 dropped_paths = sorted(out_of_task_scope.union(dropped_paths))
             written, _, candidate_error = _apply_sealed_candidate(
-                work, candidate, declared, printer, dropped_paths=dropped_paths)
+                work, candidate, declared, printer, dropped_paths=dropped_paths,
+                discovery_scope=spec["public_row"].get("scope_source") == "discovery")
             if out_of_task_scope:
                 candidate_error = TASK_SCOPE_ERROR
     except RunDeadlineExceeded:

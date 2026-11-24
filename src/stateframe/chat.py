@@ -162,6 +162,11 @@ class Session:
             record.result = str(summary.get("engine_result"))
             record.tests_passed = record.check_outcome == "pass"
             record.files = list(summary.get("files_changed") or [])
+            terminal = summary.get("engine_terminal")
+            if isinstance(terminal, dict) and terminal.get("error_type") == "ProviderHTTPError":
+                record.error = str(summary.get("engine_error_reason")
+                                    or terminal.get("error_message")
+                                    or "provider rejected the request")
             if not summary.get("final_diff_error"):
                 record.diff = (run_dir / "final.diff").read_text()
             if record.runtime_outcome == "hook_containment":
@@ -390,6 +395,8 @@ def _print_problems_line(summary_path: Path, printer) -> None:
     errors, warnings = problems.get("errors", 0), problems.get("warnings", 0)
     if isinstance(errors, int) and isinstance(warnings, int) and (errors or warnings):
         printer(f"[stateframe] problems: {errors} ERROR, {warnings} WARN (see summary.json \"problems\")")
+    if problems.get("self_errors"):
+        printer(f"[stateframe] problem diagnostics incomplete: {problems['self_errors']} self-errors")
 
 
 def repl(session: Session, read=input, printer=print, print_summary=None) -> int:

@@ -136,6 +136,9 @@ learner learners email emails notification notifications queue worker workers
 scheduler deploy deploys ui page pages
 """.split())
 
+_TRACEBACK_FRAME = re.compile(
+    r"\bFile\s+['\"]([^'\"]+)['\"]\s*,\s*line\s+\d+\s*,\s*in\s+([A-Za-z_]\w*)")
+
 _SNAKE = re.compile(r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b")
 _PATHY = re.compile(r"\b[\w./-]+\.(?:py|js|ts|vue|md|json|yaml|yml|sql)\b")
 _CAPS = re.compile(r"\b[A-Z][a-zA-Z0-9]*[a-z][a-zA-Z0-9]*\b")
@@ -151,7 +154,7 @@ def _words(text: str) -> list:
 @dataclass(frozen=True)
 class Resolution:
     """One candidate meaning for a surface phrase, with its evidence."""
-    kind: str                  # seam_violation | repo_symbol | repo_file | activity
+    kind: str                  # seam_violation | repo_symbol[_candidate] | repo_file | activity
     target: str
     score: float
     detail: str = ""
@@ -259,7 +262,7 @@ def extract_referents(utterance: str, domain_vocab: frozenset = frozenset()) -> 
     """Surface phrases that could name a thing, best-evidence class first.
 
     Four deterministic classes, in descending specificity:
-      1. quoted phrases   — the speaker delimited it themselves
+      1. quoted/backticked phrases — the speaker delimited it themselves
       2. file paths       — unambiguous
       3. snake_case       — code-shaped by construction
       4. CapitalisedNames — not sentence-initial (that is just grammar)
@@ -277,8 +280,10 @@ def extract_referents(utterance: str, domain_vocab: frozenset = frozenset()) -> 
             seen.add(p.lower())
             out.append(p)
 
-    for m in re.findall(r"'([^']{2,120})'", text) + re.findall(r'"([^"]{2,120})"', text):
-        push(m)
+    for pattern in (r"'([^']{1,120})'", r'"([^"]{1,120})"',
+                    r"`([^`]{1,120})`"):
+        for m in re.findall(pattern, text):
+            push(m)
     for m in _PATHY.findall(text):
         push(m)
     for m in _SNAKE.findall(text):
@@ -486,8 +491,58 @@ def _violation_text(v: dict) -> str:
     return " ".join(str(v.get(k, "")) for k in ("kind", "file", "name", "detail"))
 
 
+def _traceback_names_symbol(utterance: str, name: str, path: str,
+                            known_paths) -> bool:
+    target = pathlib.PurePosixPath(path.replace("\\", "/")).as_posix()
+    normalized_paths = {
+        original: pathlib.PurePosixPath(original.replace("\\", "/")).as_posix()
+        for original in known_paths
+    }
+    for reported, frame_name in _TRACEBACK_FRAME.findall(utterance or ""):
+        if frame_name != name:
+            continue
+        reported = pathlib.PurePosixPath(reported.replace("\\", "/")).as_posix()
+        matches = [original for original, candidate in normalized_paths.items()
+                   if reported == candidate or reported.endswith("/" + candidate)]
+        if len(matches) == 1 and normalized_paths[matches[0]] == target:
+            return True
+    return False
+
+
+def _explicit_path_names_symbol(utterance: str, path: str, known_paths) -> bool:
+    target = pathlib.PurePosixPath(path.replace("\\", "/")).as_posix()
+    normalized_paths = {
+        original: pathlib.PurePosixPath(original.replace("\\", "/")).as_posix()
+        for original in known_paths
+    }
+    for reported in _PATHY.findall(utterance or ""):
+        reported = pathlib.PurePosixPath(reported.replace("\\", "/")).as_posix()
+        matches = [original for original, candidate in normalized_paths.items()
+                   if (reported == candidate or reported.endswith("/" + candidate)
+                       or candidate.endswith("/" + reported))]
+        if len(matches) == 1 and normalized_paths[matches[0]] == target:
+            return True
+    return False
+
+
+def _symbol_is_grounded(utterance: str, phrase: str, name: str, path: str,
+                        state: RepoState) -> bool:
+    """Whether the ask identifies this symbol strongly enough to call it a target."""
+    if phrase.strip().casefold() != name.casefold():
+        return False
+    for pattern in (r"'([^']{1,120})'", r'"([^"]{1,120})"',
+                    r"`([^`]{1,120})`"):
+        if any(value.strip().casefold() == name.casefold()
+               for value in re.findall(pattern, utterance or "")):
+            return True
+    if _explicit_path_names_symbol(utterance, path, state.files):
+        return True
+    return _traceback_names_symbol(utterance, name, path, state.files)
+
+
 def resolve_referent(phrase: str, state: RepoState, *,
-                     vocabulary: _ResolutionVocabulary | None = None) -> Referent:
+                     vocabulary: _ResolutionVocabulary | None = None,
+                     utterance: str = "") -> Referent:
     """Score one surface phrase against state, in the committed priority order:
     seam violations, then repo symbols, then file paths, then recent activity.
 
@@ -530,7 +585,9 @@ def resolve_referent(phrase: str, state: RepoState, *,
         else:
             continue
         for p in state.symbols[name]:
-            res.append(Resolution(kind="repo_symbol", target=f"{p}::{name}",
+            kind = ("repo_symbol" if _symbol_is_grounded(
+                utterance, phrase, name, p, state) else "repo_symbol_candidate")
+            res.append(Resolution(kind=kind, target=f"{p}::{name}",
                                   score=score, detail="symbol name match"))
 
     for path, stem_w in vocabulary.files.items():
@@ -694,7 +751,8 @@ def interpret(utterance: str, repo_root=None, extra_context: dict | None = None
 
     vocabulary = _ResolutionVocabulary(state, ctx.get("declared_vocabulary"))
     phrases = extract_referents(utterance, domain_vocab=vocabulary.domain)
-    referents = [resolve_referent(p, state, vocabulary=vocabulary) for p in phrases]
+    referents = [resolve_referent(p, state, vocabulary=vocabulary,
+                                  utterance=utterance) for p in phrases]
     resolved = tuple(r for r in referents if r.is_resolved)
     missing = tuple(r for r in referents if not r.is_resolved)
 
@@ -1292,8 +1350,13 @@ def _resolve_from_evidence(spec: FieldSpec, ctx: EvidenceContext) -> tuple:
     if spec.resolver == "referent" and ctx.contract is not None:
         for r in ctx.contract.referents:
             if r.is_resolved:
-                return (f"{r.surface_phrase} -> {r.resolved[0].target}", SOURCE_USER,
-                        f"named in the ask and resolved to a {r.resolved[0].kind}")
+                match = r.resolved[0]
+                if match.kind == "repo_symbol_candidate":
+                    return (f"candidate to inspect: {r.surface_phrase} -> {match.target}",
+                            SOURCE_REPO,
+                            "the symbol matches the wording but the ask does not identify it as the target")
+                return (f"{r.surface_phrase} -> {match.target}", SOURCE_USER,
+                        f"named in the ask and resolved to a {match.kind}")
     if spec.resolver == "symptom":
         hit = _matched(_SYMPTOM_PATTERNS, text)
         if hit:
@@ -1328,11 +1391,16 @@ def _resolve_from_evidence(spec: FieldSpec, ctx: EvidenceContext) -> tuple:
     #    calling this primitive directly) still gets referent resolution.
     if spec.resolver == "referent" and ctx.contract is None and ctx.state is not None:
         for phrase in extract_referents(text, domain_vocab=ctx.state.vocab):
-            r = resolve_referent(phrase, ctx.state)
+            r = resolve_referent(phrase, ctx.state, utterance=text)
             if r.is_resolved:
-                return (r.resolved[0].target, SOURCE_REPO,
+                match = r.resolved[0]
+                if match.kind == "repo_symbol_candidate":
+                    return (f"candidate to inspect: {phrase} -> {match.target}",
+                            SOURCE_REPO,
+                            "the symbol matches the wording but the ask does not identify it as the target")
+                return (match.target, SOURCE_REPO,
                         f"'{phrase}' resolved against supplied state as a "
-                        f"{r.resolved[0].kind}")
+                        f"{match.kind}")
 
     # 5. an UNRESOLVED surface phrase is still what the human said. It is weaker
     #    than a grounded referent, so it is offered only after the bridge.

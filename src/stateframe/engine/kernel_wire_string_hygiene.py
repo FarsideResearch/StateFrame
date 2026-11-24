@@ -198,6 +198,67 @@ def _has_unpaired_surrogate(value: str) -> bool:
     return False
 
 
+def sanitize_provider_response(parsed: object, response: bytes) -> tuple[object, bytes]:
+    if b"\\ud" not in response.lower() and re.search(rb"\xed[\xa0-\xbf]", response) is None:
+        return parsed, response
+    if parsed is None and re.search(rb"\xed[\xa0-\xbf]", response):
+        try: parsed = json.loads(response.decode("utf-8", "surrogatepass"))
+        except (UnicodeError, ValueError, RecursionError): return parsed, response
+    changed = False
+
+    def clean_text(value: str, arguments: bool = False) -> str:
+        nonlocal changed
+        out, touched, index = [], False, 0
+        while index < len(value):
+            code = ord(value[index])
+            if 0xD800 <= code <= 0xDBFF and index + 1 < len(value) and 0xDC00 <= ord(value[index + 1]) <= 0xDFFF:
+                out.append(value[index:index + 2]); index += 2; continue
+            if 0xD800 <= code <= 0xDFFF:
+                out.append(_REPLACEMENT); touched = True; index += 1; continue
+            if arguments and value[index] == "\\":
+                end = index
+                while end < len(value) and value[end] == "\\": end += 1
+                if (end - index) % 2 and value[end:end + 1] == "u" \
+                        and re.fullmatch(r"[0-9a-fA-F]{4}", value[end + 1:end + 5]):
+                    unit = int(value[end + 1:end + 5], 16)
+                    low = value[end + 5:end + 11]
+                    pair = (0xD800 <= unit <= 0xDBFF and low[:2] == "\\u"
+                            and re.fullmatch(r"[0-9a-fA-F]{4}", low[2:])
+                            and 0xDC00 <= int(low[2:], 16) <= 0xDFFF)
+                    if 0xD800 <= unit <= 0xDFFF and not pair:
+                        out.extend((value[index:end - 1], r"\ufffd")); touched = True
+                    else:
+                        out.append(value[index:end + (11 if pair else 5)])
+                    index = end + (11 if pair else 5); continue
+                out.append(value[index:end]); index = end; continue
+            out.append(value[index]); index += 1
+        if touched: changed = True; return "".join(out)
+        return value
+
+    def visit(value: object, in_calls: bool = False, in_call: bool = False) -> object:
+        if isinstance(value, str): return clean_text(value)
+        if isinstance(value, list): value[:] = [visit(item, in_calls, in_calls) for item in value]
+        elif isinstance(value, dict):
+            items = [(clean_text(key), clean_text(item, True) if in_call and key == "arguments"
+                      and isinstance(item, str) else visit(item, key == "tool_calls" and isinstance(item, list),
+                                                           in_calls and key == "function"))
+                     for key, item in value.items()]
+            if any(key is not old_key or item is not old_item
+                   for (key, item), (old_key, old_item) in zip(items, value.items())): value.clear(); value.update(items)
+        return value
+
+    try:
+        visit(parsed)
+        if not changed: return parsed, response
+        clean = json.dumps(parsed, ensure_ascii=True, separators=(",", ":")).encode("ascii")
+    except RecursionError: return parsed, response
+    try: from kernel_reason_log import emit_reason
+    except ImportError: from .kernel_reason_log import emit_reason
+    emit_reason("degrade", "provider_lone_surrogate_replaced", "wire_string_hygiene",
+                "replaced provider lone surrogates", "strict UTF-8 requires valid strings", journal=False)
+    return parsed, clean
+
+
 def _string_violation(value: str) -> str | None:
     if "\x00" in value:
         return "nul"

@@ -227,6 +227,34 @@ def candidate_changed(runtime: object | None) -> bool:
     return bool(changed and revision and str(revision).strip().upper() != "UNKNOWN")
 
 
+def discovery_no_change_paths(root: object, receipts: object, summary: object) -> tuple[str, ...]:
+    """Current workspace files named in done and successfully read during this run."""
+    if not isinstance(summary, str) or not summary.strip():
+        return ()
+    try:
+        workspace = Path(root).resolve(strict=True)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return ()
+    rows = receipts if isinstance(receipts, Sequence) else ()
+    candidates: set[str] = set()
+    for row in rows:
+        if (not isinstance(row, Mapping) or row.get("kind") != "read"
+                or row.get("result_class") != "OK"):
+            continue
+        raw = row.get("target_path")
+        path = PurePosixPath(raw) if isinstance(raw, str) else PurePosixPath(".")
+        if not raw or path.is_absolute() or ".." in path.parts or path.as_posix() != raw:
+            continue
+        try:
+            current = (workspace / path).resolve(strict=True)
+            if not current.is_relative_to(workspace) or not current.is_file(): continue
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if re.search(r"(?<![\w./\\-])" + re.escape(raw) + r"(?![\w/\\-]|\.[\w])", summary):
+            candidates.add(raw)
+    return tuple(sorted(candidates))
+
+
 def _applied_file_create_product_changed(runtime: object) -> bool:
     from kernel_delivery_manifest import DeliveryManifestTracker
     from kernel_edit_source_tool import task_scope_refusal

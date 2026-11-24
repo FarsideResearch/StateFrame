@@ -11,6 +11,7 @@ import re
 import stat
 import sys
 import uuid
+from collections.abc import Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -406,7 +407,12 @@ class MutationEdits:
                 if not any(scope_path_matches(path, glob) for glob in runtime.policy.write_globs):
                     raise EditConflict("edit path exceeds mutation write grant")
                 if runtime.edit_scope is not None and path not in runtime.edit_scope:
-                    raise EditConflict("edit path exceeds --edit scope")
+                    row = runtime.effect_row
+                    reason = ("discovery scope is empty; no source path is admitted for writing"
+                              if isinstance(row, Mapping)
+                              and row.get("scope_source") == "discovery"
+                              else "edit path exceeds --edit scope")
+                    raise EditConflict(reason)
                 if (parts[-1].startswith("test_") or parts[-1] == "conftest.py"
                         or "tests" in parts or path in runtime.protected_paths):
                     raise EditConflict("protected test cannot be edited")

@@ -112,6 +112,11 @@ def _editable_read_name(relative: str) -> str | None:
 
 def _editable_values(runtime: object) -> list[object]:
     owner = getattr(runtime, "owner", None)
+    task_row = getattr(owner, "task_row", None)
+    if isinstance(task_row, Mapping) and task_row.get("scope_source") == "discovery":
+        from kernel_edit_affordance import WIDENED_PATHS_KEY
+        widened = task_row.get(WIDENED_PATHS_KEY, ())
+        return list(_path_values(widened))
     values: list[object] = [getattr(runtime, "target", None)]
     holders: list[object] = [
         getattr(runtime, "edit_contract", None),

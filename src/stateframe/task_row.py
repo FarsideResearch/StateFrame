@@ -233,8 +233,8 @@ def resolve_edit_scope(task: str, product: dict[str, str], *, target: str | None
     files at any size and wins over the size-based fallbacks below. A repo at or below
     DECLARE_ALL_LIMIT with no flags and no task rule stays unscoped. An unparseable restriction
     warns and leaves the task unscoped. Otherwise, over the limit with no flags, auto_scope
-    chooses files; if it finds none, refuse before the run so every product file cannot
-    accidentally become editable.
+    chooses files; if it finds none, the row starts with an empty, scoped discovery authority
+    so every product file cannot accidentally become editable.
     """
     return _resolve_edit_scope(task, product, target=target, edits=edits, steering=steering,
                                parsed_scope=_parse_task_scope(task))
@@ -261,9 +261,7 @@ def _resolve_edit_scope(task: str, product: dict[str, str], *, target: str | Non
     inferred = auto_scope(task, product, steering)
     if inferred:
         return {path: product[path] for path in inferred}, True, SCOPE_INFERRED
-    raise TaskRowError(
-        f"could not infer an editable file in a repository with more than {DECLARE_ALL_LIMIT} "
-        "product files; pass --target or --edit to choose the scope")
+    return {}, True, "discovery"
 
 
 # Opt-in edit scope widening (STATEFRAME_EDIT_SCOPE_WIDEN / --edit-scope widen) admits at most
@@ -393,10 +391,12 @@ def build_row(work: WorkCopy, *, task: str, checks: list[str] | None = None,
             if entry is None:
                 entry = guess_entry({path: text for path, text in product.items()
                                      if _public_hint(path)}, {})
+    if entry is None and scope_source == "discovery":
+        entry = ""
     if entry is None:
         raise TaskRowError("could not pick a public starting file; name an output path in --task "
                            "or pass --target for an existing product file")
-    new_roots = [entry.split("/", 1)[0]] if entry not in product else []
+    new_roots = [entry.split("/", 1)[0]] if entry and entry not in product else []
     # Product roots: each top-level directory, plus each top-level file by name (the engine
     # matches a root either exactly or as a directory prefix; "." would match nothing).
     roots = sorted({*(path.split("/", 1)[0] for path in product), *new_roots})
@@ -510,9 +510,11 @@ def _build_generic_row(work: WorkCopy, *, task: str, checks: list[str] | None,
             if entry is None:
                 entry = guess_entry({path: text for path, text in product.items()
                                      if _public_hint(path)}, {})
+    if entry is None and scope_source == "discovery":
+        entry = ""
     if entry is None:
         raise TaskRowError("could not pick a starting file; name an output path in --task")
-    new_roots = [entry.split("/", 1)[0]] if entry not in product else []
+    new_roots = [entry.split("/", 1)[0]] if entry and entry not in product else []
     digest = hashlib.sha256(task.encode("utf-8")).hexdigest()[:12]
     identifier = task_id or f"task-{digest}"
     row = {

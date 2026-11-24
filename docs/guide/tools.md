@@ -9,6 +9,10 @@ The existing file and check tools are `grep`, `list_files`, `read`, `edit`, `str
 If a `run_tests` selector is refused before dispatch, the tool reply names the refusal and the run can continue with another action. The refusal does not count as a passing or failing test.
 Text replacement takes a path, the exact text to find, and replacement text. The old text must occur exactly once, and each call replaces that one occurrence. It has no batch form. For a pytest check, a target may be a test file, a file and test name separated by `::`, a bare test name, or an existing test directory. Directory paths such as `tests/` and `./tests/` are accepted. A path-like target must resolve inside the repository before the check starts.
 
+## Reading source
+
+The `read` tool supplies source-read evidence. Files containing a NUL byte are reported as binary and their contents are withheld; UTF-16 files are reported as binary. Invalid UTF-8 text without NUL bytes is shown with replacement characters and a note identifying the undecodable bytes.
+
 By default, `STATEFRAME_STABLE_TOOL_HEAD` keeps provider-visible tool definitions in first-seen order after they are first offered. A listed tool is not necessarily callable on the current step: dispatch still follows that step's callable menu. Calls outside the menu are refused with `not offered for the current state`, and the request names the callable tools. Set the switch to `off` to restore per-step lists; see [Running](running.md#prompt-cache-stable-tool-head).
 
 When a run selects a [skill](skills.md), `skill_load(name)` is also offered. It loads a bounded user-role instruction body and creates a settled observation. It grants no source-read or check evidence. Skill command definitions are offered only with `--trust-skill-tools` and follow the custom command rules below.

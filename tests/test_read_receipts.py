@@ -17,6 +17,7 @@ import pytest
 
 import kernel_read_exec as reads
 import kernel_read_receipts as receipts
+import kernel_source_delivery as source
 from kernel_measurement import canonical_bytes, resolve_journal_blob_refs
 from kernel_native_tools import NativeToolBatch
 from stateframe import runner
@@ -42,10 +43,11 @@ def runtime(tmp_path):
                            retained=None, step_ledger=None, _frame_budget_request_count=3)
 
 
-def read(rt, root, args=None, module=reads, messages=None):
+def read(rt, root, args=None, module=reads, messages=None, delivery=None):
+    delivery = delivery if delivery is not None else {}
     return module.execute_read(root, root / "source.txt", "source.txt", "source.txt", 0,
                                args=args or {"path": "source.txt"}, measurement=rt,
-                               step=1, delivery={}, visible_messages=messages)
+                               step=1, delivery=delivery, visible_messages=messages)
 
 
 @pytest.fixture(autouse=True)
@@ -59,6 +61,13 @@ def test_switch_exact_value(monkeypatch):
         assert not receipts.enabled()
     monkeypatch.delenv("STATEFRAME_WORKING_SET_ALLOCATOR")
     assert not receipts.enabled()
+
+
+@pytest.mark.parametrize(("outcome", "expected"), [
+    ("BINARY", "BINARY_FILE"), ("NON_REGULAR_FILE", "REFUSED"),
+])
+def test_new_read_outcomes_keep_typed_receipt_vocabulary(outcome, expected):
+    assert receipts.typed_status(outcome) == expected
 
 
 def test_cache_live_identity_and_blobs(tmp_path):
@@ -99,7 +108,7 @@ def test_different_columns_do_not_collide(tmp_path, lossy):
         page = deliver_source(b"abab", "source.txt", 0,
                               args={"path": "source.txt", "column": col})
         meta = copy.deepcopy(page.metadata)
-        # Legacy lossy receipts remain readable, but live reads now refuse invalid UTF-8.
+        # Lossy spans keep decoded columns without inventing raw offsets.
         meta["decoded_with_replacement"] = lossy
         meta["effective_range"]["end_column"] = col + 2
         if not meta["decoded_with_replacement"]:
@@ -128,12 +137,15 @@ def test_lossy_read_keeps_base_delivery_and_decoded_capture(tmp_path, monkeypatc
     (tmp_path / "source.txt").write_bytes(b"\xff\nx\n")
     rt = runtime(tmp_path)
     scope = receipts.begin_read_attempt(rt, {"path": "source.txt"})
-    status, observation, _ = read(rt, tmp_path)
+    metadata = {}
+    status, observation, _ = read(rt, tmp_path, delivery=metadata)
     receipts.finish_pending(rt, status=status)
-    # 0.6.23 delivers invalid UTF-8 with replacement. Keep that wire contract;
-    # the audit must describe decoded columns without inventing raw offsets.
+    # Preserve HEAD~1 replacement decoding, decoded columns and raw revision binding.
     assert status == "OK"
-    assert "\ufffd" in observation and "decoded_with_replacement=true" in observation
+    assert "\ufffd\nx\n" in observation and "\\xff" not in observation
+    note = "not UTF-8: 1 undecodable bytes are shown as U+FFFD; do not copy them into an edit"
+    assert metadata["decoding_note"] == note and note in observation
+    assert "decoded_with_replacement=true" in observation
     if setting == "on":
         capture, = rt.read_capture_ledger.all()
         assert capture.identity.byte_start is capture.identity.byte_end is None
@@ -375,9 +387,9 @@ def test_executor_typed_host_failures(tmp_path, monkeypatch, error, status):
     (tmp_path / "source.txt").write_text("alpha\n")
     args = {"path": "source.txt"}
     receipts.begin_read_attempt(rt, args)
-    def fail(_self):
+    def fail(*args, **kwargs):
         raise error
-    monkeypatch.setattr(Path, "read_bytes", fail)
+    monkeypatch.setattr(source.os, "open", fail)
     outcome = reads.dispatch_live_read(tmp_path, tmp_path / "source.txt", "source.txt",
         "source.txt", 0, args=args, measurement=rt, step=1,
         bolt=SimpleNamespace(receipt=lambda *a, **k: None), policy=None, resolved_path="source.txt")

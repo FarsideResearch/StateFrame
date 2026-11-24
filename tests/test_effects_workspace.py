@@ -5,8 +5,16 @@ from pathlib import Path
 
 import pytest
 
-from kernel_effects import (ContentStore, EffectRestoreError, WorkspaceEffectPolicy,
-                            diff, effect_policy_for_run, manifest_digest, reconcile, scan)
+from kernel_effects import (
+    ContentStore,
+    EffectRestoreError,
+    WorkspaceEffectPolicy,
+    diff,
+    effect_policy_for_run,
+    manifest_digest,
+    reconcile,
+    scan,
+)
 
 
 def snapshot(root: Path, store: ContentStore):
@@ -35,6 +43,25 @@ def test_same_size_rewrite_with_restored_mtime(tmp_path):
     assert result.applied[0].path == "code.py"
     assert result.manifest["code.py"].digest != before["code.py"].digest
     assert manifest_digest(result.manifest) != manifest_digest(before)
+
+
+def test_workspace_under_symlinked_parent_keeps_effect_restore_behavior(tmp_path):
+    real_parent = tmp_path / "real-parent"
+    root = real_parent / "workspace"
+    root.mkdir(parents=True)
+    path = root / "code.py"
+    path.write_text("before")
+    alias = tmp_path / "workspace-link"
+    alias.symlink_to(real_parent, target_is_directory=True)
+    workspace = alias / "workspace"
+    store = ContentStore(tmp_path / "run")
+    before = snapshot(workspace, store)
+
+    path.write_text("changed")
+    after = scan(workspace, exclude=lambda _: False)
+    reconcile(workspace, before, after, policy(scope=lambda _: False), store, None)
+
+    assert path.read_text() == "before"
 
 
 def test_chmod_only_restored(tmp_path):
@@ -236,6 +263,92 @@ def test_restore_failure_is_typed_and_names_path(tmp_path, monkeypatch):
     with pytest.raises(EffectRestoreError, match="code.py") as raised:
         reconcile(root, before, after, policy(scope=lambda _: False), store, None)
     assert raised.value.paths == ("code.py",)
+
+
+@pytest.mark.parametrize("replacement,expected", [("file", False), ("symlink", True)])
+def test_protection_probe_keeps_symlink_alias_protected(
+        tmp_path, replacement, expected):
+    root = tmp_path / "workspace"
+    package = root / "pkg"
+    package.mkdir(parents=True)
+    hook = package / "hook.py"
+    hook.write_text("protected hook", encoding="ascii")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    before = scan(root, exclude=lambda _: False)
+    adapted = effect_policy_for_run(
+        root, {"files": {"pkg/hook.py": {}}, "protect_tests": "off"}, set(),
+        baseline_manifest=before, hook_paths=frozenset({"pkg/hook.py"}),
+    )
+
+    os.link(hook, outside / "alias.py")
+    hook.unlink()
+    package.rmdir()
+    if replacement == "file":
+        package.write_text("now a file", encoding="ascii")
+    else:
+        package.symlink_to(outside, target_is_directory=True)
+
+    assert adapted.protected("pkg/alias.py") is expected
+
+
+def test_baseline_test_inode_probe_treats_non_directory_ancestor_as_absent(tmp_path):
+    root = tmp_path / "workspace"
+    package = root / "pkg"
+    package.mkdir(parents=True)
+    protected = package / "test_api.py"
+    protected.write_text("def test_api(): pass\n", encoding="ascii")
+    before = scan(root, exclude=lambda _: False)
+    protected.unlink()
+    package.rmdir()
+    package.write_text("now a file", encoding="ascii")
+
+    adapted = effect_policy_for_run(
+        root, {"files": {}, "protect_tests": "off"}, {str(protected)},
+        baseline_manifest=before,
+    )
+
+    assert adapted.protected("pkg/other.py") is False
+    assert adapted.protected("pkg/test_api.py") is True
+
+
+def test_symlink_alias_to_baseline_test_remains_protected(tmp_path):
+    root = tmp_path / "workspace"
+    protected = root / "pkg" / "test_api.py"
+    protected.parent.mkdir(parents=True)
+    protected.write_text("def test_api(): pass\n", encoding="ascii")
+    (protected.parent / "test_alias.py").symlink_to("test_api.py")
+    before = scan(root, exclude=lambda _: False)
+
+    adapted = effect_policy_for_run(
+        root, {"files": {}, "protect_tests": "off"}, {str(protected)},
+        baseline_manifest=before,
+    )
+
+    assert adapted.protected("pkg/test_alias.py") is True
+
+
+def test_directory_replaced_by_symlink_is_restored_without_touching_target(tmp_path):
+    root = tmp_path / "workspace"
+    slot = root / "pkg" / "nested" / "slot"
+    slot.mkdir(parents=True)
+    (slot / "marker.py").write_text("saved", encoding="ascii")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "marker.py").write_text("external", encoding="ascii")
+    store = ContentStore(tmp_path / "run")
+    before = snapshot(root, store)
+
+    (slot / "marker.py").unlink()
+    slot.rmdir()
+    slot.symlink_to(outside, target_is_directory=True)
+    after = scan(root, exclude=lambda _: False)
+    result = reconcile(root, before, after, policy(scope=lambda _: False), store, None)
+
+    assert (slot / "marker.py").read_text(encoding="ascii") == "saved"
+    assert not slot.is_symlink()
+    assert (outside / "marker.py").read_text(encoding="ascii") == "external"
+    assert result.manifest == before
 
 
 def test_large_tree_scan_timing(tmp_path, record_property):

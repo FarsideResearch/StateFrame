@@ -713,12 +713,17 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
             request_id = getattr(capture, "request_id", None)
             hook_wiring.sent(wire, str(request_id) if request_id is not None else f"send:{index}")
         elapsed = time.monotonic() - started
-        with wire_lock:
-            atomic_bytes(stem.with_suffix(".response.json"), response)
         try:
             parsed = json.loads(response)
         except (ValueError, RecursionError):
             parsed = None
+        if __package__:
+            from .engine.kernel_wire_string_hygiene import sanitize_provider_response
+        else:
+            from engine.kernel_wire_string_hygiene import sanitize_provider_response
+        parsed, response = sanitize_provider_response(parsed, response)
+        with wire_lock:
+            atomic_bytes(stem.with_suffix(".response.json"), response)
         usage = _usage(parsed)
         if send_ledger is not None and replayed is None:
             settle_attempts(transport_attempts, usage)

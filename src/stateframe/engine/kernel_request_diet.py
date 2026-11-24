@@ -3494,14 +3494,27 @@ def _upsert_truthful_dropped_source_notice(
             )
     else:
         lines.append("- none")
-    lines.append("Ranges omitted by request budgeting:")
+    reason_headers = {
+        "budget_eviction": "Ranges omitted by request budgeting:",
+        "stale_evidence": "Source ranges excluded because their evidence is stale:",
+        "stale_revision": "Source ranges excluded because their revision is stale:",
+    }
+    records_by_reason: dict[str, list[Mapping[str, object]]] = {}
     for key in sorted(remaining_records):
         record = remaining_records[key]
-        revision = str(record["revision"]) or "unknown"
-        lines.append(
-            f"- {record['path']}:{record['start_line']}-{record['end_line']} "
-            f"revision={revision} reason={record['reason']}"
-        )
+        reason = str(record["reason"])
+        records_by_reason.setdefault(reason, []).append(record)
+
+    for reason, reason_records in sorted(records_by_reason.items()):
+        lines.append(reason_headers.get(
+            reason, "Source ranges excluded for the recorded reason:",
+        ))
+        for record in reason_records:
+            revision = str(record["revision"]) or "unknown"
+            lines.append(
+                f"- {record['path']}:{record['start_line']}-{record['end_line']} "
+                f"revision={revision} reason={reason}"
+            )
     notice = {
         "role": "user",
         "content": "\n".join(lines),

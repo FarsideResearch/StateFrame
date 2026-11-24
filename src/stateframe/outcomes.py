@@ -333,6 +333,9 @@ def engine_error_reason(summary: dict[str, object]) -> str | None:
             return None
         error_type = str(terminal.get("error_type") or terminal.get("error") or result)
         return f"engine error: {error_type}: {message}"
+    if result == "HARNESS_CONTRACT" and terminal.get("error_type") == "ProviderHTTPError":
+        message = str(terminal.get("error_message") or "provider rejected the request").strip()
+        return f"provider error: {message}"
     if result not in SEAL_FAILURES:
         return None
     detail = str(terminal.get("error_message") or terminal.get("error") or terminal.get("error_type") or "no detail")

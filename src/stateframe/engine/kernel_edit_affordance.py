@@ -15,6 +15,10 @@ EDIT_SCOPE_SAMPLE_SIZE = 8
 # Task-row key that opt-in edit scope widening appends admitted files to.  Mirrors
 # probes.react_repair.EDIT_SCOPE_WIDENED_KEY (a test pins the two spellings together).
 WIDENED_PATHS_KEY = '_edit_scope_widened'
+DISCOVERY_SCOPE_INSTRUCTION = (
+    'discovery scope is empty. Read candidate source files, then use the existing interactive '
+    'ask surface, when available, to ask which existing path to change. Do not write until a path is admitted. '
+    'For a headless run, end with that question and list every candidate path read.')
 
 
 def is_compact(count: int) -> bool:
@@ -23,7 +27,9 @@ def is_compact(count: int) -> bool:
 
 def whole_set_editable(holder: object) -> bool:
     """True when a scope or authority carries the whole-product-set marker, not a path list."""
-    return isinstance(holder, Mapping) and holder.get('editable_all') is True
+    return (isinstance(holder, Mapping)
+            and holder.get('scope_source') != 'discovery'
+            and holder.get('editable_all') is True)
 
 
 def _compact_fields(paths: Sequence[str]) -> dict:
@@ -47,6 +53,11 @@ def _widened_paths(row: object) -> list[str]:
     return [str(path).replace('\\', '/').lstrip('./') for path in raw if str(path).strip()]
 
 
+def _discovery_scope(holder: object, row: object) -> bool:
+    return ((isinstance(holder, Mapping) and holder.get('scope_source') == 'discovery')
+            or (isinstance(row, Mapping) and row.get('scope_source') == 'discovery'))
+
+
 def resolve_editable_paths(holder: object, row: object = None) -> list[str]:
     """Editable paths of a scope/authority; for a whole-set marker, the task row's product set.
 
@@ -54,6 +65,8 @@ def resolve_editable_paths(holder: object, row: object = None) -> list[str]:
     stay exact without the contract (and therefore the frame) carrying the list.  Files widened
     into scope during the run (``WIDENED_PATHS_KEY``) are unioned in, so they stay editable.
     """
+    if _discovery_scope(holder, row):
+        return _widened_paths(row)
     if not isinstance(holder, Mapping):
         return []
     if not whole_set_editable(holder):
@@ -69,6 +82,8 @@ def resolve_editable_paths(holder: object, row: object = None) -> list[str]:
 def path_editable(holder: object, path: str, product_paths: Sequence[str] | frozenset[str] | None = None,
                   row: object = None) -> bool:
     """Is ``path`` editable under ``holder``?  Whole-set scopes use product-set membership."""
+    if _discovery_scope(holder, row):
+        return path in _widened_paths(row)
     if not isinstance(holder, Mapping):
         return False
     if whole_set_editable(holder):
@@ -85,6 +100,8 @@ def bundle_editable_targets(row: object, contract: object) -> list[str]:
 
     A whole-set scope carries no list, so the targets come from the row's product set instead.
     """
+    if _discovery_scope(contract, row):
+        return _widened_paths(row)
     listed = row.get('editable_paths') if isinstance(row, Mapping) else None
     if listed:
         return list(listed) if isinstance(listed, Sequence) and not isinstance(listed, str) else []
@@ -197,12 +214,19 @@ def _with_edit_authority(scope: dict, editable_paths: Sequence[str],
 def contract(*, multi_file: bool, entry_path: str | None,
              entry_fn: str | None, target_fn: str = "",
              product_paths: Sequence[str] = (),
-             product_sizes: Mapping[str, Mapping[str, int | None]] | None = None) -> dict | None:
+             product_sizes: Mapping[str, Mapping[str, int | None]] | None = None,
+             scope_source: str | None = None) -> dict | None:
     if not enabled():
         return None
     if os.environ.get('STATEFRAME_VIEW', 'existing') != 'operational':
         raise ValueError('edit affordance requires operational frames')
-    declared = _product_paths(product_paths)
+    discovery_scope = scope_source == 'discovery'
+    if discovery_scope:
+        # Discovery has no admitted paths. Neither its entry hint nor incidental paths
+        # carried by the caller may become edit authority.
+        entry_path = None
+        entry_fn = None
+    declared = [] if discovery_scope else _product_paths(product_paths)
     if entry_path and entry_path not in declared:
         declared.append(str(entry_path).replace("\\", "/").lstrip("./"))
         declared.sort()
@@ -234,6 +258,11 @@ def contract(*, multi_file: bool, entry_path: str | None,
             if no_entry_definition:
                 scope['whole_file_eligibility'] = eligibility
             scope = _with_edit_authority(scope, declared, ())
+            if discovery_scope:
+                scope['scope_source'] = 'discovery'
+                scope['instruction'] = DISCOVERY_SCOPE_INSTRUCTION
+                scope['edit_authority']['scope_source'] = 'discovery'
+                scope['edit_authority']['discovery_instruction'] = DISCOVERY_SCOPE_INSTRUCTION
             if no_entry_definition:
                 scope['edit_authority']['whole_file_eligibility'] = copy.deepcopy(eligibility)
                 # In definition mode the required base is the selected definition's
@@ -432,6 +461,13 @@ def tool_surface(tools: list[dict], scope: dict | None, *, authority: bool = Fal
                 'type': 'string', 'enum': ['replace'],
                 'description': 'Exact text replacement; insertion and move need a host-issued anchor.',
             })
+        if (scope.get('scope_source') == 'discovery'
+                and name in {'edit', 'str_replace', 'insert_before', 'file_create',
+                             'file_move', 'file_delete', 'replace_module', 'edit_source',
+                             'rewrite_source', 'shell'}):
+            tool['function']['description'] = (
+                str(tool['function'].get('description', '')).rstrip()
+                + ' ' + DISCOVERY_SCOPE_INSTRUCTION)
     return result
 
 def instructions(text: str, scope: dict | None, *, authority: bool = False) -> str:

@@ -8,6 +8,7 @@ user made meanwhile).
 from __future__ import annotations
 
 import difflib
+import errno
 import fnmatch
 import hashlib
 import os
@@ -16,14 +17,17 @@ import shutil
 import stat
 import sys
 import tokenize
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import Callable, Iterator, Mapping
 
 from . import _startup_optimization_enabled
 from .engine.kernel_edit_merge import ConflictHunk, MergeApplied, MergeConflict, merge_texts
 from .engine.kernel_secret_paths import SECRET_DIRS, is_secret_file
+
+_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+_DIRECTORY_FLAGS = _READ_FLAGS | os.O_DIRECTORY
 
 # Bounds for the conflict report shown to the user (COLLAB-DRIFT piece F).
 MAX_HUNKS_PER_FILE = 5
@@ -109,7 +113,20 @@ def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _is_copy_storage_full(error: OSError) -> bool:
+    return error.errno in {errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)}
+
+
+def _copy_storage_error() -> WorkCopyError:
+    return WorkCopyError("cannot create working copy: No space left on device")
+
+
 def _ignored(name: str, is_dir: bool) -> bool:
+    if not name.isascii():
+        try:
+            name.encode("utf-8")
+        except UnicodeEncodeError:
+            return True  # not valid UTF-8: no request, journal or patch can name it
     if is_dir:
         return name in IGNORE_DIRS or name.casefold() in SECRET_DIRS or name.endswith(".egg-info")
     return is_secret_file(name) or any(fnmatch.fnmatch(name, pattern) for pattern in IGNORE_GLOBS)
@@ -121,6 +138,65 @@ def frame_source_path_allowed(path: str) -> bool:
     return bool(parts and all(part not in {"", ".", ".."} for part in parts)
                 and not any(_ignored(part, True) for part in parts[:-1])
                 and not _ignored(parts[-1], False))
+
+
+def _walk_source(
+    root: Path, onerror: Callable[[Path, OSError], None],
+) -> Iterator[tuple[Path, list[str], int]]:
+    """Walk in legacy order while retaining directory descriptors and error paths."""
+    # One close marker per open ancestor keeps the descriptor lifetime bounded by depth.
+    pending: list[tuple[Path | None, int | None]] = [(root, None)]
+    opened: list[int] = []
+    try:
+        while pending:
+            path, parent_fd = pending.pop()
+            if path is None:
+                os.close(opened.pop())
+                continue
+            name = path if parent_fd is None else path.name
+            try:
+                fd = os.open(name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
+            except OSError as error:
+                if parent_fd is not None and error.errno in {errno.ENOTDIR, errno.ELOOP}:
+                    # walk does not descend into a directory symlink, including one
+                    # installed after enumeration. Inspect the entry without following it.
+                    try:
+                        if stat.S_ISLNK(os.stat(name, dir_fd=parent_fd, follow_symlinks=False).st_mode):
+                            continue
+                    except OSError as inspect_error:
+                        error = inspect_error
+                onerror(path, error)
+                continue
+            opened.append(fd)
+            pending.append((None, None))
+            children, files = [], []
+            try:
+                with os.scandir(fd) as entries:
+                    for entry in entries:
+                        try:
+                            is_dir = entry.is_dir()
+                        except OSError:
+                            is_dir = False  # Match os.walk's classification of symlink loops.
+                        if is_dir:
+                            children.append(entry.name)
+                        else:
+                            files.append(entry.name)
+            except OSError as error:
+                onerror(path, error)
+                continue
+            children = sorted(name for name in children if not _ignored(name, True))
+            yield path, sorted(files), fd
+            pending.extend((path / name, fd) for name in reversed(children))
+    finally:
+        for fd in reversed(opened):
+            os.close(fd)
+
+
+def _source_file_error(operation: str, path: Path, error: OSError) -> WorkCopyScanError:
+    if error.filename is not None:
+        # Descriptor-relative syscalls report only the entry name.
+        error = OSError(error.errno, error.strerror, os.fspath(path))
+    return WorkCopyScanError(f"cannot {operation} repository file {path}: {error}")
 
 
 def create(original: Path, destination: Path, limits: Limits | None = None, *,
@@ -144,41 +220,74 @@ def create(original: Path, destination: Path, limits: Limits | None = None, *,
         admit_workcopy(work, limits)
         return work
     total = 0
-    destination.mkdir(parents=True)
 
-    def scan_error(error: OSError) -> None:
-        raise _repository_scan_error(error.filename or original, error) from error
+    def scan_error(path: Path, error: OSError) -> None:
+        raise _repository_scan_error(path, error) from error
 
-    for directory, dirnames, filenames in os.walk(original, followlinks=False, onerror=scan_error):
-        here = Path(directory)
-        dirnames[:] = sorted(d for d in dirnames
-                             if not _ignored(d, True) and not (here / d).is_symlink())
-        for name in sorted(filenames):
-            source = here / name
-            rel = source.relative_to(original).as_posix()
-            if _ignored(name, False) or source.is_symlink():
+    try:
+        destination.mkdir(parents=True)
+    except OSError as error:
+        if _is_copy_storage_full(error):
+            raise _copy_storage_error() from error
+        raise
+    for directory, filenames, dir_fd in _walk_source(original, onerror=scan_error):
+        here = directory.relative_to(original)
+        for name in filenames:
+            relative = here / name
+            rel = relative.as_posix()
+            if _ignored(name, False):
+                work.skipped.append(rel)
+                continue
+            source = directory / name
+            try:
+                before = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+            except OSError as error:
+                raise _source_file_error("inspect", source, error) from error
+            if not stat.S_ISREG(before.st_mode) or before.st_size > limits.max_file_bytes:
                 work.skipped.append(rel)
                 continue
             try:
-                size = source.stat().st_size
+                descriptor = os.open(name, _READ_FLAGS, dir_fd=dir_fd)
             except OSError as error:
-                raise WorkCopyScanError(f"cannot inspect repository file {source}: {error}") from error
-            if size > limits.max_file_bytes:
-                work.skipped.append(rel)
-                continue
-            total += size
+                if error.errno in {errno.ELOOP, errno.ENXIO}:
+                    work.skipped.append(rel)
+                    continue
+                if _is_copy_storage_full(error):
+                    shutil.rmtree(destination, ignore_errors=True)
+                    raise _copy_storage_error() from error
+                raise _source_file_error("read", source, error) from error
+            with os.fdopen(descriptor, "rb") as stream:
+                info = os.fstat(descriptor)
+                # An editor's atomic save may have replaced the file since the listing: copy the new one.
+                if not stat.S_ISREG(info.st_mode) or info.st_size > limits.max_file_bytes:
+                    work.skipped.append(rel)
+                    continue
+                try:
+                    data = stream.read(limits.max_file_bytes + 1)
+                except OSError as error:
+                    if _is_copy_storage_full(error):
+                        shutil.rmtree(destination, ignore_errors=True)
+                        raise _copy_storage_error() from error
+                    raise _source_file_error("read", source, error) from error
+                if len(data) > limits.max_file_bytes:
+                    work.skipped.append(rel)
+                    continue
+            total += len(data)
             if len(work.baseline) >= limits.max_files or total > limits.max_total_bytes:
                 raise WorkCopyError(
                     f"repository is larger than the run limits ({limits.max_files} files, "
                     f"{limits.max_total_bytes // (1024 * 1024)} MB); point --repo at a smaller tree")
+            target = destination / relative
             try:
-                data = source.read_bytes()
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with target.open("xb") as output:
+                    output.write(data)
+                    os.fchmod(output.fileno(), stat.S_IMODE(info.st_mode))
             except OSError as error:
-                raise WorkCopyScanError(f"cannot read repository file {source}: {error}") from error
-            target = destination / rel
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(data)
-            shutil.copymode(source, target)
+                if _is_copy_storage_full(error):
+                    shutil.rmtree(destination, ignore_errors=True)
+                    raise _copy_storage_error() from error
+                raise
             work.baseline[rel] = _sha(data)
     if not work.baseline:
         raise WorkCopyError("repository has no files to work on")
@@ -289,12 +398,49 @@ def _read_original_bytes(work: WorkCopy, rel: str) -> bytes:
     return data
 
 
+def _swap_deletions(files: dict[str, bytes | None]) -> set[str]:
+    """Deletions that must come first: a file above or below a path that is written."""
+    written = {rel for rel, data in files.items() if data is not None}
+    above = {parent.as_posix() for rel in written for parent in Path(rel).parents}
+    return {rel for rel, data in files.items() if data is None
+            and (rel in above or any(parent.as_posix() in written for parent in Path(rel).parents))}
+
+
+def _remove_empty_directories(root: Path, rel: str) -> None:
+    """Remove ``rel`` if it is a tree of empty directories; anything else stays for the apply to refuse."""
+    try:
+        with _parent_fd(root, rel) as parent:
+            _rmdir_tree(parent, Path(rel).name)
+    except OSError:
+        return
+
+
+def _rmdir_tree(parent: int, name: str) -> None:
+    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+    try:
+        for child in os.listdir(fd):
+            _rmdir_tree(fd, child)
+    finally:
+        os.close(fd)
+    os.rmdir(name, dir_fd=parent)
+
+
 def apply_files(work: WorkCopy, files: dict[str, bytes | None], *, declared: set[str]) -> list[str]:
     """Apply the sealed candidate's writes and deletions to the copy.
 
     Only paths the run declared to the engine (or new files under the copy) are written,
     each must stay inside the copy, and symlinks are refused.
     """
+    blockers = _swap_deletions(files) & declared
+    if blockers:
+        # A file became a directory or the reverse: the copy is private, so clear the old side first.
+        done = {rel for rel in blockers if (work.copy / rel).is_dir() and not (work.copy / rel).is_symlink()}
+        applied = apply_files(work, dict.fromkeys(blockers - done), declared=declared)
+        rest = {rel: data for rel, data in files.items() if rel not in blockers}
+        for rel, data in rest.items():
+            if data is not None and (rel in declared or rel not in work.baseline):
+                _remove_empty_directories(work.copy, rel)
+        return applied + apply_files(work, rest, declared=declared)
     changes: dict[str, bytes | None] = {}
     baseline: dict[str, str] = {}
     for rel, data in sorted(files.items()):
@@ -309,6 +455,10 @@ def apply_files(work: WorkCopy, files: dict[str, bytes | None], *, declared: set
                 current, _ = _read_at(parent, Path(rel).name)
         except FileNotFoundError:
             current = None
+        except NotADirectoryError as error:
+            if data is not None:
+                raise WorkCopyError(f"cannot read candidate destination {rel}: {error}") from error
+            current = None  # an ancestor is a file now, so the path is already gone
         except OSError as error:
             raise WorkCopyError(f"cannot read candidate destination {rel}: {error}") from error
         if current == data:
@@ -327,7 +477,8 @@ def _relative_parts(rel: str) -> tuple[str, ...]:
 
 
 @contextmanager
-def _parent_fd(root: Path, rel: str, *, create: bool = False):
+def _parent_fd(root: Path, rel: str, *, create: bool = False,
+               created_dirs: list[tuple[str, tuple[int, int], tuple[int, int]]] | None = None):
     """Walk every component without resolving links; anchor writes to an open directory."""
     parts = _relative_parts(rel)
     root = root.absolute()  # absolute is lexical; resolve would hide symlinks
@@ -335,19 +486,31 @@ def _parent_fd(root: Path, rel: str, *, create: bool = False):
         raise WorkCopyError(f"parent traversal in repository root: {root}")
     descriptor = os.open(root.anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        for part in (*root.parts[1:], *parts[:-1]):
+        root_parts = root.parts[1:]
+        for index, part in enumerate((*root_parts, *parts[:-1])):
+            made = False
+            parent_identity = None
             try:
                 info = os.stat(part, dir_fd=descriptor, follow_symlinks=False)
             except FileNotFoundError:
                 if not create:
                     raise
+                parent_stat = os.fstat(descriptor)
+                parent_identity = (parent_stat.st_dev, parent_stat.st_ino)
                 try:
                     os.mkdir(part, dir_fd=descriptor)
+                    made = True
                 except FileExistsError:
                     pass  # the no-follow open below validates a concurrent creation
             else:
                 if stat.S_ISLNK(info.st_mode):
                     raise WorkCopyError(f"a parent directory is a symlink: {rel}")
+            if made and created_dirs is not None and index >= len(root_parts):
+                child_stat = os.stat(part, dir_fd=descriptor, follow_symlinks=False)
+                if stat.S_ISDIR(child_stat.st_mode):
+                    rel_dir = "/".join(parts[:index - len(root_parts) + 1])
+                    created_dirs.append((rel_dir, parent_identity,
+                                         (child_stat.st_dev, child_stat.st_ino)))
             child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
             os.close(descriptor)
             descriptor = child
@@ -356,16 +519,22 @@ def _parent_fd(root: Path, rel: str, *, create: bool = False):
         os.close(descriptor)
 
 
-def _read_at(parent: int, name: str) -> tuple[bytes | None, int | None]:
-    """Read only regular files, refusing dangling links and races at the open itself."""
+def _stat_destination(parent: int, name: str) -> os.stat_result | None:
     try:
         info = os.stat(name, dir_fd=parent, follow_symlinks=False)
     except FileNotFoundError:
-        return None, None
+        return None
     if stat.S_ISLNK(info.st_mode):
         raise WorkCopyError(f"destination is a symlink: {name}")
     if not stat.S_ISREG(info.st_mode):
         raise WorkCopyError(f"destination is not a regular file: {name}")
+    return info
+
+
+def _read_at(parent: int, name: str) -> tuple[bytes | None, int | None]:
+    """Read only regular files, refusing dangling links and races at the open itself."""
+    if _stat_destination(parent, name) is None:
+        return None, None
     descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
     with os.fdopen(descriptor, "rb") as source:
         opened = os.fstat(source.fileno())
@@ -397,13 +566,177 @@ def _apply_conflict(current: bytes | None, mode: int | None, baseline_sha: str |
     return why
 
 
-def _verify_parent_identity(original: Path, rel: str, parent: int) -> None:
-    """Refuse a changed parent name while keeping writes anchored to ``parent``."""
+def _identity(info: os.stat_result) -> tuple[int, int]:
+    return info.st_dev, info.st_ino
+
+
+def _verify_parent_identity(original: Path, rel: str, parent: int,
+                            expected: tuple[int, int] | None = None) -> None:
+    """Refuse a parent name that no longer identifies the directory observed earlier."""
     with _parent_fd(original, rel) as named_parent:
-        opened = os.fstat(parent)
-        named = os.fstat(named_parent)
-        if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
+        opened = _identity(os.fstat(parent))
+        named = _identity(os.fstat(named_parent))
+        if opened != named or (expected is not None and opened != expected):
             raise WorkCopyError(f"parent directory changed while applying: {rel}")
+
+
+def _verify_staged_identity(parent: int, name: str, expected: tuple[int, int]) -> None:
+    """Refuse a staging name that no longer identifies the file this apply created."""
+    named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    if not stat.S_ISREG(named.st_mode) or _identity(named) != expected:
+        raise WorkCopyError("staged temporary changed while applying")
+
+
+def _unlink_staged(parent: int, name: str, expected: tuple[int, int]) -> None:
+    """Remove a staging name only while it still names the file this apply created."""
+    try:
+        named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        if stat.S_ISREG(named.st_mode) and _identity(named) == expected:
+            os.unlink(name, dir_fd=parent)
+    except FileNotFoundError:
+        pass
+
+
+@contextmanager
+def _apply_parent_fd(
+    original: Path,
+    rel: str,
+    staged: dict[str, tuple[tuple[int, int], str, tuple[int, int]]],
+    *,
+    created_dirs: list[tuple[str, tuple[int, int], tuple[int, int]]] | None = None,
+):
+    with _parent_fd(original, rel, create=created_dirs is not None, created_dirs=created_dirs) as parent:
+        try:
+            yield parent
+        except (OSError, WorkCopyError):
+            # The live descriptor can still reach a parent moved outside the repository.
+            with suppress(OSError):
+                identity = _identity(os.fstat(parent))
+                for parent_identity, temp, temp_identity in staged.values():
+                    if parent_identity == identity:
+                        with suppress(OSError):
+                            _unlink_staged(parent, temp, temp_identity)
+            raise
+
+
+def _recover_staged_stat(descriptor: int) -> os.stat_result:
+    """Recover identity through the open descriptor when fstat fails."""
+    try:
+        opened = os.stat(f"/proc/self/fd/{descriptor}")
+    except OSError:
+        opened = os.stat(f"/dev/fd/{descriptor}")
+    if not stat.S_ISREG(opened.st_mode):
+        raise OSError("staged temporary is not a regular file")
+    return opened
+
+
+def _new_file_mode(parent: int) -> int:
+    """Measure this directory's creation mode without changing the process umask."""
+    # This probe is always empty. A data-bearing temp is created separately at 0600.
+    name = f".stateframe-{secrets.token_hex(16)}.mode"
+    descriptor = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                         0o666, dir_fd=parent)
+    try:
+        try:
+            info = os.fstat(descriptor)
+        except OSError:
+            with suppress(OSError):
+                _unlink_staged(parent, name, _identity(_recover_staged_stat(descriptor)))
+            raise
+        _unlink_staged(parent, name, _identity(info))
+        return stat.S_IMODE(info.st_mode)
+    finally:
+        os.close(descriptor)
+
+
+def _cleanup_created_dirs(
+    original: Path,
+    created_dirs: list[tuple[str, tuple[int, int], tuple[int, int]]],
+) -> None:
+    """Remove only the same empty directories this apply created, deepest first."""
+    for rel, expected_parent, expected_child in reversed(created_dirs):
+        try:
+            with _parent_fd(original, rel) as parent:
+                if _identity(os.fstat(parent)) != expected_parent:
+                    continue
+                name = Path(rel).name
+                named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                if not stat.S_ISDIR(named.st_mode) or _identity(named) != expected_child:
+                    continue
+                os.rmdir(name, dir_fd=parent)
+        except (FileNotFoundError, NotADirectoryError, WorkCopyError, OSError):
+            # Cleanup is best effort: a non-empty directory or a changed path is preserved.
+            pass
+
+
+def _remove_staged_temps(
+    original: Path,
+    staged: dict[str, tuple[tuple[int, int], str, tuple[int, int]]],
+) -> None:
+    """Remove our staged names, including when their parent was renamed inside the tree."""
+    displaced: dict[tuple[int, int], list[tuple[str, tuple[int, int]]]] = {}
+    for rel, (parent_identity, temp, temp_identity) in staged.items():
+        try:
+            with _parent_fd(original, rel) as parent:
+                if _identity(os.fstat(parent)) == parent_identity:
+                    _unlink_staged(parent, temp, temp_identity)
+                else:
+                    displaced.setdefault(parent_identity, []).append((temp, temp_identity))
+        except (FileNotFoundError, NotADirectoryError, WorkCopyError, OSError):
+            displaced.setdefault(parent_identity, []).append((temp, temp_identity))
+    if not displaced:
+        return
+
+    # A parent may have been moved to another name while a replacement was in flight.
+    # Locate it by inode under the repository root, without following any symlinks, so
+    # its temp can still be removed without retaining one descriptor per changed file.
+    pending = dict(displaced)
+    stack = [""]
+    visited: set[tuple[int, int]] = set()
+    while stack and pending:
+        rel_dir = stack.pop()
+        probe = f"{rel_dir}/.stateframe-cleanup" if rel_dir else ".stateframe-cleanup"
+        try:
+            with _parent_fd(original, probe) as parent:
+                identity = _identity(os.fstat(parent))
+                if identity in visited:
+                    continue
+                visited.add(identity)
+                for temp, temp_identity in pending.pop(identity, []):
+                    with suppress(OSError):
+                        _unlink_staged(parent, temp, temp_identity)
+                if not pending:
+                    break
+                try:
+                    names = os.listdir(parent)
+                except OSError:
+                    continue
+                for name in names:
+                    try:
+                        info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                    except OSError:
+                        continue
+                    if not stat.S_ISDIR(info.st_mode):
+                        continue
+                    child_identity = _identity(info)
+                    child_rel = f"{rel_dir}/{name}" if rel_dir else name
+                    if child_identity in pending:
+                        try:
+                            child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                            dir_fd=parent)
+                        except OSError:
+                            continue
+                        try:
+                            if _identity(os.fstat(child)) == child_identity:
+                                for temp, temp_identity in pending.pop(child_identity):
+                                    with suppress(OSError):
+                                        _unlink_staged(child, temp, temp_identity)
+                        finally:
+                            os.close(child)
+                    if pending:
+                        stack.append(child_rel)
+        except (OSError, WorkCopyError):
+            continue
 
 
 def guarded_apply(
@@ -416,15 +749,17 @@ def guarded_apply(
 ) -> list[str]:
     """Write ``changes`` (rel -> new bytes, or None = delete) into ``original``.
 
-    Every path is validated against ``baseline`` (sha at start; absent = new file) BEFORE anything is
-    written, and re-checked right before its own write. Writes are atomic per file (temp + rename).
-    The parent name is reopened without following links before mutation; writes stay anchored to the
-    original directory descriptor.
+    Every path is validated against ``baseline`` (sha at start; absent = new file) before staging and
+    again as a set before the first replacement; each is re-checked before its own write. Writes are
+    atomic per file (temp + rename), with temporary contents staged beside destinations. Parent names
+    are reopened without following links before mutation; writes stay anchored to the
+    directory descriptors reopened one file at a time after their identities are checked.
     The whole set is not atomic: on an I/O error the files already written stay written and the error
     names them; nothing is rolled back destructively.
     """
     # Preflight may defer a retry match; only the write pass can authorize it.
     conflicts = []
+    destination_modes: dict[str, int | None] = {}
     for rel in sorted(changes):
         try:
             with _parent_fd(original, rel) as parent:
@@ -436,56 +771,124 @@ def guarded_apply(
             continue
         if why := _apply_conflict(current, mode, baseline.get(rel), (alternatives or {}).get(rel)):
             conflicts.append(f"{rel} ({why})")
+        if changes[rel] is not None:
+            destination_modes[rel] = mode
     if conflicts:
         raise WorkCopyError(f"refusing {what}: " + "; ".join(conflicts[:10]))
+    # Keep identities and names only.  Holding a parent and temp descriptor for every
+    # changed file makes large promotions exhaust the process descriptor limit.
+    staged: dict[str, tuple[tuple[int, int], str, tuple[int, int]]] = {}
+    checked: dict[str, tuple[int, int]] = {}
+    created_dirs: list[tuple[str, tuple[int, int], tuple[int, int]]] = []
     applied: list[str] = []
-    # For a rename, install the new path before deleting the old path. A later
-    # I/O failure can then leave a duplicate, but cannot lose the only copy.
-    for rel in sorted(changes, key=lambda path: (changes[path] is None, path)):
-        data = changes[rel]
-        name = Path(rel).name
-        try:
-            with _parent_fd(original, rel, create=data is not None) as parent:
-                current, mode = _read_at(parent, name)
-                why = _apply_conflict(current, mode, baseline.get(rel), (alternatives or {}).get(rel))
-                if why:
-                    raise WorkCopyError(why)
-                if data is None:
-                    if current is None:
-                        continue
-                    _verify_parent_identity(original, rel, parent)
-                    os.unlink(name, dir_fd=parent)
-                elif current != data:
-                    # O_EXCL prevents following or overwriting any pre-existing temp file.
+    succeeded = False
+    try:
+        for rel, data in sorted(changes.items()):
+            if data is None:
+                continue
+            try:
+                with _apply_parent_fd(original, rel, staged, created_dirs=created_dirs) as parent:
+                    parent_identity = _identity(os.fstat(parent))
+                    destination_mode = destination_modes[rel]
+                    mode = _new_file_mode(parent) if destination_mode is None else destination_mode
                     temp = f".stateframe-{secrets.token_hex(16)}.tmp"
                     descriptor = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                                         0o666, dir_fd=parent)
+                                         0o600, dir_fd=parent)
                     try:
-                        with os.fdopen(descriptor, "wb") as target:
-                            if mode is not None:
-                                os.fchmod(target.fileno(), mode)
-                            target.write(data)
-                        # Recheck ancestors and the leaf after staging, immediately before replace.
+                        try:
+                            temp_identity = _identity(os.fstat(descriptor))
+                        except OSError:
+                            temp_identity = _identity(_recover_staged_stat(descriptor))
+                            staged[rel] = (parent_identity, temp, temp_identity)
+                            raise
+                        staged[rel] = (parent_identity, temp, temp_identity)
+                        # Writes can clear set-ID bits. Set ordinary permissions before writing
+                        # and apply any special bits after all content is staged.
+                        write_mode = mode & ~(stat.S_ISUID | stat.S_ISGID)
+                        os.fchmod(descriptor, write_mode)
+                        info = _stat_destination(parent, Path(rel).name)
+                        current_mode = stat.S_IMODE(info.st_mode) if info is not None else None
+                        if current_mode != destination_mode:
+                            raise WorkCopyError("destination mode changed while staging")
+                        pending = memoryview(data)
+                        while pending:
+                            count = os.write(descriptor, pending)
+                            if count <= 0: raise OSError("staging write made no progress")
+                            pending = pending[count:]
+                        if mode != write_mode:
+                            os.fchmod(descriptor, mode)
+                    finally:
+                        os.close(descriptor)
+            except (OSError, WorkCopyError) as error:
+                raise WorkCopyError(f"{what} staging failed at {rel}: {error}; already applied: nothing") \
+                    from error
+
+        conflicts = []
+        for rel in sorted(changes):
+            parent_context = (_apply_parent_fd(original, rel, staged) if rel in staged
+                              else _parent_fd(original, rel))
+            try:
+                with parent_context as parent:
+                    if rel in staged:
+                        expected_parent = staged[rel][0]
+                        _verify_parent_identity(original, rel, parent, expected_parent)
+                    else:
+                        checked[rel] = _identity(os.fstat(parent))
+                    current, mode = _read_at(parent, Path(rel).name)
+                    if rel in staged:
+                        _verify_parent_identity(original, rel, parent, expected_parent)
+            except FileNotFoundError as error:
+                current, mode = None, None
+                if rel in staged:
+                    conflicts.append(f"{rel} (parent directory changed while applying: {error})")
+            except (OSError, WorkCopyError) as error:
+                conflicts.append(f"{rel} ({error})")
+                continue
+            if why := _apply_conflict(current, mode, baseline.get(rel), (alternatives or {}).get(rel)):
+                conflicts.append(f"{rel} ({why})")
+            elif rel in staged and current != changes[rel] and mode != destination_modes[rel]:
+                conflicts.append(f"{rel} (destination mode changed while applying)")
+        if conflicts:
+            raise WorkCopyError(f"refusing {what}: " + "; ".join(conflicts[:10]))
+
+        for rel in sorted(changes, key=lambda path: (changes[path] is None, path)):
+            data, name = changes[rel], Path(rel).name
+            try:
+                expected_parent = staged[rel][0] if data is not None else checked.get(rel)
+                with _apply_parent_fd(original, rel, staged) as parent:
+                    _verify_parent_identity(original, rel, parent, expected_parent)
+                    current, mode = _read_at(parent, name)
+                    why = _apply_conflict(current, mode, baseline.get(rel), (alternatives or {}).get(rel))
+                    if why: raise WorkCopyError(why)
+                    if current == data:
+                        continue
+                    _verify_parent_identity(original, rel, parent, expected_parent)
+                    if data is None:
+                        os.unlink(name, dir_fd=parent)
+                    else:
+                        _, temp, temp_identity = staged[rel]
+                        _verify_staged_identity(parent, temp, temp_identity)
+                        # Keep the final leaf read and parent check next to the rename.
                         current, mode = _read_at(parent, name)
                         why = _apply_conflict(current, mode, baseline.get(rel), (alternatives or {}).get(rel))
                         if why:
                             raise WorkCopyError(why)
                         if current == data:
                             continue
-                        _verify_parent_identity(original, rel, parent)
+                        if mode != destination_modes[rel]:
+                            raise WorkCopyError("destination mode changed while applying")
+                        _verify_parent_identity(original, rel, parent, expected_parent)
                         os.replace(temp, name, src_dir_fd=parent, dst_dir_fd=parent)
-                    finally:
-                        try:
-                            os.unlink(temp, dir_fd=parent)
-                        except FileNotFoundError:
-                            pass
-                else:
-                    continue
-        except (OSError, WorkCopyError) as error:
-            raise WorkCopyError(f"{what} stopped at {rel}: {error}; already applied: {applied or 'nothing'}") \
-                from error
-        applied.append(rel)
-    return applied
+            except (OSError, WorkCopyError) as error:
+                raise WorkCopyError(f"{what} stopped at {rel}: {error}; already applied: {applied or 'nothing'}") \
+                    from error
+            applied.append(rel)
+        succeeded = True
+        return applied
+    finally:
+        _remove_staged_temps(original, staged)
+        if not succeeded:
+            _cleanup_created_dirs(original, created_dirs)
 
 
 @contextmanager

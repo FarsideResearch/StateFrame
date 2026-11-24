@@ -15,6 +15,7 @@ from subprocess import CompletedProcess
 import pytest
 
 from tools.sandbox_temp import sandbox_visible_temp_dir, shadowed_by_bwrap_dev
+from _journal_reason_log import fresh_reason_log  # noqa: F401
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -277,7 +278,7 @@ RANDOM_CALL_ALLOWLIST = {
     },
     "src/stateframe/workcopy.py": {
         "secrets.token_hex": (
-            1, "Names a private staging file while applying a completed run to its destination."
+            2, "Names a private staging file and an empty mode probe while applying a completed run."
         ),
     },
     "src/stateframe/engine/capability_release_runner.py": {
@@ -867,7 +868,7 @@ def test_content_wire_ids_use_seed_step_content_and_same_content_ordinal():
     assert other_task != first
 
 
-def test_wire_ids_rederive_from_disk_replayed_action_receipt_history(tmp_path):
+def test_wire_ids_rederive_from_disk_replayed_action_receipt_history(tmp_path, fresh_reason_log):
     from kernel_continuation_journal import ContinuationJournal
     from kernel_continuation_runtime import _wire_effect_id, _wire_effect_ordinal
     from kernel_wire_identity import action_receipt_ordinal, action_receipt_wire_id

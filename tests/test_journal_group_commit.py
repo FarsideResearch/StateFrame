@@ -139,7 +139,9 @@ def test_sigkill_keeps_acked_action_rows_and_torn_tail_is_rejected(tmp_path, see
 
 def test_telemetry_is_fsynced_immediately_once_a_checkpoint_exists(tmp_path, monkeypatch):
     with ContinuationJournal(tmp_path, "gc", {}) as journal:
-        journal.emit("continuation_worker_checkpoint", checkpoint={}, checkpoint_hash="x")
+        checkpoint = journal.emit(
+            "continuation_worker_checkpoint", checkpoint={}, checkpoint_hash="x")
+        assert journal._last_durable_checkpoint_sequence == checkpoint["sequence"]
         calls = _fsyncs(monkeypatch)
         journal.emit("turn_timing", step=1)
         assert len(calls) == 1
@@ -152,6 +154,7 @@ def test_resumed_journal_with_checkpoint_does_not_defer(tmp_path, monkeypatch):
     resumed = ContinuationJournal.resume(path, task_id="gc", manifest={}, expected_head=head)
     try:
         assert resumed._checkpoint_seen
+        assert resumed._last_durable_checkpoint_sequence == -1
         calls = _fsyncs(monkeypatch)
         resumed.emit("action_envelope_metrics", step=1)
         assert len(calls) == 1

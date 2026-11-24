@@ -9,7 +9,7 @@ import shutil
 import stat
 import sys
 import tempfile
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
@@ -17,7 +17,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .workcopy import Limits, WorkCopy, WorkCopyScanError
+    from .workcopy import Limits, WorkCopy
 
 _MANIFEST = "parent-start.json"
 _MAX_MANIFEST_BYTES = 8 << 20
@@ -25,7 +25,6 @@ _MAX_ENTRIES = 20_000
 _MAX_OVERLAY_BYTES = 64 << 20
 _CONTEXT_EXCLUSIONS = frozenset({"__pycache__", ".pytest_cache", ".test-tmp"})
 _READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
-_DIRECTORY_FLAGS = _READ_FLAGS | os.O_DIRECTORY
 _Stamp = tuple[int, int, int, int, int, int, int, int, int]
 
 
@@ -105,78 +104,21 @@ class _Admission:
     directories: dict[str, _Stamp]
 
 
-def _walk_source(
-    root: Path, onerror: Callable[[Path, OSError], None],
-) -> Iterator[tuple[Path, list[str], int]]:
-    """Walk in legacy order while retaining directory descriptors and error paths."""
-    from .workcopy import _ignored
-
-    # One close marker per open ancestor keeps the descriptor lifetime bounded by depth.
-    pending: list[tuple[Path | None, int | None]] = [(root, None)]
-    opened: list[int] = []
-    try:
-        while pending:
-            path, parent_fd = pending.pop()
-            if path is None:
-                os.close(opened.pop())
-                continue
-            name = path if parent_fd is None else path.name
-            try:
-                fd = os.open(name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
-            except OSError as error:
-                if parent_fd is not None and error.errno in {errno.ENOTDIR, errno.ELOOP}:
-                    # walk does not descend into a directory symlink, including one
-                    # installed after enumeration. Inspect the entry without following it.
-                    try:
-                        if stat.S_ISLNK(os.stat(name, dir_fd=parent_fd, follow_symlinks=False).st_mode):
-                            continue
-                    except OSError as inspect_error:
-                        error = inspect_error
-                onerror(path, error)
-                continue
-            opened.append(fd)
-            pending.append((None, None))
-            children, files = [], []
-            try:
-                with os.scandir(fd) as entries:
-                    for entry in entries:
-                        try:
-                            is_dir = entry.is_dir()
-                        except OSError:
-                            is_dir = False  # Match os.walk's classification of symlink loops.
-                        if is_dir:
-                            children.append(entry.name)
-                        else:
-                            files.append(entry.name)
-            except OSError as error:
-                onerror(path, error)
-                continue
-            children = sorted(name for name in children if not _ignored(name, True))
-            yield path, sorted(files), fd
-            pending.extend((path / name, fd) for name in reversed(children))
-    finally:
-        for fd in reversed(opened):
-            os.close(fd)
-
-
-def _source_file_error(operation: str, path: Path, error: OSError) -> WorkCopyScanError:
-    from .workcopy import WorkCopyScanError
-
-    if error.filename is not None:
-        # Descriptor-relative syscalls report only the entry name.
-        error = OSError(error.errno, error.strerror, os.fspath(path))
-    return WorkCopyScanError(f"cannot {operation} repository file {path}: {error}")
-
-
 def admit_workcopy(work: WorkCopy, limits: Limits) -> None:
     """Write both copies from the same bounded, descriptor-anchored admission."""
-    from .workcopy import WorkCopyError, _ignored, _repository_scan_error
+    from .workcopy import (WorkCopyError, _copy_storage_error, _is_copy_storage_full, _ignored,
+                           _repository_scan_error, _source_file_error, _walk_source)
 
     def scan_error(path: Path, error: OSError) -> None:
         raise _repository_scan_error(path, error) from error
 
-    work.copy.parent.mkdir(parents=True, exist_ok=True)
-    staging = tempfile.TemporaryDirectory(prefix=".workspace-start-", dir=work.copy.parent)
+    try:
+        work.copy.parent.mkdir(parents=True, exist_ok=True)
+        staging = tempfile.TemporaryDirectory(prefix=".workspace-start-", dir=work.copy.parent)
+    except OSError as error:
+        if _is_copy_storage_full(error):
+            raise _copy_storage_error() from error
+        raise
     try:
         root = Path(staging.name)
         workspace, parent = root / "workspace", root / "parent"
@@ -225,6 +167,8 @@ def admit_workcopy(work: WorkCopy, limits: Limits) -> None:
                     try:
                         data = stream.read(info.st_size + 1)
                     except OSError as error:
+                        if _is_copy_storage_full(error):
+                            raise _copy_storage_error() from error
                         raise _source_file_error("read", path, error) from error
                     if len(data) != info.st_size or _stamp(os.fstat(source)) != _stamp(info):
                         raise WorkCopyError(f"repository file changed during admission: {rel}")
@@ -251,8 +195,10 @@ def admit_workcopy(work: WorkCopy, limits: Limits) -> None:
         if os.path.lexists(work.copy):
             raise WorkCopyError(f"working copy destination already exists: {work.copy}")
         workspace.rename(work.copy)
-    except BaseException:
+    except BaseException as error:
         staging.cleanup()
+        if isinstance(error, OSError) and _is_copy_storage_full(error):
+            raise _copy_storage_error() from error
         raise
     work._admission = _Admission(staging, files, directory_stamps)
 

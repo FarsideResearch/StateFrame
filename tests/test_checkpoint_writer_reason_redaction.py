@@ -69,7 +69,7 @@ def _run_writer_failure(
     pending = run / "checkpoints" / ".0001-1.tmp"
     pending.mkdir(parents=True)
     kernel_checkpoint._STATE.clear()
-    prior_failures = kernel_checkpoint.MAX_CONSECUTIVE_FAILURES - 1
+    prior_failures = kernel_checkpoint.FAILURE_WARNING_THRESHOLD - 1
     kernel_checkpoint._STATE.update(
         failed=prior_failures, consecutive_failed=prior_failures, disabled=False,
     )
@@ -127,7 +127,7 @@ def _run_synchronous_writer_failure(
     (run / "wire").mkdir(parents=True)
     (run / "wire" / "0001.request.json").write_text("{}")
     kernel_checkpoint._STATE.clear()
-    prior_failures = kernel_checkpoint.MAX_CONSECUTIVE_FAILURES - 1
+    prior_failures = kernel_checkpoint.FAILURE_WARNING_THRESHOLD - 1
     kernel_checkpoint._STATE.update(
         failed=prior_failures, consecutive_failed=prior_failures, disabled=False,
         last_sends=None, restored_step=None,
@@ -291,8 +291,8 @@ def test_parent_does_not_reuse_same_step_failure_from_prior_writer(
     previous_state = kernel_checkpoint._STATE.copy()
     kernel_checkpoint._STATE.clear()
     kernel_checkpoint._STATE.update(
-        failed=kernel_checkpoint.MAX_CONSECUTIVE_FAILURES - 1,
-        consecutive_failed=kernel_checkpoint.MAX_CONSECUTIVE_FAILURES - 1,
+        failed=kernel_checkpoint.FAILURE_WARNING_THRESHOLD - 1,
+        consecutive_failed=kernel_checkpoint.FAILURE_WARNING_THRESHOLD - 1,
         disabled=False,
     )
     try:
@@ -387,8 +387,8 @@ def test_serialization_failure_logs_error_type_and_value_free_field_path(
     (run / "wire" / "0001.request.json").write_text("{}")
     kernel_checkpoint._STATE.clear()
     kernel_checkpoint._STATE.update(
-        failed=kernel_checkpoint.MAX_CONSECUTIVE_FAILURES - 1,
-        consecutive_failed=kernel_checkpoint.MAX_CONSECUTIVE_FAILURES - 1,
+        failed=kernel_checkpoint.FAILURE_WARNING_THRESHOLD - 1,
+        consecutive_failed=kernel_checkpoint.FAILURE_WARNING_THRESHOLD - 1,
         disabled=False, last_sends=None, restored_step=None,
     )
     monkeypatch.setattr(kernel_checkpoint, "mode", lambda: "save")

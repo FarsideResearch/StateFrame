@@ -1733,6 +1733,7 @@ class _Pickler(pickle.Pickler):
     def __init__(self, stream, ctx, protocol=5):
         super().__init__(stream, protocol=protocol)
         self.ctx = ctx
+        self.workspace_objects_on = _workspace_objects_on()
 
     def persistent_id(self, obj):
         ctx = self.ctx
@@ -1747,7 +1748,7 @@ class _Pickler(pickle.Pickler):
             return ("host-startup-cache-writer",)
         if isinstance(obj, types.ModuleType):
             return ("mod", obj.__name__)
-        if (_workspace_objects_on() and (type(obj).__module__, type(obj).__qualname__)
+        if (self.workspace_objects_on and (type(obj).__module__, type(obj).__qualname__)
                 == ("kernel_shell_tool", "ShellTool")):
             from kernel_shell_tool import service
 
@@ -1755,7 +1756,7 @@ class _Pickler(pickle.Pickler):
             if not isinstance(root, Path) or service() is not obj:
                 raise pickle.PicklingError("shell checkpoint has no current host binding")
             return ("host-shell-tool", os.fspath(root))
-        if (_workspace_objects_on() and (type(obj).__module__, type(obj).__qualname__)
+        if (self.workspace_objects_on and (type(obj).__module__, type(obj).__qualname__)
                 == ("kernel_agent_tools", "AgentTools")):
             from kernel_agent_tools import service
 
@@ -1763,7 +1764,7 @@ class _Pickler(pickle.Pickler):
             if not isinstance(root, Path) or service() is not obj:
                 raise pickle.PicklingError("agent tools checkpoint has no current host binding")
             return ("host-agent-tools", os.fspath(root))
-        if (_workspace_objects_on() and (type(obj).__module__, type(obj).__qualname__)
+        if (self.workspace_objects_on and (type(obj).__module__, type(obj).__qualname__)
                 in {("kernel_workspace_consumers", "WorkspaceConsumers"),
                     ("kernel_workspace_state", "WorkspaceState")}):
             from kernel_workspace_consumers import consumers_for
@@ -2391,9 +2392,8 @@ _STATE = {"saved": 0, "failed": 0, "restored_step": None, "disabled": None, "las
           "child": None, "child_tmp": None, "child_journal_offset": None,
           "child_journal_file_id": None, "child_journal_missing": False,
           "consecutive_failed": 0, "low_disk": False}
-# Saving stops after this many failures in a row (a full disk would otherwise retry, and leave a
-# partial copy, at every boundary for the rest of the run).
-MAX_CONSECUTIVE_FAILURES = 3
+# Warn once after repeated failures; save attempts are gated by new model sends.
+FAILURE_WARNING_THRESHOLD = 3
 
 
 def _every() -> int:
@@ -2950,6 +2950,8 @@ LINK_FALLBACK_ERRNOS = frozenset({errno.EXDEV, errno.EPERM, errno.EMLINK, errno.
 # Live stat tuple (dev, ino, size, mtime_ns, ctime_ns, secret generation) -> sha256 scanned under it.
 # ctime moves on every write, so a changed file misses. Cleared when the run changes.
 _DIGEST_MEMO: dict[tuple[int, int, int, int, int, int], str] = {}
+# Pool objects are immutable; verify an existing inode once in each process before reusing it.
+_VERIFIED_OBJECTS: set[tuple[int, str, int, int, int, int, str]] = set()
 # Timestamps come from a coarse clock, so a rewrite shortly after a scan can keep the same ctime. As
 # git does for its index, a digest is remembered only when the file's mtime and ctime both predate
 # the scan by this window; a recently touched file is always hashed again.
@@ -3012,12 +3014,24 @@ def _store_object(path: str, info: os.stat_result, digest: str, objects: Path) -
     objects.mkdir(mode=0o700, exist_ok=True)
     mode = stat.S_IMODE(info.st_mode)
     final = objects / f"{digest}-{mode:o}"
+    folder = os.open(objects, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        existing = os.lstat(final)
-        if stat.S_ISREG(existing.st_mode) and existing.st_size == info.st_size:
-            return final, 0
-    except FileNotFoundError:
-        pass
+        try:
+            existing = os.stat(final.name, dir_fd=folder, follow_symlinks=False)
+            if stat.S_ISREG(existing.st_mode) and existing.st_size == info.st_size:
+                identity = (os.getpid(), os.fspath(final), existing.st_dev, existing.st_ino,
+                            existing.st_size, existing.st_mtime_ns, digest)
+                if (stat.S_IMODE(existing.st_mode) == (mode & ~0o222)
+                        and (identity in _VERIFIED_OBJECTS
+                             or _file_sha256(final.name, dir_fd=folder) == digest)):
+                    _VERIFIED_OBJECTS.add(identity)
+                    return final, 0
+                aside_name = f"quarantine-{time.time_ns()}-{final.name}"
+                os.rename(final.name, aside_name, src_dir_fd=folder, dst_dir_fd=folder)
+        except FileNotFoundError:
+            pass
+    finally:
+        os.close(folder)
     temporary_name: str | None = None
     try:
         with open(path, "rb") as reader:
@@ -3067,12 +3081,13 @@ def _link_or_copy(stored: Path, destination: str | Path, live: Path, relpath: st
     return "cloned" if cloned else "copied"
 
 
-def _file_sha256(path: str | os.PathLike[str]) -> str | None:
+def _file_sha256(path: str | os.PathLike[str], *, dir_fd: int | None = None) -> str | None:
     """SHA-256 of a regular file, streamed in 1 MiB blocks; None when it is not readable as one."""
     descriptor = None
     try:
-        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-                             | getattr(os, "O_CLOEXEC", 0))
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        descriptor = (os.open(path, flags) if dir_fd is None
+                      else os.open(path, flags, dir_fd=dir_fd))
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
             return None
         digest = hashlib.sha256()
@@ -3281,7 +3296,12 @@ def _copy_pooled_fallback(source: Path, target: Path) -> None:
         raise CheckpointError("checkpoint artifact identity conflict")
 
 
-_OBJECT_NAME = re.compile(r"[0-9a-f]{64}-[0-7]+|\.[0-9]+-[^/]*\.tmp")
+_OBJECT_NAME = re.compile(
+    r"(?P<object>[0-9a-f]{64}-[0-7]+)"
+    r"|(?P<temporary>\.[0-9]+-[^/]*\.tmp)"
+    r"|quarantine-(?P<quarantine_ns>0|[1-9][0-9]*)-"
+    r"(?P<quarantine_object>[0-9a-f]{64}-[0-7]+)"
+)
 
 
 def _prune_objects(root: Path) -> None:
@@ -3293,16 +3313,53 @@ def _prune_objects(root: Path) -> None:
         folder = os.open(root / OBJECT_DIR, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except OSError:
         return
+    objects = root / OBJECT_DIR
     try:
-        for name in os.listdir(folder):
-            if _OBJECT_NAME.fullmatch(name) is None:
+        names = os.listdir(folder)
+        quarantines: dict[str, tuple[int, str]] = {}
+        quarantine_names: dict[str, tuple[str, int]] = {}
+        for name in names:
+            match = _OBJECT_NAME.fullmatch(name)
+            if match is None or match.group("quarantine_object") is None:
+                continue
+            try:
+                timestamp = int(match.group("quarantine_ns"))
+            except ValueError:
+                continue
+            object_name = match.group("quarantine_object")
+            quarantine_names[name] = (object_name, timestamp)
+            candidate = (timestamp, name)
+            if candidate > quarantines.get(object_name, (-1, "")):
+                quarantines[object_name] = candidate
+
+        live: dict[str, tuple[int, int, int, int]] = {}
+        for name in names:
+            match = _OBJECT_NAME.fullmatch(name)
+            if match is None:
                 continue
             try:
                 info = os.stat(name, dir_fd=folder, follow_symlinks=False)
-                if stat.S_ISREG(info.st_mode) and (name.endswith(".tmp") or info.st_nlink <= 1):
+                if match.group("quarantine_object") is not None:
+                    recognized = quarantine_names.get(name)
+                    if (recognized is not None
+                            and quarantines.get(recognized[0]) != (recognized[1], name)
+                            and stat.S_ISREG(info.st_mode)):
+                        os.unlink(name, dir_fd=folder)
+                    continue
+                if not stat.S_ISREG(info.st_mode):
+                    continue
+                if match.group("temporary") is not None or info.st_nlink <= 1:
                     os.unlink(name, dir_fd=folder)
+                    continue
+                live[name] = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
             except OSError:
                 pass
+
+        _VERIFIED_OBJECTS.intersection_update(
+            item for item in _VERIFIED_OBJECTS
+            if Path(item[1]).parent != objects
+            or live.get(Path(item[1]).name) == item[2:6]
+        )
     except (OSError, NotImplementedError):
         pass
     finally:
@@ -4234,15 +4291,15 @@ def failure_summary() -> dict[str, object]:
 
 
 def _note_failure(run_dir, reason: str) -> None:
-    """Count a failed save; after MAX_CONSECUTIVE_FAILURES in a row, stop saving (said once)."""
+    """Count every failed save and warn once; a later model send makes another attempt eligible."""
     _STATE["failed"] += 1
     _STATE["consecutive_failed"] = _STATE.get("consecutive_failed", 0) + 1
-    if _STATE["consecutive_failed"] >= MAX_CONSECUTIVE_FAILURES and not _STATE["disabled"]:
-        _STATE["disabled"] = f"{MAX_CONSECUTIVE_FAILURES} consecutive checkpoint failures ({reason})"
-        if run_dir is not None:
-            _record(Path(run_dir), event="checkpoint_disabled", reason=_STATE["disabled"])
-        print(f"checkpoint: WARNING saving turned off for this run after {MAX_CONSECUTIVE_FAILURES} "
-              f"failed saves in a row ({reason}); resume will replay", file=sys.stderr, flush=True)
+    if _STATE["consecutive_failed"] >= FAILURE_WARNING_THRESHOLD:
+        warning = f"{FAILURE_WARNING_THRESHOLD} consecutive checkpoint failures: {reason}"
+        if "repeated_save_failures" not in _STATE.setdefault("warned", set()):
+            _record(run_dir, event="checkpoint_warning", reason=warning)
+        _warn_once("repeated_save_failures",
+                   f"{warning}; saving continues after a new model send")
 
 
 _STALE = re.compile(
@@ -4459,7 +4516,7 @@ def engine_fingerprint(*, bind_host: bool = False) -> str:
 
 
 def save_point(frame, step: int, poc) -> None:
-    """Step-loop hook. Never raises: a failed save is recorded and the run continues.
+    """Step-loop hook. Save failures are recorded; engine stop exceptions propagate after cleanup.
 
     ``blocked_seconds`` in each save's event is the wall time from entering this hook to leaving
     it (mode checks, send count, writer reap, capture, fork and the event write), plus the time spent
@@ -4491,8 +4548,8 @@ def _save_point(frame, step: int, poc, entered: float) -> None:
     out = Path(poc)
     run_dir = out.parent
     if current == "save":
-        # One checkpoint per model send: a boundary with no new send since the last checkpoint is
-        # recovered from that checkpoint plus the (empty) replayed tail, so saving it buys nothing.
+        # Consume the send before attempting: a failed capture must not retry at this boundary and
+        # publish over the only checkpoint with a replayable tail.
         sends = _sends(run_dir)
         previous_sends = _STATE["last_sends"]
         if sends == 0:
@@ -4527,9 +4584,10 @@ def _save_point(frame, step: int, poc, entered: float) -> None:
         try:
             try:
                 target = save(frame, step, run_dir, background=background)
-            except BaseException as error:  # noqa: BLE001 - save failures never stop the engine run
-                if current == "save":
-                    _STATE["last_sends"] = previous_sends
+            except BaseException as error:  # noqa: BLE001 - record failures, but pass engine stops through
+                if (isinstance(error, KeyboardInterrupt)
+                        or getattr(error, "boundary_recovery_stop", False)):
+                    raise
                 reason = _failure_reason(error)
                 writer_error_type = _safe_error_type(error)
                 _record(run_dir, event="checkpoint_failed", step=step,
@@ -4556,9 +4614,10 @@ def _save_point(frame, step: int, poc, entered: float) -> None:
             blocked = time.perf_counter() - entered + _STATE.get("unsaved_hook_seconds", 0.0)
             _record(run_dir, **fields, blocked_seconds=round(blocked, 3))
             _STATE["unsaved_hook_seconds"], _STATE["just_saved"] = 0.0, True
-    except Exception as error:  # noqa: BLE001 - fail open, never break the run
-        if current == "save":
-            _STATE["last_sends"] = previous_sends  # nothing was saved: the next boundary may retry
+    except Exception as error:  # noqa: BLE001 - checkpoint errors fail open unless the engine is stopping
+        if (isinstance(error, KeyboardInterrupt)
+                or getattr(error, "boundary_recovery_stop", False)):
+            raise
         reason = _failure_reason(error)
         writer_error_type = _safe_error_type(error)
         _record(run_dir, event="checkpoint_failed", step=step,
@@ -4698,6 +4757,22 @@ def _prune_pool(root: Path, run_dir: Path, checkpoints: tuple[Path, ...] | None 
 def _validate(checkpoint: Path) -> tuple[dict, bytes]:
     """Authenticate the state and check compatibility before any run files are restored."""
     meta, raw = _authenticate_state(checkpoint)
+    recorded_files = meta.get("file_sha256")
+    if recorded_files is not None:
+        if not isinstance(recorded_files, dict):
+            raise CheckpointError("checkpoint file digest metadata is invalid")
+        for directory, files in recorded_files.items():
+            if (not isinstance(directory, str) or Path(directory).name != directory
+                    or not isinstance(files, dict)):
+                raise CheckpointError("checkpoint file digest metadata is invalid")
+            for name, expected in files.items():
+                relative = Path(name) if isinstance(name, str) else Path(".")
+                if (not isinstance(name, str) or not name or relative.is_absolute()
+                        or ".." in relative.parts):
+                    raise CheckpointError("checkpoint file digest metadata is invalid")
+                key = Path(directory) / relative
+                if _file_sha256(checkpoint / "run" / key) != expected:
+                    raise CheckpointError(f"checkpoint run file {key.as_posix()} checksum mismatch")
     if list(sys.version_info[:3]) != meta.get("python"):
         raise CheckpointError("checkpoint was written by another Python version")
     if meta.get("engine_files_sha256") != engine_fingerprint(bind_host=True):

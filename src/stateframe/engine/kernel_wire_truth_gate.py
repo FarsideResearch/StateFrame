@@ -313,7 +313,7 @@ def _bound_source_delivery_paths(
 
 
 def _source_failures(messages: object, context: Mapping[str, object],
-                     wire: bytes) -> list[str]:
+                     wire: bytes, *, capture=None, frozen_inputs=None) -> list[str]:
     failures: list[str] = []
     content = "\n".join(
         str(message.get("content") or "")
@@ -393,11 +393,19 @@ def _source_failures(messages: object, context: Mapping[str, object],
                 # full source is still present and verified on this wire.
                 visible_plan = dict(plan)
                 sources = context.get("source_contents")
+                witness_args = {}
+                if (frozen_inputs is not None
+                        and context.get("request_id") == getattr(capture, "request_id", "")):
+                    from kernel_final_wire_budget import _final_capture_witnesses
+                    witnesses = _final_capture_witnesses(capture, frozen_inputs, plan, sources, wire)
+                    if witnesses:
+                        witness_args["verified_capture_witnesses"] = witnesses
                 receipt = verify_final_source_delivery(
                     visible_plan,
                     messages if isinstance(messages, list) else [],
                     payload=wire,
                     sources=sources if isinstance(sources, Mapping) else None,
+                    **witness_args,
                 )
                 if not source_delivery_satisfied(receipt):
                     failures.append("source_delivery_incomplete")
@@ -492,7 +500,7 @@ def _authority_failures(tools: object, authorities: object, *,
 
 def evaluate_wire(wire: bytes, context: Mapping[str, object], *,
                   allow_done_expansion: bool = False,
-                  attempt: int = 1) -> WireTruthResult:
+                  attempt: int = 1, capture=None, frozen_inputs=None) -> WireTruthResult:
     """Parse and validate the serialized body; never consult a pre-dump dict."""
     request_id = str(context.get("request_id", "UNKNOWN"))
     revision = str(context.get("candidate_revision", "UNKNOWN"))
@@ -547,7 +555,8 @@ def evaluate_wire(wire: bytes, context: Mapping[str, object], *,
         messages, context.get("required_facts"),
         context.get("retrievable_fact_handles"),
     ))
-    failed.extend(_source_failures(messages, context, wire))
+    failed.extend(_source_failures(messages, context, wire, capture=capture,
+                                   frozen_inputs=frozen_inputs))
     return WireTruthResult(
         request_id=request_id,
         revision=revision,
@@ -592,6 +601,8 @@ def check_wire(
         emit: Callable[..., object] | None = None,
         attempt: int = 1,
         allow_done_repair: bool = True,
+        capture=None,
+        frozen_inputs=None,
 ) -> WireTruthResult:
     """Check one attempt and repair only a missing required ``done`` once."""
     if not enabled():
@@ -613,7 +624,8 @@ def check_wire(
             wire=wire,
         )
 
-    initial = evaluate_wire(wire, context, attempt=attempt)
+    initial = evaluate_wire(wire, context, attempt=attempt, capture=capture,
+                            frozen_inputs=frozen_inputs)
     stripped_by: tuple[str, ...] = ()
     repairable_failures = set(initial.failed)
     repairable_failures.discard("required_done_missing")
@@ -633,6 +645,7 @@ def check_wire(
             wire = json.dumps(rebuilt).encode()
             final = evaluate_wire(
                 wire, context, allow_done_expansion=True, attempt=attempt,
+                capture=capture, frozen_inputs=frozen_inputs,
             )
             final = WireTruthResult(
                 **{**final.__dict__, "wire": wire, "repaired": True,

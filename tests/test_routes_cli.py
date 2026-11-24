@@ -10,7 +10,7 @@ from stateframe import _child, cli, replay_tape, routes, runner
 from stateframe.endpoint import Endpoint, EndpointError
 from stateframe.engine.kernel_provider_dialect import ProviderCapabilityError
 from stateframe.scripted_endpoint import Script, make_handler
-from http.server import ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 
 from _timeouts import scaled
@@ -62,6 +62,152 @@ def servers():
         yield [f"http://127.0.0.1:{server.server_port}/v1" for server, _ in active]
     finally:
         for server, thread in active:
+            server.shutdown()
+            thread.join(timeout=scaled(2))
+            server.server_close()
+
+
+def _preflight_server(model, *, required_key=None):
+    requests = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            return
+
+        def _send(self, status, payload):
+            body = json.dumps(payload).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):  # noqa: N802
+            authorization = self.headers.get("Authorization")
+            requests.append((self.path, authorization))
+            request_path = self.path.split("?", 1)[0]
+            if required_key and authorization != f"Bearer {required_key}":
+                self._send(401, {"error": {"message": "unauthorized"}})
+            elif "?" in self.path and request_path.endswith("/provider_epoch"):
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            elif request_path.endswith("/models"):
+                self._send(200, {"data": [{"id": model}]})
+            elif request_path == "/props":
+                self._send(200, {"default_generation_settings": {"n_ctx": 65536},
+                                 "model_path": "preflight-test"})
+            elif request_path == "/slots":
+                self._send(200, [{"id": 0, "n_ctx": 65536, "is_processing": False}])
+            else:
+                self._send(404, {"error": {"message": "not found"}})
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread, f"http://127.0.0.1:{server.server_port}/v1", requests
+
+
+def _enable_real_preflight_epochs(monkeypatch):
+    import stateframe
+    from stateframe import send1_probe_cache
+
+    monkeypatch.setenv("STATEFRAME_SEND1_WAVE4", "on")
+    monkeypatch.setattr(stateframe, "_startup_optimization_enabled", lambda: True)
+    monkeypatch.setattr(send1_probe_cache, "reads_available", lambda: True)
+    monkeypatch.setattr(send1_probe_cache, "host_fingerprint", lambda: "test-host")
+    monkeypatch.setattr(runner, "_provider_probe",
+                        lambda _options, probe, *args, **kwargs: probe(*args, **kwargs))
+
+
+def test_route_preflight_only_authenticates_tokenizer_at_generation_origin(monkeypatch):
+    key = "route-preflight-secret"
+    generation = _preflight_server("base", required_key=key)
+    tokenizer = _preflight_server("base")
+    generation_server, generation_thread, generation_url, generation_requests = generation
+    tokenizer_server, tokenizer_thread, tokenizer_url, tokenizer_requests = tokenizer
+    try:
+        _enable_real_preflight_epochs(monkeypatch)
+        monkeypatch.setenv("ROUTE_PREFLIGHT_KEY", key)
+        options = runner.RunOptions(
+            repo=None, task="task", endpoint=Endpoint(
+                generation_url, "base", api_key_env="ROUTE_PREFLIGHT_KEY"),
+            route_cli=[f"read.tokenizer={tokenizer_url}"],
+        )
+        options._send1_wave4 = True
+
+        runner._probe_routes(options, lambda *_args: None)
+
+        generation_paths = {path.split("?", 1)[0] for path, _ in generation_requests}
+        tokenizer_paths = {path.split("?", 1)[0] for path, _ in tokenizer_requests}
+        assert {"/v1/provider_epoch", "/v1/models", "/props", "/slots"} <= generation_paths
+        assert {"/v1/provider_epoch", "/v1/models"} <= tokenizer_paths
+        assert all(auth == f"Bearer {key}" for _, auth in generation_requests)
+        assert all(auth is None for _, auth in tokenizer_requests)
+    finally:
+        for server, thread in ((tokenizer_server, tokenizer_thread),
+                               (generation_server, generation_thread)):
+            server.shutdown()
+            thread.join(timeout=scaled(2))
+            server.server_close()
+
+
+def test_route_preflight_keeps_credentials_for_same_origin_tokenizer(monkeypatch):
+    key = "route-preflight-secret"
+    server, thread, endpoint_url, requests = _preflight_server("base", required_key=key)
+    try:
+        _enable_real_preflight_epochs(monkeypatch)
+        monkeypatch.setenv("ROUTE_PREFLIGHT_KEY", key)
+        options = runner.RunOptions(
+            repo=None, task="task", endpoint=Endpoint(
+                endpoint_url, "base", api_key_env="ROUTE_PREFLIGHT_KEY"),
+            route_cli=[f"read.tokenizer={endpoint_url}/tokenizer"],
+        )
+        options._send1_wave4 = True
+
+        runner._probe_routes(options, lambda *_args: None)
+
+        tokenizer_requests = [(path, auth) for path, auth in requests
+                              if path.startswith("/v1/tokenizer/")]
+        assert {"/v1/tokenizer/provider_epoch", "/v1/tokenizer/models"} <= {
+            path.split("?", 1)[0] for path, _ in tokenizer_requests}
+        assert all(auth == f"Bearer {key}" for _, auth in tokenizer_requests)
+        assert all(auth == f"Bearer {key}" for _, auth in requests)
+    finally:
+        server.shutdown()
+        thread.join(timeout=scaled(2))
+        server.server_close()
+
+
+def test_route_preflight_401_error_names_repair_without_exposing_key(monkeypatch):
+    key = "route-preflight-secret"
+    tokenizer_key = "tokenizer-private-key"
+    generation = _preflight_server("base", required_key=key)
+    tokenizer = _preflight_server("base", required_key=tokenizer_key)
+    generation_server, generation_thread, generation_url, _generation_requests = generation
+    tokenizer_server, tokenizer_thread, tokenizer_url, tokenizer_requests = tokenizer
+    try:
+        _enable_real_preflight_epochs(monkeypatch)
+        monkeypatch.setenv("ROUTE_PREFLIGHT_KEY", key)
+        options = runner.RunOptions(
+            repo=None, task="task", endpoint=Endpoint(
+                generation_url, "base", api_key_env="ROUTE_PREFLIGHT_KEY"),
+            route_cli=[f"read.tokenizer={tokenizer_url}"],
+        )
+        options._send1_wave4 = True
+
+        with pytest.raises(runner.RunError) as raised:
+            runner._probe_routes(options, lambda *_args: None)
+
+        message = str(raised.value)
+        assert "route read.tokenizer cannot be used" in message
+        assert "HTTP 401" in message and "check --api-key-env" in message
+        assert "change read.tokenizer" in message
+        assert key not in message and tokenizer_key not in message
+        assert all(auth is None for _, auth in tokenizer_requests)
+    finally:
+        for server, thread in ((tokenizer_server, tokenizer_thread),
+                               (generation_server, generation_thread)):
             server.shutdown()
             thread.join(timeout=scaled(2))
             server.server_close()

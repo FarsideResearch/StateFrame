@@ -141,6 +141,7 @@ EXPECTED_ENTRIES = (
     ("tests/test_parallel_worker_prep.py::test_unscoped_worker_projection_is_byte_identical_to_base", "all"),
     ("tests/test_parallel_worker_prep.py::test_wire_parity_reports_first_send_byte_and_component", "all"),
     ("tests/test_powerups_parity.py::test_feature_off_raw_request_parity", "requires:host_sandbox"),
+    ("tests/test_public_test_verdict_fact_dedupe.py::test_scripted_session_parity_within_same_build", "requires:host_sandbox"),
     ("tests/test_provider_body.py::test_shipped_profile_llama_body_is_byte_identical_to_unmodified_parent_code", "all"),
     ("tests/test_read_receipts_admission.py::test_off_is_byte_identical_and_emits_nothing", "all"),
     ("tests/test_shell_e2e.py::test_kill_resume_serves_byte_identical_next_request", "requires:host_sandbox"),
@@ -487,6 +488,8 @@ EXPECTED_ASSERTIONS = {
         "assert f'byte {offset}' in message",
     "tests/test_powerups_parity.py::test_feature_off_raw_request_parity":
         "assert ordinary[1] == disabled[1]",
+    "tests/test_public_test_verdict_fact_dedupe.py::test_scripted_session_parity_within_same_build":
+        "assert first_requests == second_requests",
     "tests/test_provider_body.py::test_shipped_profile_llama_body_is_byte_identical_to_unmodified_parent_code":
         "assert json.dumps(llama_body).encode('utf-8') == json.dumps(baseline_body).encode('utf-8')",
     "tests/test_read_receipts_admission.py::test_off_is_byte_identical_and_emits_nothing":

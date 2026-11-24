@@ -86,9 +86,9 @@ def attach_shell_verification(sequence: list[dict], call_id: str,
 
 
 def bounded_summary(text: str) -> str:
-    data = text.encode("utf-8")
+    data = text.encode("utf-8", errors="backslashreplace")  # a restored name may not be valid UTF-8
     if len(data) <= 4096:
-        return text
+        return data.decode("utf-8")
     return data[:4096].decode("utf-8", errors="ignore") + f" [... {len(data) - 4096} bytes omitted ...]"
 
 

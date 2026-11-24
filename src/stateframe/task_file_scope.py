@@ -29,6 +29,20 @@ _GERUND_BLOCKED_CONTEXT = re.compile(
     r"cannot|"
     r"do|does|did|am|is|are|was|were|be|been|being|have|has|had|can|could|"
     r"may|might|must|shall|should|will|would|never|not|without)(?![\w./\\-])", re.IGNORECASE)
+_REPORT_PAST_CONTEXT = re.compile(
+    r"(?<![\w./\\-])(?:tried|attempted|ended|worked|fixed|solved|changed|edited|"
+    r"modified|wrote|created|saved|added|touched|repaired|corrected|restored|"
+    r"resolved|addressed|passed|handled|completed|finalized|succeeded|updated)(?![\w./\\-])",
+    re.IGNORECASE)
+# A request verb opening the clause keeps it an instruction: a past participle inside it reports nothing.
+_REQUEST_OPENING = re.compile(
+    r"\s*(?:[-*]\s+|\d+[.)]\s+)?(?:(?:please|then|now|so|and|but|to)\s+)*(?:fix|make|get|edit|change|modify|"
+    r"update|repair|solve|resolve|implement|add|write|create|ensure|correct|restore|address|complete|finish|"
+    r"handle|refactor|rename|remove|move|improve|let|have|help|bring|turn|keep|ship|do|find|debug|rework|"
+    r"adjust|patch|support|allow|clean|set|put|save|touch|alter)(?![\w./\\-])", re.IGNORECASE)
+_REPORT_SUBORDINATE = re.compile(
+    r"(?<![\w./\\-])(?:after|before|when|while|if|unless|since|because|although|"
+    r"though|once|until|provided)(?![\w./\\-])", re.IGNORECASE)
 _WRITE_VERB = re.compile(
     r"(?<![\w./\\-])(?:write|creat(?:e|ing)|edit|change|modify|update|save|put|set|fix|add|touch|alter)"
     r"(?![\w./\\-])", re.IGNORECASE)
@@ -137,12 +151,20 @@ def _targets(text: str, *, end_offset: list[int] | None = None) -> tuple[str, ..
     return tuple(dict.fromkeys(paths))
 
 
-def _expand_gerund_rule(sentence: str, *, question: bool) -> str:
+def _reported_past_context(sentence: str, start: int) -> bool:
+    clause = re.split(r"[,;:]", sentence[:start])[-1]
+    if _REQUEST_OPENING.match(clause) or _REQUEST_OPENING.match(sentence):
+        return False
+    return any(not _REPORT_SUBORDINATE.search(clause[:verb.start()]) for verb in _REPORT_PAST_CONTEXT.finditer(clause))
+
+
+def _expand_gerund_rule(sentence: str, *, question: bool, reports: bool) -> str:
     """Present only the two closed gerund forms to the existing ONLY-rule parser."""
     if question: return sentence
     def normalize(match: re.Match[str]) -> str:
         t2 = match.group("t2_verb") is not None
-        if _GERUND_BLOCKED_CONTEXT.search(sentence[:match.start()]): return match[0]
+        if (_GERUND_BLOCKED_CONTEXT.search(sentence[:match.start()])
+                or reports and _reported_past_context(sentence, match.start())): return match[0]
         tail = sentence[match.end():]
         connector = match.group("t1_context") or match.group("t2_context") or ""
         if not re.fullmatch(r"the\s+file\s+above", tail.strip(), re.IGNORECASE):
@@ -200,6 +222,8 @@ def parse_task_file_scope(task: str, *, strict: bool = False) -> tuple[str, ...]
                       for i in range(0, len(split), 2) if split[i].strip()]
     allowed: list[str] = []
     no_other = False
+    # A live "no other file" instruction keeps every path it was read with before.
+    reports = not any(_NO_OTHER_RULE.search(sentence) for sentence, _ in sentence_parts)
     for index, (sentence, question) in enumerate(sentence_parts):
         if _CONDITIONAL.search(sentence):
             if strict and (_ONLY_RULE.search(sentence) or _NO_OTHER_RULE.search(sentence) or _GERUND_ONLY_RULE.search(sentence)):
@@ -208,7 +232,7 @@ def parse_task_file_scope(task: str, *, strict: bool = False) -> tuple[str, ...]
                     "use an unconditional repository-relative path")
             continue
         no_other = no_other or bool(_NO_OTHER_RULE.search(sentence))
-        sentence = _expand_gerund_rule(sentence, question=question)
+        sentence = _expand_gerund_rule(sentence, question=question, reports=reports)
         affirmative_starts = {verb.start() for verb in _affirmative_verbs(sentence)}
         for rule in _ONLY_RULE.finditer(sentence):
             verb = _WRITE_VERB.search(rule[0])

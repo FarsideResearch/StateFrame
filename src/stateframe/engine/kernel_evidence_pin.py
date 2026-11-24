@@ -12,10 +12,13 @@ The wire check then requires the exact typed pin to be the one and only well-for
 """
 from __future__ import annotations
 
+import os
 import re
+from collections.abc import Mapping
 
 EVIDENCE_START = "[EVIDENCEPIN]"
 EVIDENCE_END = "[/EVIDENCEPIN]"
+PIN_DEDUP_ENV = "STATEFRAME_PIN_DEDUP"
 
 # Replacement tokens keep the text readable for the model and contain no bracket markers.
 _NEUTRAL_START = "{EVIDENCEPIN}"
@@ -36,6 +39,15 @@ def neutralize_pin_body(body: str) -> str:
 def build_evidence_pin(body: str) -> str:
     """Wrap a body in the pin markers after neutralizing any marker text the body quotes."""
     return EVIDENCE_START + neutralize_pin_body(body) + EVIDENCE_END
+
+
+def pin_dedup_enabled(environ: Mapping[str, str] | None = None) -> bool:
+    """Whether request composition may elide duplicated evidence-pin text."""
+    source = os.environ if environ is None else environ
+    value = str(source.get(PIN_DEDUP_ENV, "off")).strip().lower()
+    if value not in {"off", "on"}:
+        raise ValueError(f"{PIN_DEDUP_ENV} must be off or on")
+    return value == "on"
 
 
 

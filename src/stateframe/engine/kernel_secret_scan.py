@@ -6,11 +6,22 @@ UTF-8 representation, including surrogate pairs and lone surrogates.
 """
 from __future__ import annotations
 
+import re
+
 _SHORT_ESCAPES = {
     ord('"'): b'"', ord("\\"): b"\\", ord("/"): b"/", ord("b"): b"\b",
     ord("f"): b"\f", ord("n"): b"\n", ord("r"): b"\r", ord("t"): b"\t",
 }
 _HEX_DIGITS = b"0123456789abcdefABCDEF"
+
+
+def _literal_pattern(values: tuple[bytes, ...], flags: int = 0) -> re.Pattern[bytes] | None:
+    if not values:
+        return None
+    try:
+        return re.compile(b"|".join(re.escape(value) for value in values), flags)
+    except (re.error, OverflowError, RecursionError, MemoryError):
+        return None
 
 
 class _JsonStringUnescaper:
@@ -97,6 +108,10 @@ class SecretScanner:
     def __init__(self, secrets: list[bytes], *, stages: int = 8) -> None:
         self.secrets = tuple(secrets)
         self.hex_secrets = tuple(set(secrets) & {value.hex().encode("ascii") for value in secrets})
+        self._matcher_secrets = self.secrets
+        self._matcher_hex_secrets = self.hex_secrets
+        self._secret_pattern = _literal_pattern(self.secrets)
+        self._hex_pattern = _literal_pattern(self.hex_secrets, re.IGNORECASE)
         self.keep = max((len(value) for value in secrets), default=1) - 1
         self.chunk_size = max(65536, self.keep + 1)
         self.decoders = [_JsonStringUnescaper() for _ in range(stages)]
@@ -112,10 +127,22 @@ class SecretScanner:
         if not data:
             return False
         text = self.tails[stage] + data
-        self.found = any(value in text for value in self.secrets)
-        if not self.found and self.hex_secrets:
-            folded = text.lower()
-            self.found = any(value in folded for value in self.hex_secrets)
+        patterns_valid = (
+            self.secrets is self._matcher_secrets
+            and self.hex_secrets is self._matcher_hex_secrets
+            and (not self.secrets or self._secret_pattern is not None)
+            and (not self.hex_secrets or self._hex_pattern is not None)
+        )
+        if patterns_valid:
+            self.found = (self._secret_pattern is not None
+                          and self._secret_pattern.search(text) is not None)
+            if not self.found and self._hex_pattern is not None:
+                self.found = self._hex_pattern.search(text) is not None
+        else:
+            self.found = any(value in text for value in self.secrets)
+            if not self.found and self.hex_secrets:
+                folded = text.lower()
+                self.found = any(value in folded for value in self.hex_secrets)
         self.tails[stage] = text[-self.keep:] if self.keep else b""
         return self.found
 

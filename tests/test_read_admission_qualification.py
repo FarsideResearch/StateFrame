@@ -14,7 +14,7 @@ from kernel_stateframe_framefit5 import _serialize_state_message, build_typed_st
 from kernel_working_set_proof import verify_certificate
 
 
-def seal_fixture(tmp_path, monkeypatch):
+def seal_fixture(tmp_path, monkeypatch, *, identity_content=None, wire_truth=False):
     """Real runtime, capture, contract and sealed body up to the read batch."""
     import kernel_read_admission as admission
     import kernel_wire_truth_gate as truth
@@ -24,11 +24,10 @@ def seal_fixture(tmp_path, monkeypatch):
     monkeypatch.setenv("STATEFRAME_FINAL_CACHE_LAYOUT", "off")
     monkeypatch.setattr("kernel_request_budget.HARD_MAX_REQUEST_BYTES", 12_000)
     monkeypatch.setattr(admission, "request_byte_cap", lambda: 12_000)
-    # The unrelated wire-facts service is disabled. Allocation, closure,
-    # product validation, measurement, capture and seal are all real.
-    monkeypatch.setattr(truth, "capture_context", lambda *a, **k: {})
-    monkeypatch.setattr("kernel_wire_truth_facts.require_fact_context", lambda value: value)
-    monkeypatch.setattr(truth, "enabled", lambda: False)
+    if not wire_truth:
+        monkeypatch.setattr(truth, "capture_context", lambda *a, **k: {})
+        monkeypatch.setattr("kernel_wire_truth_facts.require_fact_context", lambda value: value)
+        monkeypatch.setattr(truth, "enabled", lambda: False)
     monkeypatch.setattr("kernel_provider_dialect.capabilities_for",
                         lambda *a, **k: ProviderCapabilities(dialect="llama.cpp"))
     task = {"role": "user", "content": "Task: inspect source"}
@@ -42,7 +41,7 @@ def seal_fixture(tmp_path, monkeypatch):
         _empirical_frame_sources={}, frame_ceiling=33_344, retained=None, step_ledger=None,
         _frame_budget_request_count=1, binding=lambda: {"product_revision": "fixture"},
         _request_token_meter=RequestTokenMeter(disabled=True))
-    capture = RequestCapture(journal, 1, "snapshot")
+    capture = RequestCapture(journal, 1, "snapshot", identity_content=identity_content)
     capture._framefit5_task_message = task
     capture._request_source_closure_override = plan
     rt.prepared_binding = rt.binding()

@@ -284,7 +284,9 @@ def recent_editable_read_windows(runtime: object, frame: Mapping[str, object]) -
     if not editable:
         owner = getattr(runtime, "owner", None)
         task = getattr(owner, "task_row", None)
-        values = task.get("editable_paths", ()) if isinstance(task, Mapping) else ()
+        discovery = isinstance(task, Mapping) and task.get("scope_source") == "discovery"
+        values = (task.get("editable_paths", ())
+                  if isinstance(task, Mapping) and not discovery else ())
         if isinstance(values, (list, tuple)):
             from kernel_request_source_window import _safe_framefit_path
             editable = {path for value in values
@@ -1237,6 +1239,30 @@ def frame_source_snapshot(
     revisions = plan.get("revisions", {})
     revisions = revisions if isinstance(revisions, Mapping) else {}
     root = _workspace_root(runtime)
+    if plan.get("read_only_empty_scope") is True:
+        read_receipts = plan.get("read_source_receipts")
+        raw_sources = getattr(runtime, "_empirical_frame_sources", {})
+        if not isinstance(read_receipts, Mapping) or not isinstance(raw_sources, Mapping):
+            raise FrameAllocationReplanNeeded("discovery read receipt snapshot is unavailable")
+        verified_read_sources: dict[str, str] = {}
+        for path, receipt in read_receipts.items():
+            source_row = raw_sources.get(path)
+            source = sources.get(path)
+            if (not isinstance(path, str) or _safe_framefit_path(path) != path
+                    or public_path(path) != path or not isinstance(receipt, Mapping)
+                    or not isinstance(source_row, Mapping) or source_row.get("full") is not True
+                    or not isinstance(source, str) or source_row.get("content") != source
+                    or source_row.get("revision") != receipt.get("revision")
+                    or source_revision(source) != receipt.get("revision")
+                    or source_row.get("reference") != receipt.get("reference")
+                    or not isinstance(receipt.get("reference"), str)
+                    or not receipt["reference"].strip()):
+                raise FrameAllocationReplanNeeded("discovery read receipt differs from its source")
+            raw = _read_optional_source(root, path)
+            if raw is None or raw != source.encode("utf-8"):
+                raise FrameAllocationReplanNeeded("discovery read source changed after its receipt")
+            verified_read_sources[path] = source
+        sources = verified_read_sources
     checked: set[str] = set()
     for unit in plan.get("units", ()):
         path = unit.get("path") if isinstance(unit, Mapping) else None

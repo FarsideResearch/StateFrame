@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.8.35 (2026-11-24)
+
+- Changed: the normalized public test verdict row is written to the journal when the verdict or its binding changes, and again after a checkpoint or resume, instead of on every check.
+- Fixed: a provider reply of HTTP 400, 401, 403 or 404 that ends a run is reported as a provider error with its status instead of a request-seal failure.
+- Tokenizer checks send provider credentials only to the provider's own address.
+- Docs: which key a role or a resume uses when only its endpoint is changed.
+- Test interpreter fallback checks `python` after `python3` is unavailable or StateFrame-owned, searches PATH entries in order including empty entries, resolves each candidate's parent while preserving the executable symlink, and reuses the recorded choice on resume. If that fallback reports Python 2, StateFrame asks the user to choose Python 3; a failed version query leaves existing validation in control.
+- Catalog: avoid repeated receipt copies during adaptation and coalescing, and skip the intermediate public tree for JSON-native canonical values with an iterative depth check.
+- Runtime: catalog receipt projection snapshots rows during stream iteration, preserving reused-sequence payloads and separating diagnostic unknown notes while avoiding a separate collection copy pass.
+- Secret scanning compiles registered byte literals once per scanner, avoiding repeated Python-level secret iteration while preserving streaming tails and hex checks.
+- Fixed: resume checks recorded checkpoint file digests and falls back when a file is damaged; saves verify a stored object before reusing it.
+- With truthful read panels enabled, live requests identify deferred source ranges and label stale evidence with the reason it was excluded.
+- Fixed: finished commands with identical launch settings no longer keep one full copy each in the command supervisor.
+- Fixed: automatic idle prompt-cache pins now use separate per-run locks, so concurrent runs spread across reported idle slots without blocking subframe warm handoffs.
+- Read tool: refuse non-regular files without blocking, withhold NUL-containing files, and show invalid UTF-8 bytes as explicit escapes.
+- Read tool: precheck file types, withhold NUL content, and preserve replacement-decoded paging with a bounded invalid UTF-8 note.
+- Read tools: withhold binary and non-regular reads as typed refusals, preserve replacement-decoded paging, and keep the invalid UTF-8 note outside page and admission budgets.
+- Fixed: lone surrogates in provider replies are replaced before response recording on live and replayed sends; other response bytes are unchanged.
+- Requirement parsing no longer stalls on a long task line when the text never says "is valid" or "are valid". Text that contains the phrase is parsed as before.
+- Checkpoint saving no longer turns off after three failed saves. It tries again only after a new model send, because a retry at the same send could evict the checkpoint resume needs. It keeps repeated-failure warnings visible to the host, and propagates marked stops through object-backed capture after cleanup.
+- Function indexing collects file facts and nested function words in one syntax-tree walk instead of one walk per function; results and order are unchanged.
+- Fixed: a report of past edits in a task no longer narrows which files the task may change.
+- Fixed: parallel run preparation accepts supported timing and fanout continuation profile settings.
+- Add profile-only `STATEFRAME_PIN_DEDUP=on` (default off): leaves out evidence-pin text that the same request already carries in the task or the authority block.
+- Tests: journal tests no longer fail when an earlier test left a warning in the worker.
+- Fixed final source delivery checks for requests whose required source is carried by certified read pages.
+- In-place promotion stages all new files before rechecking destinations and parents before the first replacement; a staging-time conflict writes no destination, while a later conflict reports the paths already applied. Verified deletions follow the same file exclusions as the checks.
+- Chat and `inspect` say when problem diagnostics are incomplete.
+- Fix: unquoted symbol-name matches remain candidates; exact quoted or backticked names, matching file paths and traceback frames ground symbol claims. Intake still proceeds when there is one candidate.
+
 ## 0.8.34 (2026-11-24)
 
 - Fixed: provider liveness now renews when a child reports new cumulative response bytes; repeated or replaced output does not extend the wait.

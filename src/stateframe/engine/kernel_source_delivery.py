@@ -1,12 +1,64 @@
 """Exact, bounded source pages shared by read receipts and final delivery."""
 from __future__ import annotations
 
+import errno
 import hashlib
+import os
 import re
+import stat
 from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass
+from pathlib import Path
 
 from kernel_paged_source import page_window_args
+
+
+class NonRegularReadPath(Exception):
+    """Raised when a source path or opened descriptor is not a regular file."""
+
+
+def _signature_for_stat(info: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (int(info.st_dev), int(info.st_ino), int(info.st_size),
+            int(info.st_mtime_ns), int(info.st_ctime_ns))
+
+
+def read_regular_file(path: Path) -> tuple[bytes, tuple[int, int, int, int, int]]:
+    before = path.stat()
+    if not stat.S_ISREG(before.st_mode):
+        raise NonRegularReadPath
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+    descriptor: int | None = None
+    try:
+        try:
+            descriptor = os.open(path, flags)
+        except OSError as error:
+            if error.errno in {getattr(errno, "ENXIO", -1), getattr(errno, "ENODEV", -2)}:
+                raise NonRegularReadPath from error
+            raise
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode):
+            raise NonRegularReadPath
+        source = os.fdopen(descriptor, "rb")
+        descriptor = None
+        with source:
+            return source.read(), _signature_for_stat(opened)
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError as error:
+                if error.errno != errno.EBADF:
+                    raise
+
+
+def decode_source(raw: bytes) -> tuple[str, bool, str | None]:
+    try:
+        return raw.decode("utf-8"), False, None
+    except UnicodeDecodeError:
+        invalid_bytes = len(raw) - len(raw.decode("utf-8", "ignore").encode("utf-8"))
+        note = (f"not UTF-8: {invalid_bytes} undecodable bytes are shown as U+FFFD; "
+                "do not copy them into an edit")
+        return raw.decode("utf-8", errors="replace"), True, note
 
 DEFAULT_MAX_LINES = 120
 MAX_READ_LINES = 1000
@@ -355,10 +407,13 @@ def deliver_source(raw: bytes, display: str, start: int, *, args: object,
                normalize_read_request(args, default_start_line=start + 1))
     options = request.arguments
     revision = _revision(raw)
+    decoding_note: str | None = None
 
     def finish(result_class: str, text: str, content: str,
                metadata: dict[str, object]) -> SourceDelivery:
         content_bytes = content.encode("utf-8", errors="replace")
+        if decoding_note is not None:
+            metadata["decoding_note"] = decoding_note
         metadata.setdefault("requested_range", _requested_range(request))
         metadata.setdefault("effective_range", None)
         metadata.setdefault("clip_reason", None)
@@ -370,12 +425,26 @@ def deliver_source(raw: bytes, display: str, start: int, *, args: object,
             metadata_out.update(metadata)
         return SourceDelivery(result_class, text, content, metadata)
 
-    try:
-        decoded = raw.decode("utf-8")
-        replaced = False
-    except UnicodeDecodeError:
-        decoded = raw.decode("utf-8", errors="replace")
-        replaced = True
+    if b"\0" in raw:
+        if options.get("cursor") not in (None, ""):
+            _, _, cursor_error, _ = _position_from_cursor(
+                raw, options.get("cursor"), start + 1,
+                _bounded_int(options.get("column"), 0, 0, 10**9),
+            )
+            if cursor_error == "READ_CURSOR_STALE":
+                return finish(
+                    "STALE_REVISION",
+                    "STALE_REVISION: source changed since the cursor was issued; restart the read.",
+                    "",
+                    {"schema": "read-page/1", "path": display, "revision": revision,
+                     "result_class": "STALE_REVISION", "clip_reason": "stale_revision"},
+                )
+        return finish("BINARY", f"{display}: binary file, {len(raw)} bytes", "", {
+            "schema": "read-page/1", "path": display, "revision": revision,
+            "result_class": "BINARY", "binary_file": True,
+            "file_byte_length": len(raw),
+        })
+    decoded, replaced, decoding_note = decode_source(raw)
     lines = decoded.splitlines(keepends=True)
     total = len(lines)
     requested_start, range_end, range_error = page_window_args(options, decoded)
@@ -650,6 +719,7 @@ def deliver_source(raw: bytes, display: str, start: int, *, args: object,
 
 __all__ = [
     "DEFAULT_MAX_CHARS", "DEFAULT_MAX_LINES", "MAX_READ_CHARS", "MAX_READ_LINES",
-    "MIN_READ_CHARS", "NormalizedReadRequest", "ReadArgumentError", "SourceDelivery",
-    "deliver_source", "normalize_read_request",
+    "MIN_READ_CHARS", "NonRegularReadPath", "NormalizedReadRequest", "ReadArgumentError",
+    "SourceDelivery", "decode_source", "deliver_source", "normalize_read_request",
+    "read_regular_file",
 ]

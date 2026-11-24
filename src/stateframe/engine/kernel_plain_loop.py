@@ -356,6 +356,10 @@ def run_loop(task_text: str, *, provider: Provider, execute: Executor, limits: L
                     output = f"error: {type(error).__name__}: {error}"
                     reply_outcome = Outcome.ERROR
                     reply_receipt = {"code": "tool_error"}
+                if name == "read_file" and output.startswith(("BINARY_FILE:", "REFUSED NON_REGULAR_FILE:")):
+                    reply_outcome = Outcome.REFUSED
+                    reply_receipt = {"code": "binary_file" if output.startswith("BINARY_FILE:")
+                                     else "non_regular_file"}
                 if name == "done":
                     finished = True
                 content = output if name == "shell" else cap(output)

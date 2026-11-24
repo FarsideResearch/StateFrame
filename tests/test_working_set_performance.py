@@ -90,9 +90,19 @@ def oracle_value(value):
     raise TypeError(f"unsupported oracle value: {kind}")
 
 
+def without_default_panels(item):
+    """Drop the read-panel flag added after the captured oracle, only while it is off."""
+    if isinstance(item, dict):
+        return {key: without_default_panels(child) for key, child in item.items()
+                if not (key == "truthful_read_panels" and child is False)}
+    if isinstance(item, list):
+        return [without_default_panels(child) for child in item]
+    return item
+
+
 def baseline_projection(value):
     """Compare fixture fields that predate derived digests and default metadata."""
-    projected = oracle_value(value)
+    projected = without_default_panels(oracle_value(value))
 
     def normalize(item):
         if isinstance(item, dict):
@@ -170,8 +180,8 @@ def test_frozen_baseline_exact_results_and_randomized_assignments(baseline, admi
     # every field with lossless fingerprints and compare the same captured read
     # with its protection marker absent and present.
     def digest(value):
-        encoded = json.dumps(oracle_value(value), sort_keys=True, separators=(",", ":"),
-                             allow_nan=False).encode()
+        encoded = json.dumps(without_default_panels(oracle_value(value)), sort_keys=True,
+                             separators=(",", ":"), allow_nan=False).encode()
         return hashlib.sha256(encoded).hexdigest()
 
     assert digest(raw_admission) == (

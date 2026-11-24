@@ -970,6 +970,7 @@ class ContinuationJournal(AuditJournal):
         self._observer_batch_head: tuple[int, str] | None = None
         self._reporting_observer_failures: _ObserverFailureReport | None = None
         self._sequence = 0
+        self._last_durable_checkpoint_sequence = -1
         self._head: str | None = None
         self._size = 0
         self._blob_cache: dict[str, int] = {}
@@ -2663,6 +2664,7 @@ class ContinuationJournal(AuditJournal):
         self._sequence, self._head = record["sequence"], record["record_hash"]
         if record["kind"] == CHECKPOINT_KIND:
             self._checkpoint_seen = True
+            self._last_durable_checkpoint_sequence = record["sequence"]
         try:
             if len(getattr(self, "_record_offsets", ())) == record["sequence"] - 1:
                 self._record_offsets.append(offset)
@@ -2949,6 +2951,20 @@ class ContinuationJournal(AuditJournal):
             if getattr(self, "_unsynced", False) and self._fd is not None and os.getpid() == self._pid:
                 os.fsync(self._fd)
                 self._unsynced = False
+
+    def flush_pending(self, kind: str) -> None:
+        if not getattr(self, "_unsynced", False): return
+        with self._lock:
+            if not getattr(self, "_unsynced", False):
+                return
+            self.assert_owner()
+            try:
+                os.fsync(self._fd)
+                self._unsynced = False
+            except BaseException as error:
+                self._poison(f"{type(error).__name__} appending {kind!r} after seq "
+                             f"{self._sequence}: {str(error)[:160]}")
+                raise
 
     def close(self) -> None:
         with self._lock:

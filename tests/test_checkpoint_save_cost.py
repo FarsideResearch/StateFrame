@@ -1,11 +1,20 @@
 """Checkpoint save cost: scandir snapshot walk, content-addressed object store, one save per send."""
 from __future__ import annotations
 
+import errno
+import hashlib
+import io
+import json
 import os
+import pickle
+import stat
+import sys
+from collections.abc import MutableMapping
 from pathlib import Path
 
 import pytest
 
+from stateframe import resume
 from stateframe.engine import kernel_checkpoint as checkpoint
 
 posix_only = pytest.mark.skipif(os.name != "posix", reason="inode sharing requires POSIX")
@@ -16,6 +25,91 @@ def _tree(root: Path, directories: int = 4, files: int = 5) -> None:
         (root / f"d{d}").mkdir(parents=True)
         for f in range(files):
             (root / f"d{d}" / f"f{f}.py").write_bytes(f"{d}-{f}\n".encode() * 50)
+
+
+def test_workspace_switch_reads_are_bounded_per_pickle_save(monkeypatch):
+    setting = "STATEFRAME_WORKSPACE_OBJECTS"
+
+    class CountingEnvironment(MutableMapping[str, str]):
+        def __init__(self, wrapped):
+            self.wrapped = wrapped
+            self.reads = 0
+
+        def __getitem__(self, key):
+            return self.wrapped[key]
+
+        def __setitem__(self, key, value):
+            self.wrapped[key] = value
+
+        def __delitem__(self, key):
+            del self.wrapped[key]
+
+        def __iter__(self):
+            return iter(self.wrapped)
+
+        def __len__(self):
+            return len(self.wrapped)
+
+        def get(self, key, default=None):
+            if key == setting:
+                self.reads += 1
+            return self.wrapped.get(key, default)
+
+        def __getattr__(self, name):
+            return getattr(self.wrapped, name)
+
+    monkeypatch.setenv(setting, "off")
+    environ = CountingEnvironment(os.environ)
+    monkeypatch.setattr(checkpoint.os, "environ", environ)
+    indexed = object()
+    monkeypatch.setattr(checkpoint, "_SAVE", {"ids": {id(indexed): ("stable", "object-id")}})
+    payload = [object() for _ in range(512)] + [indexed]
+    ctx = {name: {} for name in ("hostfns", "participants", "framecells", "framefuncs", "cvars")}
+    reads_per_save = []
+    serialized = []
+
+    for setting_value in ("off", "on"):
+        environ[setting] = setting_value
+        before = environ.reads
+        stream = io.BytesIO()
+        checkpoint.dump_to(stream, payload, ctx)
+        reads_per_save.append(environ.reads - before)
+        serialized.append(stream.getvalue())
+
+    assert reads_per_save[0] <= 4
+    assert reads_per_save[1] <= 4
+    assert serialized[0] == serialized[1]
+    assert b"object-id" in serialized[0]
+
+
+def test_workspace_switch_is_refreshed_between_pickle_saves(monkeypatch, tmp_path):
+    import sys
+    import types
+
+    module = types.ModuleType("kernel_shell_tool")
+
+    class ShellTool:
+        pass
+
+    ShellTool.__module__ = module.__name__
+    ShellTool.__qualname__ = "ShellTool"
+    module.ShellTool = ShellTool
+    tool = ShellTool()
+    tool.root = tmp_path
+    module.service = lambda: tool
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    monkeypatch.setattr(checkpoint, "_SAVE", {})
+    ctx = {name: {} for name in ("hostfns", "participants", "framecells", "framefuncs", "cvars")}
+
+    serialized = []
+    for setting_value in ("off", "on", "off"):
+        monkeypatch.setenv("STATEFRAME_WORKSPACE_OBJECTS", setting_value)
+        serialized.append(checkpoint.dumps([tool], ctx))
+
+    assert serialized[0] == serialized[2]
+    assert serialized[0] != serialized[1]
+    assert b"host-shell-tool" not in serialized[0]
+    assert b"host-shell-tool" in serialized[1]
 
 
 @posix_only
@@ -121,10 +215,225 @@ def test_save_point_saves_at_most_once_per_send(tmp_path, monkeypatch):
         checkpoint._STATE.update(before)
 
 
+_SIGNING_KEY = b"checkpoint-save-cost-signing-key-0123456789"
+
+
+@pytest.fixture
+def _selection_context(monkeypatch):
+    monkeypatch.setenv(checkpoint.LEGACY_DIRECT_ENGINE_ENV, "1")
+    monkeypatch.setattr(checkpoint, "_SIGNING_KEY", [_SIGNING_KEY])
+    monkeypatch.setattr(checkpoint, "_SECRETS", [])
+    monkeypatch.setattr(checkpoint, "_PRODUCT_HOST", False)
+    monkeypatch.setattr(checkpoint, "_FINGERPRINT", None)
+    monkeypatch.setattr(checkpoint, "_HOST_IDENTITY_BOUND", False)
+    checkpoint.configure_product_host()
+
+
+def _resume_candidate(run: Path, name: str, seq: int, data: bytes = b"original",
+                      *, file_digest: bool = True) -> Path:
+    root = run / "checkpoints"
+    checkpoint._private_dir(root)
+    folder = root / name
+    checkpoint._private_dir(folder)
+    copied = folder / "run" / "env"
+    copied.mkdir(parents=True)
+    (copied / "model.py").write_bytes(data)
+    (folder / "run" / "journal.jsonl").write_bytes(b'{"event":"sample"}\n')
+    (folder / "run" / "request.json").write_bytes(b'{"request":"sample"}\n')
+    raw = pickle.dumps({"seq": seq}, protocol=5)
+    state = folder / checkpoint.STATE_FILE
+    state.write_bytes(raw)
+    state.chmod(0o600)
+    manifest = b"{}"
+    (folder / checkpoint.MANIFEST_FILE).write_bytes(manifest)
+    (folder / checkpoint.MANIFEST_FILE).chmod(0o600)
+    meta = {
+        "schema": checkpoint.SCHEMA, "step": seq, "seq": seq, "sends": 0,
+        "created": float(seq), "entries": ["env", "journal.jsonl", "request.json"],
+        "python": list(sys.version_info[:3]),
+        "engine_root": checkpoint._engine_root(),
+        "engine_files_sha256": checkpoint.engine_fingerprint(bind_host=True),
+        "pid": os.getpid(), "clocks": {"monotonic": 0, "perf_counter": 0},
+        "files": {"linked": 0, "copied": 1, "cloned": 0},
+        "blob_manifest_sha256": hashlib.sha256(manifest).hexdigest(), "pool_sha256": {},
+        "file_chunks": {}, "file_modes": {}, "file_mtime_ns": {}, "link_fallback": 0,
+        "bytes_new": len(raw) + len(manifest), "blob_count": 0,
+        "state_bytes": len(raw), "state_sha256": hashlib.sha256(raw).hexdigest(),
+        "chunk_index": {}, "chunks": [],
+    }
+    if file_digest:
+        meta["file_sha256"] = {"env": {"model.py": hashlib.sha256(data).hexdigest()}}
+    meta["signature"] = checkpoint._signature(meta, meta["state_sha256"])
+    metadata = folder / checkpoint.META_FILE
+    metadata.write_text(json.dumps(meta, sort_keys=True))
+    metadata.chmod(0o600)
+    return folder
+
+
+def _select(run: Path):
+    return resume.select_checkpoint(run, [{"send": 1}], run / "wire")
+
+
+def test_same_size_run_file_damage_rejects_with_one_named_hash(tmp_path, monkeypatch,
+                                                               _selection_context):
+    folder = _resume_candidate(tmp_path / "run", "0001-1", 1)
+    damaged = folder / "run" / "env" / "model.py"
+    damaged.write_bytes(b"tampered")
+    calls = []
+    real_digest = checkpoint._file_sha256
+
+    def track_digest(path, **kwargs):
+        calls.append(Path(path))
+        return real_digest(path, **kwargs)
+
+    monkeypatch.setattr(checkpoint, "_file_sha256", track_digest)
+
+    with pytest.raises(checkpoint.CheckpointError, match="env/model.py checksum mismatch"):
+        checkpoint.validate(folder)
+    assert calls == [damaged]
+
+
+def test_bad_newest_file_falls_back_to_older_checkpoint(tmp_path, _selection_context):
+    run = tmp_path / "run"
+    older = _resume_candidate(run, "0001-1", 1)
+    newest = _resume_candidate(run, "0002-1", 2)
+    damaged = newest / "run" / "env" / "model.py"
+    damaged.write_bytes(b"tampered")
+
+    selected = _select(run)
+
+    assert selected is not None and selected["dir"] == str(older)
+    refusals = [json.loads(line) for line in (run / "checkpoints" / "events.jsonl").read_text().splitlines()]
+    assert len(refusals) == 1
+    assert "env/model.py checksum mismatch" in refusals[0]["detail"]
+
+
+def test_bad_only_checkpoint_falls_back_to_replay(tmp_path, _selection_context):
+    run = tmp_path / "run"
+    folder = _resume_candidate(run, "0001-1", 1)
+    (folder / "run" / "env" / "model.py").write_bytes(b"tampered")
+
+    assert _select(run) is None
+    refusal = json.loads((run / "checkpoints" / "events.jsonl").read_text())
+    assert "env/model.py checksum mismatch" in refusal["detail"]
+
+
+def test_checkpoint_without_file_digests_keeps_legacy_behavior(tmp_path, _selection_context):
+    run = tmp_path / "run"
+    folder = _resume_candidate(run, "0001-1", 1, file_digest=False)
+    (folder / "run" / "env" / "model.py").write_bytes(b"tampered")
+
+    selected = _select(run)
+
+    assert selected is not None and selected["dir"] == str(folder)
+
+
+def test_undamaged_journal_request_and_checkpoint_bytes_stay_equal(tmp_path, _selection_context):
+    folder = _resume_candidate(tmp_path / "run", "0001-1", 1)
+    paths = [folder / "run" / "journal.jsonl", folder / "run" / "request.json",
+             folder / checkpoint.STATE_FILE, folder / checkpoint.MANIFEST_FILE,
+             folder / checkpoint.META_FILE]
+    before = {path: path.read_bytes() for path in paths}
+
+    checkpoint.validate(folder)
+
+    assert {path: path.read_bytes() for path in paths} == before
+
+
+def test_unreadable_recorded_file_is_rejected_and_named(tmp_path, monkeypatch, _selection_context):
+    run = tmp_path / "run"
+    folder = _resume_candidate(run, "0001-1", 1)
+    target = folder / "run" / "env" / "model.py"
+    real_open = os.open
+
+    def unreadable(path, *args, **kwargs):
+        if os.fspath(path) == os.fspath(target):
+            raise PermissionError(errno.EACCES, "unreadable", os.fspath(path))
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(checkpoint.os, "open", unreadable)
+    assert _select(run) is None
+    refusal = json.loads((run / "checkpoints" / "events.jsonl").read_text())
+    assert "env/model.py checksum mismatch" in refusal["detail"]
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_existing_object_is_hashed_once_or_quarantined(tmp_path, monkeypatch, corrupt):
+    source, objects = tmp_path / "source", tmp_path / checkpoint.OBJECT_DIR
+    data = b"right" if corrupt else b"bytes"
+    wrong = b"wrong"
+    source.write_bytes(data)
+    source.chmod(0o644)
+    objects.mkdir()
+    info = source.stat()
+    digest = hashlib.sha256(data).hexdigest()
+    final = objects / f"{digest}-{stat.S_IMODE(info.st_mode):o}"
+    final.write_bytes(wrong if corrupt else data)
+    final.chmod(0o444)
+    monkeypatch.setattr(checkpoint, "_VERIFIED_OBJECTS", set())
+    calls = []
+    real_digest = checkpoint._file_sha256
+
+    def track_digest(path, **kwargs):
+        calls.append(Path(path))
+        return real_digest(path, **kwargs)
+
+    monkeypatch.setattr(checkpoint, "_file_sha256", track_digest)
+    real_rename = os.rename
+    rename_calls = []
+
+    def track_rename(source, target, *args, **kwargs):
+        rename_calls.append((source, target, kwargs))
+        return real_rename(source, target, *args, **kwargs)
+
+    monkeypatch.setattr(checkpoint.os, "rename", track_rename)
+
+    written = None
+    for index in range(3):  # each snapshot hard link changes the object's ctime
+        stored, current_written = checkpoint._store_object(os.fspath(source), info, digest, objects)
+        if index == 0:
+            written = current_written
+        os.link(stored, tmp_path / f"checkpoint-{index}")
+
+    assert stored == final and final.read_bytes() == data
+    assert len(calls) == (1 if not corrupt else 2)
+    if corrupt:
+        aside, = objects.glob("quarantine-*")
+        assert aside.read_bytes() == wrong
+        assert written == len(data)
+        assert len(rename_calls) == 1
+        source_name, target_name, rename_options = rename_calls[0]
+        assert source_name == final.name and target_name == aside.name
+        assert rename_options["src_dir_fd"] == rename_options["dst_dir_fd"]
+    else:
+        assert written == 0
+        assert rename_calls == []
+
+
+def test_enospc_while_quarantining_preserves_bad_object(tmp_path, monkeypatch):
+    source, objects = tmp_path / "source", tmp_path / checkpoint.OBJECT_DIR
+    data, wrong = b"right", b"wrong"
+    source.write_bytes(data)
+    info = source.stat()
+    objects.mkdir()
+    final = objects / f"{hashlib.sha256(data).hexdigest()}-{info.st_mode & 0o777:o}"
+    final.write_bytes(wrong)
+    monkeypatch.setattr(checkpoint, "_VERIFIED_OBJECTS", set())
+
+    def full_disk(*_args, **_kwargs):
+        raise OSError(errno.ENOSPC, "no space")
+
+    monkeypatch.setattr(checkpoint.os, "rename", full_disk)
+    with pytest.raises(OSError) as error:
+        checkpoint._store_object(os.fspath(source), info, hashlib.sha256(data).hexdigest(), objects)
+    assert error.value.errno == errno.ENOSPC
+    assert final.read_bytes() == wrong
+    assert not list(objects.glob("*.tmp")) and not list(objects.glob("quarantine-*"))
+
+
 # ---------------------------------------------------------------- kill / resume replay
 
 import subprocess  # noqa: E402
-import sys  # noqa: E402
 
 CHILD = Path(__file__).resolve().parent / "fixtures" / "checkpoint_kill_child.py"
 TURNS = 6

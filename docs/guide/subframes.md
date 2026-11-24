@@ -122,6 +122,8 @@ counts above unless they are also declared as owned, new, or supporting-read pat
 `auto` probes idle slots at the configured model endpoints and respects `--parallel-max` and any slot pool. When
 `/slots` is unavailable, it uses the configured ceiling, further limited by an explicit slot pool. Slot leases are
 cooperative: they coordinate participating StateFrame runs but do not reserve hardware against other clients.
+Runs spread across idle slots with separate per-run locks; subframes keep their own leases and may still take the
+parent's pinned slot first for a warm handoff.
 
 The corresponding profile or shell settings are:
 

@@ -549,6 +549,8 @@ def _values_after_valid(text: str) -> list[object]:
     result = [value for value in values if str(value) not in fields]
     if result:
         return list(dict.fromkeys(result))
+    if not re.search(r"\s(?:are|is)\s+valid", text, re.I):
+        return []
     # Support the compact public shape ``private and public are valid`` only
     # when each value is a simple word adjacent to the validity phrase.
     match = re.search(r"(?:only|values?\s+(?:are|include))\s+(.+?)\s+(?:are|is)\s+valid", text, re.I)
