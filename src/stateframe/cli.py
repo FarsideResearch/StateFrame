@@ -132,11 +132,14 @@ def _add_task_arguments(command: argparse.ArgumentParser, *, for_run: bool = Fal
     command.add_argument("--pytest-plugins", choices=["installed"],
                          help="let pytest load installed plugins (off by default in the sandbox)")
     command.add_argument("--edit", action="append", default=[], metavar="PATH",
-                         help="another file the fix may change (repeatable); with --edit or in a "
-                              "repo over 200 source files only --target and --edit files are "
-                              "editable, the rest of the repo is read-only context; without them a large "
-                              "repo is scoped from the files the task and chosen checks name, and when "
-                              "they name none every product file is editable")
+                          help="--edit adds a path to the initial edit scope (repeatable). When both flags "
+                               "are set, --target also joins the scope; explicit paths must fit any parsed "
+                               "task file-scope rule. In repositories over 200 product files, --target "
+                               "alone scopes edits, subject to parsed task file-scope rules. If a large "
+                               "repository has neither flag, scope is inferred from the task and chosen "
+                               "checks; choose a path if none can be inferred. An unparseable task "
+                               "file-scope rule remains unscoped. In smaller repositories, --target alone "
+                               "is only a starting-file hint; parsed task file-scope rules govern edits.")
     command.add_argument("--edit-scope", choices=("scoped", "widen"), default=None,
                          help="in a scoped run, 'widen' lets the model edit another existing product "
                               "file instead of being refused (same as STATEFRAME_EDIT_SCOPE_WIDEN=on; "

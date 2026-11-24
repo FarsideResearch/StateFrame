@@ -184,20 +184,55 @@ def search_tree(tmp_path: Path) -> Path:
     return root
 
 
-def _open_trace(monkeypatch, root: Path):
+def _open_trace(monkeypatch, root: Path, *, fail_names: frozenset[str] = frozenset()):
     root = root.resolve()
     slots = {"reference": [], "actual": []}
     active = {"slot": "actual"}
-    original = Path.read_bytes
+    original_read_bytes = Path.read_bytes
+    original_os_open = os.open
+    directory_paths: dict[tuple[int, int], str] = {}
+
+    def relative_path(path, dir_fd=None) -> str | None:
+        candidate = Path(os.fsdecode(path))
+        if candidate.is_absolute():
+            try:
+                return candidate.relative_to(root).as_posix()
+            except ValueError:
+                return None
+        if dir_fd is None:
+            return None
+        try:
+            info = os.fstat(dir_fd)
+        except OSError:
+            return None
+        parent = directory_paths.get((info.st_dev, info.st_ino))
+        return (Path(parent) / candidate).as_posix() if parent is not None else None
+
+    def observe(relative: str | None) -> None:
+        if relative is None or relative == ".":
+            return
+        slots[active["slot"]].append(relative)
+        if relative in fail_names:
+            raise PermissionError("fixture denies this source")
 
     def traced_read(path: Path) -> bytes:
-        relative = path.relative_to(root)
-        slots[active["slot"]].append(relative.as_posix())
-        if relative.as_posix() == "unreadable.txt":
-            raise PermissionError("fixture denies this source")
-        return original(path)
+        observe(relative_path(path))
+        return original_read_bytes(path)
+
+    def traced_os_open(path, flags, mode=0o777, *, dir_fd=None):
+        relative = relative_path(path, dir_fd)
+        directory = bool(flags & getattr(os, "O_DIRECTORY", 0))
+        if not directory:
+            observe(relative)
+        descriptor = original_os_open(path, flags, mode, dir_fd=dir_fd)
+        if directory and relative is not None:
+            info = os.fstat(descriptor)
+            directory_paths[(info.st_dev, info.st_ino)] = relative
+        return descriptor
 
     monkeypatch.setattr(Path, "read_bytes", traced_read)
+    monkeypatch.setattr(os, "open", traced_os_open)
+    monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd | {traced_os_open})
     return active, slots
 
 

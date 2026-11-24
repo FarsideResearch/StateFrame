@@ -16,7 +16,11 @@ from typing import Mapping
 SCHEMA = "stateframe-switch-registry/1"
 # Host setup and retention switches are read before engine creation and are never
 # handed to the engine child, even when their literals appear in engine modules.
-HOST_ONLY_SWITCHES = frozenset({"STATEFRAME_ENV_SEED", "STATEFRAME_ENDPOINT_MAX_JSON_BYTES"})
+HOST_ONLY_SWITCHES = frozenset({
+    "STATEFRAME_ENDPOINT_MAX_JSON_BYTES",
+    "STATEFRAME_ENV_SEED",
+    "STATEFRAME_REQUIRED_TEST_LEDGER",
+})
 # Compatibility spellings are normalized at public boundaries, not registered
 # engine switches. Keep this exemption exact and guarded by the namespace tests.
 DEPRECATED_SWITCH_ALIASES = frozenset({"STATEFRAME_ROUTE_BUDGET"})

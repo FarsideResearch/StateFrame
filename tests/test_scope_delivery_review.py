@@ -296,6 +296,7 @@ def test_scoped_parallel_candidate_completes_after_parent_resume(
     monkeypatch.syspath_prepend(str(root / "tests" / "fixtures"))
     monkeypatch.syspath_prepend(str(root / "tests" / "fixtures" / "parallel"))
     from barrier_endpoint import BarrierEndpoint
+    from _timeouts import scaled
     from e2e_support import interrupt_run, summary_for, tool_step
     from engine_run import start_monitored
 
@@ -338,7 +339,7 @@ def test_scoped_parallel_candidate_completes_after_parent_resume(
                        PYTHONPATH=str(root / "src"))
 
     with BarrierEndpoint(parent, subframes, slots=2, hold_until={"target": "quiet"},
-                         hold_parent_request=2, barrier_timeout=240) as endpoint:
+                         hold_parent_request=2, barrier_timeout=scaled(600)) as endpoint:
         command = [
             sys.executable, "-m", "stateframe", "run", "--repo", str(repo), "--task",
             "Fix pkg/target.py to return 2. Only edit pkg/target.py and pkg/quiet.py.",
@@ -354,9 +355,9 @@ def test_scoped_parallel_candidate_completes_after_parent_resume(
         )
         resumed = None
         try:
-            assert endpoint.wait_for_requests("parent", 2, timeout=60)
-            assert endpoint.wait_for_requests("target", 1, timeout=180)
-            assert endpoint.wait_for_requests("quiet", 1, timeout=180)
+            assert endpoint.wait_for_requests("parent", 2, timeout=scaled(240))
+            assert endpoint.wait_for_requests("target", 1, timeout=scaled(240))
+            assert endpoint.wait_for_requests("quiet", 1, timeout=scaled(240))
             interrupt_run(process, run_dir)
             endpoint.release_parent_request()
             resumed = start_monitored(
@@ -369,13 +370,9 @@ def test_scoped_parallel_candidate_completes_after_parent_resume(
             endpoint.assert_consumed()
         finally:
             if resumed is not None and resumed.poll() is None:
-                resumed.cancel("review test cleanup")
-                resumed.escalate(grace=0)
-                resumed.reap(timeout=15)
+                resumed.close()
             if process.poll() is None:
-                process.cancel("review test cleanup")
-                process.escalate(grace=0)
-                process.reap(timeout=15)
+                process.close()
 
     summary = summary_for(run_dir)
     parent_spec = json.loads((run_dir / "spec.json").read_text(encoding="utf-8"))

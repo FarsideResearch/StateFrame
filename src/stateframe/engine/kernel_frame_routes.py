@@ -438,8 +438,17 @@ def applied_settings(route: Route) -> dict[str, object]:
 
 
 def route_identity(route: Route) -> dict[str, object]:
-    """Routing v2 (MR-7): full effective identity of a leg: endpoint, model and applied settings."""
-    return {"endpoint": route.endpoint, "model": route.model, **applied_settings(route)}
+    """Routing v2 (MR-7): effective identity, including settings outside the provider body."""
+    settings = route.settings
+    identity = {"endpoint": route.endpoint, "model": route.model, **applied_settings(route)}
+    # Use runtime fallbacks so older saved route tables remain comparable after resume.
+    identity.update(
+        timeout_s=settings.get("timeout_s") or 1800.0,
+        context_tokens=settings.get("context_tokens") or (_baseline or {}).get("context_tokens") or 65536,
+        tokenizer=settings.get("tokenizer") or settings.get("endpoint") or route.endpoint,
+        allow_remote=bool(settings.get("allow_remote")),
+    )
+    return identity
 
 
 def apply_body(body: dict[str, object], route: Route, *, default_endpoint: str) -> None:

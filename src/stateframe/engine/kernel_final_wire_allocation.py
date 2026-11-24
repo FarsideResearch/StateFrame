@@ -84,6 +84,12 @@ def _stable_wire_record_for_publication(candidate, body):
     return record
 
 
+def allocation_keywords(candidate):
+    """Candidate inputs that capture_candidate takes; the witness binding is for the final check only."""
+    return {name: value for name, value in candidate._frame_candidate_inputs.items()
+            if name != "source_delivery_witness_binding"}
+
+
 def _recover_post_fit_growth(candidate, context, body, fitted_body, fitted_counter,
                              fitted_inputs, fitted_delivery, *, meter, endpoint, key):
     """Fit the final transport body before its budget proof can reject growth."""
@@ -605,7 +611,7 @@ def _build_qualified_request(capture, runtime, body, *, endpoint, key, deadline,
             runtime=context, capture=candidate, body=body,
             previous_allocation=getattr(capture, "_replacement_allocation", None),
             request_lineage=getattr(capture, "_replacement_lineage", None),
-            **candidate._frame_candidate_inputs,
+            **allocation_keywords(candidate),
         ).to_bytes()
         raise
     if check.wire != wire or check.verdict not in {"PASS", "DISABLED"}:
@@ -617,7 +623,7 @@ def _build_qualified_request(capture, runtime, body, *, endpoint, key, deadline,
     allocation = capture_candidate(runtime=context, capture=candidate, body=body,
                                    previous_allocation=getattr(capture, "_replacement_allocation", None),
                                    request_lineage=getattr(capture, "_replacement_lineage", None),
-                                   **candidate._frame_candidate_inputs)
+                                   **allocation_keywords(candidate))
     if allocated is not None:
         assert_certified_body(body, allocated)
     metadata = {

@@ -608,18 +608,20 @@ _CLOSURE_KINDS = frozenset({"applied_write", "not_applied_write", "unknown_write
 _EXPECTED_RESULT_CLASSES = {
     **{tool: {"NO_OP", "REFUSED"} for tool in
        ("job_wait", "job_output", "git", "web_fetch", "skill_load")},
-    **{tool: {"OK", "MISSING", "DIRECTORY", "ALREADY_PRESENT", "ERROR", "OUT_OF_RANGE"}
+    **{tool: {"OK", "MISSING", "DIRECTORY", "ALREADY_PRESENT", "ERROR", "OUT_OF_RANGE",
+              "REPEAT_SUPPRESSED"}
        for tool in ("read", "text")},
     "read": {"OK", "MISSING", "DIRECTORY", "ALREADY_PRESENT", "ERROR", "OUT_OF_RANGE",
-             "REFUSED_ADMISSION"},
-    "grep": {"HITS", "NO_HITS", "ERROR", "OUT_OF_RANGE"},
+             "REFUSED_ADMISSION", "REPEAT_SUPPRESSED"},
+    "grep": {"HITS", "NO_HITS", "ERROR", "OUT_OF_RANGE", "REPEAT_SUPPRESSED"},
     "ls": {"OK"},
     "list_files": {"HOST_OBSERVED", "REJECTED"},
-    **{tool: {"HOST_OBSERVED", "ERROR", "OUT_OF_RANGE"}
+    **{tool: {"HOST_OBSERVED", "ERROR", "OUT_OF_RANGE", "REPEAT_SUPPRESSED"}
        for tool in ("where_defined", "who_calls", "references")},
     **{tool: {"RECALLED", "RECALL_REJECTED"}
        for tool in ("recall", "recall_evidence", "recall_generated_artifact")},
-    "read_check_receipt": {"HOST_OBSERVED", "NOT_FOUND", "REJECTED", "ERROR", "OUT_OF_RANGE"},
+    "read_check_receipt": {"HOST_OBSERVED", "NOT_FOUND", "REJECTED", "ERROR", "OUT_OF_RANGE",
+                           "REPEAT_SUPPRESSED"},
     "run_tests": {"GREEN", "PARTIAL_PASS", "RED", "FAIL_WITH_WITNESS", "HARNESS_ERROR",
                   "REFUSED_PREDISPATCH",
                   "SELECTOR_ERROR", "NO_TESTS", "NO_VERDICT", "REUSED_VERIFICATION",
@@ -653,6 +655,14 @@ def test_closure_inventory_catches_planted_read_result(monkeypatch):
     with pytest.raises(AssertionError):
         _assert_closure_inventory_complete()
     assert "result:read:PLANTED_RESULT" in _discovered_closure_kinds()
+
+
+def test_closure_inventory_catches_removed_repeat_suppressed_read_result(monkeypatch):
+    _assert_closure_inventory_complete()
+    monkeypatch.setitem(READ_RESULT_CLASSES, "read",
+                        READ_RESULT_CLASSES["read"] - {"REPEAT_SUPPRESSED"})
+    with pytest.raises(AssertionError):
+        _assert_closure_inventory_complete()
 
 
 @pytest.mark.parametrize("kind", sorted(_CLOSURE_KINDS))

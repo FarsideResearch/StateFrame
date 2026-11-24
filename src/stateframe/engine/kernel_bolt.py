@@ -20,7 +20,7 @@ import kernel_effect_boundary as keb
 import kernel_workspace_truth as _workspace_truth
 from kernel_liveness import Evidence, OrganCensusSpec, TriState
 from kernel_verdict import SATISFIED
-from kernel_reason_log import emit_reason
+from kernel_reason_log import builtin_exception_name, emit_reason
 from kernel_history_spool import history as _history, journal_directory as _journal_directory
 from kernel_history_receipts import (
     append_receipt as _append_receipt,
@@ -100,7 +100,13 @@ def _build_grep_symbol_view(
             relative = path.relative_to(root).as_posix()
             try:
                 rows = _symbols(os.fsencode(relative), path.read_bytes())
-            except (OSError, Unavailable):
+            except (OSError, Unavailable) as exc:
+                emit_reason(
+                    "fallback", "grep_symbol_source_unavailable", "repo_intel",
+                    "repository symbol source was skipped",
+                    "symbol extraction or file reading failed",
+                    journal=False, dropped=builtin_exception_name(exc),
+                )
                 continue
             for symbol, hits in rows.items():
                 definitions.setdefault(symbol, []).extend(hits)

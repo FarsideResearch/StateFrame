@@ -100,11 +100,12 @@ def test_switches_off_matches_021_protected_window_bytes(tmp_path, monkeypatch):
     assert json.dumps(actual).encode() == json.dumps(expected_021).encode()
 
 
-@pytest.mark.parametrize("secret", ["pkg/credentials.py", "pkg/.env.py"])
+# Source modules are kept whatever their name (test_workcopy_secret_globs); these paths stay secret.
+@pytest.mark.parametrize("secret", ["pkg/credentials.json", "pkg/.secrets/module.py"])
 def test_late_secret_path_excluded_from_every_frame_source_route(tmp_path, monkeypatch, secret):
     monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
     target = tmp_path / secret
-    target.parent.mkdir()
+    target.parent.mkdir(parents=True)
     target.write_text("password = 'TOP_SECRET_RELEASE14'\n")
     raw = target.read_bytes()
     revision = "sha256:" + hashlib.sha256(raw).hexdigest()
@@ -138,12 +139,12 @@ def test_frame_source_paths_all_use_shared_workcopy_predicate(monkeypatch):
     import kernel_code_bookmarks as bookmarks
     monkeypatch.setattr(snapshot, "frame_source_path_allowed", observe)
     monkeypatch.setattr(bookmarks, "frame_source_path_allowed", observe, raising=False)
-    assert not original("pkg/.env.py") and not original("pkg/credentials.py")
-    for path in ("pkg/.env.py", "pkg/credentials.py"):
+    assert not original("pkg/.secrets/module.py") and not original("pkg/credentials.json")
+    for path in ("pkg/.secrets/module.py", "pkg/credentials.json"):
         assert snapshot._current_window(Path("/tmp"), path, 1, 1, "sha256:x") is None
         assert snapshot._source_coverage_line_items([], [path]) == []
         assert bookmarks._source(Path("/tmp"), path) is None
-    assert set(checked) >= {"pkg/.env.py", "pkg/credentials.py"}
+    assert set(checked) >= {"pkg/.secrets/module.py", "pkg/credentials.json"}
     for entrypoint in (_current_window, recent_editable_read_windows,
                        editable_product_windows, public_check_source_windows,
                        _source_coverage_line_items, fit_recent_read_windows,

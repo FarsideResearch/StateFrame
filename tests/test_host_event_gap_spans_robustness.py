@@ -22,7 +22,7 @@ _BEFORE_NS = 11
 _EXECUTION_NS = 100
 _AFTER_NS = 17
 _BASELINE_CHECKPOINTED_JOURNAL_FIELDS = frozenset({
-    "path", "_lock", "_fd", "_poisoned", "_poison_cause", "_observer_failures",
+    "path", "_lock", "_fd", "_poisoned", "_poison_cause",
     "_reporting_observer_failures", "_sequence", "_head", "_size", "_blob_cache",
     "_record_cache", "_record_cache_start", "_record_cache_bytes", "_record_cache_sizes",
     "_record_offsets", "_record_hashes", "_record_cache_limit", "_framefit_receipt_records",
@@ -212,13 +212,33 @@ _SPAN_PAUSE_FIELDS = frozenset({
 
 
 def test_checkpointed_journal_attributes_exclude_span_pause_state(tmp_path):
-    # Pin only what this change adds: the pause bookkeeping must never be checkpointed. A frozen copy of the whole
-    # field set broke on the next release that added an unrelated journal field (v0.4.26 _subscriber_cursor_kinds).
     journal = ContinuationJournal(tmp_path, "checkpoint-attributes", {"origin": "fixture"})
     try:
-        state = set(kernel_checkpoint._journal_state(journal))
-        assert _SPAN_PAUSE_FIELDS <= set(vars(journal))
-        assert not (state & _SPAN_PAUSE_FIELDS)
-        assert _BASELINE_CHECKPOINTED_JOURNAL_FIELDS - {"_subscriber_cursor_kinds"} <= state
+        _assert_checkpoint_excludes_span_pause_state(journal)
+    finally:
+        journal.close()
+
+
+def _assert_checkpoint_excludes_span_pause_state(journal):
+    state = set(kernel_checkpoint._journal_state(journal))
+    assert _SPAN_PAUSE_FIELDS <= set(vars(journal))
+    assert not (state & _SPAN_PAUSE_FIELDS)
+    assert _BASELINE_CHECKPOINTED_JOURNAL_FIELDS - {"_subscriber_cursor_kinds"} <= state
+    return state
+
+
+def test_checkpointed_journal_guard_catches_planted_span_pause_state(monkeypatch, tmp_path):
+    journal = ContinuationJournal(tmp_path, "checkpoint-pause-mutant", {"origin": "fixture"})
+    original = kernel_checkpoint._journal_state
+
+    def include_pause_state(target):
+        state = original(target)
+        state["_warm_host_span_pause_counts"] = dict(target._warm_host_span_pause_counts)
+        return state
+
+    monkeypatch.setattr(kernel_checkpoint, "_journal_state", include_pause_state)
+    try:
+        with pytest.raises(AssertionError):
+            _assert_checkpoint_excludes_span_pause_state(journal)
     finally:
         journal.close()

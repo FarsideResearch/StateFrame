@@ -12,6 +12,8 @@
 
 ## Common flags
 
+`STATEFRAME_REQUIRED_TEST_LEDGER=off|on` (host environment, default `off`) collects outcomes during the selected baseline and final pytest checks. The summary compares baseline passes with the last complete final check and lists failed and missing tests using repository-relative pytest node IDs, such as `tests/test_math.py::TestMath::test_add[small]`. A completed check that collects no tests can establish that baseline tests are missing. The summary reports `unknown` when either side lacks a complete report, for example after an interrupted check, an unsupported launcher, or a report that exceeds the size limit. The ledger is advisory and preserves the check's stdout, stderr, exit status and configured JUnit output. Incomplete reasons are written as fixed codes to its bounded report; if no report can be read, the summary says `pytest report was not produced`.
+
 - `--endpoint`, `--model` (or `STATEFRAME_ENDPOINT`, `STATEFRAME_MODEL`): the server and model. Loopback only unless `STATEFRAME_ALLOW_REMOTE_ENDPOINT=1`.
 - `STATEFRAME_ENDPOINT_MAX_JSON_BYTES` (environment): positive byte limit for endpoint probe JSON bodies; defaults to 4 MiB. An oversized optional `/slots` reply is ignored with one warning that names its path and limit; an invalid setting is reported at startup.
 - `--check PATH` (repeatable): pytest files selected for the default check; for a generic command, extra existing check files to protect.
@@ -250,6 +252,8 @@ Watch for:
 ### Unified routing (schema 2, off by default)
 
 `STATEFRAME_ROUTING_SCHEMA` picks how per-step routing decides. Unset or `1` is the behaviour above, byte for byte. `2` turns on the unified rules below; any other value stops the run. Set `STATEFRAME_ROUTING_SCHEMA=2` in a custom profile.
+
+Schema 2 compares effective timeout, context capacity, tokenizer endpoint and remote-connection permission when deciding whether edit or finish calls need another route. These settings affect route behavior but do not enter the provider request body.
 
 - **One decision per request.** Each request gets one route decision that names its model, endpoint and key. A role configured in your routes file wins over the adaptive model router, and the router still checks the final request. Once a request is sealed its destination cannot change; if something tries, the run fails loudly instead of sending elsewhere. The decision is journaled once per request as `route_decision`. If the router would pick a different model when a request is rebuilt, its body adjustments are kept, the decided model stays, and `route_drift_pinned` is journaled.
 - **Helper calls use real model ids.** The `decide2` and work-frame calls send the configured default model id instead of the `decision-tier` and `work-frame` aliases. Set `STATEFRAME_DECIDE2_MODEL` or `STATEFRAME_WORK_FRAME_MODEL` in a custom profile to override them.

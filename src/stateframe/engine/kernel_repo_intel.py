@@ -24,6 +24,7 @@ from repo_intel_core.repo_map import (
     get_current_commit_sha,
 )
 from repo_intel_core.ts_dispatch import outline_file as outline
+from kernel_reason_log import builtin_exception_name, emit_reason
 
 logger = logging.getLogger(__name__)
 
@@ -689,7 +690,13 @@ def _observed_intake_map(root: Path, target_path: str, symbol: str, *, seed=Fals
     kind = "intake-map"
     try:
         hint = None if seed else cache.lookup(kind, fingerprint, validate=_intake_map_hint_valid)
-    except OSError:
+    except OSError as exc:
+        emit_reason(
+            "fallback", "repo_intel_intake_cache_lookup_failed", "repo_intel",
+            "cached repository map was skipped",
+            "the intake cache lookup failed",
+            journal=False, dropped=builtin_exception_name(exc),
+        )
         return None
 
     try:
@@ -725,7 +732,13 @@ def _observed_intake_map(root: Path, target_path: str, symbol: str, *, seed=Fals
         bounded = bound_repo_map(repo_map, target_path=target_path, symbol=symbol)
         if not observation.current() or not focused.current() or focus.resolve() != focus:
             return None
-    except (OSError, ValueError, RuntimeError, _repo_map_module.IntakeObservationUnavailable):
+    except (OSError, ValueError, RuntimeError, _repo_map_module.IntakeObservationUnavailable) as exc:
+        emit_reason(
+            "fallback", "repo_intel_intake_map_unavailable", "repo_intel",
+            "repository map intake was skipped",
+            "the source observation or map generation failed",
+            journal=False, dropped=builtin_exception_name(exc),
+        )
         return None
 
     if not stats["tree_sitter"] and not stats["parse_failures"]:

@@ -202,6 +202,8 @@ def test_blocked_plain_fallback_suspends_without_publishing(hook, monkeypatch):
 
 
 def test_off_provider_bytes_match_group_base(tmp_path, tmp_path_factory):
-    from test_working_set_off_parity_base import test_off_provider_bytes_match_cutover_base
+    from test_working_set_off_parity_base import (
+        test_off_provider_bytes_match_release_before_allocator,
+    )
 
-    test_off_provider_bytes_match_cutover_base(tmp_path, tmp_path_factory, "1f6b7e9bc1")
+    test_off_provider_bytes_match_release_before_allocator(tmp_path, tmp_path_factory)

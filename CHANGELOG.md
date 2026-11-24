@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+- Fixed: final source-delivery revalidation retains certified capture witnesses bound to the request, source plan, source bytes, and certificate.
+- Fixed: schema-2 route comparison includes effective timeout, context capacity, tokenizer endpoint and remote-connection policy. The behavior stays off by default; schema 1 keeps its existing provider requests and journal records.
+- Tests: pin schema-2 route identity to the active route's tokenizer even when `LLAMA_CPP_TOKENIZE_URL` is set.
+- Fixed: large source trees use much less memory. The parse-tree cache is bounded by measured memory instead of source size, claim locations are stored compactly, and finding a Python definition line no longer compiles a pattern per definition.
+- Tests: the scoped parallel resume test uses the suite's scaled waits.
+- Fixed: resume now recognizes an archive interrupted after its spec copy and completes moving the attempt evidence into that archive.
+- Fixed: class-scoped edit normalization preserves whitespace-only lines inside multiline string literals while dedenting source code.
+- Function indexing builds file and function facts from one parse per file, uses module-name import lookup, and stores slotted function records.
+- Fixed: repository search opens directories and files through descriptors from the workspace root without following links, on every search path; where that is not possible it reports an incomplete search.
+- Invalid optional engine settings now resolve visibly to compatible defaults and are saved for replay.
+- Fixed: functions and classes in a probe can use names and imports defined in the same probe. Earlier they failed with a name error.
+- New opt-in `STATEFRAME_REQUIRED_TEST_LEDGER=on` (off by default): when the task's own pytest check passed tests before the change and a later complete run of that check no longer passes them, the summary lists the missing or failed test ids. Incomplete runs are reported as unknown, with a reason. Nothing is refused or stopped. The ledger is advisory: pytest runs repository code in the same process.
+- Fixed: twelve handlers that dropped errors now log a warning; results and requests are unchanged.
+- Docs: the architecture notes and `--edit` help match the resume, replay and scope rules.
+- Tests: refresh stale journal inventory, receipt parity and release-pin expectations.
+
 ## 0.8.30 (2026-11-23)
 
 - macOS: startup probes and subframe workers no longer stop because another user's process cannot be inspected (0.7.0 to 0.8.29).
