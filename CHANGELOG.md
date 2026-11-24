@@ -1,10 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.9.7 (2026-11-24)
 
 - Fixed: a run no longer ends when a planned source file changes more than once while a request is being prepared; it stops only when the same source revisions are reported twice in a row.
 - Replaced the DSML tool-call reply parser with a new linear-time implementation.
-
 
 ## 0.9.6 (2026-11-24)
 
