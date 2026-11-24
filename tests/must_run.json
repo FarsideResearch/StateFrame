@@ -2425,6 +2425,38 @@
       "witness_assertion": "assert calls == [reference, current]"
     },
     {
+      "scenario_id": "test_yolo_cli_test_yolo_request_byte_parity_and_disabled_matches_pinned_base",
+      "nodeid": "tests/test_yolo_cli.py::test_yolo_request_byte_parity_and_disabled_matches_pinned_base",
+      "item_nodeids": [
+        "tests/test_yolo_cli.py::test_yolo_request_byte_parity_and_disabled_matches_pinned_base"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert results[\"yolo\"] == results[\"explicit\"] and results[\"disabled\"] == results[\"base\"]"
+    },
+    {
+      "scenario_id": "test_yolo_cli_test_yolo_full_network_wire_parity_changes_head_context_and_tail",
+      "nodeid": "tests/test_yolo_cli.py::test_yolo_full_network_wire_parity_changes_head_context_and_tail",
+      "item_nodeids": [
+        "tests/test_yolo_cli.py::test_yolo_full_network_wire_parity_changes_head_context_and_tail"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert any(\"YOLO_TAIL\" in body and \"unrestricted | network full\" in body for body in yolo_wire)"
+    },
+    {
       "scenario_id": "test_unit_coalesce_test_parity_sha_guard_accepts_runtime_parent_and_golden_bytes",
       "nodeid": "tests/test_unit_coalesce.py::test_parity_sha_guard_accepts_runtime_parent_and_golden_bytes",
       "item_nodeids": [

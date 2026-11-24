@@ -70,6 +70,61 @@ def test_v2_split_runs_reads_and_withholds_escalating_calls(monkeypatch):
     assert target == "edit"
 
 
+def test_v2_native_batch_withholds_ordered_suffix_and_never_selects_done(monkeypatch):
+    monkeypatch.setenv("STATEFRAME_ROUTING_SCHEMA", "2")
+    install_split_table()
+    journal = Journal()
+    capture = SimpleNamespace(journal=journal, request_id="request", snapshot_id="snapshot",
+                              selected_response_event_id="response")
+    token = ACTIVE_REQUEST.set(capture)
+    batch = NativeToolBatch()
+    calls = [READ, EDIT, {"id": "r2", "function": {"name": "read", "arguments": "{}"}},
+             {"id": "d", "function": {"name": "done", "arguments": "{}"}}]
+    withheld = []
+
+    def before_commit(batch_calls):
+        kept, suffix, target = frame_routes.route_split(frame_routes.resolve("read"), batch_calls)
+        withheld.append((target, suffix))
+        return kept
+
+    try:
+        _content, selected = batch.next(lambda *_a, **_k: ("", calls), [],
+                                        before_commit=before_commit)
+    finally:
+        ACTIVE_REQUEST.reset(token)
+    assert [call["function"]["name"] for call in selected] == ["read"]
+    assert batch.pending == []
+    assert committed_names(journal) == ["read"]
+    assert withheld == [("edit", calls[1:])]
+
+
+@pytest.mark.parametrize("schema", ["1", "2"])
+@pytest.mark.parametrize("malformed", [
+    {"id": "bad", "function": {"name": "read", "arguments": None}},
+    {"id": "bad"}, None,
+])
+@pytest.mark.parametrize("after_escalation", [False, True])
+def test_malformed_batch_keeps_base_unsplit_result(monkeypatch, schema, malformed,
+                                                    after_escalation):
+    monkeypatch.setenv("STATEFRAME_ROUTING_SCHEMA", schema)
+    install_split_table()
+    done = {"id": "d", "function": {"name": "done", "arguments": "{}"}}
+    calls = ([READ, EDIT, malformed, done] if after_escalation
+             else [READ, malformed, EDIT, done])
+
+    assert frame_routes.route_split(frame_routes.resolve("read"), calls) == (calls, [], None)
+
+
+def test_v1_route_split_keeps_per_call_ordering(monkeypatch):
+    monkeypatch.setenv("STATEFRAME_ROUTING_SCHEMA", "1")
+    install_split_table()
+    calls = [READ, EDIT, {"id": "r2", "function": {"name": "read", "arguments": "{}"}},
+             {"id": "d", "function": {"name": "done", "arguments": "{}"}}]
+
+    assert frame_routes.route_split(frame_routes.resolve("read"), calls) == (
+        [READ, calls[2]], [EDIT, calls[3]], "edit")
+
+
 def test_v2_pure_edit_is_fully_withheld(monkeypatch):
     monkeypatch.setenv("STATEFRAME_ROUTING_SCHEMA", "2")
     install_split_table()

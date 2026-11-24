@@ -531,6 +531,10 @@ def _turn_groups(
     *,
     journal: object = None,
 ) -> tuple[list[dict[str, object]], set[int]]:
+    missing_result_text = (
+        "ERROR: tool result was missing from the transcript; execution outcome is unknown."
+    )
+
     def drop(reason: str, start: int, end: int, call_count: int = 0) -> None:
         consumed.update(range(start, end))
         emit = getattr(journal, "emit", None)
@@ -549,6 +553,63 @@ def _turn_groups(
             except Exception:
                 # Diagnostic journaling must not make frame construction fail.
                 pass
+
+    def settle_group(
+        assistant: Mapping[str, object],
+        calls: object,
+        results: Sequence[Mapping[str, object]],
+        index: int,
+    ) -> dict[str, object] | None:
+        """Preserve identifiable calls when their original exchange is malformed."""
+        if not isinstance(calls, Sequence) or isinstance(calls, (str, bytes, bytearray)):
+            return None
+        normalized_calls: list[dict[str, object]] = []
+        call_ids: list[str] = []
+        for call in calls:
+            if not isinstance(call, Mapping):
+                continue
+            call_id = str(call.get("id") or "")
+            if not call_id or call_id in call_ids:
+                continue
+            normalized = copy.deepcopy(dict(call))
+            normalized["id"] = call_id
+            function = call.get("function")
+            normalized["function"] = (
+                copy.deepcopy(dict(function)) if isinstance(function, Mapping)
+                else {"name": "unknown", "arguments": "{}"}
+            )
+            call_ids.append(call_id)
+            normalized_calls.append(normalized)
+        if not call_ids:
+            return None
+
+        matched_results: dict[str, Mapping[str, object]] = {}
+        for result in results:
+            result_id = str(result.get("tool_call_id") or "")
+            if result_id in call_ids and result_id not in matched_results:
+                matched_results[result_id] = result
+
+        normalized_assistant = copy.deepcopy(dict(assistant))
+        normalized_assistant["tool_calls"] = normalized_calls
+        normalized_messages: list[dict[str, object]] = [normalized_assistant]
+        for call_id in call_ids:
+            result = matched_results.get(call_id)
+            if result is None or not isinstance(result.get("content"), str):
+                normalized_messages.append({
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": missing_result_text,
+                })
+            else:
+                normalized_messages.append(copy.deepcopy(dict(result)))
+        ids = tuple(call_ids)
+        return {
+            "key": ids,
+            "call_ids": ids,
+            "messages": tuple(normalized_messages),
+            "real": any(":auto_verify" not in call_id for call_id in ids),
+            "index": index,
+        }
 
     groups: list[dict[str, object]] = []
     consumed: set[int] = set()
@@ -614,6 +675,9 @@ def _turn_groups(
             ):
                 cursor += 1
             drop("malformed_tool_calls", index, cursor, len(calls))
+            settled = settle_group(message, calls, messages[index + 1:cursor], index)
+            if settled is not None:
+                groups.append(settled)
             index = cursor
             continue
         cursor = index + 1
@@ -625,8 +689,12 @@ def _turn_groups(
             results.append(candidate)
             cursor += 1
         result_ids = [str(item.get("tool_call_id") or "") for item in results]
-        if len(results) != len(call_ids) or set(result_ids) != set(call_ids):
+        if (len(results) != len(call_ids) or set(result_ids) != set(call_ids)
+                or any(not isinstance(item.get("content"), str) for item in results)):
             drop("incomplete_tool_results", index, cursor, len(call_ids))
+            settled = settle_group(message, calls, results, index)
+            if settled is not None:
+                groups.append(settled)
             index = cursor
             continue
         span = [copy.deepcopy(dict(message))]

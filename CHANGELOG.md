@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.8.34 (2026-11-24)
+
+- Fixed: provider liveness now renews when a child reports new cumulative response bytes; repeated or replaced output does not extend the wait.
+- Schema 2 withholds a well-formed tool batch from its first cross-route call onward; malformed batches keep the base unsplit behavior, and schema 1 stays unchanged.
+- Fixed: routed-model tokenizer conflicts are refused early when the tokenizer URL comes from the profile or per-run environment; token selection is unchanged.
+- Cargo and Go test receipts are read across all targets and packages, including quiet and uncaptured output.
+- Continuation journal appends recover only from proven zero-byte write errors; uncertain writes and fsync failures remain poisoned.
+- Fixed: problems summaries preserve read failures as unknown and report persisted reason-log self-errors without changing cause counts or run outcome.
+- Missing or late tool results are settled as typed unknown outcomes beside their calls, so incomplete action groups do not block the next frame request.
+- The idle governor now treats new read ranges, source revisions, and paged search results as fresh evidence. Cursor offsets and display headers alone do not make a repeated search page novel; unchanged evidence still follows the existing warning and refusal policy.
+- Directory reads now use the returned entry page as evidence, so new listings are admitted and repeated unchanged listings still reach the warning and refusal policy.
+- Reads explicitly absent from the current request are admitted as recovery before novelty accounting, so they remain uncounted while visible repeats still follow the budget.
+- --yolo on run, chat and resume authorizes unrestricted host shell access from the command line only; explicit shell flags win.
+- Security: resuming a run that recorded host execution requires the resume command to repeat `--shell unrestricted --shell-sandbox off`.
+- Fixed: Linux check and mutation sandboxes can read the same public CA trust roots as shell commands, bound read-only; no broader `/etc` mounts or network changes.
+- Fixed: class-scoped edits now map LF, CRLF, and CR positions to Python AST lines, with unexpected span errors returned as typed refusals.
+- Improved: large-file literal searches check query bytes before UTF-8 decoding, while preserving non-text evidence and complete matching lines.
+- Fixed: search rows label names with undecodable filesystem bytes using a display-only path; valid names retain their existing bytes and page digests remain stable.
+- Fixed: paths beginning with `//undecodable-name/` are display-only across read, text edit, delete, search and listing resolution.
+- Fixed: directory and repository layout pages use search's display-only labels for names with undecodable filesystem bytes.
+- Fixed: repository and unit-policy regex searches report timed-out lines as undecided and continue searching later lines and files, until slow lines have used 30 s of CPU in one call, after which the remaining lines and files are reported as not searched; the guard arms only when SIGVTALRM is SIG_DFL and the virtual CPU timer is free, then drains pending ticks before restoring SIG_DFL. Literal and path searches remain unguarded.
+- Fixed: a search that could not cover every file no longer leaves an unresolved effect that ends the run.
+
 ## 0.8.33 (2026-11-24)
 
 - Provider credentials are not sent to a redirected address: cross-origin provider redirects are refused. This includes an `http://` provider that redirects to `https://`: set the final `https://` URL.

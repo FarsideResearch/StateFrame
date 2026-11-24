@@ -14,6 +14,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
 import kernel_workspace_truth as _workspace_truth
+from kernel_tool_paths import is_display_only_path
 
 
 SCHEMA = "navbasics-workspace-list/1"
@@ -54,6 +55,8 @@ def _relative(root: Path, path: Path) -> str:
 def resolve_scope(root: Path, scope: object = None, *, journal: object = None) -> Path:
     """Resolve a repository-relative scope without permitting an escape."""
     root = Path(root).resolve()
+    if scope not in (None, "", ".") and is_display_only_path(str(scope)):
+        raise ValueError("workspace navigation scope must be inside the repository root")
     requested = root if scope in (None, "", ".") else Path(str(scope))
     candidate = requested if requested.is_absolute() else root / requested
     if candidate.is_symlink():

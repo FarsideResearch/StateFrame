@@ -17,6 +17,14 @@ class ToolPathEscape(AmbiguousToolPath):
     Subclasses AmbiguousToolPath so every existing tool handler reports it as a refusal."""
 
 
+_DISPLAY_ONLY_PATH_PREFIX = "//undecodable-name/"
+
+
+def is_display_only_path(requested: object) -> bool:
+    """Recognize search-result labels before filesystem path normalization."""
+    return isinstance(requested, str) and requested.startswith(_DISPLAY_ONLY_PATH_PREFIX)
+
+
 def unique_tool_match(root: Path, requested: str, candidates: Iterable[Path]) -> Path | None:
     matches = sorted(set(candidates), key=lambda path: str(path))
     if len(matches) > 1:
@@ -60,6 +68,8 @@ def resolve_tool_path(root: Path, requested: str) -> Path:
     missing result is returned unchanged so each tool can report its own
     missing-resource outcome.
     """
+    if is_display_only_path(requested):
+        raise ToolPathEscape("Display-only search labels cannot be used as workspace paths.")
     exact = root / requested
     if not _resolves_under(root, exact):
         raise ToolPathEscape(f"Path {requested!r} is outside the workspace. Use a repository-relative path.")

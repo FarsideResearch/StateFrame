@@ -389,22 +389,37 @@ def test_stringifiable_cursor_uses_the_same_offset_for_row_window(
     assert dict(actual.metadata) == expected["metadata"]
 
 
-@pytest.mark.skipif(os.name != "posix", reason="surrogate filenames require POSIX filesystem encoding")
 def test_serialization_error_is_raised_after_later_files_are_opened(tmp_path: Path, monkeypatch):
     root = tmp_path / "repo"
     root.mkdir()
     (root / "a.txt").write_text("MATCH first\n", encoding="utf-8")
-    invalid_name = os.fsdecode(b"z-\xff.txt")
-    (root / invalid_name).write_text("MATCH invalid path\n", encoding="utf-8")
+    (root / "b.txt").write_text("MATCH invalid text\n", encoding="utf-8")
     (root / "zz-after.txt").write_text("MATCH later\n", encoding="utf-8")
     monkeypatch.setenv("STATEFRAME_WORKSPACE_OBJECTS", "off")
     monkeypatch.setenv("STATEFRAME_OWNER_COORDS", "off")
     active, opened = _open_trace(monkeypatch, root)
 
     active["slot"] = "reference"
-    with pytest.raises(UnicodeEncodeError) as expected_error:
-        _plain_search(root, "MATCH", mode="literal")
+    navigation.search_repository(root, "MATCH", mode="literal")
     reference_opens = tuple(opened["reference"])
+
+    read_text = navigation._read_text
+
+    def invalid_text(relative, *args, **kwargs):
+        text, status = read_text(relative, *args, **kwargs)
+        return (text.replace("invalid text", "invalid \udcfftext") if relative == "b.txt" else text,
+                status)
+
+    monkeypatch.setattr(navigation, "_read_text", invalid_text)
+    expected_rows = [
+        {"path": "a.txt", "line": 1, "text": "MATCH first"},
+        {"path": "b.txt", "line": 1, "text": "MATCH invalid \udcfftext"},
+        {"path": "zz-after.txt", "line": 1, "text": "MATCH later"},
+    ]
+    expected_serialization = json.dumps(
+        expected_rows, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    with pytest.raises(UnicodeEncodeError) as expected_error:
+        expected_serialization.encode("utf-8")
 
     active["slot"] = "actual"
     with pytest.raises(UnicodeEncodeError) as actual_error:

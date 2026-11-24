@@ -2594,17 +2594,22 @@ class ContinuationJournal(AuditJournal):
             record["record_hash"] = record_hash
             if len(line) > MAX_RECORD_BYTES:
                 raise ValueError("journal record exceeds limit")
+            offset = self._size
+            sequence_before, head_before = self._sequence, self._head
+            bytes_written = 0
+            write_attempted = False
             try:
                 view = memoryview(line)
-                offset = self._size
                 with self.host_spans.measure("append_fsync", sequence=record["sequence"]):
                     # Keep interrupted report writes recoverable, including a
                     # partial final summary. Release the intent before fanout.
                     intent = self._begin_publication(complete_line=line) if self._reporting_observer_failures else None
                     while view:
+                        write_attempted = True
                         count = os.write(self._fd, view)
                         if count <= 0:
                             raise OSError("journal write made no progress")
+                        bytes_written += count
                         view = view[count:]
                     batch = getattr(self, "_publication_batch", None)
                     if batch is not None:
@@ -2633,8 +2638,19 @@ class ContinuationJournal(AuditJournal):
                     writer_rows.append(_WriterRow(offset, line, envelope,
                                                   len(encoded_record) + len(hash_member) + 1))
             except BaseException as error:
-                self._poison(f"{type(error).__name__} appending {kind!r} after seq "
-                             f"{self._sequence}: {str(error)[:160]}")
+                empty_append_failure = False
+                if (isinstance(error, OSError) and write_attempted and bytes_written == 0
+                        and self._size == offset and self._sequence == sequence_before
+                        and self._head == head_before):
+                    try:
+                        empty_append_failure = os.fstat(self._fd).st_size == offset
+                        if empty_append_failure:
+                            self.assert_owner()
+                    except (OSError, JournalError):
+                        empty_append_failure = False
+                if not empty_append_failure:
+                    self._poison(f"{type(error).__name__} appending {kind!r} after seq "
+                                 f"{self._sequence}: {str(error)[:160]}")
                 raise
             self._report_observer_failures()
             if identity_fire and not _is_observer_failure_overflow(record):
@@ -2962,8 +2978,14 @@ class ContinuationJournal(AuditJournal):
                     self._poison("fsync failed while closing the journal")
                 if self._fd is not None:
                     # Closing an inherited fd must not explicitly unlock the parent's lease.
-                    os.close(self._fd)
-                    self._fd = None
+                    # The handle stays named until it is closed: a child forked in between drops it by name.
+                    try:
+                        os.close(self._fd)
+                    except OSError:
+                        self._poison("close failed while closing the journal")
+                        raise
+                    finally:
+                        self._fd = None
             finally:
                 token = self._outline_capability_listener_token
                 self._outline_capability_listener_token = None

@@ -32,7 +32,7 @@ def _engine_child(parent_pid):
 def _interrupted_run(tmp_path, *, network="none", script_name="resume.script.json", repo=None,
                      task="Format app.py and verify it", wait_for_checkpoint=False,
                      checkpoint_task=None, pause_at=None, tokenize_off_marker=None, shell=None,
-                     wait_for_saved=False):
+                     wait_for_saved=False, shell_sandbox="on", parallel="off"):
     repo = repo or copy_repo(tmp_path)
     run_dir = tmp_path / "run"
     marker = tmp_path / "paused"
@@ -65,7 +65,8 @@ def _interrupted_run(tmp_path, *, network="none", script_name="resume.script.jso
              "--run-dir", str(run_dir), "--test-python", PYTHON,
              "--test-cmd", "python -m unittest discover -s tests -q",
             "--max-turns", "32", "--quiet",
-            "--shell-network", network, "--shell", shell],
+            "--shell-network", network, "--shell", shell, "--shell-sandbox", shell_sandbox,
+            "--parallel", parallel],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, env=environment(), start_new_session=True,
             expected_seconds=scaled(600), step="interrupted run",
@@ -134,10 +135,80 @@ def test_e16_local_shell_resume_replays_identical_next_request(tmp_path):
     assert 'VALUE = "before"' in (repo / "app.py").read_text()
 
 
-def test_continuation_resume_sends_uncrashed_prepared_request_bytes(tmp_path, monkeypatch):
-    """Compare the provider body rebuilt on resume with the real pre-crash request."""
+HOST_RESUME_ERROR = (
+    "stateframe: cannot resume: this run authorizes host execution; repeat with: "
+    "stateframe resume RUN --shell unrestricted --shell-sandbox off"
+)
+HOST_FLAGS_ERROR = (
+    "stateframe: refused: repeat both host flags exactly with: "
+    "stateframe resume RUN --shell unrestricted --shell-sandbox off"
+)
+
+
+def _resume_json(run_dir, *flags):
+    return run_monitored(
+        [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--replay-external", *flags, "--json"],
+        capture_output=True, text=True, env=environment(),
+        expected_seconds=scaled(60), check=False)
+
+
+def _assert_json_refusal(result, expected):
+    assert result.returncode == 2
+    assert result.stderr.splitlines() == [expected]
+    assert json.loads(result.stdout) == {"error": expected, "exit_code": 2, "succeeded": False}
+
+
+def test_resume_host_authorization_requires_the_same_flags_before_replay(tmp_path):
+    _, run_dir, _ = _interrupted_run(
+        tmp_path, shell="unrestricted", shell_sandbox="off")
+    requests_before = read_requests(run_dir)
+    attempts_before = sorted(path.name for path in (run_dir / "attempts").glob("*"))
+
+    _assert_json_refusal(_resume_json(run_dir), HOST_RESUME_ERROR)
+    from stateframe.resume import ResumeRefused
+    from stateframe.runner import resume_run
+    with pytest.raises(ResumeRefused, match="repeat with: stateframe resume RUN"):
+        resume_run(run_dir)
+    _assert_json_refusal(_resume_json(run_dir, "--shell", "unrestricted"), HOST_FLAGS_ERROR)
+    _assert_json_refusal(_resume_json(run_dir, "--shell-sandbox", "off"), HOST_FLAGS_ERROR)
+    for flags, named in ((("--shell", "standard", "--shell-sandbox", "off"), "--shell:"),
+                         (("--shell", "unrestricted", "--shell-sandbox", "on"), "--shell-sandbox:")):
+        refused = _resume_json(run_dir, *flags)
+        assert refused.returncode == 2
+        assert f"argument {named} invalid choice" in json.loads(refused.stdout)["error"]
+    assert read_requests(run_dir) == requests_before
+    assert sorted(path.name for path in (run_dir / "attempts").glob("*")) == attempts_before
+
+    spec_path = run_dir / "spec.json"
+    spec = json.loads(spec_path.read_text())
+    spec["tool_settings"]["host_authorization"]["granted_at"] = "forged"
+    spec_path.write_text(json.dumps(spec))
+    _assert_json_refusal(_resume_json(run_dir), HOST_RESUME_ERROR)
+    assert read_requests(run_dir) == requests_before
+
+    spec_path.write_text("{")
+    damaged = _resume_json(run_dir)
+    assert damaged.returncode == 2
+    assert json.loads(damaged.stdout)["error"].startswith("stateframe: cannot resume: spec.json is damaged:")
+    assert read_requests(run_dir) == requests_before
+
+
+def test_resume_host_authorization_on_parallel_run_requires_same_flags(tmp_path):
+    _, run_dir, _ = _interrupted_run(
+        tmp_path, shell="unrestricted", shell_sandbox="off", parallel="1")
+    _assert_json_refusal(_resume_json(run_dir), HOST_RESUME_ERROR)
+    assert len(read_requests(run_dir)) == 2
+
+
+@pytest.mark.parametrize("host_authorized", [False, True])
+def test_continuation_resume_sends_uncrashed_prepared_request_bytes(
+        tmp_path, monkeypatch, host_authorized):
+    """Compare each resumed provider body with its prepared request, with and without host authority."""
     monkeypatch.setenv("KERNEL_CONTINUATION_EXECUTIVE", "1")
-    _, run_dir, expected = _interrupted_run(tmp_path)
+    _, run_dir, expected = _interrupted_run(
+        tmp_path,
+        shell="unrestricted" if host_authorized else None,
+        shell_sandbox="off" if host_authorized else "on")
     prepared = (run_dir / "wire" / "0002.request.json").read_bytes()
     prepared_body = json.loads(prepared)
     assert prepared_body["messages"] == expected["messages"]
@@ -148,15 +219,79 @@ def test_continuation_resume_sends_uncrashed_prepared_request_bytes(tmp_path, mo
     script_path = tmp_path / "resume-with-request-log.script.json"
     script_path.write_text(json.dumps(script))
     with Endpoint(script_path) as endpoint:
+        flags = (["--shell", "unrestricted", "--shell-sandbox", "off"]
+                 if host_authorized else [])
         resumed = run_monitored(
             [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--endpoint", endpoint.url,
-             "--model", "scripted", "--quiet"], capture_output=True, text=True,
+             "--model", "scripted", *flags, "--replay-external", "--quiet"], capture_output=True, text=True,
             env=environment(), expected_seconds=scaled(240), check=False)
     assert resumed.returncode == 0, resumed.stdout + resumed.stderr
     sent = tuple(json.loads(line) for line in request_log.read_text().splitlines())
     assert sent, "resume did not send a provider request"
     assert json.dumps(sent[0]).encode() == prepared
     assert not (run_dir / "resume-divergence.json").exists()
+
+
+def test_resume_grant_is_refused_when_the_run_did_not_record_host_authorization(tmp_path):
+    _, run_dir, _ = _interrupted_run(tmp_path)
+    _assert_json_refusal(
+        _resume_json(run_dir, "--shell", "unrestricted", "--shell-sandbox", "off"),
+        "stateframe: cannot resume: this run did not record host authorization")
+    assert len(read_requests(run_dir)) == 2
+
+
+def test_chat_task_resume_requires_host_authorization_again(tmp_path):
+    repo = copy_repo(tmp_path)
+    session_dir = tmp_path / "chat-session"
+    run_dir = session_dir / "task-01"
+    marker = tmp_path / "chat-paused"
+    script = FIXTURES / "scripts" / "resume.script.json"
+    endpoint = subprocess.Popen(
+        [PYTHON, str(FIXTURES / "pause_endpoint.py"), "--script", str(script),
+         "--marker", str(marker), "--pause-at", "2", "--pause-seconds", "600"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment())
+    chat = None
+    try:
+        assert endpoint.stdout is not None
+        url = endpoint.stdout.readline().strip()
+        started = time.time()
+        chat = subprocess.Popen(
+            [PYTHON, "-m", "stateframe", "chat", "--repo", str(repo), "--session-dir", str(session_dir),
+             "--endpoint", url, "--model", "scripted", "--max-turns", "32",
+             "--test-python", PYTHON, "--shell", "unrestricted", "--shell-sandbox", "off"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, env=environment(), start_new_session=True)
+        assert chat.stdin is not None
+        chat.stdin.write("Format app.py and verify it\n")
+        chat.stdin.flush()
+        chat.stdin.close()
+        chat.stdin = None
+        deadline = time.monotonic() + scaled(600)
+        while not marker.exists():
+            assert chat.poll() is None, "chat task ended before the paused request"
+            remaining = deadline - time.monotonic()
+            assert remaining > 0, "chat task did not reach the paused request"
+            time.sleep(min(0.1, remaining))
+        child = _engine_child(chat.pid)
+        assert child is not None
+        identity = record_identity(child, launched_after=started, command_fragment="_child.py")
+        signal_run_verified(run_dir, child, identity, signal.SIGKILL, deadline=deadline,
+                            what="paused chat task request")
+        chat.communicate(timeout=scaled(30))
+        _assert_json_refusal(_resume_json(run_dir), HOST_RESUME_ERROR)
+        assert len(read_requests(run_dir)) == 2
+    finally:
+        if chat is not None and chat.poll() is None:
+            signal_run_owned(run_dir, chat, signal.SIGKILL, deadline=time.monotonic(),
+                             what="chat cleanup", require_checkpoint_saved=False)
+            chat.wait(timeout=scaled(5))
+        if endpoint.poll() is None:
+            endpoint.terminate()
+            try:
+                endpoint.wait(timeout=scaled(5))
+            except subprocess.TimeoutExpired:
+                endpoint.kill()
+                endpoint.wait(timeout=scaled(5))
 
 
 def test_checkpoint_restores_and_verifies_paused_request(tmp_path, monkeypatch):

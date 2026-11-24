@@ -156,7 +156,9 @@ READ_OUTCOMES = {
     # keeps any future producer class from falling through to an unknown effect.
     "read": frozenset({"OK", "MISSING", "DIRECTORY", "ALREADY_PRESENT"}),
     "text": frozenset({"OK", "MISSING", "DIRECTORY", "ALREADY_PRESENT"}),
-    "grep": frozenset({"HITS", "NO_HITS"}),
+    # PARTIAL: the search ran but did not cover everything (scan_complete=false). The attempt is
+    # settled; it proves no absence.
+    "grep": frozenset({"HITS", "NO_HITS", "PARTIAL"}),
     "ls": frozenset({"OK"}),
     "list_files": frozenset({"HOST_OBSERVED"}),
     "where_defined": frozenset({"HOST_OBSERVED"}),

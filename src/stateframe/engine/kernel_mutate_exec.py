@@ -22,7 +22,8 @@ from typing import Callable, Literal
 import uuid
 
 if __package__:
-    from .kernel_exec_capability import ExecCapability, ExecLimits, symlink_hops
+    from .kernel_exec_capability import (ExecCapability, ExecLimits, public_ca_read_roots,
+                                         symlink_hops)
     from .kernel_exec_session import CleanupReport, ExecSession, ExecSessionError, rpc_timeout_seconds
     from .kernel_exec_tracker import ProcessTable, process_cmdline_digest
     from .kernel_mutate_debug import _hook_timing
@@ -31,7 +32,8 @@ if __package__:
     from .kernel_mutate_sweep import _boot_id
     from .sf_mutate_boot import strict_loads
 else:
-    from kernel_exec_capability import ExecCapability, ExecLimits, symlink_hops
+    from kernel_exec_capability import (ExecCapability, ExecLimits, public_ca_read_roots,
+                                        symlink_hops)
     from kernel_exec_session import CleanupReport, ExecSession, ExecSessionError, rpc_timeout_seconds
     from kernel_exec_tracker import ProcessTable, process_cmdline_digest
     from kernel_mutate_debug import _hook_timing
@@ -56,8 +58,9 @@ def _hook_arm_deadline(trigger_deadline: float, *, launch_started: float,
 
 def _fixed_env_capability(name: str, unit_root: Path, read_roots: tuple[Path, ...],
                           network: Literal["none", "full"], limits: ExecLimits) -> ExecCapability:
-    """Give every mutation child the same fixed environment."""
-    return ExecCapability(name, unit_root, False, read_roots, (), network, _ENV, limits)
+    """Give every mutation child the same fixed environment and public CA roots."""
+    return ExecCapability(name, unit_root, False,
+                          (*read_roots, *public_ca_read_roots()), (), network, _ENV, limits)
 
 def _exclusive_private(path: str, flags: int) -> int:
     """open() opener: create the launch ledger exclusively with owner-only permissions."""

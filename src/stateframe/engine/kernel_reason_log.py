@@ -426,9 +426,11 @@ def problems_from_file(path: str | os.PathLike, *, log_level: str = "warn") -> d
     """Runner-side merge of problems.jsonl (first-occurrence rows + per-process summary rows)."""
     causes: dict[str, dict] = {}
     summed: dict[str, int] = {}
+    self_errors_by_pid: dict[int, int] = {}
+    anonymous_self_errors = 0
     try:
         lines = Path(path).read_text(errors="replace").splitlines()
-    except OSError:
+    except FileNotFoundError:
         lines = []
     for raw in lines:
         try:
@@ -438,12 +440,20 @@ def problems_from_file(path: str | os.PathLike, *, log_level: str = "warn") -> d
         if not isinstance(row, dict):
             continue
         if row.get("summary"):
+            pid = row.get("pid")
+            valid_pid = isinstance(pid, int) and not isinstance(pid, bool) and pid > 0
             for key, info in (row.get("by_cause") or {}).items():
                 if isinstance(info, dict):
                     summed[key] = summed.get(key, 0) + int(info.get("count") or 0)
                     causes.setdefault(key, {"level": info.get("level"), "component": info.get("component"),
                                             "count": 0, "what": info.get("what"), "why": info.get("why"),
                                             "first": info.get("first") or {}})
+            self_errors = row.get("self_errors")
+            if type(self_errors) is int and self_errors > 0:
+                if valid_pid:
+                    self_errors_by_pid[pid] = max(self_errors_by_pid.get(pid, 0), self_errors)
+                else:
+                    anonymous_self_errors += self_errors
             continue
         key = f"{row.get('category')}:{row.get('cause_key')}"
         entry = causes.setdefault(key, {"level": row.get("level"), "component": row.get("component"),
@@ -452,6 +462,10 @@ def problems_from_file(path: str | os.PathLike, *, log_level: str = "warn") -> d
         entry["count"] += 1
     for key, entry in causes.items():
         entry["count"] = max(entry["count"], summed.get(key, 0))
-    return {"errors": sum(1 for e in causes.values() if e["level"] == "ERROR"),
-            "warnings": sum(1 for e in causes.values() if e["level"] == "WARN"),
-            "by_cause": causes, "log_level": log_level}
+    result = {"errors": sum(1 for e in causes.values() if e["level"] == "ERROR"),
+              "warnings": sum(1 for e in causes.values() if e["level"] == "WARN"),
+              "by_cause": causes, "log_level": log_level}
+    self_error_count = sum(self_errors_by_pid.values()) + anonymous_self_errors
+    if self_error_count:
+        result["self_errors"] = self_error_count
+    return result

@@ -11,6 +11,7 @@ import kernel_frame_routes as _frame_routes
 import copy
 import os
 import sys
+from collections import Counter
 from types import SimpleNamespace
 
 from kernel_read_receipts import refused_calls, finish_pending, enabled as read_audit_enabled
@@ -561,32 +562,128 @@ class NativeToolBatch:
             self._pending_tool_result_messages.extend(tool_results)
 
     def append_unexecuted_tool_results(self, messages: list[dict]) -> int:
-        """Append queued tool results to conversation history exactly once."""
+        """Close queued calls beside their assistant turn exactly once."""
         if not self._pending_tool_result_messages:
             return 0
-        # A host exit can discover the missing closure after the worker already
-        # appended a truthful refusal. Do not manufacture a second tool result
-        # when draining the queue into the full conversation history.
-        existing = {message.get("tool_call_id") for message in messages if message.get("role") == "tool"}
-        proposed = {call.get("id") for message in messages if message.get("role") == "assistant"
-                    for call in (message.get("tool_calls") or []) if isinstance(call, dict)}
-        queued = []
-        for message in self._pending_tool_result_messages:
-            if message.get("role") == "tool":
-                if message.get("tool_call_id") in existing:
-                    continue
-                existing.add(message.get("tool_call_id"))
-            elif message.get("role") == "assistant" and message.get("tool_calls"):
-                calls = [call for call in message["tool_calls"]
-                         if call.get("id") not in existing and call.get("id") not in proposed]
-                if not calls:
-                    continue
-                proposed.update(call.get("id") for call in calls)
-                message = {**message, "tool_calls": calls}
-            queued.append(message)
-        messages.extend(queued)
+        pending = self._pending_tool_result_messages
+
+        def call_signature(message: dict) -> tuple[tuple[str, str, str], ...] | None:
+            calls = message.get("tool_calls")
+            if not isinstance(calls, (list, tuple)) or not calls:
+                return None
+            signature = []
+            for call in calls:
+                if not isinstance(call, dict):
+                    return None
+                function = call.get("function")
+                if not isinstance(function, dict):
+                    return None
+                call_id = call.get("id")
+                name = function.get("name")
+                arguments = function.get("arguments")
+                if (not isinstance(call_id, str) or not call_id
+                        or not isinstance(name, str) or not name
+                        or not isinstance(arguments, str)):
+                    return None
+                signature.append((call_id, name, arguments))
+            return tuple(signature)
+
+        def call_ids(message: dict) -> set[str]:
+            return {
+                call["id"] for call in message.get("tool_calls", ())
+                if isinstance(call, dict) and isinstance(call.get("id"), str)
+            }
+
+        # Match queued assistant records by their call contents, not by IDs alone:
+        # local providers may reuse an ID in a later turn. A queued subset can still
+        # belong to an assistant message that contains the original full batch.
+        pending_counts: Counter[tuple[tuple[str, str, str], ...]] = Counter(
+            signature
+            for message in pending
+            if message.get("role") == "assistant"
+            for signature in (call_signature(message),)
+            if signature is not None
+        )
+        candidates_by_signature: dict[tuple[tuple[str, str, str], ...], list[dict]] = {
+            signature: [] for signature in pending_counts
+        }
+        for index, assistant in enumerate(messages):
+            if assistant.get("role") != "assistant":
+                continue
+            existing_signature = call_signature(assistant)
+            if existing_signature is None:
+                continue
+            existing_counts = Counter(existing_signature)
+            for signature, candidates in candidates_by_signature.items():
+                required_counts = Counter(signature)
+                if all(existing_counts[call] >= count
+                       for call, count in required_counts.items()):
+                    candidates.append(assistant)
+
+        active_assistant: dict | None = None
+        active_call_ids: set[str] = set()
+        inserted_results = 0
+        for message in pending:
+            if message.get("role") == "assistant":
+                signature = call_signature(message)
+                target = None
+                if signature is not None:
+                    candidates = candidates_by_signature.get(signature, [])
+                    remaining = pending_counts[signature]
+                    if candidates:
+                        # A single queued closure belongs to the newest matching
+                        # assistant. Repeated identical groups consume matching turns
+                        # in transcript order, one by one.
+                        offset = max(0, len(candidates) - remaining)
+                        target = candidates.pop(offset)
+                    pending_counts[signature] -= 1
+                if target is None:
+                    target = message
+                    messages.append(target)
+                active_assistant = target
+                active_call_ids = call_ids(target)
+                continue
+
+            if message.get("role") != "tool":
+                messages.append(message)
+                continue
+
+            call_id = message.get("tool_call_id")
+            target = (active_assistant
+                      if isinstance(call_id, str) and call_id in active_call_ids else None)
+            if target is None and isinstance(call_id, str) and call_id:
+                target = next((assistant for assistant in reversed(messages)
+                               if assistant.get("role") == "assistant"
+                               and call_id in call_ids(assistant)), None)
+            if target is None or not isinstance(call_id, str) or not call_id:
+                messages.append(message)
+                inserted_results += 1
+                continue
+
+            target_index = next(index for index, assistant in enumerate(messages)
+                                if assistant is target)
+            cursor = target_index + 1
+            already_present = False
+            while cursor < len(messages) and messages[cursor].get("role") != "assistant":
+                if (messages[cursor].get("role") == "tool"
+                        and messages[cursor].get("tool_call_id") == call_id):
+                    already_present = True
+                    break
+                cursor += 1
+            if already_present:
+                continue
+
+            assistant_call_ids = call_ids(target)
+            cursor = target_index + 1
+            while (cursor < len(messages)
+                   and messages[cursor].get("role") == "tool"
+                   and messages[cursor].get("tool_call_id") in assistant_call_ids):
+                cursor += 1
+            messages.insert(cursor, message)
+            inserted_results += 1
+
         self._pending_tool_result_messages = []
-        return sum(message.get("role") == "tool" for message in queued)
+        return inserted_results
 
     def finish(self):
         if self.finalized:

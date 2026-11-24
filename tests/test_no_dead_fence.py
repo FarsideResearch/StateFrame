@@ -613,7 +613,7 @@ _EXPECTED_RESULT_CLASSES = {
        for tool in ("read", "text")},
     "read": {"OK", "MISSING", "DIRECTORY", "ALREADY_PRESENT", "ERROR", "OUT_OF_RANGE",
              "REFUSED_ADMISSION", "REPEAT_SUPPRESSED"},
-    "grep": {"HITS", "NO_HITS", "ERROR", "OUT_OF_RANGE", "REPEAT_SUPPRESSED"},
+    "grep": {"HITS", "NO_HITS", "PARTIAL", "ERROR", "OUT_OF_RANGE", "REPEAT_SUPPRESSED"},
     "ls": {"OK"},
     "list_files": {"HOST_OBSERVED", "REJECTED"},
     **{tool: {"HOST_OBSERVED", "ERROR", "OUT_OF_RANGE", "REPEAT_SUPPRESSED"}

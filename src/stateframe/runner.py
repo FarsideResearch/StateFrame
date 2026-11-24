@@ -571,6 +571,7 @@ class RunOptions:
     _capabilities: dict[str, object] = field(default_factory=dict, init=False, repr=False)
     _send1_wave4: bool | None = field(default=None, init=False, repr=False)
     _resuming: bool = field(default=False, init=False, repr=False)
+    _cli_yolo: bool = field(default=False, repr=False)
     _provider_epoch: ProviderEpoch | None = field(default=None, init=False, repr=False)
     # Environment for the repository's tests (engine checks and --test-cmd), e.g. test-only
     # settings a project needs to import. Declared to the engine as host task env keys.
@@ -1699,6 +1700,11 @@ def _write_hook_terminal_summary(run_dir: Path, *, runtime_outcome: str, engine_
         "hooks": counts,
         "problems": _problems_summary(run_dir),
     }
+    try:
+        if json.loads((run_dir / "spec.json").read_text(encoding="utf-8")).get("yolo") is True:
+            summary["yolo"] = True
+    except (OSError, ValueError, AttributeError):
+        pass
     _write_json_atomic(run_dir / "summary.json", summary)
     printer(f"hooks: {counts['runs']} runs, {counts['denied']} denied, "
             f"{counts['vetoes']} vetoes, {counts['errors']} errors")
@@ -2157,6 +2163,7 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
         "parent_snapshot": str(run / "parent"),
         "public_row": row,
         "tool_settings": settings.as_dict(),
+        **({"yolo": True} if options._cli_yolo else {}),
         "custom_tools_digest": custom.digest,
         "custom_executables": {tool.name: tool.executable_digest for tool in custom.tools},
         "skills": records,
@@ -2531,7 +2538,7 @@ def _check_routed_model(options: RunOptions, endpoint: Endpoint, role: str, sour
 
 
 def _probe_routes(options: RunOptions, printer=print, *, resume_roles: dict | None = None,
-                  warnings: list[str] | None = None) -> None:
+                  warnings: list[str] | None = None, tokenizer_url: str | None = None) -> None:
     options._provider_route_dialects.clear()
     table = _resolve_routes(options)
     if not table.active:
@@ -2547,7 +2554,9 @@ def _probe_routes(options: RunOptions, printer=print, *, resume_roles: dict | No
     mismatched = [role for role, settings in table.roles.items()
                   if routes.uses_other_model(role, settings["model"], options.endpoint.model)
                   and table.sources[role].get("tokenizer", "default") == "default"]
-    if os.environ.get("LLAMA_CPP_TOKENIZE_URL") and mismatched:
+    if tokenizer_url is None:
+        tokenizer_url = provider_environment.get("LLAMA_CPP_TOKENIZE_URL")
+    if tokenizer_url and mismatched:
         raise RunError(f"LLAMA_CPP_TOKENIZE_URL is set while route {mismatched[0]} uses another model; set "
                        f"{mismatched[0]}.tokenizer or unset LLAMA_CPP_TOKENIZE_URL")
     base_provider_capabilities = _provider_capabilities_for(
@@ -3014,15 +3023,10 @@ def _problems_summary(run_dir: Path, options: RunOptions | None = None) -> dict[
     """summary.json "problems": counts by cause, first occurrence. Logging only."""
     level = _resolved_log_level(options) if options is not None else "warn"
     path = run_dir / PROBLEMS_FILE
-    # The merge treats an unreadable file as empty; report unknown instead of a clean 0/0.
-    if path.exists():
-        try:
-            with open(path, "rb"):
-                pass
-        except OSError as error:
-            return _unknown_problems(level, "problems file unreadable: " + type(error).__name__)
     try:
         return _reason_log.problems_from_file(path, log_level=level)
+    except OSError as error:
+        return _unknown_problems(level, "problems file unreadable: " + type(error).__name__)
     except Exception as error:
         return _unknown_problems(level, "problems merge failed: " + type(error).__name__)
 
@@ -3035,13 +3039,21 @@ def _print_problems(problems: dict[str, object], printer, log_level: str) -> Non
     if problems.get("unknown"):
         printer(f"[stateframe] problems: unknown ({problems['unknown']})")
         return
+    self_errors = problems.get("self_errors")
+    diagnostics_incomplete = isinstance(self_errors, int) and not isinstance(self_errors, bool) and self_errors > 0
+    diagnostic_line = (f"[stateframe] problem diagnostics incomplete: reason log reported {self_errors} "
+                       "self-errors; some causes may be missing")
     by_cause = problems.get("by_cause") or {}
     if not by_cause:
-        if log_level in {"info", "debug"}:
+        if diagnostics_incomplete:
+            printer(diagnostic_line)
+        elif log_level in {"info", "debug"}:
             printer("[stateframe] problems: none")
         return
     printer(f"[stateframe] problems: {problems['errors']} ERROR, {problems['warnings']} WARN "
             "(see summary.json \"problems\")")
+    if diagnostics_incomplete:
+        printer(diagnostic_line)
     for key, entry in list(by_cause.items())[:20]:
         count = f" x{entry['count']}" if entry.get("count", 1) > 1 else ""
         printer(f"[stateframe] {entry.get('level')} {entry.get('component')}: "
@@ -4087,6 +4099,8 @@ def summarize(run: Path, started: float) -> dict[str, object]:
         "prompt_cache_slot": slot_info,
         "wall_seconds": round(time.monotonic() - started, 1),
     }
+    if spec.get("yolo") is True:
+        summary["yolo"] = True
     if spec_diagnostic is not None:
         summary.update(run_spec_diagnostic=spec_diagnostic,
                        capabilities=None, provider_capabilities=None, prompt_cache_slot=None,
@@ -4349,16 +4363,43 @@ def _validate_read_capture_resume(environment: Mapping[str, str]) -> None:
             f"{name} changed (run: {recorded}, now: {current}); unset it to resume")
 
 
+def _require_resume_host_authorization(run_dir: Path, granted: bool) -> None:
+    """Require a fresh caller grant before assessing a run that recorded host execution."""
+    try:
+        spec = json.loads((Path(run_dir) / "spec.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return  # assess() reports the established damaged/missing-spec refusal.
+    settings = spec.get("tool_settings") if isinstance(spec, dict) else None
+    if not isinstance(settings, dict):
+        return
+    recorded = settings.get("host_authorization") is not None
+    if recorded and not granted:
+        raise resume_module.ResumeRefused(
+            "this run authorizes host execution; repeat with: "
+            "stateframe resume RUN --shell unrestricted --shell-sandbox off")
+    if granted and not recorded:
+        raise resume_module.ResumeRefused("this run did not record host authorization")
+
+
 def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: int | None = None,
                 timeout_s: float | None = None, quiet: bool = False, model: str | None = None,
                 keep_checkpoints: bool = False, keep_run_env: bool = False, replay_external: bool = False,
                 route_cli: list[str] | None = None, routes_file: Path | None = None,
-                printer=print) -> dict[str, object]:
+                _yolo_cli: bool = False, host_authorization: bool = False, printer=print) -> dict[str, object]:
     """Continue an interrupted run in place (see ``stateframe.resume``).
 
     ``model`` continues under another model NAME the endpoint serves (the same weights listed differently,
     e.g. after moving servers); without it the run's own model name is required.
     """
+    run_dir = Path(run_dir).resolve()
+    try:
+        recorded_spec = json.loads((run_dir / "spec.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        recorded_spec = {}
+    if (isinstance(recorded_spec, dict) and recorded_spec.get("yolo") is True) != _yolo_cli:
+        raise resume_module.ResumeRefused(
+            "--yolo is required to resume a yolo run, and --yolo only applies to a yolo run")
+    _require_resume_host_authorization(run_dir, host_authorization)
     if sys.platform != "linux":
         try:
             saved_spec = json.loads((Path(run_dir) / "spec.json").read_text(encoding="utf-8"))
@@ -4566,7 +4607,11 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
                 current_routes = _resolve_routes(options)
                 _compare_resume_routes(spec.get("routes"), current_routes, options.route_cli,
                                        old_default=old_default, new_default=new_default, unresolved_auto=True)
-                _probe_routes(options, printer, resume_roles=(spec.get("routes") or {}).get("roles"))
+                resume_tokenizer_url = environment.get("LLAMA_CPP_TOKENIZE_URL")
+                if not isinstance(resume_tokenizer_url, str):
+                    resume_tokenizer_url = os.environ.get("LLAMA_CPP_TOKENIZE_URL", "")
+                _probe_routes(options, printer, resume_roles=(spec.get("routes") or {}).get("roles"),
+                              tokenizer_url=resume_tokenizer_url)
             except routes.RecordedRouteError as error:
                 raise resume_module.ResumeRefused(str(error)) from None
             route_changes = _compare_resume_routes(spec.get("routes"), options._routes, options.route_cli,

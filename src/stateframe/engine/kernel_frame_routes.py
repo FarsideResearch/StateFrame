@@ -343,26 +343,30 @@ class RouteEscalation(Exception):
 def route_split(answering: Route | None, calls: object, *,
                 custom_writes: set[str] | frozenset[str] = frozenset()
                 ) -> tuple[list[dict], list[dict], str | None]:
-    """Routing v2 (MR-5): split a batch into calls that run on the answering route and withheld calls.
+    """Split well-formed batches; schema 2 withholds the suffix after a route change.
 
-    Returns (kept, withheld, target). Only edit/finish calls whose role resolves to another route
-    (see _route_differs: full identity under v2) are withheld; read-kind calls always stay. target is None when nothing escalates,
-    and then kept is the whole batch. Callers use this only under routing_v2().
+    Malformed batches remain unsplit. Schema 1 keeps its per-call split behavior.
     """
     if answering is None or not isinstance(calls, list) or not _well_formed(calls):
         return (list(calls) if isinstance(calls, list) else []), [], None
     kept: list[dict] = []
     withheld: list[dict] = []
     targets: set[str] = set()
+    ordered_suffix = routing_v2()
+    withholding_suffix = False
     for call in calls:
         role = classify_calls([call], custom_writes=custom_writes)
+        changes_route = False
         if role in {"edit", "finish"}:
             target = resolve(role)
             if _route_differs(target, answering):
-                withheld.append(call)
                 targets.add(role)
-                continue
-        kept.append(call)
+                changes_route = True
+        if withholding_suffix or changes_route:
+            withheld.append(call)
+            withholding_suffix = withholding_suffix or ordered_suffix
+        else:
+            kept.append(call)
     if not withheld:
         return list(calls), [], None
     return kept, withheld, "edit" if "edit" in targets else "finish"

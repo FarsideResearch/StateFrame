@@ -141,16 +141,58 @@ def symlink_hops(path: Path) -> tuple[Path, ...]:
 _PUBLIC_CA_PATHS = ("/etc/ssl/certs", "/etc/ssl/cert.pem", "/etc/pki/tls/certs",
                      "/etc/pki/ca-trust/extracted", "/etc/ca-certificates")
 
+_PUBLIC_CA_TARGETS = (
+    Path("/etc/ssl/certs"), Path("/etc/ssl/cert.pem"),
+    Path("/etc/pki/tls/certs"), Path("/etc/pki/ca-trust/extracted"),
+    Path("/etc/ca-certificates"), Path("/usr/share/ca-certificates"),
+    Path("/usr/share/pki/ca-trust-source"), Path("/usr/lib/ssl/cert.pem"),
+    Path("/usr/lib/ssl/certs"), Path("/var/lib/ca-certificates/pem"),
+)
+_PUBLIC_CA_STORE_ROOTS = (Path("/nix/store"), Path("/gnu/store"))
+
+
+def _public_ca_target(path: Path) -> bool:
+    """Accept only conventional public trust-store locations after symlink resolution."""
+    if any(part.casefold() in {"private", "private-key", "private_keys"} for part in path.parts):
+        return False
+    if any(path == root or path.is_relative_to(root) for root in _PUBLIC_CA_TARGETS):
+        return True
+    # Package stores are immutable, but the store root itself is much broader than
+    # certificate authority. Admit only the resolved CA file or package directory.
+    return any(path != root and path.is_relative_to(root) for root in _PUBLIC_CA_STORE_ROOTS)
+
+
+def _public_ca_readable(path: Path, status: os.stat_result) -> bool:
+    """Check that a CA root is a readable regular file or searchable directory."""
+    if S_ISDIR(status.st_mode):
+        return os.access(path, os.R_OK | os.X_OK)
+    if S_ISREG(status.st_mode):
+        return os.access(path, os.R_OK)
+    return False
+
 
 def public_ca_read_roots() -> tuple[Path, ...]:
-    """Linux public CA trust store paths (with their symlink chains); macOS admits /etc/ssl elsewhere."""
+    """Linux public CA trust paths and safe symlink chains; macOS admits /etc/ssl elsewhere."""
     if sys.platform == "darwin":
         return ()
     roots: list[Path] = []
     for raw in _PUBLIC_CA_PATHS:
         path = Path(raw)
-        if path.exists():
-            roots.extend(symlink_hops(path))
+        try:
+            resolved = path.resolve(strict=True)
+            status = resolved.stat()
+            if not _public_ca_target(resolved) or not _public_ca_readable(resolved, status):
+                continue
+            hops = symlink_hops(path)
+            # The link chain can change after the first resolve. Validate every
+            # path that will be handed to the sandbox as well as the initial target.
+            if any(not _public_ca_target(hop.resolve(strict=True)) for hop in hops):
+                continue
+            roots.extend(hops)
+        except (OSError, RuntimeError, ValueError):
+            # A missing, inaccessible, or changing trust root must not make the
+            # sandbox itself unavailable. CA mounts are optional check inputs.
+            continue
     return tuple(dict.fromkeys(roots))
 
 

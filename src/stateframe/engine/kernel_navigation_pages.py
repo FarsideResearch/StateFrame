@@ -11,11 +11,15 @@ import hashlib
 import json
 import os
 import re
+import signal
 import stat
+import threading
+import time
 from collections import OrderedDict
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import closing
 from dataclasses import dataclass
+from functools import wraps
 from itertools import islice
 from pathlib import Path
 from typing import TYPE_CHECKING, Generic, TypeVar
@@ -25,6 +29,76 @@ if TYPE_CHECKING:
     from kernel_workspace_tree import Entry, File
 
 import kernel_workspace_truth as _workspace_truth
+from kernel_tool_paths import is_display_only_path
+
+_LINE_CPU_LIMIT_SECONDS = 10.0
+# Lines long enough to span two ticks share one CPU budget per search call.
+_CALL_CPU_LIMIT_SECONDS = 30.0
+_LINE_TIMER_TICK_SECONDS = 0.1
+_LINE_SCOPE = threading.local()
+_THREAD_TIME = getattr(time, "thread_time", None)
+
+
+class _RegexLineTimeout(TimeoutError): pass
+
+def _restore_line_scope(state: dict[str, object]) -> None:
+    state["flag"][0] = 0
+    if state.get("armed"):
+        try: signal.setitimer(state["timer"], 0); state["armed"] = False  # drain one pending tick
+        except (OSError, RuntimeError, ValueError): return
+    if state.get("signum") is not None: signal.signal(state["signum"], signal.SIG_DFL)
+
+def _arm_line_scope(state: dict[str, object]) -> None:
+    signum, timer = getattr(signal, "SIGVTALRM", None), getattr(signal, "ITIMER_VIRTUAL", None)
+    getitimer, setitimer = getattr(signal, "getitimer", None), getattr(signal, "setitimer", None)
+    if (threading.current_thread() is not threading.main_thread() or signum is None or timer is None
+            or _THREAD_TIME is None or getitimer is None or setitimer is None
+            or signal.getsignal(signum) is not signal.SIG_DFL or any(getitimer(timer))): return
+    previous = signal.signal(signum, _line_tick)
+    if previous is not signal.SIG_DFL: signal.signal(signum, previous); return
+    state.update(signum=signum, timer=timer, armed=True)
+    setitimer(timer, _LINE_TIMER_TICK_SECONDS, _LINE_TIMER_TICK_SECONDS)
+
+def _line_match_session(function):
+    @wraps(function)
+    def run(*args, **kwargs):
+        mode = str(kwargs.get("mode", "")).strip().casefold()
+        if (getattr(_LINE_SCOPE, "state", None) is not None
+                or mode in ("literal", "text", "path", "filename", "file")):
+            return function(*args, **kwargs)
+        state = {"flag": [0], "last_tick": None}; _LINE_SCOPE.state = state
+        try:
+            try: _arm_line_scope(state)
+            except (OSError, RuntimeError, ValueError): _restore_line_scope(state)
+            return function(*args, **kwargs)
+        finally:
+            try: _restore_line_scope(state)
+            finally: del _LINE_SCOPE.state
+    return run
+
+def _line_tick(_signum: int, _frame) -> None:
+    if ((state := getattr(_LINE_SCOPE, "state", None))
+            and threading.current_thread() is threading.main_thread() and state["flag"][0]):
+        key, previous, now = (state["pass_token"], state["flag"][0]), state["last_tick"], _THREAD_TIME()
+        if previous is None or previous[:2] != key:
+            state["last_tick"], state["seen"] = (*key, now), now
+            return
+        state["slow"] = state.get("slow", 0.0) + now - state.get("seen", now)
+        state["seen"] = now
+        state["spent"] = state["slow"] > _CALL_CPU_LIMIT_SECONDS
+        if state["spent"] or now - previous[2] > _LINE_CPU_LIMIT_SECONDS: raise _RegexLineTimeout
+
+def _undecided_note(lines: int, files: int) -> list[str]:
+    notes = [f"{lines} line{'s' if lines != 1 else ''} not decided."] if lines else []
+    if files:
+        notes.append(f"{files} file{'s' if files != 1 else ''} not searched.")
+    if _line_budget_spent():
+        notes.append(f"Slow-pattern CPU limit reached ({_CALL_CPU_LIMIT_SECONDS:g} s in this call); "
+                     "use a simpler pattern or a narrower scope.")
+    return notes
+
+def _line_budget_spent() -> bool:
+    return bool((getattr(_LINE_SCOPE, "state", None) or {}).get("spent"))
 
 _SKIP_DIRS = frozenset({
     ".git", ".hg", ".svn", ".tox", ".venv", "__pycache__", ".pytest_cache",
@@ -40,12 +114,15 @@ _SEARCH_MAX_BYTES = 256 << 20
 _SEARCH_CACHE_BYTES = 8 << 20
 _SEARCH_RESULT_BYTES = 512 << 10
 _SEARCH_FILE_RESULT_BYTES = 64 << 10
+_SEARCH_LITERAL_PREFILTER_BYTES = 8192
 
 
 @dataclass(frozen=True)
 class NavigationPage:
     text: str
     metadata: Mapping[str, object]
+    # Digest of the returned result rows, excluding pagination and display headers.
+    evidence_digest: str = ""
 
 
 def _bounded_int(value: object, default: int, *, maximum: int = MAX_PAGE_SIZE) -> int:
@@ -63,6 +140,8 @@ def page_size(args: object, *, default: int = DEFAULT_PAGE_SIZE) -> int:
 
 
 def _rooted(root: Path, scope: object, *, journal: object = None) -> Path:
+    if scope not in (None, "", ".") and is_display_only_path(str(scope)):
+        raise ValueError("navigation scope must be inside the repository root")
     requested = root if scope in (None, "", ".") else Path(str(scope))
     candidate = requested if requested.is_absolute() else root / requested
     resolved = candidate.resolve()
@@ -167,7 +246,12 @@ def _fd_paths(root: Path, start: Path, errors: list[OSError]) -> Iterator[tuple[
             os.close(root_fd)
 
 
-def _read_text(relative: str, root_fd: int) -> tuple[str | None, str]:
+def _decode_search_text(raw: bytes) -> str:
+    return raw.decode("utf-8")
+
+
+def _read_text(relative: str, root_fd: int,
+               literal_bytes: bytes | None = None) -> tuple[str | None, str]:
     dirname, _, name = relative.rpartition("/")
     parent = root_fd
     try:
@@ -200,16 +284,45 @@ def _read_text(relative: str, root_fd: int) -> tuple[str | None, str]:
             os.close(parent)
     if b"\x00" in raw:
         return None, "non_text"
+    if (literal_bytes is not None
+            and (_SEARCH_LITERAL_PREFILTER_BYTES <= info.st_size <= _SEARCH_MAX_FILE_BYTES
+                 or info.st_size >= 2 * _SEARCH_MAX_FILE_BYTES)
+            and raw[:64].isascii()):
+        if literal_bytes not in raw:
+            if raw.isascii():
+                return None, "text"
+            try:
+                _decode_search_text(raw)
+            except UnicodeDecodeError:
+                return None, "non_text"
+            return None, "text"
+        try:
+            return _decode_search_text(raw), "text"
+        except UnicodeDecodeError:
+            return None, "non_text"
     try:
         return raw.decode("utf-8"), "text"
     except UnicodeDecodeError:
         return None, "non_text"
 
 
+def _literal_bytes(query: str) -> bytes | None:
+    try:
+        return query.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+
+
 def _fingerprint(rows: Sequence[Mapping[str, object]]) -> str:
     encoded = json.dumps(list(rows), sort_keys=True, ensure_ascii=False,
                          separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()[:24]
+
+
+def _undecodable_search_path(path: str) -> str:
+    if not any("\ud800" <= c <= "\udfff" for c in path): return path
+    return "//undecodable-name/" + "".join(
+        f"\\x{ord(c) & 255:02x}" if "\ud800" <= c <= "\udfff" else c for c in path)
 
 
 def _cursor(digest: str, offset: int) -> str:
@@ -306,11 +419,17 @@ class _SearchPageAccumulator:
             try:
                 encoded = encoded_row.encode("utf-8")
             except UnicodeEncodeError as error:
-                start = self._serialized_chars + separator + error.start
-                end = self._serialized_chars + separator + error.end
-                self._encoding_error = (start, end, error.reason,
-                                        encoded_row[error.start:error.end])
-            else:
+                if isinstance(path := row.get("path"), str) and path != (display := _undecodable_search_path(path)):
+                    row["path"] = display
+                    encoded_row = json.dumps(row, sort_keys=True, ensure_ascii=False,
+                                             separators=(",", ":"))
+                    encoded = encoded_row.encode("utf-8")
+                else:
+                    start = self._serialized_chars + separator + error.start
+                    end = self._serialized_chars + separator + error.end
+                    self._encoding_error = (start, end, error.reason,
+                                            encoded_row[error.start:error.end])
+            if self._encoding_error is None:
                 if separator:
                     self._digest.update(b",")
                 self._digest.update(encoded)
@@ -415,6 +534,8 @@ class _SearchResult:
     unreadable: int
     non_text: int
     limited: bool
+    undecided_lines: int
+    unsearched: int
     rows: tuple[bytes, ...]
     all_rows: bool
 
@@ -447,14 +568,50 @@ def _row(path: str, line: int | None = None, text: str = "") -> bytes:
     row: dict[str, object] = {"path": path}
     if line is not None:
         row.update(line=line, text=text)
-    return json.dumps(row, sort_keys=True, ensure_ascii=False,
-                      separators=(",", ":")).encode("utf-8")
+    try: return json.dumps(row, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    except UnicodeEncodeError:
+        row["path"] = _undecodable_search_path(path)
+        return json.dumps(row, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
-def _match_rows(path: str, text: str, matcher: re.Pattern[str]) -> Iterator[bytes]:
-    for line_number, line in enumerate(text.splitlines(), 1):
-        if matcher.search(line):
-            yield _row(path, line_number, line)
+def _matching_lines(lines: list[str], matcher: re.Pattern[str] | None,
+                    undecided: list[int] | None, literal_query: str | None = None) -> Iterator[tuple[int, str]]:
+    state = getattr(_LINE_SCOPE, "state", {})
+    if literal_query is None: assert matcher is not None
+    if literal_query is not None or not state.get("armed"):
+        for number, line in enumerate(lines, 1):
+            if literal_query in line if literal_query is not None else matcher.search(line):
+                yield number, line
+        return
+
+    flag, offset, previous_token = state["flag"], 0, state.get("pass_token")
+    state["pass_token"] = pass_token = object()
+    try:
+        while offset < len(lines):
+            try:
+                rest = lines if offset == 0 else islice(lines, offset, None)
+                for number, line in enumerate(rest, offset + 1):
+                    matched = False; flag[0] = number
+                    matched = matcher.search(line)
+                    if matched: flag[0] = 0; yield number, line
+                return
+            except _RegexLineTimeout:
+                cut_line = flag[0]; flag[0] = 0
+                if undecided is None: raise
+                if matched: yield cut_line, lines[cut_line - 1]
+                else: undecided[0] += 1
+                offset = cut_line
+                if state.get("spent"):
+                    undecided[0] += len(lines) - offset
+                    return
+    finally:
+        flag[0] = 0; state["pass_token"] = previous_token
+
+def _match_rows(path: str, text: str, matcher: re.Pattern[str],
+                literal_query: str | None = None,
+                undecided: list[int] | None = None) -> Iterator[bytes]:
+    for number, line in _matching_lines(text.splitlines(), matcher, undecided, literal_query):
+        yield _row(path, number, line)
 
 
 def _matches_file_glob(relative: str, file_glob: str | None) -> bool:
@@ -525,8 +682,9 @@ def _scan_pinned_search(
     matcher: re.Pattern[str] | None, cache: _SearchCache, start: int, size: int,
 ) -> _SearchResult:
     mode, query, file_glob = parameters
+    literal_bytes = _literal_bytes(query) if mode == "literal" else None
     digest = hashlib.sha256(b"[")
-    total = unreadable = non_text = scanned_bytes = 0
+    total = unreadable = non_text = scanned_bytes = undecided_lines = unsearched = 0
     limited = False
     page_rows: list[bytes] = []
     all_rows: list[bytes] | None = []
@@ -556,7 +714,7 @@ def _scan_pinned_search(
                 continue
             if matcher is None:
                 if query in relative:
-                    append(_row(_escape_search_name(relative)))
+                    append(_row(relative))
                 continue
             if file.size > _SEARCH_MAX_FILE_BYTES:
                 limited = True
@@ -573,7 +731,14 @@ def _scan_pinned_search(
                     append(hit)
                 non_text += status == "non_text"
                 continue
-            text, status = _read_text(relative, root_fd) if root_fd >= 0 else (None, "unreadable")
+            if _line_budget_spent():
+                limited = True
+                unsearched += 1
+                continue
+            if root_fd < 0:
+                text, status = None, "unreadable"
+            else:
+                text, status = _read_text(relative, root_fd, literal_bytes)
             if text is None:
                 unreadable += status == "unreadable"
                 non_text += status == "non_text"
@@ -582,11 +747,16 @@ def _scan_pinned_search(
                 continue
             weight = len(relative) * 4 + len(query) * 4 + 512
             file_rows: list[bytes] = []
-            for hit in _match_rows(_escape_search_name(relative), text, matcher):
+            file_undecided = [0] if mode == "regex" else None
+            for hit in _match_rows(relative, text, matcher,
+                                   query if mode == "literal" else None, file_undecided):
                 append(hit)
                 weight += len(hit) + 64
                 if weight <= _SEARCH_FILE_RESULT_BYTES:
                     file_rows.append(hit)
+            if file_undecided and file_undecided[0]:
+                undecided_lines += file_undecided[0]
+                weight = _SEARCH_FILE_RESULT_BYTES + 1
             if weight <= _SEARCH_FILE_RESULT_BYTES:
                 cache.files.put(key, (status, tuple(file_rows)), weight)
     except _SearchCoverageLimit:
@@ -595,7 +765,7 @@ def _scan_pinned_search(
         if matcher is not None and root_fd >= 0: os.close(root_fd)
     digest.update(b"]")
     return _SearchResult(
-        digest.hexdigest()[:24], total, unreadable, non_text, limited,
+        digest.hexdigest()[:24], total, unreadable, non_text, limited or _line_budget_spent(), undecided_lines, unsearched,
         tuple(all_rows if all_rows is not None else page_rows), all_rows is not None,
     )
 
@@ -640,7 +810,8 @@ def _pinned_search(
             if not observation.validate_for_use(boundary):
                 vars(consumers).pop("_navigation_search_cache", None)
                 raise WorkspaceUnavailable("search workspace observation changed")
-            if cached is None and not result.unreadable:
+            if (cached is None and not result.unreadable and not result.undecided_lines
+                    and not result.unsearched):
                 weight = sum(len(row) + 64 for row in result.rows) + len(parameters[1]) * 4 + 512
                 cache.results.put(key if result.all_rows else page_key, result, weight)
             return result
@@ -648,6 +819,7 @@ def _pinned_search(
         return None
 
 
+@_line_match_session
 def search_repository(root: Path, pattern: str, scope: object = None, *,
                       mode: str | None = None, file_glob: str | None = None,
                       cursor: object = None, requested_page_size: object = None,
@@ -663,7 +835,8 @@ def search_repository(root: Path, pattern: str, scope: object = None, *,
         raise ValueError("grep mode must be regex, literal, or path")
     page = _bounded_int(requested_page_size, DEFAULT_PAGE_SIZE)
     root = root.resolve()
-    query, preserve_legacy_names = str(pattern), requested_page_size is None and cursor in (None, "")
+    query = str(pattern)
+    literal_bytes = _literal_bytes(query) if normalized_mode == "literal" else None
     pinned = None
     safe_fds = (os.open in os.supports_dir_fd and os.stat in os.supports_dir_fd
                 and os.listdir in os.supports_fd
@@ -676,6 +849,8 @@ def search_repository(root: Path, pattern: str, scope: object = None, *,
             pinned = _pinned_search(consumers, root, scope, (normalized_mode, query, file_glob),
                                     cursor, page, journal)
 
+    undecided_lines = [pinned.undecided_lines if pinned is not None else 0]
+    unsearched = pinned.unsearched if pinned is not None else 0
     if pinned is not None:
         shown, metadata = pinned.page(_offset(cursor, pinned.digest), page)
         unreadable_files, non_text_files = pinned.unreadable, pinned.non_text
@@ -687,7 +862,7 @@ def search_repository(root: Path, pattern: str, scope: object = None, *,
         limited = False
 
         def matching_rows() -> Iterator[dict[str, object]]:
-            nonlocal unreadable_files, non_text_files
+            nonlocal unreadable_files, non_text_files, unsearched
             if start is None:
                 return
             errors: list[OSError] = []
@@ -697,24 +872,30 @@ def search_repository(root: Path, pattern: str, scope: object = None, *,
                         continue
                     if matcher is None:
                         if query in relative:
-                            yield {"path": relative if preserve_legacy_names else _escape_search_name(relative)}
+                            yield {"path": relative}
                         continue
-                    text, status = _read_text(relative, root_fd)
+                    if _line_budget_spent():
+                        unsearched += 1
+                        continue
+                    text, status = _read_text(relative, root_fd, literal_bytes)
                     if text is None:
                         unreadable_files += status == "unreadable"
                         non_text_files += status == "non_text"
                         continue
-                    display = relative if preserve_legacy_names else _escape_search_name(relative)
-                    for line_number, line in enumerate(text.splitlines(), 1):
-                        if matcher.search(line):
-                            yield {"path": display, "line": line_number, "text": line}
+                    for line_number, line in _matching_lines(
+                            text.splitlines(), matcher, undecided_lines,
+                            query if normalized_mode == "literal" else None):
+                        yield {"path": relative, "line": line_number, "text": line}
             unreadable_files += sum(not isinstance(error, PermissionError) for error in errors)
 
         small_first_page = cursor is None or (type(cursor) is str and not cursor)
         with closing(matching_rows()) as rows:
             initial_page = list(islice(rows, page + 1)) if small_first_page else None
             if initial_page is not None and len(initial_page) <= page:
-                shown, metadata = _page_rows(initial_page, cursor=cursor, size=page)
+                try: shown, metadata = _page_rows(initial_page, cursor=cursor, size=page)
+                except UnicodeEncodeError:
+                    for row in initial_page: row["path"] = _undecodable_search_path(row["path"])
+                    shown, metadata = _page_rows(initial_page, cursor=cursor, size=page)
             else:
                 overflow = initial_page.pop() if initial_page is not None else None
                 page_rows = _SearchPageAccumulator(cursor, page, initial_page=initial_page)
@@ -724,6 +905,7 @@ def search_repository(root: Path, pattern: str, scope: object = None, *,
                     page_rows.add(row)
                 shown, metadata = page_rows.finish()
 
+    limited = limited or _line_budget_spent()
     if normalized_mode == "path":
         rendered = [str(row["path"]) for row in shown]
     else:
@@ -733,12 +915,16 @@ def search_repository(root: Path, pattern: str, scope: object = None, *,
                 "file_glob": None if file_glob is None else _escape_search_name(file_glob),
                 "page_size": page}
     if normalized_mode != "path" or limited or unreadable_files:
-        metadata.update({"scan_complete": unreadable_files == 0 and not limited,
+        metadata.update({"scan_complete": unreadable_files == 0 and not limited and not undecided_lines[0],
                          "unreadable_files": unreadable_files,
                          "non_text_files": non_text_files})
     if limited:
         metadata["coverage_limited"] = True
-    if not metadata["total"]:
+    if undecided_lines[0] or unsearched:
+        if unsearched:
+            metadata["unsearched_files"] = unsearched
+        rendered.extend(_undecided_note(undecided_lines[0], unsearched))
+    elif not metadata["total"]:
         # Search evidence is limited to this query and scope. In particular,
         # literal alternation-looking text says nothing about either symbol.
         summary = (f"No hits for {normalized_mode} search: pattern={query!r} "
@@ -759,6 +945,7 @@ def search_repository(root: Path, pattern: str, scope: object = None, *,
         _page_text("search", metadata, rendered,
                    advice=_advice(policy, kind="search", size=page)),
         metadata,
+        "sha256:" + _fingerprint(shown),
     )
 
 
@@ -819,20 +1006,20 @@ def directory_page(directory: Path, display: str, *, cursor: object = None,
     children = sorted(
         {child.name + ("/" if child.is_dir() else "") for child in directory.iterdir()}
     )
-    rows = [{"name": name} for name in children]
+    rows = [{"name": _undecodable_search_path(name)} for name in children]
     shown, metadata = _page_rows(rows, cursor=cursor, size=page)
     metadata = {**metadata, "path": display, "page_size": page}
     rendered = [str(row["name"]) for row in shown]
     text = (f"{display} is a DIRECTORY. Contents:\n"
             + _page_text("directory", metadata, rendered,
                          advice=_advice(policy, kind="directory", size=page)))
-    return NavigationPage(text, metadata)
+    return NavigationPage(text, metadata, "sha256:" + _fingerprint(shown))
 
 
 def workspace_layout(root: Path, *, policy: object | None = None) -> str:
     """Keep no-target orientation bounded while pointing at the path search page."""
     files = _walk_files(root, None)
-    rows = [{"path": relative} for relative, _path in files]
+    rows = [{"path": _undecodable_search_path(relative)} for relative, _path in files]
     shown, metadata = _page_rows(rows, cursor=None, size=DEFAULT_LAYOUT_PAGE_SIZE)
     rendered = [f"- {row['path']}" for row in shown]
     body = _page_text("repository layout", metadata, rendered,

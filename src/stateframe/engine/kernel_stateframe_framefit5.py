@@ -767,9 +767,16 @@ def _opaque_actions(
                     latest_parallel_call_id = call_id
     rows: list[dict[str, object]] = []
     ids: set[str] = set()
+    seen_turn_objects: set[int] = set()
+    seen_call_objects: set[int] = set()
     for turn_index, turn in enumerate(turns):
         if not isinstance(turn, Sequence) or isinstance(turn, (str, bytes, bytearray)):
             raise FrameFit5Error("unclassified action turn is malformed")
+        turn_identity = id(turn)
+        if turn_identity in seen_turn_objects:
+            raise FrameFit5Error("unclassified action turn was supplied more than once")
+        seen_turn_objects.add(turn_identity)
+        turn_ids: set[str] = set()
         results = {
             str(item.get("tool_call_id")): item
             for item in turn
@@ -806,9 +813,15 @@ def _opaque_actions(
             for call in calls:
                 if not isinstance(call, Mapping):
                     raise FrameFit5Error("unclassified tool call is malformed")
+                call_identity = id(call)
+                if call_identity in seen_call_objects:
+                    raise FrameFit5Error("unclassified tool call was supplied more than once")
+                seen_call_objects.add(call_identity)
                 call_id = str(call.get("id") or "")
-                if not call_id or call_id in ids:
+                # IDs can be reused by later calls; repeats within a turn are ambiguous.
+                if not call_id or call_id in turn_ids:
                     raise FrameFit5Error("unclassified tool call id is invalid")
+                turn_ids.add(call_id)
                 ids.add(call_id)
                 function = call.get("function")
                 if not isinstance(function, Mapping):

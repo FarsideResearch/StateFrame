@@ -139,7 +139,10 @@ def outcome_from_receipt(
     count = row.get("hit_count", row.get("match_count"))
     if type(count) is int and count >= 0 and str(row.get("kind", "")).lower() in {
             "grep", "search"}:
-        return (Outcome.HITS, {"hit_count": count}) if count else (Outcome.NO_HITS, {})
+        if count:
+            return Outcome.HITS, {"hit_count": count}
+        # A search that did not cover everything proves no absence.
+        return (Outcome.ACCEPTED if result_class == "PARTIAL" else Outcome.NO_HITS), {}
 
     if isinstance(call, Mapping):
         function = call.get("function")

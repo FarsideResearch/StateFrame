@@ -587,6 +587,8 @@ def execute_read(root: Path, p: Path, raw: str, display: str, start: int, *,
                         policy=policy))
             if delivery is not None:
                 delivery.update(page.metadata)
+                if page.evidence_digest:
+                    delivery["page_evidence_digest"] = page.evidence_digest
                 delivery["host_outcome"] = "OBSERVED"
                 delivery["read_reuse"] = _ordinary_read_receipt(step, raw, start, "directory_listing")
             return "DIRECTORY", page.text, None
@@ -1132,7 +1134,8 @@ def emit_read_receipt(bolt: object, root: Path, p: Path, raw: str, start: int,
         result_status = "OK"
     bolt.receipt("read", f"{raw}@{start + 1}", f"{raw}|{start}",
                  result_status,
-                 detail=json.dumps(dict(delivery or {}), sort_keys=True,
+                 detail=json.dumps({key: value for key, value in (delivery or {}).items()
+                                    if key != "page_evidence_digest"}, sort_keys=True,
                                      ensure_ascii=False, separators=(",", ":"))[:150],
                  target_path=receipt_target_path(root, p),
                  read_contract={field: (delivery or {}).get(field)

@@ -51,6 +51,9 @@ Shell refusals use `REFUSED <CODE>: <reason>`: `SHELL_OFF`, `READ_ONLY_POLICY`, 
 `--shell-ask` asks before a program outside the inspection and `--shell-allow` sets. It defaults off for `run` and on for `chat`; `--no-shell-ask` changes that. Chat reads the answer from its terminal. An unattended run declines, and a request expires after 120 seconds. Decisions are recorded for resume.
 
 `--shell-sandbox off` requires `--shell unrestricted` and prints `WARNING: SHELL SANDBOX OFF; COMMANDS CAN ACCESS THE HOST`. This is host execution, with access beyond the declared roots. It is authorized only by a CLI flag and recorded in the run. Tool authority cannot be supplied by a profile switch.
+Resuming that run requires repeating both flags on `stateframe resume`.
+
+`--yolo` fills omitted shell settings with `--shell unrestricted --shell-sandbox off --shell-network full`, and explicit shell flags win. It allows arbitrary host shell commands that can modify files beyond the workspace and access the network; hooks, checks and MCP remain sandboxed.
 
 ## Sandbox and workspace effects
 

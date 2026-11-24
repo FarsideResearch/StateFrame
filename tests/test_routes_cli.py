@@ -147,6 +147,68 @@ def test_start_refusals_name_route_and_repair(servers, monkeypatch):
     assert options._routes is not None
 
 
+@pytest.mark.parametrize("source", ("environment", "profile", "extra_env", "resume_spec"))
+def test_run_wide_tokenizer_conflict_sources_refuse_before_route_probes(source, tmp_path, monkeypatch):
+    monkeypatch.delenv("LLAMA_CPP_TOKENIZE_URL", raising=False)
+    tokenizer = "http://127.0.0.1:8082"
+    options = runner.RunOptions(
+        repo=None, task="task", endpoint=Endpoint("http://127.0.0.1:8080/v1", "base"),
+        route_cli=["read.endpoint=http://127.0.0.1:8081/v1", "read.model=small"],
+    )
+    if source == "environment":
+        monkeypatch.setenv("LLAMA_CPP_TOKENIZE_URL", tokenizer)
+    elif source == "profile":
+        profile = tmp_path / "tokenizer-profile.json"
+        profile.write_text(json.dumps({
+            "schema": "stateframe-product-profile/1",
+            "switches": {"LLAMA_CPP_TOKENIZE_URL": tokenizer},
+        }))
+        options.profile = str(profile)
+    elif source == "extra_env":
+        options.extra_env["LLAMA_CPP_TOKENIZE_URL"] = tokenizer
+
+    probes: list[str] = []
+
+    def record_probe(endpoint: str, *_args: object, **_kwargs: object) -> None:
+        probes.append(endpoint)
+        raise runner.RunError("route provider probe was reached")
+
+    monkeypatch.setattr(runner, "_provider_capabilities_for", record_probe)
+    with pytest.raises(runner.RunError, match="LLAMA_CPP_TOKENIZE_URL is set while route read uses"):
+        if source == "resume_spec":
+            runner._probe_routes(options, lambda *_args: None, tokenizer_url=tokenizer)
+        else:
+            runner._probe_routes(options, lambda *_args: None)
+    assert probes == []
+
+
+def test_resume_refuses_recorded_extra_env_tokenizer_before_route_probes(tmp_path, servers, monkeypatch):
+    default, small = servers
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "app.py").write_text("value = 1\n")
+    (repo / "test_app.py").write_text("from app import value\ndef test_value(): assert value == 1\n")
+    options = runner.RunOptions(
+        repo=repo, task="task", endpoint=Endpoint(default, "base"), run_dir=tmp_path / "run",
+        route_cli=[f"read.endpoint={small}", "read.model=small"],
+        extra_env={"LLAMA_CPP_TOKENIZE_URL": default + "/tokenize"},
+    )
+    options._routes = runner._resolve_routes(options)
+    runner.prepare(options)
+    probes: list[str] = []
+
+    def record_probe(endpoint: str, *_args: object, **_kwargs: object) -> None:
+        probes.append(endpoint)
+        raise runner.RunError("route provider probe was reached")
+
+    monkeypatch.setattr(runner, "_provider_model", lambda *_args: {"model_found": True})
+    monkeypatch.setattr(runner, "check_slot_context", lambda *_args: None)
+    monkeypatch.setattr(runner, "_provider_capabilities_for", record_probe)
+    with pytest.raises(runner.RunError, match="LLAMA_CPP_TOKENIZE_URL is set while route read uses"):
+        runner.resume_run(tmp_path / "run", printer=lambda *_args: None)
+    assert probes == []
+
+
 def test_unit_overlay_model_is_probed_with_request_endpoint(servers, monkeypatch):
     default, small = servers
     served = {(default, "base"), (default, "large"), (small, "small")}
