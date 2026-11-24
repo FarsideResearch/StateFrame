@@ -16,6 +16,8 @@ ALLOWLIST = {
         ("Sends a bounded GET through vetted destinations with a bounded, validated caller-supplied Accept header; "
          "it fetches user-selected page content "
          "and does not invoke a model server."),
+    "src/stateframe/otel/transport.py:send":
+        "Sends telemetry to a validated receiver using only operator-configured headers; receiver authentication is optional.",
 }
 _UNSUPPORTED_HTTP_LIBRARIES = {"requests", "httpx", "aiohttp", "urllib3", "pycurl"}
 

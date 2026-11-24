@@ -10,6 +10,7 @@ import base64
 import gzip
 import hashlib
 import io
+import json
 import os
 import tarfile
 import tomllib
@@ -26,13 +27,15 @@ SDIST_TOP_LEVEL = frozenset({"LICENSE", "NOTICE", "README.md", "install.sh", "py
                              "KNOWN_LIMITATIONS.md", "AGENTS.md", "llms.txt"})
 # Onboarding guide for developers and AI coding assistants (AGENTS.md and llms.txt point here).
 SDIST_DOCS = frozenset({f"docs/guide/{name}.md" for name in (
-    "concepts", "request-lifecycle", "code-map", "running", "extending", "troubleshooting", "design")})
+    "concepts", "request-lifecycle", "code-map", "running", "extending", "troubleshooting",
+    "design", "observability")})
 SDIST_DOCS = SDIST_DOCS | {
     "docs/assets/stateframe-banner.webp",  # README banner (relative link)
+    "docs/assets/observability-dashboard.json",
     "docs/guide/contracts/offline-pytest.md",
 }
 # The installer verifies the bundled wheels with this standalone helper.
-SDIST_SCRIPTS = frozenset({"scripts/build_wheelhouse.py", "scripts/installed_smoke.sh"})
+SDIST_SCRIPTS = frozenset({"scripts/build_wheelhouse.py", "scripts/installed_smoke.sh", "scripts/otel_demo.sh"})
 # Product regression tests belong to the maintainer tree, not an installed release.
 SDIST_TESTS: frozenset[str] = frozenset()
 SDIST_WHEELHOUSE = frozenset({
@@ -217,7 +220,12 @@ def _package_files() -> list[tuple[str, bytes]]:
                 and (path.suffix in {".py", ".json"}
                      or relative.as_posix() == "THIRD_PARTY_LICENSES.md"
                      or _is_prebuilt_fixture(relative))):
-            out.append((path.relative_to(SRC).as_posix(), path.read_bytes()))
+            data = path.read_bytes()
+            if relative.as_posix() == "otel/manifest.json":
+                manifest = json.loads(data)
+                manifest["source_baseline"] = _project()["version"]
+                data = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode()
+            out.append((path.relative_to(SRC).as_posix(), data))
     return out
 
 

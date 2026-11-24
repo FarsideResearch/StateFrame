@@ -1,10 +1,9 @@
 """Every STATEFRAME_* name the public docs tell users to set must actually take effect.
 
-A setting reaches StateFrame in one of three ways: an engine opt-in switch forwarded from the shell through
-runner.OPT_IN_SWITCHES, a product setting the CLI reads itself (src/stateframe/*.py outside the engine), or an engine
-switch that only a custom profile can set, which the docs must say. A name in none of these is silently ignored when a
-user exports it, which is the bug class this file guards (two new switches once shipped docs saying "set it in the
-shell" without the allowlist entry).
+A setting reaches the product in one of three ways: an engine opt-in switch forwarded from the shell through
+runner.OPT_IN_SWITCHES, a CLI or exporter setting read by product code, or an engine switch that only a custom profile
+can set, which the docs must say. A name in none of these is silently ignored when a user exports it, which is the bug
+class this file guards (two new switches once shipped docs saying "set it in the shell" without the allowlist entry).
 """
 from __future__ import annotations
 
@@ -75,9 +74,10 @@ def _documented(root: Path = ROOT) -> dict[str, list[str]]:
 
 
 def _product_reads(root: Path = ROOT) -> set[str]:
-    """STATEFRAME_* literals the product code (not the engine) contains: settings the CLI reads itself."""
+    """Setting literals read by the CLI and the optional exporter package."""
     found: set[str] = set()
-    for path in (root / "src/stateframe").glob("*.py"):
+    paths = (*root.glob("src/stateframe/*.py"), *root.glob("src/stateframe/otel/*.py"))
+    for path in paths:
         found.update(NAME.findall(path.read_text(encoding="utf-8")))
     return found
 

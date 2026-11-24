@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.0 (2026-11-24)
+
+- Optional OTLP trace export for finished runs (off by default).
+
 ## 0.8.36 (2026-11-24)
 
 - Workspace scans, undo of refused changes and test evidence read files over 16 MiB in blocks; such a file no longer ends a run.

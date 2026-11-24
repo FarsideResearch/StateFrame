@@ -7,7 +7,7 @@ backend-path = ["_build"]
 
 [project]
 name = "stateframe"
-version = "0.8.36"
+version = "0.9.0"
 description = "StateFrame: an Open Agent Engine that sends a typed state frame instead of chat history. Preview release."
 readme = "README.md"
 license = "AGPL-3.0-only"  # dual: AGPLv3 or a commercial license (COMMERCIAL-LICENSE.md)
@@ -39,3 +39,4 @@ repomap = [  # all MIT
 
 [project.scripts]
 stateframe = "stateframe.cli:main"
+stateframe-otel = "stateframe.otel.cli:main"
