@@ -476,3 +476,41 @@ def test_every_non_code_package_asset_has_provenance_and_rejects_an_unknown_asse
     problems = _asset_problems(planted)
     assert f"wheel: no asset provenance entry for {asset_probe}" in problems
     assert f"sdist: no asset provenance entry for {asset_probe}" in problems
+
+
+# Full texts of the licenses for code adapted into repo_intel_core, pinned by digest of the
+# exact upstream text (trailing whitespace stripped).
+ADAPTED_CODE_LICENSES = {
+    "CodeGraph": "69ba01d8aad8c9f7fa721245eda05fdb36d82bbae1c43f9751f13ab8cf3cc34b",
+    "CPython": "35936f8ff79198c68a38a9bb1912fa131fc7b840ca5928feea09dc96e5c66b8d",
+}
+
+
+def _adapted_license_text(inventory: str, project: str) -> str:
+    start = inventory.index(f"### {project}")
+    block = inventory[start:].split("```", 2)
+    assert len(block) == 3, f"{project}: license text block missing"
+    return block[1].strip("\n").rstrip()
+
+
+def test_adapted_code_notices_ship_in_wheel_and_sdist(built_artifacts: _BuiltArtifacts) -> None:
+    with zipfile.ZipFile(built_artifacts.wheel) as wheel:
+        members = {name: wheel.read(name).decode() for name in wheel.namelist()
+                   if name == f"{built_artifacts.package}/THIRD_PARTY_LICENSES.md" or name.endswith("/NOTICE")}
+    with tarfile.open(built_artifacts.sdist, "r:gz") as sdist:
+        for path in ("NOTICE", f"src/{built_artifacts.package}/THIRD_PARTY_LICENSES.md"):
+            handle = sdist.extractfile(f"{built_artifacts.sdist_root}/{path}")
+            assert handle is not None, path
+            members[f"sdist:{path}"] = handle.read().decode()
+    notices = {name: text for name, text in members.items() if name.endswith("NOTICE")}
+    inventories = {name: text for name, text in members.items() if name.endswith("THIRD_PARTY_LICENSES.md")}
+    assert len(notices) == 2 and len(inventories) == 2, sorted(members)
+    for name, text in notices.items():
+        assert "CodeGraph (MIT)" in text and "CPython (PSF-2.0)" in text, name
+        assert "call_graph.py" in text and "ts_extract.py" in text and "ts_dispatch.py" in text, name
+    for name, text in inventories.items():
+        assert "https://github.com/colbymchenry/codegraph" in text, name
+        assert "Copyright (c) 2026 Colby Mchenry" in text, name
+        for project, digest in ADAPTED_CODE_LICENSES.items():
+            body = _adapted_license_text(text, project)
+            assert hashlib.sha256(body.encode()).hexdigest() == digest, f"{name}: {project}"
