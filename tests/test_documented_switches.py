@@ -43,6 +43,7 @@ PROFILE_ONLY = {
     "STATEFRAME_LOCALIZE_MAX_FILES",
     "STATEFRAME_LOCALIZE_MAX_SOURCE_BYTES",
     "STATEFRAME_CONSTANT_TOOL_MENU",
+    "STATEFRAME_PIN_DEDUP",
 }
 # Placeholders in the extension guide and prefixes of per-role variables, not settings.
 EXAMPLES = {"STATEFRAME_MY_SWITCH"}

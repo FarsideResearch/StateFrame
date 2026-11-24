@@ -21,8 +21,13 @@ def _make_work(root: Path) -> workcopy.WorkCopy:
 def _block_scandir(monkeypatch: pytest.MonkeyPatch, blocked: Path) -> None:
     original_scandir = os.scandir
 
-    def scandir(path: str | bytes | os.PathLike[str] | os.PathLike[bytes]) -> os.ScandirIterator[str]:
-        if Path(path).resolve() == blocked.resolve():
+    def scandir(path: int | str | bytes | os.PathLike[str] | os.PathLike[bytes]) -> os.ScandirIterator[str]:
+        if isinstance(path, int):
+            info, target = os.fstat(path), blocked.stat()
+            matches = (info.st_dev, info.st_ino) == (target.st_dev, target.st_ino)
+        else:
+            matches = Path(path).resolve() == blocked.resolve()
+        if matches:
             raise PermissionError(errno.EACCES, "blocked by test", str(blocked))
         return original_scandir(path)
 

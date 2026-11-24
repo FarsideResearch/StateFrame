@@ -599,6 +599,8 @@ def capture(frame, step: int, run: Path) -> Path:
         _state_memo[memo_key] = next_memo
         return final
     except Exception as error:
+        if getattr(error, "boundary_recovery_stop", False):
+            raise
         raise engine.ObjectCaptureError(stage, engine._failure_reason(error)) from error
 
 

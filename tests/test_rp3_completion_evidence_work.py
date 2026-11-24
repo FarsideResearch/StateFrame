@@ -137,9 +137,14 @@ def test_repeated_completion_consumers_bound_evidence_work(tmp_path, monkeypatch
         counts["integrity_audits"] += 1
         return audit()
 
+    event_sequence = 0
+
     def count_event(kind, **_fields):
+        nonlocal event_sequence
+        event_sequence += 1
         if kind == "public_test_verdict_fact_normalized":
             counts["verdict_events"] += 1
+        return {"kind": kind, "sequence": event_sequence}
 
     monkeypatch.setattr(artifact_policy, "normalize_public_test_bindings_for_mode", count_normalize)
     monkeypatch.setattr(verdict, "_canonical", count_canonical)
@@ -167,11 +172,11 @@ def test_repeated_completion_consumers_bound_evidence_work(tmp_path, monkeypatch
     assert consumers.state.fence.root == root
     assert all(basis == bases[0] for basis in bases)
     audits = counts["integrity_audits"]
-    assert audits == counts["verdict_events"] and audits >= 18
+    assert counts["verdict_events"] == 1 and audits >= 18
     print(f"completion consumers: total={elapsed:.6f}s max_cycle={max(cycle_times):.6f}s {dict(counts)}")
     assert dict(counts) == {
         "normalizations": 1, "completion_encodes": 1,
-        "integrity_audits": audits, "verdict_events": audits,
+        "integrity_audits": audits, "verdict_events": 1,
     }
     assert max(cycle_times) < 10.0
 

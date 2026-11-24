@@ -14,17 +14,8 @@ from _child_env import child_env
 
 import kernel_continuation_journal as journals
 import kernel_measurement as measurement
-import kernel_reason_log
 from kernel_continuation_journal import ContinuationJournal, JournalError
-
-
-@pytest.fixture(autouse=True)
-def _fresh_reason_log():
-    # Closing a journal appends the process-wide problem summary, so causes logged by an
-    # earlier test in the same worker would change these journals' bytes and heads.
-    kernel_reason_log.reset_for_tests()
-    yield
-    kernel_reason_log.reset_for_tests()
+from _journal_reason_log import fresh_reason_log  # noqa: F401
 
 
 def _pilot(monkeypatch, enabled):
@@ -121,7 +112,8 @@ def test_evicted_prefix_is_validated_and_retained_suffix_can_be_indexed(tmp_path
         assert len(scans) == 1
 
 
-def test_event_bytes_and_receipt_references_match_through_resume(tmp_path, monkeypatch):
+def test_event_bytes_and_receipt_references_match_through_resume(
+        tmp_path, monkeypatch, fresh_reason_log):
     monkeypatch.setattr(journals, "uuid", SimpleNamespace(uuid4=lambda: SimpleNamespace(hex="abc")))
     monkeypatch.setattr(journals, "time", SimpleNamespace(time_ns=lambda: 123456))
     results = []

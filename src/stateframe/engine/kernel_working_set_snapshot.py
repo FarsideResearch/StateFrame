@@ -136,6 +136,7 @@ class PreparationSnapshot:
     # Provider environment authority is frozen at construction. Keep the unset
     # default out of repr/digests so the llama.cpp default path stays identical.
     provider_reasoning_effort: str | None = field(default=None, repr=False)
+    truthful_read_panels: bool = field(default=False, repr=False)
 
     @property
     def slots(self) -> tuple[SourceSlot, ...]:
@@ -225,6 +226,8 @@ class PreparationSnapshot:
         extra = f"grep_result_digests={self.grep_result_digests!r}" if self.grep_result_digests else ""
         if self.protected_ranges:
             extra += f"protected_ranges={self.protected_ranges!r}"
+        if self.truthful_read_panels:
+            extra += "truthful_read_panels=True"
         return digest((repr(self) + extra).encode())
 
     @property
@@ -439,6 +442,11 @@ def freeze_preparation(body, runtime, *, request_id: str, byte_cap: int,
             owner_actions = tuple(actions)
     plan = getattr(runtime, "_request_source_closure", None)
     deferred = set(plan.get("deferred_paths", ())) if isinstance(plan, dict) else set()
+    from kernel_request_diet import truthful_read_panels_enabled
+    from kernel_request_source_window import (
+        DEFERRED_SOURCE_NOTICE_HEADER, DEFERRED_SOURCE_RANGES_LABEL, _DEFERRED_SOURCE_PATHS_LABEL,
+    )
+
     insertion = None
     for index, message in enumerate(messages):
         content = message.get("content")
@@ -479,10 +487,12 @@ def freeze_preparation(body, runtime, *, request_id: str, byte_cap: int,
                     payload_start=payload_start))
             continue
         if index < boundary and message.get("role") == "user" and isinstance(content, str):
-            if content.startswith("[Deferred required source paths]"):
-                label = "Required source paths are not attached; read one only if your edit needs it:"
-                if label in content:
-                    deferred.update(line[2:] for line in content.split(label, 1)[1].splitlines() if line.startswith("- "))
+            if content.startswith(DEFERRED_SOURCE_NOTICE_HEADER):
+                for label in (_DEFERRED_SOURCE_PATHS_LABEL, DEFERRED_SOURCE_RANGES_LABEL):
+                    if label in content:
+                        deferred.update(line[2:] for line in content.split(label, 1)[1].splitlines()
+                                        if line.startswith("- "))
+                        break
                 continue
             if content.startswith(("[Host fact]\n", "[Source page deferred]\n",
                                    "[Source coverage]\n")) or content.startswith("kept "):
@@ -558,4 +568,5 @@ def freeze_preparation(body, runtime, *, request_id: str, byte_cap: int,
         recovery_schema=next((json.dumps(t["function"].get("parameters", {})).encode()
             for t in frozen.get("tools", ()) if isinstance(t, dict)
             and isinstance(t.get("function"), dict) and t["function"].get("name") == "read"), b""),
-        provider_reasoning_effort=provider_effort)
+        provider_reasoning_effort=provider_effort,
+        truthful_read_panels=truthful_read_panels_enabled())

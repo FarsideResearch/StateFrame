@@ -7,6 +7,8 @@ import json
 import os
 from collections.abc import Mapping, Sequence
 
+from kernel_evidence_pin import pin_dedup_enabled, well_formed_pin_blocks
+
 
 INVENTORY_MODE_ENV = "STATEFRAME_PAGE_LOG_INVENTORY"
 INVENTORY_EVENT_PREFIX = "stateframe_page_log_inventory"
@@ -18,6 +20,102 @@ _VALID_MODES = frozenset({"off", "shadow", "on"})
 
 class FinalMessageError(ValueError):
     """A volatile message cannot be composed without losing request meaning."""
+
+
+def _authority_evidence_pins(text: str) -> list[str]:
+    """Read exact FRAMEFIT5 evidence-pin values from serialized authority fields."""
+    pins: list[str] = []
+    cursor = 0
+    decoder = json.JSONDecoder()
+    while True:
+        marker = text.find(AUTHORITY_OVERLAY_HEADER + "\n", cursor)
+        if marker < 0:
+            break
+        start = marker + len(AUTHORITY_OVERLAY_HEADER) + 1
+        try:
+            payload, consumed = decoder.raw_decode(text[start:])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            cursor = start
+            continue
+        cursor = start + consumed
+        if not isinstance(payload, Mapping) or payload.get("schema") != "stateframe-authority-overlay/1":
+            continue
+        fields = payload.get("fields")
+        if not isinstance(fields, list):
+            continue
+        for field in fields:
+            if not isinstance(field, Mapping):
+                continue
+            path = field.get("path")
+            value = field.get("value")
+            if (isinstance(path, list)
+                    and len(path) >= 4
+                    and path[-3:] == ["framefit5", "owner_protocol", "evidence_pin"]
+                    and isinstance(value, str)
+                    and well_formed_pin_blocks(value) == [value]):
+                pins.append(value)
+    return pins
+
+
+def _strip_authority_overlay_payloads(text: str) -> str:
+    """Hide serialized authority values from the standalone block scanner."""
+    result: list[str] = []
+    cursor = 0
+    decoder = json.JSONDecoder()
+    while True:
+        marker = text.find(AUTHORITY_OVERLAY_HEADER + "\n", cursor)
+        if marker < 0:
+            break
+        start = marker + len(AUTHORITY_OVERLAY_HEADER) + 1
+        try:
+            payload, consumed = decoder.raw_decode(text[start:])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            result.append(text[cursor:start])
+            cursor = start
+            continue
+        if isinstance(payload, Mapping) and payload.get("schema") == "stateframe-authority-overlay/1":
+            result.append(text[cursor:start])
+            cursor = start + consumed
+        else:
+            result.append(text[cursor:start])
+            cursor = start
+    result.append(text[cursor:])
+    return "".join(result)
+
+
+def _deduplicate_authority_pin(
+        contents: list[str], additions: list[str],
+) -> list[str]:
+    """Remove one isolated copy only when the outgoing authority value is exact."""
+    if not pin_dedup_enabled():
+        return contents
+    # PAGE_LOG passes the exact authority overlay as one composer addition. Looking
+    # through prior messages would let quoted task or file text impersonate it.
+    pins = [pin for source in additions for pin in _authority_evidence_pins(source)]
+    if len(pins) != 1:
+        return contents
+    pin = pins[0]
+    matches = []
+    for target in (contents, additions):
+        for index, content in enumerate(target):
+            if content.count(pin) != 1:
+                continue
+            start = content.index(pin)
+            before, after = content[:start], content[start + len(pin):]
+            if ((before and not before.endswith("\n\n"))
+                    or (after and not after.startswith("\n\n"))):
+                continue
+            matches.append((target, index, before, after))
+    if len(matches) != 1:
+        return contents
+    target, index, before, after = matches[0]
+    if before.endswith("\n\n"):
+        target[index] = before[:-2] + after
+    elif after:
+        target[index] = after[2:]
+    else:
+        del target[index]
+    return contents
 
 
 def inventory_mode(environ: Mapping[str, str] | None = None) -> str:
@@ -157,6 +255,7 @@ def compose_final_user_message(
         index = suffix_indexes[0]
         contents[index] = contents[index][:-len(greenfact_text)]
         greenfact = greenfact_text
+    contents = _deduplicate_authority_pin(contents, extra)
     final_content = "\n\n".join([*contents, *extra]) + greenfact
     output = copy.deepcopy(body)
     final_message: dict[str, object] = {"role": "user", "content": final_content}

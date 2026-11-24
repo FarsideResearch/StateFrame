@@ -311,6 +311,9 @@ def model_swap_for(spec: dict, model: str | None) -> dict[str, object] | None:
 
 def _terminal_resume_refusal(status: object, summary: dict, *, hooks_only: bool = False) -> str | None:
     """The terminal-result refusals shared by resume assessment and storage retention."""
+    if (status == "RUN_INCOMPLETE" and isinstance(summary.get("engine_terminal"), dict)
+            and summary["engine_terminal"].get("reason_code") == "DISCOVERY_SCOPE_NEEDS_TARGET"):
+        return "empty discovery answer needs --target or --edit; start a new run"
     if (summary.get("runtime_outcome") == "hook_refused"
             or summary.get("engine_result") in {"HOOK_DENIED", "HOOK_FAILED"}):
         return "hook refused prompt submission; start a new run"

@@ -130,6 +130,28 @@ def test_k1_giant_read_is_paginated_not_blocked(tmp_path, on, monkeypatch):
     assert event["admitted_lines"] == delivered_end
 
 
+def test_lossy_note_is_not_priced_by_read_admission(tmp_path, on, monkeypatch):
+    raw = b"source \xff\n"
+    (tmp_path / "source.txt").write_bytes(raw)
+    page = delivery_mod.deliver_source(raw, "source.txt", 0,
+                                      args={"path": "source.txt"})
+    note = str(page.metadata["decoding_note"])
+    page_text = page.text.removesuffix("\n" + note)
+    page_bytes = admission._wire_bytes(page_text)
+    state = admission._RequestState(request_index=3, allowance=page_bytes)
+    monkeypatch.setattr(admission, "_state", lambda *_args: state)
+
+    rt = runtime(tmp_path)
+    (status, observation, _), _ = read(rt, tmp_path, "source.txt")
+
+    assert status == "OK"
+    assert observation.endswith("\n" + note)
+    assert observation.removesuffix("\n" + note) == page.text
+    [event] = [row for row in rt.journal.events if row["kind"] == "read_admission"]
+    assert event["decision"] == "FULL"
+    assert event["page_bytes"] == event["admitted_bytes"] == page_bytes
+
+
 def test_k2_batch_overflow_admits_in_order_and_refuses_the_rest_with_cursors(tmp_path, on, monkeypatch):
     monkeypatch.setattr(admission, "request_byte_cap", lambda: 82_026)
     rt = runtime(tmp_path, fixed=4_000)  # allowance 78_026 for 16 pages of ~24 KB

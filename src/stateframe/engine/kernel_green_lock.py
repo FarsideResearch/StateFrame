@@ -350,6 +350,26 @@ def _stable_product_identity(value: object) -> str:
 def _editable_product_paths(runtime: object) -> tuple[str, ...]:
     """Resolve the host-declared editable product paths for this attempt."""
     owner = getattr(runtime, "owner", None)
+    task_row = getattr(owner, "task_row", None)
+    if isinstance(task_row, Mapping) and task_row.get("scope_source") == "discovery":
+        from kernel_edit_affordance import WIDENED_PATHS_KEY
+        widened = task_row.get(WIDENED_PATHS_KEY, ())
+        if isinstance(widened, str):
+            candidates = (widened,)
+        elif isinstance(widened, Sequence) and not isinstance(widened, (bytes, bytearray)):
+            candidates = widened
+        else:
+            candidates = ()
+        admitted = set()
+        for candidate in candidates:
+            raw = str(candidate).strip().replace("\\", "/")
+            while raw.startswith("./"):
+                raw = raw[2:]
+            parts = raw.split("/")
+            if (raw and not raw.startswith("/") and ".." not in parts
+                    and is_product_path(raw)):
+                admitted.add(raw)
+        return tuple(sorted(admitted))
     for holder in (getattr(owner, "task_row", None),
                    getattr(runtime, "edit_contract", None),
                    getattr(owner, "edit_contract", None)):

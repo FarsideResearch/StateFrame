@@ -10,7 +10,7 @@ import pytest
 import edit_scope_parity as parity
 import kernel_edit_affordance as affordance
 from probes import react_repair as rr
-from stateframe.task_row import DECLARE_ALL_LIMIT, TaskRowError, build_row
+from stateframe.task_row import DECLARE_ALL_LIMIT, build_row
 from stateframe.workcopy import create
 
 # Digest of parity.surfaces(50) computed at 71739465 (before the compact scope existed).
@@ -164,10 +164,21 @@ def _large_repo_with_tests(tmp_path, extra_tests):
     return create(repo, tmp_path / "copy")
 
 
-def test_large_uninferred_row_requires_explicit_scope(tmp_path):
+@pytest.mark.parametrize("runner_kind", ["pytest", "generic"])
+def test_large_uninferred_row_starts_read_only_discovery(tmp_path, runner_kind):
     work = _large_repo_with_tests(tmp_path, 30)
-    with pytest.raises(TaskRowError, match="pass --target or --edit"):
-        build_row(work, task="Something is broken.", checks=["tests/test_main.py"])
+    row = build_row(
+        work, task="Something is broken.", checks=["tests/test_main.py"],
+        runner_kind=runner_kind,
+        test_command=("python", "-m", "pytest") if runner_kind == "generic" else (),
+    )
+
+    assert row["scope_source"] == "discovery"
+    assert row["scoped_edits"] is True
+    assert row["files"] == {}
+    assert row["entry"]["path"] == ""
+    assert row["path"] == ""
+    assert row["new_file_roots"] == []
 
 
 def test_explicit_scope_still_builds_a_large_repo_row(tmp_path):

@@ -434,6 +434,8 @@ def snapshot_digest(snapshot: PreparationSnapshot) -> str:
         authority.pop("provider_reasoning_effort")
     if not snapshot.protected_ranges:
         authority.pop("protected_ranges")
+    if not snapshot.truthful_read_panels:
+        authority.pop("truthful_read_panels")
     return digest(json.dumps(authority, default=encode,
                              sort_keys=True, separators=(",", ":")).encode())
 
@@ -626,7 +628,7 @@ def _render_assignment(snapshot: PreparationSnapshot,
         notice = _render_truthful_deferred_source_notice(
             sorted(deferred_paths), delivered_source_ranges=tuple(
                 (s.identity.path, s.identity.revision, s.identity.first_line, s.identity.last_line)
-                for s in current))
+                for s in current), range_deferrals=snapshot.truthful_read_panels)
         reason = _recovery_unavailable_reason(snapshot)
         if reason is not None:
             notice += f"\nRead recovery unavailable in this request: {reason}."

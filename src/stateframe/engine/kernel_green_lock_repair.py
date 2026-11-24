@@ -794,6 +794,15 @@ class RepairController:
 
     def _product_paths(self, candidate: Path) -> tuple[str, ...]:
         owner = getattr(self.runtime, "owner", None)
+        task_row = getattr(owner, "task_row", None)
+        if isinstance(task_row, Mapping) and task_row.get("scope_source") == "discovery":
+            from kernel_edit_affordance import WIDENED_PATHS_KEY
+            widened = task_row.get(WIDENED_PATHS_KEY, ())
+            if isinstance(widened, str):
+                return (widened,)
+            if isinstance(widened, Sequence) and not isinstance(widened, (bytes, bytearray)):
+                return tuple(dict.fromkeys(str(path) for path in widened if str(path).strip()))
+            return ()
         values = (
             getattr(self.runtime, "product_paths", None)
             or getattr(self.runtime, "candidate_product_paths", None)

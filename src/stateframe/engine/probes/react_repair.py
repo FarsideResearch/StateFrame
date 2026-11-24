@@ -143,7 +143,7 @@ from kernel_tool_paths import (  # noqa: E402
     AmbiguousToolPath, receipt_target_path, resolve_tool_path, unique_tool_match,
 )
 from kernel_verdict import BLOCKED  # noqa: E402
-from kernel_tool_reply import tool_reply_for_call as _tool_reply_for_call  # noqa: E402
+from kernel_tool_reply import Outcome as _ToolReplyOutcome, tool_reply_for_call as _tool_reply_for_call  # noqa: E402
 from kernel_kill_attribution import (  # noqa: E402
     attribute_termination, model_facing_kill_line as _model_facing_kill_line)
 if os.environ.get("STATEFRAME_MUTATIONS", "off") in {"prebuilt", "authored"}:
@@ -725,7 +725,13 @@ class FileSet:
             entry = {"path": row["working_path"]}
         if not isinstance(entry, Mapping) and isinstance(row.get("path"), str):
             entry = {"path": row["path"]}
-        if isinstance(entry, Mapping) and isinstance(entry.get("path"), str):
+        empty_discovery_entry = (
+            row.get("scope_source") == "discovery"
+            and isinstance(entry, Mapping)
+            and entry.get("path") == ""
+        )
+        if (isinstance(entry, Mapping) and isinstance(entry.get("path"), str)
+                and not empty_discovery_entry):
             entry_path = normalize_repo_path(entry["path"], field="row.entry.path")
             entry_fn = (str(entry["fn"]) if isinstance(entry.get("fn"), str)
                         and entry.get("fn") else None)
@@ -1214,6 +1220,10 @@ def _is_product_path(relative: str, row: Mapping[str, object]) -> bool:
     except (ImportError, ValueError):
         return False
     parts = pathlib.PurePosixPath(path).parts
+    admitted_files = row.get("files")
+    if (row.get("scope_source") == "discovery"
+            and isinstance(admitted_files, Mapping) and path in admitted_files):
+        return True
     # The task cap applies to editable tests as well as ordinary product files.
     scope = row.get("task_file_scope")
     if isinstance(scope, (list, tuple)) and scope and path not in scope:
@@ -1256,6 +1266,8 @@ _row_is_product_path = _is_product_path
 # reaches the same scope by re-executing the same tool calls.
 EDIT_SCOPE_WIDEN_CAP = 24
 EDIT_SCOPE_WIDENED_KEY = "_edit_scope_widened"
+DISCOVERY_SCOPE_REFUSAL = (
+    "discovery scope is empty; no source path is admitted for writing")
 
 
 def _edit_scope_widen_enabled() -> bool:
@@ -7621,7 +7633,8 @@ def work(d, *, resume=None):
                                        entry_path=fileset.entry_path, entry_fn=fileset.entry_fn,
                                        target_fn=fn,
                                        product_paths=_declared_product_paths,
-                                       product_sizes=_product_sizes)
+                                       product_sizes=_product_sizes,
+                                       scope_source=d.get("scope_source"))
         _definition_mode = bool(_edit_contract and
                                 _edit_contract.get('mode') == 'declared_product_files')
         tool_surface = edit_surface(tool_surface, _edit_contract,
@@ -7823,6 +7836,9 @@ def work(d, *, resume=None):
             _claim_rule_rendered = render_claim_rule_first_turn(msgs, _entry_ticket_text)
             from kernel_project_instructions import install as install_project_instructions
             msgs = install_project_instructions(msgs)
+        if d.get("scope_source") == "discovery":
+            from kernel_edit_affordance import DISCOVERY_SCOPE_INSTRUCTION
+            msgs[1]["content"] += "\n\n" + DISCOVERY_SCOPE_INSTRUCTION
         if _lean_on:
             from kernel_lean import BoundedToolMessages
             msgs = BoundedToolMessages(msgs)
@@ -7968,6 +7984,8 @@ def work(d, *, resume=None):
             """Task caps apply to every path, before declared/created-file shortcuts."""
             if _task_scope_reason(relative) is not None:
                 return True
+            if d.get("scope_source") == "discovery":
+                return isinstance(relative, str) and relative not in fileset.paths
             if not (multifile and d.get("scoped_edits") is True):
                 return False
             if not isinstance(relative, str) or relative in fileset.paths:
@@ -7991,6 +8009,12 @@ def work(d, *, resume=None):
                 return _typed_edit_rejection(
                     "NOT_EDITABLE", root / relative, root=root,
                     hint=reason, include_hint=True, detail=reason)
+            if d.get("scope_source") == "discovery":
+                detail = DISCOVERY_SCOPE_REFUSAL
+                path = root / (relative if isinstance(relative, str) else "__invalid_path__")
+                return _typed_edit_rejection(
+                    "NOT_EDITABLE", path, root=root,
+                    hint=detail, include_hint=True, detail=detail)
             return _typed_edit_rejection(
                 "NOT_EDITABLE", root / relative, root=root,
                 hint=(f"{relative} is not listed in the EditAuthority's editable_paths. "
@@ -9588,6 +9612,7 @@ def work(d, *, resume=None):
                 _kernel_checkpoint.refuse_restored_setup(POC.parent, _error)
         from kernel_read_receipts import begin_read_attempt, finish_pending as _finish_read_attempt
         for step in step_indices(step + 1, _loop_limit):
+            _read_result = None
             _finish_read_attempt(measurement)
             _read_forwarded = False
             if _hook_wiring_for_run is not None and _pending_hook_action is not None:
@@ -11226,6 +11251,8 @@ def work(d, *, resume=None):
                                     if _task_scope_reason(relative) is not None:
                                         raise FileOperationRefused(
                                             "NEW_FILE_FORBIDDEN", _scope_rejection(relative))
+                                    if d.get("scope_source") == "discovery":
+                                        return False
                                     return (not new_files_forbidden(measurement)
                                             and _row_is_product_path(relative, d))
 
@@ -11666,7 +11693,8 @@ def work(d, *, resume=None):
                 _finish_edit_nturn()
                 if getattr(e, "boundary_recovery_stop", False):
                     raise
-                if _prepared.capture.transport_errors:
+                provider_failure = getattr(e, "failure_origin", None) == "provider"
+                if _prepared.capture.transport_errors and not provider_failure:
                     measurement.harness_fault("transport_exception", _prepared.capture.request_id)
                 # HARNESS_TRANSPORT or HARNESS_CONTRACT (audit 2026-10-05 #1): the run
                 # ends typed ONCE; no native_response_rejected / invalid_proposal.
@@ -11687,16 +11715,19 @@ def work(d, *, resume=None):
                     _location = _exception_location(e)
                     print(_location["traceback_tail"], file=sys.stderr, flush=True)
                     _reported_edits, _reported_checks = _reported_progress_counts(locals())
+                    failure_origin = getattr(e, "failure_origin", "harness")
+                    if failure_origin not in {"harness", "provider"}:
+                        failure_origin = "harness"
                     outcome = {
                         "result": _harness_outcome, "steps": _reported_steps(),
                         "edits": _reported_edits, "tests": _reported_checks,
                         "behaviour": "unverified",
-                        "error_type": type(e).__name__, "failure_origin": "harness",
+                        "error_type": type(e).__name__, "failure_origin": failure_origin,
                         **_location,
                     }
                     measurement.journal.emit(
                         "worker_exception", error_type=type(e).__name__,
-                        outcome=_harness_outcome, failure_origin="harness",
+                        outcome=_harness_outcome, failure_origin=failure_origin,
                         step=step, **_location)
                     finish_native_batch_transcript(msgs)
                     from kernel_read_receipts import finish_pending
@@ -12807,6 +12838,42 @@ def work(d, *, resume=None):
                     wait_for_pending_mutations,
                 )
                 if done_submit_enabled(measurement):
+                    if (d.get("scope_source") == "discovery" and not d.get("files")
+                            and not d.get(EDIT_SCOPE_WIDENED_KEY)):
+                        from kernel_done_is_submit_authority import (
+                            candidate_changed, discovery_no_change_paths,
+                        )
+                        if not candidate_changed(measurement):
+                            _discovery_paths = discovery_no_change_paths(
+                                root, getattr(bolt, "_receipts", ()), _done_summary)
+                            _discovery_message = ("No files changed. Candidate paths read: "
+                                f"{', '.join(_discovery_paths) if _discovery_paths else 'none'}. "
+                                "Rerun with --target PATH or --edit PATH to select a path.")
+                            _discovery_status = "NEEDS_WORK"
+                            _discovery_reply = _discovery_message
+                            if not _discovery_paths:
+                                _empty_refusal = ownerless_early_done_refusal(
+                                    measurement,
+                                    available_tools=getattr(
+                                        measurement, "_stateframe_current_request_tool_names", ()),
+                                )
+                                _discovery_reply = (
+                                    str(_empty_refusal["detail"]) if _empty_refusal else
+                                    "[host] done refused: no product file has been changed yet; "
+                                    "the discovery scope is empty."
+                                ) + "\n" + _discovery_message
+                            _discovery_terminal_fields = {
+                                "reason_code": "DISCOVERY_SCOPE_NEEDS_TARGET",
+                                "message": _discovery_reply,
+                                "candidate_paths": list(_discovery_paths),
+                            }
+                            measurement.system_outcome = "run_incomplete"
+                            bolt.receipt("done", _done_summary[:100] or "done", _done_summary,
+                                         _discovery_status, detail=_discovery_reply[:600])
+                            measurement.observe("done", _discovery_reply)
+                            msgs.append(_tool_reply_for_call(
+                                msgs, tool_call_id, _discovery_reply, no_id_role="user"))
+                            break
                     refusal = ownerless_early_done_refusal(
                         measurement,
                         available_tools=getattr(
@@ -14009,7 +14076,9 @@ def work(d, *, resume=None):
                         _scope_widen(relative)
                     if _outside_edit_scope(relative):
                         return (_task_scope_reason(relative)
-                                or "NOT_EDITABLE: path is outside editable_paths")
+                                or (str(_scope_rejection(relative))
+                                    if d.get("scope_source") == "discovery"
+                                    else "NOT_EDITABLE: path is outside editable_paths"))
                     return None
 
                 def _ep_write(path: pathlib.Path, data: bytes) -> tuple[bool, str | None]:
@@ -14122,7 +14191,10 @@ def work(d, *, resume=None):
                                         _scope_widen(_batch_relative)
                                     if _outside_edit_scope(_batch_relative):
                                         _batch_scope_rejection = _scope_rejection(_batch_relative)
-                                        _batch_reason = "NOT_EDITABLE: path is outside editable_paths"
+                                        _batch_reason = (
+                                            "NOT_EDITABLE: " + DISCOVERY_SCOPE_REFUSAL
+                                            if d.get("scope_source") == "discovery" else
+                                            "NOT_EDITABLE: path is outside editable_paths")
                         except (AmbiguousToolPath, OSError, ValueError) as _batch_error:
                             _batch_reason = str(_batch_error)
                         if _batch_reason:
@@ -15589,10 +15661,16 @@ def work(d, *, resume=None):
                 elif _scope_line:
                     delivered_obs = delivered_obs + "\n" + _scope_line
                 _scope_truth_line = None
+            _read_result = locals().get("_read_result")
+            _withheld_read = (line.startswith("read ") and _read_result in {"BINARY", "NON_REGULAR_FILE"})
+            _outcome = _ToolReplyOutcome.REFUSED if _withheld_read else None
+            _receipt = ({"code": "binary_file" if _read_result == "BINARY" else "non_regular_file"}
+                        if _withheld_read else None)
             # Read/search helpers have already applied their shared bounded delivery
             # contract.  A second unconditional character slice here made receipts and
             # model-visible bytes disagree, especially for long lines and later pages.
-            msgs.append(_tool_reply_for_call(msgs, tool_call_id, delivered_obs) if tool_call_id
+            msgs.append(_tool_reply_for_call(msgs, tool_call_id, delivered_obs,
+                                             outcome=_outcome, receipt=_receipt) if tool_call_id
                         else {"role": "user", "content": delivered_obs})
             _postgreen_advisory = locals().get("_pending_postgreen_nudge")
             if isinstance(_postgreen_advisory, str) and _postgreen_advisory:
@@ -15800,7 +15878,7 @@ def work(d, *, resume=None):
                     error_type=type(capture_error).__name__,
                     dispatch=False,
                 )
-        if continuation_workspace is not None:
+        if continuation_workspace is not None and not locals().get("_discovery_terminal_fields"):
             if target is None:
                 raise ValueError("continuation requires a declared public working path")
             _execution_root = root
@@ -16166,11 +16244,14 @@ def work(d, *, resume=None):
                           else None)
         from kernel_read_receipts import finish_pending
         finish_pending(measurement, error=sys.exc_info()[1])
-        measurement.finish({"result": _hook_terminal or _finish_result,
+        measurement.finish({"result": _hook_terminal or (
+                                "RUN_INCOMPLETE" if measurement.system_outcome == "run_incomplete"
+                                else _finish_result),
                             "steps": _reported_steps(),
                             "edits": _finish_progress.edits,
                             "tests": _finish_progress.checks,
                             "behaviour": behaviour,
+                            **locals().get("_discovery_terminal_fields", {}),
                             "completion": (measurement._last_completion_decision.to_dict()
                                             if measurement._last_completion_decision is not None else None)})
         _finish_progress = _progress_facts()
@@ -16252,7 +16333,8 @@ def work(d, *, resume=None):
             return _attach_env_receipt(
                 dict(fn=fn, result=_terminal_result, steps=_reported_steps(),
                      edits=_finish_progress.edits, tests=_finish_progress.checks,
-                     behaviour=behaviour, **_done_facts_fields,
+                     behaviour=behaviour, **locals().get("_discovery_terminal_fields", {}),
+                     **_done_facts_fields,
                       **_done_submit_fields, **_multi_result, **_unit_terminal), measurement)
         if (_done_terminal is None and harness_suspect and not ok
                 and behaviour != "PASS_behavioural"):

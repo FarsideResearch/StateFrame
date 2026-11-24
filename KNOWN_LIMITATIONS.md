@@ -2,11 +2,17 @@
 
 ## In-place delivery while the repository is being edited
 
-`--in-place` checks every destination before it writes the first file, then writes
-the files one after another. If another program edits a destination between two of
-those writes, the run stops with an apply error and exit status 2 and keeps that
-edit, but files written earlier in the same delivery stay in place. The error names
-the conflicting file. Compare the repository with `final.diff` in the run directory.
+`--in-place` stages the new contents of every file it will create or replace beside
+its destination, then checks every destination and parent again before the first
+replacement. A conflict during staging leaves the destination files unchanged and
+triggers cleanup of the staged files. Staging requires disk space for the entire
+set of new contents. A crash during staging can leave temporary files for the
+whole set.
+
+Once replacements begin, another program can still edit a later destination before
+its per-path check. The run stops with an apply error and exit status 2, keeps that
+edit, and leaves earlier replacements in place. The error names the conflict and
+paths already applied. Compare the repository with `final.diff` in the run directory.
 
 ## Opt-in unit coalescing: evidence and escalation
 
@@ -253,6 +259,8 @@ This release has an early five-run result on the previously stalled multi-file r
 ## Multi-file source and repeated reads
 
 With `STATEFRAME_CODE_BOOKMARKS` on by default, the frame offers current editable product source before repeated-read and navigation bookkeeping. Each editable product path has a coverage line showing which source ranges are in view and whether the source changed since its last read when that comparison is available. Files of at most 60 lines and 2 KiB can be shown whole when the request budget allows. Very large repositories still get selected windows, not every whole file. Bookmarks use a current failing check to keep its test code and related product source in view, but need a usable source location. Setup and collection failures, and failures without a `file:line`, do not activate them. Set `STATEFRAME_CODE_BOOKMARKS=off` to restore 0.2.1 behavior byte for byte.
+
+The `read` tool reports files containing a NUL byte as binary and withholds their contents. UTF-16 files are reported as binary.
 
 Measured so far on one multi-file task that had stopped on every previously observed build: all five current live runs completed and were submitted, with all 14 tests passing (three on an earlier build of this release, two on the release code). This is an early result from five runs, not a general success rate. In an offline rebuild of one recorded request, the frame showed 11 of 11 product files whole, up from 1 of 11; complete request size fell from 85,664 to 77,017 bytes, below the 82,026-byte ceiling.
 

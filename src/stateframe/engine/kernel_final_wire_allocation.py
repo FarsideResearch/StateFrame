@@ -525,8 +525,9 @@ def _build_qualified_request(capture, runtime, body, *, endpoint, key, deadline,
     # Keep classification metadata on the candidate for allocation readers, but
     # prove capacity and bind the seal against the exact provider wire copy.
     wire_body = _finalize_provider_request_body(capture, body, provider_capabilities)
+    frozen_inputs = snapshot_revalidation_inputs(candidate, context, wire_body)
     budget = reconcile_frozen_budget(candidate, context, wire_body,
-                                    frozen_inputs=snapshot_revalidation_inputs(candidate, context, wire_body))
+                                    frozen_inputs=frozen_inputs)
     if budget.get("final_validation_failures"):
         log_seal_violation("candidate failed final budget/source/menu proof",
                            ",".join(budget["final_validation_failures"]))
@@ -546,9 +547,9 @@ def _build_qualified_request(capture, runtime, body, *, endpoint, key, deadline,
     if (getattr(candidate, "_capacity_retry_compact_tool_prose", False)
             and candidate._request_measurement.body_sha256
             != "sha256:" + (wire_digest or hashlib.sha256(wire).hexdigest())):
+        frozen_inputs = snapshot_revalidation_inputs(candidate, context, body)
         budget = reconcile_frozen_budget(
-            candidate, context, body,
-            frozen_inputs=snapshot_revalidation_inputs(candidate, context, body),
+            candidate, context, body, frozen_inputs=frozen_inputs,
         )
         if budget.get("final_validation_failures"):
             log_seal_violation("capacity retry failed final provider budget proof",
@@ -603,7 +604,8 @@ def _build_qualified_request(capture, runtime, body, *, endpoint, key, deadline,
         capture_context(candidate, context, body, side_call=False))
     try:
         check = check_wire(wire, candidate._wire_truth_context, emit=candidate.journal.emit,
-                           attempt=1, allow_done_repair=False)
+                           attempt=1, allow_done_repair=False, capture=candidate,
+                           frozen_inputs=frozen_inputs)
     except WireTruthBlocked as blocked:
         # Preserve source placement from the rejected, unsent candidate. The
         # repair path must reassemble and seal a new request before dispatch.

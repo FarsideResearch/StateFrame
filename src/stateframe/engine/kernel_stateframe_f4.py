@@ -232,7 +232,8 @@ def _refs(value: object, *, limit: int = 8) -> list[str]:
     return result
 
 
-def _revision(frame: Mapping[str, object], path: str | None = None) -> str:
+def _revision(frame: Mapping[str, object], path: str | None = None, *,
+              compact_many: bool = False) -> str:
     revisions = frame.get("artifact_revisions")
     if isinstance(revisions, Mapping):
         if path and revisions.get(path) is not None:
@@ -241,7 +242,10 @@ def _revision(frame: Mapping[str, object], path: str | None = None) -> str:
         if len(values) == 1:
             return values[0]
         if values:
-            return "|".join(sorted(dict.fromkeys(values)))
+            joined = "|".join(sorted(dict.fromkeys(values)))
+            if compact_many:
+                return "sha256:" + hashlib.sha256(joined.encode("utf-8")).hexdigest()
+            return joined
     for key in ("revision", "current_revision", "workspace_revision", "source_revision"):
         value = frame.get(key)
         if value not in (None, ""):
@@ -580,7 +584,8 @@ def _claim(name: str, *, state: str, revision: str, ran: Sequence[str], evidence
 def project_f4_state(frame: Mapping[str, object] | None, *,
                      active_decisions: object = None, tools: object = None,
                      selectors: Sequence[str] = (), path: str | None = None,
-                     current_product_revision: str | None = None) -> dict[str, object]:
+                     current_product_revision: str | None = None,
+                     compact_many_revisions: bool = False) -> dict[str, object]:
     """Project the allowlisted, revision-bound agent-facing state.
 
     Raw host fields deliberately never pass through this function.  The output
@@ -592,7 +597,7 @@ def project_f4_state(frame: Mapping[str, object] | None, *,
             isinstance(current_product_revision, str)
             and current_product_revision.strip()):
         raise ValueError("current_product_revision must be a nonempty string")
-    revision = _revision(source, path)
+    revision = _revision(source, path, compact_many=compact_many_revisions)
     check_revision = (current_product_revision.strip() if current_product_revision is not None
                       else revision)
     selector_values = _selector_values(source, selectors)

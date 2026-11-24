@@ -2129,6 +2129,24 @@
       "witness_assertion": "assert ordinary[1] == disabled[1]"
     },
     {
+      "scenario_id": "test_public_test_verdict_fact_dedupe_test_scripted_session_parity_within_same_build",
+      "nodeid": "tests/test_public_test_verdict_fact_dedupe.py::test_scripted_session_parity_within_same_build",
+      "item_nodeids": [
+        "tests/test_public_test_verdict_fact_dedupe.py::test_scripted_session_parity_within_same_build"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [
+        "host_sandbox"
+      ],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert first_requests == second_requests"
+    },
+    {
       "scenario_id": "test_provider_body_test_shipped_profile_llama_body_is_byte_identical_to_unmodified_parent_code",
       "nodeid": "tests/test_provider_body.py::test_shipped_profile_llama_body_is_byte_identical_to_unmodified_parent_code",
       "item_nodeids": [

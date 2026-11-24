@@ -114,3 +114,16 @@ def test_empty_and_non_utf8_problems_file_are_clean(tmp_path):
         path.write_bytes(body)
         problems = runner._problems_summary(tmp_path)
         assert problems["errors"] == 0 and "unknown" not in problems
+
+
+def test_chat_and_inspect_show_incomplete_diagnostics(tmp_path):
+    import json
+    from stateframe import chat, inspect_run
+    summary = {"problems": {"errors": 0, "warnings": 0, "by_cause": {}, "self_errors": 2}}
+    path = tmp_path / "summary.json"
+    path.write_text(json.dumps(summary))
+    lines = []
+    chat._print_problems_line(path, lines.append)
+    assert lines == ["[stateframe] problem diagnostics incomplete: 2 self-errors"]
+    (tmp_path / "wire").mkdir(exist_ok=True)
+    assert "problems: 0 errors, 0 warnings (incomplete)" in inspect_run.overview(tmp_path)

@@ -27,6 +27,7 @@ Layout:
 """
 from __future__ import annotations
 
+from collections import deque
 import ast
 import logging
 import math
@@ -145,19 +146,65 @@ def _function_body_bag(node) -> dict:
     """Identifier bag for one function: its own name, parameters, and every Name /
     Attribute / called symbol inside it (nested functions included — they are also
     indexed separately, so a name appearing in both is deliberate)."""
-    bag: dict = {}
-    _add(bag, words(node.name), 3.0)
-    args = node.args
-    for a in list(args.args) + list(args.posonlyargs) + list(args.kwonlyargs):
-        _add(bag, words(a.arg), 1.5)
-    for sub in ast.walk(node):
-        if isinstance(sub, ast.Name):
-            _add(bag, words(sub.id), 1.0)
-        elif isinstance(sub, ast.Attribute):
-            _add(bag, words(sub.attr), 1.2)
-        elif isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and sub is not node:
-            _add(bag, words(sub.name), 1.5)
-    return bag
+    return _collect_tree_facts(node)[-1][node]
+
+
+def _collect_tree_facts(tree):
+    """Collect file facts and function bags in one breadth-first AST walk.
+
+    Each node contributes to its enclosing function bags once, avoiding a full
+    subtree walk per function. Queue order matches ast.walk, preserving bag and
+    file-token insertion order.
+    """
+    file_bag: dict = {}
+    import_words: set[str] = set()
+    modules: set[str] = set()
+    module_terms: list[tuple[set[str], float]] = []
+    body_bags: dict = {}
+    pending = deque([(tree, ())])
+    while pending:
+        node, owners = pending.popleft()
+        child_owners = owners
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            name_words = words(node.name)
+            _add(file_bag, name_words, 2.5)
+            _add(file_bag, words((ast.get_docstring(node) or "")[:300]), 1.5)
+            for owner in owners:
+                _add(body_bags[owner], name_words, 1.5)
+            bag: dict = {}
+            _add(bag, name_words, 3.0)
+            args = node.args
+            for arg in list(args.args) + list(args.posonlyargs) + list(args.kwonlyargs):
+                _add(bag, words(arg.arg), 1.5)
+            body_bags[node] = bag
+            child_owners = owners + (node,)
+        elif isinstance(node, ast.ClassDef):
+            name_words = words(node.name)
+            _add(file_bag, name_words, 2.5)
+            _add(file_bag, words((ast.get_docstring(node) or "")[:300]), 1.5)
+            module_terms.append((name_words, 2.5))
+            for owner in owners:
+                _add(body_bags[owner], name_words, 1.5)
+        elif isinstance(node, ast.Name):
+            name_words = words(node.id)
+            _add(file_bag, name_words, 1.0)
+            module_terms.append((name_words, 0.8))
+            for owner in owners:
+                _add(body_bags[owner], name_words, 1.0)
+        elif isinstance(node, ast.Attribute):
+            attr_words = words(node.attr)
+            for owner in owners:
+                _add(body_bags[owner], attr_words, 1.2)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                import_words.update(words(alias.name))
+                modules.add(alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            import_words.update(words(node.module))
+            modules.add(node.module.split(".")[0])
+        for child in ast.iter_child_nodes(node):
+            pending.append((child, child_owners))
+    return file_bag, import_words, modules, module_terms, body_bags
 
 
 def _extract_file_facts(path: str, source: str) -> dict:
@@ -172,21 +219,9 @@ def _extract_file_facts(path: str, source: str) -> dict:
         return {"status": "syntax_error", "file_bag": file_bag,
                 "imports": [], "records": []}
 
-    import_words: set = set()
-    modules: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            _add(file_bag, words(node.name), 2.5)
-            _add(file_bag, words((ast.get_docstring(node) or "")[:300]), 1.5)
-        elif isinstance(node, ast.Name):
-            _add(file_bag, words(node.id), 1.0)
-        elif isinstance(node, ast.Import):
-            for alias in node.names:
-                import_words.update(words(alias.name))
-                modules.add(alias.name.split(".")[0])
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            import_words.update(words(node.module))
-            modules.add(node.module.split(".")[0])
+    tree_file_bag, import_words, modules, module_terms, body_bags = _collect_tree_facts(tree)
+    for word, weight in tree_file_bag.items():
+        file_bag[word] = max(file_bag.get(word, 0.0), weight)
     _add(file_bag, words((ast.get_docstring(tree) or "")[:300]), 2.0)
 
     records: list[FuncRecord] = []
@@ -201,7 +236,7 @@ def _extract_file_facts(path: str, source: str) -> dict:
             func_id=f"{path}::{qualname}::{start}", path=path,
             name=node.name, qualname=qualname, lineno=start,
             end_lineno=end, loc=max(1, end - start + 1), is_module=False,
-            ident_bag=_function_body_bag(node), doc_bag=doc_bag,
+            ident_bag=body_bags[node], doc_bag=doc_bag,
             construct_counts=_count_constructs(body),
             parent_path_words=path_words, parent_import_words=import_words,
         ))
@@ -211,11 +246,8 @@ def _extract_file_facts(path: str, source: str) -> dict:
     mod_lines = [line for number, line in enumerate(lines, 1) if number not in covered]
     mod_bag: dict = {}
     _add(mod_bag, import_words, 1.0)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ClassDef):
-            _add(mod_bag, words(node.name), 2.5)
-        elif isinstance(node, ast.Name):
-            _add(mod_bag, words(node.id), 0.8)
+    for tokens, weight in module_terms:
+        _add(mod_bag, tokens, weight)
     mod_doc: dict = {}
     _add(mod_doc, words((ast.get_docstring(tree) or "")[:400]), 2.0)
     records.append(FuncRecord(
@@ -312,7 +344,8 @@ def score_function(qwords, cls, rec: FuncRecord, fidx: FuncIndex):
          that is nothing but the implicated construct outranks one that merely
          mentions it.
     """
-    func_lex = _bm25(qwords, rec.bag, fidx.df, fidx.n)
+    func_bag = rec.bag
+    func_lex = _bm25(qwords, func_bag, fidx.df, fidx.n)
     parent_bag = fidx.file_idx.get(rec.path, {})
     parent_lex = _bm25(qwords, parent_bag, fidx.file_df, fidx.file_n)
 
@@ -323,7 +356,7 @@ def score_function(qwords, cls, rec: FuncRecord, fidx: FuncIndex):
 
     score = (W_FUNC_LEX * func_lex + W_PARENT_LEX * parent_lex
              + abs_term + den_term)
-    matched = sorted(w for w in qwords if w in rec.bag)
+    matched = sorted(w for w in qwords if w in func_bag)
     ev = {
         "func_lex": round(func_lex, 3),
         "parent_lex": round(parent_lex, 3),

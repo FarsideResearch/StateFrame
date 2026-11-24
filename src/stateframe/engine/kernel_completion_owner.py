@@ -5558,10 +5558,35 @@ def _contract_host_text(messages: object) -> str:
     )
 
 
+def _contract_evidence_pin_text(messages: object) -> str:
+    """Host-authored pin text, excluding tool replies and authority payloads."""
+    if not isinstance(messages, Sequence) or isinstance(messages, (str, bytes, bytearray)):
+        return ""
+    strip_authority = None
+    if _pin_dedup_enabled_for_wire():
+        from kernel_stateframe_final_message import _strip_authority_overlay_payloads
+        strip_authority = _strip_authority_overlay_payloads
+    contents: list[str] = []
+    for message in messages:
+        if not isinstance(message, Mapping) or message.get("role") not in {"system", "user"}:
+            continue
+        content = str(message.get("content") or "")
+        if strip_authority is not None:
+            content = strip_authority(content)
+        contents.append(content)
+    return "\n".join(contents)
+
+
+def _pin_dedup_enabled_for_wire() -> bool:
+    from kernel_evidence_pin import pin_dedup_enabled
+    return pin_dedup_enabled()
+
+
 def _framefit5_owner_protocol(messages: object) -> Mapping[str, object] | None:
     """Read the typed owner protocol carried inside a FRAMEFIT5 StateFrame."""
     if not isinstance(messages, Sequence) or isinstance(messages, (str, bytes, bytearray)):
         return None
+    wire_messages = messages
     from kernel_cache_layout_view import semantic_messages
     messages = semantic_messages(messages)
     for message in messages:
@@ -5579,7 +5604,30 @@ def _framefit5_owner_protocol(messages: object) -> Mapping[str, object] | None:
         protocol = framefit5.get("owner_protocol") if isinstance(framefit5, Mapping) else None
         if (isinstance(protocol, Mapping)
                 and protocol.get("schema") == "stateframe-framefit5-owner/1"):
-            if (not protocol.get("continuation_limits")
+            resolved_protocol = dict(protocol)
+            from kernel_evidence_pin import pin_dedup_enabled
+            if (pin_dedup_enabled()
+                    and any(isinstance(row, Mapping)
+                            and row.get("name") == "stateframe_page_log_final"
+                            for row in wire_messages)):
+                from kernel_stateframe_final_message import (
+                    PAGE_LOG_FINAL_MESSAGE_NAME, _authority_evidence_pins,
+                )
+                authority_pins = [
+                    pin
+                    for row in wire_messages
+                    if isinstance(row, Mapping)
+                    and row.get("name") == PAGE_LOG_FINAL_MESSAGE_NAME
+                    and isinstance(row.get("content"), str)
+                    for pin in _authority_evidence_pins(row["content"])
+                ]
+                # PAGE_LOG materializes owner fields into the semantic frame. Quoted
+                # file text can carry an overlay too, so exactly one physical overlay
+                # must hold the typed pin; every other block is ordinary text.
+                typed_pin = resolved_protocol.get("evidence_pin")
+                if authority_pins.count(typed_pin) != 1:
+                    resolved_protocol.pop("evidence_pin", None)
+            if (not resolved_protocol.get("continuation_limits")
                     and isinstance(framefit5.get("subframe_scope"), Mapping)):
                 # Final cache layout moves the host's serialized limit into its
                 # authority overlay. Recover that exact child-only value for the
@@ -5587,8 +5635,8 @@ def _framefit5_owner_protocol(messages: object) -> Mapping[str, object] | None:
                 line = next((value.strip() for value in _contract_host_text(messages).splitlines()
                              if value.startswith("[CONTINUATION LIMITS |")), None)
                 if line is not None:
-                    return {**protocol, "continuation_limits": line}
-            return protocol
+                    return {**resolved_protocol, "continuation_limits": line}
+            return resolved_protocol
     return None
 
 
@@ -5608,8 +5656,13 @@ def _wire_evidence_pin(messages: object) -> tuple[str | None, int]:
     protocol = _framefit5_owner_protocol(messages)
     if protocol is not None:
         value = protocol.get("evidence_pin")
-        return (value, 1) if isinstance(value, str) and value else (None, 0)
-    blocks = well_formed_pin_blocks(_contract_host_text(messages))
+        if isinstance(value, str) and value:
+            return value, 1
+        if not _pin_dedup_enabled_for_wire():
+            return None, 0
+    text = (_contract_evidence_pin_text(messages) if _pin_dedup_enabled_for_wire()
+            else _contract_host_text(messages))
+    blocks = well_formed_pin_blocks(text)
     return (blocks[-1] if blocks else None), len(blocks)
 
 
@@ -5618,8 +5671,13 @@ def _wire_pin_is_typed(messages: object, typed: str) -> bool:
     protocol = _framefit5_owner_protocol(messages)
     if protocol is not None:
         value = protocol.get("evidence_pin")
-        return isinstance(value, str) and value == typed
-    return typed_pin_is_sole_wire_block(_contract_host_text(messages), typed)
+        if isinstance(value, str) and value:
+            return value == typed
+        if not _pin_dedup_enabled_for_wire():
+            return False
+    text = (_contract_evidence_pin_text(messages) if _pin_dedup_enabled_for_wire()
+            else _contract_host_text(messages))
+    return typed_pin_is_sole_wire_block(text, typed)
 
 
 def _wire_continuation_limits(messages: object) -> str | None:

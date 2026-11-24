@@ -20,8 +20,9 @@ import json
 import os
 import re
 import sys
+import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar
 from kernel_obligation_assess import UnavailableEvidence
@@ -181,16 +182,156 @@ def public_test_verdict_fact_mode(value: object = None) -> str:
         return "off"
 
 
+def _freeze_public_test_marker_value(value: object):
+    """Copy the small JSON-shaped verdict projection with exact Python types."""
+    value_type = type(value)
+    if value is None:
+        return ("none",)
+    if value_type is bool:
+        return ("bool", value)
+    if value_type is int:
+        return ("int", value)
+    if value_type is float:
+        return ("float", value.hex())
+    if value_type is str:
+        return ("str", value)
+    if value_type is bytes:
+        return ("bytes", value)
+    if value_type is list:
+        children = tuple(_freeze_public_test_marker_value(item) for item in value)
+        if any(item is None for item in children):
+            return None
+        return ("list", children)
+    if value_type is tuple:
+        children = tuple(_freeze_public_test_marker_value(item) for item in value)
+        if any(item is None for item in children):
+            return None
+        return ("tuple", children)
+    if value_type is dict:
+        if any(type(key) is not str for key in value):
+            return None
+        children = tuple(
+            (key, _freeze_public_test_marker_value(value[key]))
+            for key in sorted(value)
+        )
+        if any(item is None for _key, item in children):
+            return None
+        return ("dict", children)
+    return None
+
+
+def _public_test_marker_binding(binding: object):
+    """Keep compact binding fields; reuse revisions already made from file maps."""
+    if binding is None:
+        return ("none",)
+    if not isinstance(binding, Mapping):
+        return None
+    compact: dict[str, object] = {}
+    for key, value in binding.items():
+        if type(key) is not str:
+            return None
+        if key in {"product_files", "harness_files"}:
+            if not isinstance(value, Mapping):
+                return None
+            revision_key = ("product_revision" if key == "product_files"
+                            else "test_harness_revision")
+            # Successful optimized normalization has already hashed the exact
+            # filtered map and returned that revision on the verdict binding.
+            # Rewalking the file map here would duplicate its per-call work.
+            if type(binding.get(revision_key)) is not str:
+                return None
+            continue
+        compact[key] = value
+    return _freeze_public_test_marker_value(compact)
+
+
+def _public_test_verdict_fact_marker(verdict: object, binding: object):
+    """Return a detached content key, or None to emit without deduplication."""
+    try:
+        to_dict = getattr(verdict, "to_dict", None)
+        if not callable(to_dict):
+            return None
+        verdict_value = _freeze_public_test_marker_value(to_dict())
+        binding_value = _public_test_marker_binding(binding)
+        verdict_binding = _public_test_marker_binding(getattr(verdict, "binding", None))
+        receipts = getattr(verdict, "trusted_receipts", ())
+        if type(receipts) is not tuple:
+            return None
+        receipt_values = []
+        for receipt in receipts:
+            receipt_value = {
+                "selectors": getattr(receipt, "selectors", None),
+                "binding": _public_test_marker_binding(getattr(receipt, "binding", None)),
+                "after_binding": _public_test_marker_binding(
+                    getattr(receipt, "after_binding", None)),
+                "exit_code": getattr(receipt, "exit_code", None),
+                "binding_stable": getattr(receipt, "binding_stable", None),
+                "producer": getattr(receipt, "producer", None),
+                "kind": getattr(receipt, "kind", None),
+            }
+            if (receipt_value["binding"] is None
+                    or receipt_value["after_binding"] is None):
+                return None
+            frozen_receipt = _freeze_public_test_marker_value(receipt_value)
+            if frozen_receipt is None:
+                return None
+            receipt_values.append(frozen_receipt)
+        if (verdict_value is None or binding_value is None
+                or verdict_binding is None):
+            return None
+        return (
+            "public-test-verdict-fact/1", verdict_value, binding_value,
+            verdict_binding, tuple(receipt_values),
+        )
+    except Exception:
+        return None
+
+
 def _emit_public_test_verdict_fact_event(
         runtime: object, kind: str, **fields: object,
-) -> None:
+) -> object | None:
     try:
         emit = getattr(getattr(runtime, "journal", None), "emit", None)
         if callable(emit):
-            emit(kind, producer="kernel_stateframe_runtime", dispatch=False, **fields)
+            return emit(kind, producer="kernel_stateframe_runtime", dispatch=False, **fields)
     except Exception:
         # Verdict telemetry must never affect the authoritative result.
-        pass
+        return None
+    return None
+
+
+def _emit_changed_public_test_verdict_fact(
+        runtime: object, verdict: object, binding: object,
+) -> None:
+    marker = _public_test_verdict_fact_marker(verdict, binding)
+    lock = getattr(runtime, "_public_test_verdict_fact_lock", None)
+    if lock is None:
+        lock = threading.RLock()
+        setattr(runtime, "_public_test_verdict_fact_lock", lock)
+    journal = getattr(runtime, "journal", None)
+    checkpoint_sequence = getattr(journal, "_last_durable_checkpoint_sequence", -1)
+    if type(checkpoint_sequence) is not int:
+        checkpoint_sequence = -1
+    with lock:
+        previous = getattr(runtime, "_public_test_verdict_fact_marker", None)
+        suppressed = (marker is not None and isinstance(previous, tuple) and len(previous) == 3
+                      and marker == previous[0] and previous[2] is journal
+                      and type(previous[1]) is int and previous[1] > checkpoint_sequence)
+    if suppressed:
+        try: getattr(journal, "flush_pending", lambda *_: None)("public_test_verdict_fact_normalized")
+        except Exception: pass
+        return
+    emitted = _emit_public_test_verdict_fact_event(
+        runtime, "public_test_verdict_fact_normalized")
+    if (marker is not None and emitted is not None
+            and getattr(runtime, "journal", None) is journal):
+        sequence = emitted.get("sequence") if isinstance(emitted, Mapping) else None
+        if type(sequence) is int:
+            with lock:
+                previous = getattr(runtime, "_public_test_verdict_fact_marker", None)
+                if (not isinstance(previous, tuple) or len(previous) != 3 or previous[2] is not journal
+                        or type(previous[1]) is not int or sequence > previous[1]):
+                    setattr(runtime, "_public_test_verdict_fact_marker", (marker, sequence, journal))
 
 
 def _framefit5_error_detail(
@@ -5614,6 +5755,8 @@ class StateFrameRuntime:
         # epoch so an admitted edit always forces a fresh binding.
         self._binding_epoch = 0
         self._binding_cache: dict[str, object] | None = None
+        self._public_test_verdict_fact_marker = None
+        self._public_test_verdict_fact_lock = threading.RLock()
         self._workspace_snapshot_cache: dict[tuple[str, str], dict[str, str | None]] = {}
         self.post_edit_tracker = (
             PostEditTracker(Path(owner.root))
@@ -5933,6 +6076,8 @@ class StateFrameRuntime:
             if receipts is not None:
                 state["test_receipts"] = receipts.value
         state.pop("_completion_binding_generation", None)
+        state.pop("_public_test_verdict_fact_marker", None)
+        state.pop("_public_test_verdict_fact_lock", None)
         # A resumed attempt opens its own publication port and workspace fence.
         state.pop("_live_decision_panels", None)
         state.pop("_coverage_workspace_projection", None)
@@ -5940,6 +6085,10 @@ class StateFrameRuntime:
 
     def __setstate__(self, state):
         self.__dict__.update(state)
+        # Request publication state belongs to this process attempt, never to
+        # the restored runtime snapshot.
+        self._public_test_verdict_fact_marker = None
+        self._public_test_verdict_fact_lock = threading.RLock()
         receipts = state.get("test_receipts")
         if _pinned_completion_enabled() and type(receipts) is list:
             from kernel_host_cache import completion_receipts
@@ -6584,12 +6733,23 @@ class StateFrameRuntime:
         if self.frame_series is not None:
             self.frame_series.bind_target(relative, selected_symbol or getattr(self.owner, "fn", ""))
         self._refresh_bound_edit_target()
-        receipt = self.owner.receipt(
+        self.owner.receipt(
             "localize", reason, relative, "BOUND",
             "model-admitted target bound",
-            path=relative, symbol=str(getattr(self.owner, "fn", "") or ""),
-            evidence_refs=[str(ref) for ref in evidence_refs if str(ref)][:32],
+            target_path=relative,
         )
+        owner_receipts = getattr(self.owner, "_receipts", ())
+        receipt = (
+            copy.deepcopy(owner_receipts[-1])
+            if isinstance(owner_receipts, Sequence)
+            and owner_receipts and isinstance(owner_receipts[-1], Mapping)
+            else {}
+        )
+        receipt.update({
+            "path": relative,
+            "symbol": str(getattr(self.owner, "fn", "") or ""),
+            "evidence_refs": [str(ref) for ref in evidence_refs if str(ref)][:32],
+        })
         event = self.journal.emit(
             "target_bound", producer="kernel_target_localization",
             path=relative, symbol=str(getattr(self.owner, "fn", "") or ""),
@@ -14119,6 +14279,14 @@ class StateFrameRuntime:
         verdict, fact = self._public_test_verdict_fact()
         return copy.deepcopy(verdict) if fact is not None else verdict
 
+    def _reset_public_test_verdict_fact_marker(self) -> None:
+        lock = getattr(self, "_public_test_verdict_fact_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._public_test_verdict_fact_lock = lock
+        with lock:
+            self._public_test_verdict_fact_marker = None
+
     def _completion_test_identity(self, provider, root: Path):
         """Acquire fresh authority and a reuse key when the provider can prove one."""
         from kernel_verdict_identity import RunIdentity, RunIdentityProvider
@@ -14250,8 +14418,8 @@ class StateFrameRuntime:
                 verdict = authority
 
         if fallback_reason is None and mode == "on":
-            _emit_public_test_verdict_fact_event(
-                self, "public_test_verdict_fact_normalized")
+            _emit_changed_public_test_verdict_fact(
+                self, verdict, authority.current_binding)
         elif fallback_reason is None and mode == "shadow":
             _emit_public_test_verdict_fact_event(
                 self, "public_test_verdict_fact_shadow_checked")
@@ -17795,7 +17963,6 @@ class StateFrameRuntime:
     def _catalog_receipts(self) -> tuple[dict[str, object], ...]:
         """Collect only host-owned receipt streams accepted by Catalog A."""
         task_id, scope = self._catalog_task_scope()
-        receipts: list[dict[str, object]] = []
         streams = (
             ("owner", getattr(self.owner, "_receipts", ())),
             ("tests", getattr(self, "test_receipts", ())),
@@ -17805,62 +17972,74 @@ class StateFrameRuntime:
         row = getattr(self.owner, "task_row", {})
         if isinstance(row, Mapping):
             streams += (("task-catalog", row.get("catalog_receipts", ())),)
-        for source, stream in streams:
-            if not isinstance(stream, Sequence) or isinstance(stream, (str, bytes, bytearray)):
-                continue
-            for offset, value in enumerate(stream):
-                if not isinstance(value, Mapping) or not self._catalog_supported_receipt(value):
+
+        def admitted_receipts() -> Iterator[Mapping[str, object]]:
+            admitted_count = 0
+            for source, stream in streams:
+                if not isinstance(stream, Sequence) or isinstance(stream, (str, bytes, bytearray)):
                     continue
-                receipt = copy.deepcopy(dict(value))
-                receipt.setdefault("receipt_id", f"stateframe-catalog:{source}:{offset}")
-                sequence = receipt.get("admitted_seq", receipt.get("sequence", receipt.get("seq")))
-                if type(sequence) is not int or sequence < 0:
-                    receipt["seq"] = len(receipts) + 1
-                host_admitted = self._catalog_host_admitted(value, source)
-                if host_admitted:
-                    receipt["host_admitted"] = True
-                else:
-                    # Preserve the observation as history, but do not let a
-                    # model claim seed task completion debt.
-                    receipt["host_admitted"] = False
-                    receipt.pop("required_by", None)
-                    receipt.pop("required_for", None)
-                    receipt["scope"] = "diagnostic"
-                    raw_unknowns = receipt.get("unknowns", receipt.get("unknown"))
-                    if isinstance(raw_unknowns, Mapping):
-                        raw_unknowns = (raw_unknowns,)
-                    if isinstance(raw_unknowns, Sequence) and not isinstance(raw_unknowns, (str, bytes, bytearray)):
-                        sanitized = []
-                        for unknown in raw_unknowns:
-                            if isinstance(unknown, Mapping):
-                                item = copy.deepcopy(dict(unknown))
-                                item["required_by"] = ()
-                                item["blocking_scope"] = "diagnostic"
-                                sanitized.append(item)
-                            else:
-                                sanitized.append(unknown)
-                        receipt["unknowns"] = sanitized
-                required = receipt.get("required_by", receipt.get("required_for"))
-                if host_admitted and required in (None, (), []):
-                    if source in {"tests", "host-checks", "host-repair-checks"} or receipt.get("kind") in {
-                        "check", "test", "test_subprocess_completed", "verification",
-                    }:
-                        receipt["required_by"] = [task_id]
-                if host_admitted and receipt.get("required_by") not in (None, (), []):
-                    receipt.setdefault("scope", scope)
-                else:
-                    # Exploration and failed/no-op history remain diagnostic;
-                    # they are not silently promoted to task completion debt.
-                    receipt.setdefault("scope", "diagnostic")
-                receipts.append(receipt)
+                for offset, value in enumerate(stream):
+                    if not isinstance(value, Mapping) or not self._catalog_supported_receipt(value):
+                        continue
+                    # Keep admission lazy: coalescing deep-copies each row before
+                    # advancing a Sequence that may reuse nested values.
+                    receipt = dict(value)
+                    receipt.setdefault("receipt_id", f"stateframe-catalog:{source}:{offset}")
+                    sequence = receipt.get("admitted_seq", receipt.get("sequence", receipt.get("seq")))
+                    if type(sequence) is not int or sequence < 0:
+                        receipt["seq"] = admitted_count + 1
+                    host_admitted = self._catalog_host_admitted(value, source)
+                    if host_admitted:
+                        receipt["host_admitted"] = True
+                    else:
+                        # Preserve the observation as history, but do not let a
+                        # model claim seed task completion debt.
+                        receipt["host_admitted"] = False
+                        receipt.pop("required_by", None)
+                        receipt.pop("required_for", None)
+                        receipt["scope"] = "diagnostic"
+                        raw_unknowns = receipt.get("unknowns", receipt.get("unknown"))
+                        if isinstance(raw_unknowns, Mapping):
+                            raw_unknowns = (raw_unknowns,)
+                        if isinstance(raw_unknowns, Sequence) and not isinstance(raw_unknowns, (str, bytes, bytearray)):
+                            sanitized = []
+                            for unknown in raw_unknowns:
+                                if isinstance(unknown, Mapping):
+                                    item = copy.deepcopy(dict(unknown))
+                                    item["required_by"] = ()
+                                    item["blocking_scope"] = "diagnostic"
+                                    sanitized.append(item)
+                                else:
+                                    sanitized.append(unknown)
+                            receipt["unknowns"] = sanitized
+                    required = receipt.get("required_by", receipt.get("required_for"))
+                    if host_admitted and required in (None, (), []):
+                        if source in {"tests", "host-checks", "host-repair-checks"} or receipt.get("kind") in {
+                            "check", "test", "test_subprocess_completed", "verification",
+                        }:
+                            receipt["required_by"] = [task_id]
+                    if host_admitted and receipt.get("required_by") not in (None, (), []):
+                        receipt.setdefault("scope", scope)
+                    else:
+                        # Exploration and failed/no-op history remain diagnostic;
+                        # they are not silently promoted to task completion debt.
+                        receipt.setdefault("scope", "diagnostic")
+                    admitted_count += 1
+                    yield receipt
         from kernel_catalog import coalesce_execution_receipts
-        receipts = list(coalesce_execution_receipts(receipts))
-        receipts.extend(self._catalog_assumption_receipts())
+        # The coalescer consumes by iteration and snapshots each row immediately.
+        receipts = list(coalesce_execution_receipts(admitted_receipts()))  # type: ignore[arg-type]
+        receipts.extend(
+            copy.deepcopy(receipt) for receipt in self._catalog_assumption_receipts()
+        )
         from kernel_unknowns_ledger import mode as _unknowns_ledger_mode
         if _unknowns_ledger_mode() == "on":
             # UNKNOWNS LEDGER: sticky host-producer receipts (opened/resolved).
             from kernel_unknowns_ledger import observe as _unknowns_ledger_observe
-            receipts.extend(_unknowns_ledger_observe(self, task_id=task_id, scope=scope))
+            receipts.extend(
+                copy.deepcopy(receipt)
+                for receipt in _unknowns_ledger_observe(self, task_id=task_id, scope=scope)
+            )
         return tuple(receipts)
 
     def _catalog_sync(self):
@@ -17872,7 +18051,9 @@ class StateFrameRuntime:
         if prior_unknowns:
             enriched: list[dict[str, object]] = []
             for receipt in receipts:
-                current = copy.deepcopy(dict(receipt))
+                # _catalog_receipts returns an owned snapshot; normalization makes
+                # its own deep copy, while relation fields added here are top-level.
+                current = dict(receipt)
                 normalized = normalize_receipt(current)
                 if (current.get("host_admitted") is True
                         and str(normalized.get("canonical_outcome", "")).upper() == "PASS"
@@ -20089,6 +20270,9 @@ class StateFrameRuntime:
             if progress is not None:
                 frame = dict(frame)
                 frame["progress_ledger"] = progress.mapping()
+        task_row = getattr(getattr(self, "owner", None), "task_row", None)
+        discovery_scope = (isinstance(task_row, Mapping)
+                           and task_row.get("scope_source") == "discovery")
         state = project_f4_state(
             frame,
             active_decisions=getattr(self, "_last_completion_decision", None),
@@ -20096,6 +20280,7 @@ class StateFrameRuntime:
             selectors=getattr(self.owner, "f2p_ids", ()) if hasattr(self, "owner") else (),
             path=path,
             current_product_revision=self.binding().get("product_revision"),
+            compact_many_revisions=discovery_scope,
         )
         try:
             from kernel_stateframe_frame_continuity import (

@@ -7,7 +7,7 @@ import os
 import re
 from collections.abc import Mapping, Sequence
 
-from kernel_evidence_pin import neutralize_pin_body
+from kernel_evidence_pin import neutralize_pin_body, pin_dedup_enabled
 from kernel_request_source_window import MODEL_WINDOW_MARKER, WINDOW_MARKER
 
 MODE_ENV = "STATEFRAME_REFUSAL_COMPACT"
@@ -664,6 +664,22 @@ def _pin_bytes(lines: Sequence[str]) -> int:
     return len("\n".join(lines).encode("utf-8"))
 
 
+def _task_contains_clause(task: str, clause: str) -> bool:
+    if len(clause) < 40:
+        return False
+    pattern_parts = []
+    for index, char in enumerate(clause):
+        if char != " ":
+            pattern_parts.append(re.escape(char))
+        elif ((index == 0 or clause[index - 1] != " ")
+              and (index + 1 == len(clause) or clause[index + 1] != " ")):
+            pattern_parts.append(r"(?: |\r\n|\r|\n)")
+        else:
+            pattern_parts.append(" ")
+    pattern = "".join(pattern_parts)
+    return re.search(r"(?<![^\W_])" + pattern + r"(?![^\W_])", task) is not None
+
+
 def _fit_pin_core(lines: list[str], *, end: str) -> list[str]:
     """Bound explanatory fields without ever cutting a normative marker."""
     limits = (900, 600, 360, 220, 120)
@@ -754,6 +770,7 @@ def _action_check_output(selected: Mapping[str, object], checks: Sequence[Mappin
 def render_evidence_pin(
         runtime: object, tools: object, *, frame: Mapping[str, object] | None = None,
         include_framefit_journal: bool | None = None,
+        task_text: str | None = None,
 ) -> str:
     """Render one bounded join of existing check, revision, refusal, and clause records."""
     frame_map = frame if isinstance(frame, Mapping) else {}
@@ -862,13 +879,24 @@ def render_evidence_pin(
         lines.append("witness_operation=" + witness_row)
     if brief and not requirements:
         lines.append("requirements_source=" + _clip(brief, 1400))
-    requirement_lines = [
-        f"- {row['id']} verbatim={row['clause']} "
-        f"reference={row.get('reference', row['source'])} source={row['source']} "
-        f"status={row.get('status', 'UNKNOWN')} observed={row.get('observed', 'UNKNOWN')} "
-        f"missing_evidence={row.get('missing_category', 'UNKNOWN')}"
-        for row in requirements
-    ]
+    deduplicate_clauses = pin_dedup_enabled() and isinstance(task_text, str)
+    requirement_lines: list[str] = []
+    deduplicated_requirement_lines: list[str] = []
+    for row in requirements:
+        clause = row["clause"]
+        line = f"- {row['id']}"
+        deduplicated_line = line
+        duplicate_text = deduplicate_clauses and _task_contains_clause(task_text or "", clause)
+        line += f" verbatim={clause}"
+        if not duplicate_text:
+            deduplicated_line += f" verbatim={clause}"
+        metadata = (
+            f" reference={row.get('reference', row['source'])} source={row['source']} "
+            f"status={row.get('status', 'UNKNOWN')} observed={row.get('observed', 'UNKNOWN')} "
+            f"missing_evidence={row.get('missing_category', 'UNKNOWN')}"
+        )
+        requirement_lines.append(line + metadata)
+        deduplicated_requirement_lines.append(deduplicated_line + metadata)
     if requirements:
         lines.append("requirements:")
     else:
@@ -876,14 +904,21 @@ def render_evidence_pin(
     # Body text quotes runtime, task and file data: neutralize marker literals so the block ends where the host wrote it.
     lines = [lines[0], *(neutralize_pin_body(line) for line in lines[1:])]
     requirement_lines = [neutralize_pin_body(line) for line in requirement_lines]
+    deduplicated_requirement_lines = [
+        neutralize_pin_body(line) for line in deduplicated_requirement_lines
+    ]
     retrieval_handle = neutralize_pin_body(retrieval_handle)
     full_candidate = [*lines, *requirement_lines, EVIDENCE_END]
     if _pin_bytes(full_candidate) <= EVIDENCE_MAX_BYTES:
-        return "\n".join(full_candidate)
+        selected_lines = (
+            deduplicated_requirement_lines if deduplicate_clauses else requirement_lines
+        )
+        return "\n".join([*lines, *selected_lines, EVIDENCE_END])
 
     all_ids = [str(row["id"]) for row in requirements]
     selected_lines: list[str] = []
-    for requirement_line in requirement_lines:
+    selected_indices: list[int] = []
+    for index, requirement_line in enumerate(requirement_lines):
         candidate_selected_lines = [*selected_lines, requirement_line]
         candidate_selected_ids = [
             line.split(" ", 2)[1] for line in candidate_selected_lines
@@ -899,6 +934,7 @@ def render_evidence_pin(
         candidate = _fit_pin_core(candidate[:-1], end=EVIDENCE_END)
         if _pin_bytes([*candidate, EVIDENCE_END]) <= EVIDENCE_MAX_BYTES:
             selected_lines.append(requirement_line)
+            selected_indices.append(index)
 
     selected_ids = [line.split(" ", 2)[1] for line in selected_lines]
     omitted_ids = [identifier for identifier in all_ids if identifier not in selected_ids]
@@ -921,6 +957,13 @@ def render_evidence_pin(
             "requirements_retrieval_handle=" + retrieval_handle,
             "retrieval_action=" + retrieval_action,
         ]
+
+    if deduplicate_clauses and selected_indices and "core_evidence_omitted=true" not in bounded_lines:
+        replacements = {
+            requirement_lines[index]: deduplicated_requirement_lines[index]
+            for index in selected_indices
+        }
+        bounded_lines = [replacements.get(line, line) for line in bounded_lines]
     bounded_lines.append(EVIDENCE_END)
     return "\n".join(bounded_lines)
 
@@ -1066,6 +1109,17 @@ def _has_evidence_pin(messages: Sequence[Mapping[str, object]], *,
     )
 
 
+def _outgoing_task_text(messages: Sequence[Mapping[str, object]]) -> str | None:
+    """Return the Task row currently being prepared for this request."""
+    for message in messages:
+        if not isinstance(message, Mapping) or message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, str) and content.startswith("Task:"):
+            return content
+    return None
+
+
 def append_evidence_pin(runtime: object, messages: Sequence[dict], tools: object, *,
                         frame: Mapping[str, object] | None = None,
                         request_id: str | None = None) -> tuple[list[dict], str]:
@@ -1077,12 +1131,22 @@ def append_evidence_pin(runtime: object, messages: Sequence[dict], tools: object
         selected_mode = continuity_mode()
     except Exception:
         selected_mode = "off"
+    deduplicate_clauses = pin_dedup_enabled()
+    preserve_stateframe = selected_mode == "on"
+    result = [dict(message) for message in messages]
+    if deduplicate_clauses:
+        _remove_evidence_pin_blocks(result, preserve_stateframe=preserve_stateframe)
+        task_text = _outgoing_task_text(result)
+    else:
+        task_text = None
     if selected_mode == "shadow":
         panel = render_evidence_pin(
-            runtime, tools, frame=frame, include_framefit_journal=False)
+            runtime, tools, frame=frame, include_framefit_journal=False,
+            task_text=task_text)
         try:
             candidate = render_evidence_pin(
-                runtime, tools, frame=frame, include_framefit_journal=True)
+                runtime, tools, frame=frame, include_framefit_journal=True,
+                task_text=task_text)
             mismatch_fields = evidence_pin_mismatch_fields(panel, candidate)
         except Exception as error:
             _emit_continuity_event(
@@ -1096,19 +1160,21 @@ def append_evidence_pin(runtime: object, messages: Sequence[dict], tools: object
     elif selected_mode == "on":
         try:
             panel = render_evidence_pin(
-                runtime, tools, frame=frame, include_framefit_journal=True)
+                runtime, tools, frame=frame, include_framefit_journal=True,
+                task_text=task_text)
         except Exception as error:
             _emit_continuity_event(
                 runtime, "frame_continuity_evidence_pin_failed",
                 error_type=type(error).__name__, mode=selected_mode)
             panel = render_evidence_pin(
-                runtime, tools, frame=frame, include_framefit_journal=False)
+                runtime, tools, frame=frame, include_framefit_journal=False,
+                task_text=task_text)
     else:
         panel = render_evidence_pin(
-            runtime, tools, frame=frame, include_framefit_journal=False)
-    result = [dict(message) for message in messages]
-    preserve_stateframe = selected_mode == "on"
-    _remove_evidence_pin_blocks(result, preserve_stateframe=preserve_stateframe)
+            runtime, tools, frame=frame, include_framefit_journal=False,
+            task_text=task_text)
+    if not deduplicate_clauses:
+        _remove_evidence_pin_blocks(result, preserve_stateframe=preserve_stateframe)
     typed_pin_handled = (
         _update_typed_owner_pin(result, panel) if preserve_stateframe else False
     )

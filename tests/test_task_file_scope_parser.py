@@ -209,3 +209,178 @@ def test_new_affirmative_directive_after_negation(continuation):
     assert parse_task_file_scope(
         f"Do not modify config.py {continuation}. Change no other file."
     ) == ("answer.json",)
+
+
+PAST_EDIT_REPORTS = [
+    "Yesterday I tried fixing it by editing only a.py.",
+    "The previous commit fixed it by editing only a.py.",
+    "They ended by editing only a.py.",
+    "Last week's patch worked by editing only a.py.",
+    "Earlier I repaired the bug by editing only a.py.",
+    "The maintainer solved the issue by editing only a.py.",
+    "They changed the setting by editing only a.py.",
+    "We corrected the failure by editing only a.py.",
+    "My earlier attempt restored the build by editing only a.py.",
+    "Our team resolved the warning by editing only a.py.",
+    "The author addressed the issue by editing only a.py.",
+    "An older version passed by editing only a.py.",
+    "The old release handled the case by editing only a.py.",
+    "The first worker completed the task by editing only a.py.",
+    "Yesterday we finalized the fix by editing only a.py.",
+    "The earlier patch succeeded by editing only a.py.",
+    "A contributor updated the config by editing only a.py.",
+    "This change worked by editing only a.py.",
+    "In the last run, I corrected the bug by editing only a.py.",
+    "We already changed the setting by editing only a.py.",
+]
+
+PAST_TENSE_REPORT_TASKS = [
+    "I changed a.py yesterday. Change no other file.",
+    "We already edited only b.py. Change no other file.",
+    "I modified src/settings.py earlier. Change no other file.",
+    "The previous run updated config.toml. Change no other file.",
+    "I repaired src/app.py yesterday. Change no other file.",
+    "We fixed README.md in the prior pass. Change no other file.",
+    "They created output.json last week. Change no other file.",
+    "Someone wrote answer.json yesterday. Change no other file.",
+    "I saved src/state.py earlier. Change no other file.",
+    "The team touched Makefile in the previous run. Change no other file.",
+    "They added tests/test_x.py before handoff. Change no other file.",
+    "The author corrected src/tool.py yesterday. Change no other file.",
+    "We restored src/config.py last week. Change no other file.",
+    "Earlier I addressed src/main.py. Change no other file.",
+    "They changed only a.py. Change no other file.",
+    "A teammate edited b.py earlier. Change no other file.",
+    "I updated README.md last night. Change no other file.",
+    "A prior patch modified src/util.py. Change no other file.",
+    "Earlier I touched src/build.py. Change no other file.",
+    "Yesterday the repair saved src/index.js. Change no other file.",
+]
+PAST_TENSE_REPORTS = [
+    task.removesuffix(" Change no other file.") for task in PAST_TENSE_REPORT_TASKS
+]
+
+PAST_EDIT_ERROR_CASE = (
+    "We already changed the setting by editing only ../outside.py. "
+    "Change no other file.")
+
+
+def test_reported_past_edit_with_an_unsupported_path_still_refuses_under_no_other():
+    with pytest.raises(TaskFileScopeError):
+        parse_task_file_scope(PAST_EDIT_ERROR_CASE, strict=True)
+    assert parse_task_file_scope(PAST_EDIT_ERROR_CASE.removesuffix(" Change no other file."), strict=True) is None
+
+
+@pytest.mark.parametrize("report", PAST_EDIT_REPORTS)
+def test_reported_past_edits_alone_do_not_scope(report):
+    assert parse_task_file_scope(report) is None
+    assert parse_task_file_scope(report, strict=True) is None
+
+
+@pytest.mark.parametrize("report", PAST_EDIT_REPORTS)
+def test_reported_past_edits_never_remove_a_live_no_other_instruction(report):
+    task = report + " Change no other file."
+    assert parse_task_file_scope(task), "the restriction was dropped"
+    assert parse_task_file_scope(task, strict=True)
+
+
+@pytest.mark.parametrize("task", [
+    "I already changed a.py. Do not touch any other file.", *PAST_TENSE_REPORT_TASKS])
+def test_past_tense_report_does_not_switch_off_the_strict_refusal(task):
+    with pytest.raises(TaskFileScopeError):
+        parse_task_file_scope(task, strict=True)
+
+
+@pytest.mark.parametrize("report", PAST_TENSE_REPORTS)
+def test_present_restriction_survives_a_past_edit_report(report):
+    task = report.rstrip(".") + ", now only edit b.py. Change no other file."
+    assert parse_task_file_scope(task) == ("b.py",)
+    assert parse_task_file_scope(task, strict=True) == ("b.py",)
+
+
+PAST_TENSE_INSTRUCTION_CASES = [
+    ("The file edited should be only a.py. Only edit a.py.", ("a.py",)),
+    ("The file changed yesterday should be only a.py. Only edit a.py.", ("a.py",)),
+    ("The file modified earlier should be only a.py. Only edit a.py.", ("a.py",)),
+    ("The file updated yesterday should be only a.py. Only edit a.py.", ("a.py",)),
+    ("Fix the defect after the prior test passed by editing only src/a40.py. "
+     "Change no other file.", ("src/a40.py",)),
+    ("Update the module after the earlier run succeeded by changing only src/a41.py. "
+     "Change no other file.", ("src/a41.py",)),
+    ("Create the result after validation completed by writing only out/a42.json. "
+     "Change no other file.", ("out/a42.json",)),
+    ("Adjust the implementation after the previous release changed by editing only "
+     "src/a43.py. Change no other file.", ("src/a43.py",)),
+    ("Fix the behavior because the earlier attempt succeeded by touching only src/a44.py. "
+     "Change no other file.", ("src/a44.py",)),
+    ("Refactor the helper though the last check passed by modifying only src/a45.py. "
+     "Change no other file.", ("src/a45.py",)),
+]
+
+
+@pytest.mark.parametrize(("task", "expected"), PAST_TENSE_INSTRUCTION_CASES)
+def test_past_tense_context_keeps_the_released_instruction_scope(task, expected):
+    assert parse_task_file_scope(task) == expected
+
+
+def test_reported_past_edit_is_reflected_in_the_initial_task_message(tmp_path):
+    from probes.react_repair import FileSet, _initial_task_content, _render_multifile_list
+    from stateframe.task_row import build_row
+    from stateframe.workcopy import create
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.py").write_text("A = 1\n", encoding="utf-8")
+    (repo / "b.py").write_text("B = 2\n", encoding="utf-8")
+    work = create(repo, tmp_path / "copy")
+
+    def initial_message(task: str) -> tuple[dict[str, object], str]:
+        row = build_row(work, task=task, runner_kind="generic", test_command=("true",))
+        message = _initial_task_content(
+            row["msg"], _render_multifile_list(FileSet.from_row(row)), "")
+        return row, message
+
+    unrestricted, default_message = initial_message("Fix the issue.")
+    scoped, scoped_message = initial_message("Only edit a.py.")
+    question, question_message = initial_message(
+        "Should I edit only a.py? Change no other file.")
+    narrated_task = (
+        "The previous commit fixed it by editing only a.py. Do the same in b.py.")
+    narrated, narration_message = initial_message(narrated_task)
+    gerund, gerund_message = initial_message(
+        'changing only "a.py". Touch no other files.')
+
+    def expected_message(task: str, paths: tuple[str, ...]) -> set[bytes]:
+        file_list = "FILE LIST (declared source files):\n" + "\n".join(
+            f"- {path}" for path in paths)
+        return {
+            f"{label}: {task}\n\n{file_list}\nBegin.".encode("utf-8")
+            for label in ("Bug report", "Task")
+        }
+
+    assert "task_file_scope" not in unrestricted
+    assert "FILE LIST (declared source files):\n- a.py\n- b.py" in default_message
+    assert default_message.encode("utf-8") in expected_message(
+        "Fix the issue.", ("a.py", "b.py"))
+    assert scoped["task_file_scope"] == ["a.py"]
+    assert "FILE LIST (declared source files):\n- a.py\nBegin." in scoped_message
+    assert "- b.py" not in scoped_message
+    assert question["task_file_scope"] == ["a.py"]
+    assert "FILE LIST (declared source files):\n- a.py\nBegin." in question_message
+    assert "task_file_scope" not in narrated
+    assert "FILE LIST (declared source files):\n- a.py\n- b.py" in narration_message
+    assert narration_message.encode("utf-8") in expected_message(
+        narrated["msg"], ("a.py", "b.py"))
+    assert gerund["task_file_scope"] == ["a.py"]
+    assert gerund_message.encode("utf-8") in expected_message(
+        gerund["msg"], ("a.py",))
+
+
+@pytest.mark.parametrize("task", [
+    "Make the tests that ended up failing pass by editing only a.py.",
+    "Fix the code added by the last change by editing only a.py.",
+    "Please fix the bug created yesterday by editing only a.py.",
+    "- Repair what the tool updated by modifying only a.py.",
+])
+def test_request_with_a_past_participle_keeps_its_restriction(task):
+    assert parse_task_file_scope(task) == ("a.py",)

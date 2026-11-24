@@ -16,6 +16,9 @@ from pathlib import Path
 EXISTENCE_ORACLE_ENV = "STATEFRAME_EXISTENCE_ORACLE"
 LEGACY_SYMBOL_ABSENCE_PREFIX = " DOES NOT EXIST anywhere"
 READ_BEFORE_USE_LABEL = "Read each before use:"
+TRUTHFUL_DEFERRED_SOURCE_PATHS_LABEL = (
+    "Required source paths are not attached; read one only if your edit needs it:"
+)
 READ_REUSE_MISSING_PREFIXES = (
     "[read reuse] source bytes missing from this request;",
     "[read reuse] delivered source was clipped by ",
@@ -758,6 +761,10 @@ def render_deferred_source_facts(
 ) -> str:
     normalized = tuple(dict.fromkeys(str(path).strip() for path in paths if str(path).strip()))
     lines = [header, "Current live-workspace source status:"]
+    from kernel_request_diet import truthful_read_panels_enabled
+
+    show_unattached_paths = truthful_read_panels_enabled()
+    unattached_paths: list[str] = []
     for path in normalized:
         path_fact = exists(root, path, revision=revision, journal=journal)
         if path_fact.status == "exists":
@@ -766,8 +773,13 @@ def render_deferred_source_facts(
                 revision=path_fact.revision, journal=journal,
             )
             lines.append(render_fact(receipt))
+            if show_unattached_paths and receipt.status == "no_receipt":
+                unattached_paths.append(path)
         else:
             lines.append(render_fact(path_fact))
+    if unattached_paths:
+        lines.append(TRUTHFUL_DEFERRED_SOURCE_PATHS_LABEL)
+        lines.extend(f"- {path}" for path in unattached_paths)
     return "\n".join(lines)
 
 
@@ -781,7 +793,8 @@ def render_read_visibility_fact(fact: Fact) -> str:
 
 __all__ = [
     "EXISTENCE_ORACLE_ENV", "Fact", "LEGACY_SYMBOL_ABSENCE_PREFIX",
-    "READ_BEFORE_USE_LABEL", "READ_REUSE_MISSING_PREFIXES", "enabled", "exists",
+    "READ_BEFORE_USE_LABEL", "READ_REUSE_MISSING_PREFIXES",
+    "TRUTHFUL_DEFERRED_SOURCE_PATHS_LABEL", "enabled", "exists",
     "literal_matches", "probe_live_workspace", "read_current", "render_entry_fact",
     "render_fact", "render_legacy_claim_fact", "render_legacy_deferred_notice",
     "render_legacy_entry_verification", "render_legacy_read_missing",

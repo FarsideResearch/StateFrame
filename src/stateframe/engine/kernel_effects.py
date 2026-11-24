@@ -14,6 +14,7 @@ from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Callable, Iterable, Iterator, Literal, Mapping, Protocol, TextIO
 
 
+DISCOVERY_SCOPE_REFUSAL = "discovery scope is empty; no source path is admitted for writing"
 MAX_FILE_BYTES = 16 << 20
 MAX_WORKSPACE_BYTES = 256 << 20
 MAX_WORKSPACE_ENTRIES = 20000
@@ -453,6 +454,9 @@ class EffectPolicy(Protocol):
     def authorize(self, effect: Effect) -> tuple[bool, str]: ...
 
 
+BAD_NAME_REASON = "file names must be valid UTF-8"
+
+
 @dataclass(frozen=True)
 class WorkspaceEffectPolicy:
     protected: Callable[[str], bool]
@@ -463,6 +467,7 @@ class WorkspaceEffectPolicy:
     collection_guard: Callable[[str, bool, str | None, str | None], str | None] | None = None
     # Files a task's explicit file-scope rule allows ("Change no other file"); None when no rule.
     task_scope: tuple[str, ...] | None = None
+    edit_scope_refusal: str = "outside edit scope"
 
     def authorize(self, effect: Effect) -> tuple[bool, str]:
         if self.protected(effect.path):
@@ -472,6 +477,11 @@ class WorkspaceEffectPolicy:
                 return False, reason
         if effect.after and effect.after.kind in {"symlink", "other"}:
             return False, "symlinks, hardlinks, and special files are not allowed"
+        if effect.after and not effect.path.isascii():
+            try:
+                effect.path.encode("utf-8")
+            except UnicodeEncodeError:
+                return False, BAD_NAME_REASON
         if (
             effect.before
             and effect.before.kind == "file"
@@ -499,15 +509,15 @@ class WorkspaceEffectPolicy:
             )
             return (
                 allowed,
-                "structural product directory"
-                if allowed
-                else "new directory is not allowed",
+                ("structural product directory" if allowed else
+                 self.edit_scope_refusal if self.edit_scope_refusal != "outside edit scope" else
+                 "new directory is not allowed"),
             )
         # The task's file-scope rule is a hard limit and is checked before the generic edit scope.
         if self.task_scope is not None and effect.path not in self.task_scope:
             return False, "outside task file scope"
         if self.edit_scope is not None and not self.edit_scope(effect.path):
-            return False, "outside edit scope"
+            return False, self.edit_scope_refusal
         if effect.before is None and not self.new_file_allowed(effect.path):
             return False, "new path is not allowed"
         return True, "authorized workspace effect"
@@ -579,14 +589,14 @@ def effect_policy_for_run(
     for name in baseline_tests:
         try:
             info = os.lstat(name)
-        except FileNotFoundError:
+        except (FileNotFoundError, NotADirectoryError):
             continue
         if stat.S_ISREG(info.st_mode):
             protected_inodes.add((info.st_dev, info.st_ino))
     for name in hook_paths:
         try:
             info = os.lstat(root / name)
-        except FileNotFoundError:
+        except (FileNotFoundError, NotADirectoryError):
             continue
         if stat.S_ISREG(info.st_mode):
             # Hardlinks have no content digest in a workspace scan. An alias
@@ -607,13 +617,13 @@ def effect_policy_for_run(
             return True
         try:
             info = os.lstat(candidate)
-        except FileNotFoundError:
+        except (FileNotFoundError, NotADirectoryError):
             return False
         if hook_paths and stat.S_ISREG(info.st_mode):
             for name in hook_paths:
                 try:
                     protected = os.lstat(root / name)
-                except FileNotFoundError:
+                except (FileNotFoundError, NotADirectoryError):
                     continue
                 if stat.S_ISREG(protected.st_mode) and (info.st_dev, info.st_ino) == (
                     protected.st_dev,
@@ -622,25 +632,29 @@ def effect_policy_for_run(
                     return True
         return (info.st_dev, info.st_ino) in protected_inodes
 
+    discovery_scope = row.get("scope_source") == "discovery"
     return WorkspaceEffectPolicy(
         protected=is_protected,
         edit_scope=(
             None
-            if row.get("scoped_edits") is False
+            if row.get("scoped_edits") is False and not discovery_scope
             else lambda path: (
                 path in editable
                 # Files admitted by opt-in edit scope widening during the run
                 # (react_repair EDIT_SCOPE_WIDENED_KEY); absent unless widened.
                 or path in row.get("_edit_scope_widened", ())
-                or (path not in original_paths and _is_product_path(path, row))
+                or (not discovery_scope
+                    and path not in original_paths and _is_product_path(path, row))
             )
         ),
-        new_file_allowed=lambda path: _is_product_path(path, row),
+        new_file_allowed=lambda path: (
+            not discovery_scope and _is_product_path(path, row)),
         collection_guard=collection_guard if guarded else None,
         baseline_manifest=baseline_manifest,
         task_scope=task_scope,
+        edit_scope_refusal=(DISCOVERY_SCOPE_REFUSAL if discovery_scope else "outside edit scope"),
         directory_allowed=lambda path: (
-            (
+            not discovery_scope and ((
                 row.get("tier") == "USER-REPO"
                 and row.get("scoped_edits") is False
                 and _is_product_path(path, row)
@@ -650,7 +664,7 @@ def effect_policy_for_run(
                 or path.startswith(str(base).rstrip("/") + "/")
                 for base in row.get("allowed_product_paths", ())
                 if (root / str(base)).is_dir()
-            )
+            ))
         ),
     )
 
@@ -820,6 +834,19 @@ def reconcile_effects(
             if reason := policy.collection_guard(effect.path, False, original, current):
                 decision = False, reason
         decisions.append((effect, *decision))
+    # A rename to a name that is restored must not lose its source.
+    lost = {effect.after.digest for effect, allowed, reason in decisions
+            if not allowed and reason == BAD_NAME_REASON and effect.after.digest}
+    # Directories have no digest: an emptied one stays when a new directory was refused its name.
+    lost_dir = any(not allowed and reason == BAD_NAME_REASON and effect.before is None
+                   and effect.after is not None and effect.after.kind == "dir"
+                   for effect, allowed, reason in decisions)
+    parents = {str(parent) for path in before for parent in PurePosixPath(path).parents} if lost_dir else set()
+    decisions = [(effect, False, BAD_NAME_REASON)
+                 if allowed and effect.after is None and (
+                     effect.before.digest in lost
+                     or lost_dir and effect.before.kind == "dir" and effect.path not in parents)
+                 else (effect, allowed, reason) for effect, allowed, reason in decisions]
     # A new directory is structural authority, not a product-file extension.
     # Keep it when an admitted descendant needs it, but never override protection.
     if isinstance(policy, WorkspaceEffectPolicy):

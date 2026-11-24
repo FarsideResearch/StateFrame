@@ -268,7 +268,31 @@ PARALLEL_TUNING_SWITCHES = frozenset({
     'STATEFRAME_PARALLEL_BYTE_TOKEN_CALIBRATION',
     'STATEFRAME_PARALLEL_BYTE_TOKEN_HEADROOM_PCT',
     'STATEFRAME_PARALLEL_USAGE_FEEDBACK',
+    'STATEFRAME_PARALLEL_FANOUT_CONTINUATION',
+    'STATEFRAME_PARALLEL_INSPECT_SECONDS',
+    'STATEFRAME_PARALLEL_CLEANUP_SECONDS',
+    'STATEFRAME_PARALLEL_WATCHDOG_GRACE_SECONDS',
+    'STATEFRAME_PARALLEL_HOST_RESPONSE_SECONDS',
+    'STATEFRAME_PARALLEL_PREPARE_SECONDS',
 })
+
+_PARALLEL_FANOUT_SWITCH = 'STATEFRAME_PARALLEL_FANOUT_CONTINUATION'
+
+
+def _validate_profile_tuning_setting(switch: str, value: object) -> None:
+    if switch.endswith('_SECONDS'):
+        reason = 'must be a positive finite number of seconds'
+        try:
+            seconds = float(value) if isinstance(value, str) else 0.0
+        except ValueError:
+            seconds = 0.0
+        if not math.isfinite(seconds) or seconds <= 0:
+            raise ParallelConfigError(switch, value, switch, reason)
+    elif switch == _PARALLEL_FANOUT_SWITCH:
+        if (not isinstance(value, str)
+                or value.strip() and value.strip().lower() not in {'on', 'off'}):
+            raise ParallelConfigError(
+                switch, value, switch, 'must be on or off; unset it to keep the default')
 
 
 def format_parallel_limit(setting: str, value: int) -> str:
@@ -334,6 +358,9 @@ class ParallelLimits(Record):
                     and switch != 'STATEFRAME_PARALLEL_MODE'):
                 setting = switch.removeprefix('STATEFRAME_PARALLEL_').lower()
                 raise ParallelConfigError(setting, value, switch, 'unknown parallel limit setting')
+            if (switch in PARALLEL_TUNING_SWITCHES
+                    and (switch.endswith('_SECONDS') or switch == _PARALLEL_FANOUT_SWITCH)):
+                _validate_profile_tuning_setting(switch, value)
 
         defaults = cls()
         values = {item.name: getattr(defaults, item.name) for item in fields(cls) if item.init}

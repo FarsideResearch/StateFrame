@@ -7,6 +7,7 @@ import os
 import shutil
 import stat
 import uuid
+from collections.abc import Mapping
 from pathlib import Path
 
 from kernel_measurement import canonical_bytes, digest
@@ -156,7 +157,17 @@ class ContinuationWorkspace:
 
     def bind(self, runtime) -> None:
         self.assert_owner()
-        if getattr(runtime, "target", None) is None:
+        target = getattr(runtime, "target", None)
+        task_row = getattr(runtime.owner, "task_row", {})
+        targetless_discovery = (
+            target is None
+            and isinstance(task_row, Mapping)
+            and task_row.get("scope_source") == "discovery"
+            and task_row.get("scoped_edits") is True
+            and isinstance(task_row.get("files"), Mapping)
+            and not task_row["files"]
+        )
+        if target is None and not targetless_discovery:
             # Audit 2026-10-05 #3: batches 889/894 died with AttributeError
             # ('NoneType'.resolve) here; fail typed and journaled instead.
             journal = getattr(runtime, "journal", None)
@@ -165,18 +176,24 @@ class ContinuationWorkspace:
                              producer="kernel_continuation_workspace.bind", dispatch=False)
             raise WorkspaceError("retained session requires a resolved target")
         root = Path(runtime.owner.root).resolve()
-        target = runtime.target.resolve()
-        if root == self.directory or not root.is_relative_to(self.directory) or not target.is_relative_to(root):
+        if root == self.directory or not root.is_relative_to(self.directory):
+            raise WorkspaceError("execution root/target escape the retained session")
+        target_path = target.resolve() if target is not None else None
+        if target_path is not None and not target_path.is_relative_to(root):
             raise WorkspaceError("execution root/target escape the retained session")
         if not root.is_dir():
             raise WorkspaceError("execution workspace is missing")
         initial = {
             "schema": FORMAT, "root": root.relative_to(self.directory).as_posix(),
-            "target": target.relative_to(root).as_posix(), "binding": runtime.binding(),
+            "target": (target_path.relative_to(root).as_posix()
+                       if target_path is not None else None),
+            "binding": runtime.binding(),
             "protected_tests": {str(p.relative_to(root)): sha for p, sha in runtime.protected_tests.items()},
             "run_id": runtime.journal.run_id, "task_id": runtime.journal.task_id,
             "config_hash": runtime.journal.config_hash, "journal_path": str(runtime.journal.path),
         }
+        if targetless_discovery:
+            initial["scope_source"] = "discovery"
         self._write("initialized.json", initial)
         runtime.journal.emit("continuation_workspace_bound",
             directory=str(self.directory), root=str(root),

@@ -101,7 +101,8 @@ class ToolTape:
                     self._apply_complete(record, number)
 
     def _append(self, record: dict) -> None:
-        encoded = (json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        encoded = (json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+                   ).encode("utf-8", "backslashreplace")  # a lone surrogate becomes its JSON escape
         created = not self.path.exists()
         fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
         try:

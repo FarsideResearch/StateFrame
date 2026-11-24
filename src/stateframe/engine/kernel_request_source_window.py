@@ -79,9 +79,8 @@ _LANGUAGE_BY_SUFFIX = {
 }
 
 DEFERRED_SOURCE_NOTICE_HEADER = "[Deferred required source paths]"
-_DEFERRED_SOURCE_PATHS_LABEL = (
-    "Required source paths are not attached; read one only if your edit needs it:"
-)
+_DEFERRED_SOURCE_PATHS_LABEL = _workspace_truth.TRUTHFUL_DEFERRED_SOURCE_PATHS_LABEL
+DEFERRED_SOURCE_RANGES_LABEL = "Source paths with deferred ranges (read only if needed):"
 _LEGACY_DEFERRED_SOURCE_PATHS_LABEL = "Required source paths omitted from this request:"
 _READ_PAGE_HEADER = re.compile(
     r"^\[read page\] path=(?P<path>.+?) revision=(?P<revision>sha256:[0-9a-f]{64}) "
@@ -121,9 +120,38 @@ def _normalized_deferred_paths(paths: Sequence[object]) -> tuple[str, ...]:
     return tuple(normalized)
 
 
+def discovery_read_source_receipts(runtime: object, root: Path) -> dict[str, dict[str, str]]:
+    """Retain only exact current source bytes already observed by this run."""
+    raw = getattr(runtime, "_empirical_frame_sources", {})
+    if not isinstance(raw, Mapping):
+        return {}
+    from kernel_public_localization import public_path
+    from kernel_stateframe_headcarry import _read_optional_source
+
+    receipts: dict[str, dict[str, str]] = {}
+    for path, row in raw.items():
+        if not isinstance(path, str) or not isinstance(row, Mapping):
+            continue
+        safe = _safe_framefit_path(path)
+        content = row.get("content")
+        revision = row.get("revision")
+        reference = row.get("reference")
+        if (safe != path or public_path(path) != path or row.get("full") is not True
+                or not isinstance(content, str) or not isinstance(revision, str)
+                or source_revision(content) != revision
+                or not isinstance(reference, str) or not reference.strip()):
+            continue
+        current = _read_optional_source(root, path)
+        if current is None or current != content.encode("utf-8"):
+            continue
+        receipts[path] = {"revision": revision, "reference": reference.strip()}
+    return receipts
+
+
 def _render_truthful_deferred_source_notice(
         paths: Sequence[object], *,
         delivered_source_ranges: Sequence[tuple[str, str, int, int]] = (),
+        range_deferrals: bool = False,
 ) -> str:
     """Render delivered source spans and excerpts omitted from this request."""
     normalized = _normalized_deferred_paths(paths)
@@ -147,7 +175,7 @@ def _render_truthful_deferred_source_notice(
         )
     else:
         lines.append("- none")
-    lines.append(_DEFERRED_SOURCE_PATHS_LABEL)
+    lines.append(DEFERRED_SOURCE_RANGES_LABEL if range_deferrals else _DEFERRED_SOURCE_PATHS_LABEL)
     lines.extend(f"- {path}" for path in normalized)
     return "\n".join(lines)
 
@@ -206,7 +234,7 @@ def _upsert_truthful_deferred_source_notice(
     if not normalized:
         return
     content = _render_truthful_deferred_source_notice(
-        normalized, delivered_source_ranges=delivered,
+        normalized, delivered_source_ranges=delivered, range_deferrals=True,
     )
     notice = {
         "role": "user",
@@ -647,6 +675,7 @@ def _parse_deferred_source_notice(content: str) -> tuple[str, ...]:
                   if line in {
                       _DEFERRED_SOURCE_PATHS_LABEL,
                       _LEGACY_DEFERRED_SOURCE_PATHS_LABEL,
+                      DEFERRED_SOURCE_RANGES_LABEL,
                   }), None)
     if label is None:
         return ()
@@ -662,8 +691,11 @@ def _parse_deferred_source_notice(content: str) -> tuple[str, ...]:
         delivered_rows.append((path, "" if revision == "unknown" else revision,
                                int(start), int(end)))
     paths = tuple(line[2:] for line in lines[omitted_index + 1:] if line.startswith("- "))
+    if not paths:
+        return ()
     canonical = _render_truthful_deferred_source_notice(
         paths, delivered_source_ranges=delivered_rows,
+        range_deferrals=label == DEFERRED_SOURCE_RANGES_LABEL,
     )
     if label == _LEGACY_DEFERRED_SOURCE_PATHS_LABEL:
         canonical = canonical.replace(
@@ -671,7 +703,7 @@ def _parse_deferred_source_notice(content: str) -> tuple[str, ...]:
             _LEGACY_DEFERRED_SOURCE_PATHS_LABEL,
             1,
         )
-    if not paths or content != canonical:
+    if content != canonical:
         return ()
     return paths
 
@@ -688,7 +720,9 @@ def _parse_live_workspace_deferred_notice(content: str) -> tuple[str, ...]:
         return ()
 
     paths: list[str] = []
-    for line in lines[2:]:
+    unattached_paths: list[str] = []
+    footer = lines.index(_DEFERRED_SOURCE_PATHS_LABEL, 2) if _DEFERRED_SOURCE_PATHS_LABEL in lines else len(lines)
+    for line in lines[2:footer]:
         match = None
         for pattern in _LIVE_WORKSPACE_DEFERRED_FACT_PATTERNS:
             match = pattern.fullmatch(line)
@@ -700,12 +734,12 @@ def _parse_live_workspace_deferred_notice(content: str) -> tuple[str, ...]:
         if not path or path in paths:
             return ()
         paths.append(path)
-    canonical = "\n".join((
-        DEFERRED_SOURCE_NOTICE_HEADER,
-        "Current live-workspace source status:",
-        *lines[2:],
-    ))
-    return tuple(paths) if content == canonical else ()
+        if line.startswith("No current read receipt for "):
+            unattached_paths.append(path)
+    if footer < len(lines) and (
+            not unattached_paths or lines[footer + 1:] != [f"- {path}" for path in unattached_paths]):
+        return ()
+    return tuple(paths) if content == "\n".join(lines) else ()
 
 
 def _final_wire_proof_identity(
@@ -2851,6 +2885,29 @@ def bound_runtime_sources(
         else ()
     ))
     if target is None or root is None or path is None:
+        owner = getattr(runtime, "owner", None)
+        row = getattr(owner, "task_row", {})
+        discovery = (
+            target is None and root is not None and isinstance(row, Mapping)
+            and row.get("scope_source") == "discovery"
+            and row.get("scoped_edits") is True
+            and isinstance(row.get("files"), Mapping) and not row["files"]
+        )
+        if discovery:
+            closure_plan = build_source_closure(Path(root), (), _ticket_text(runtime)).as_dict()
+            closure_plan["scope_source"] = "discovery"
+            closure_plan["read_only_empty_scope"] = True
+            closure_plan["read_source_receipts"] = discovery_read_source_receipts(
+                runtime, Path(root))
+            closure_plan["workspace_authorization"] = {
+                "scope": str(getattr(runtime, "workspace_scope", root)),
+                "generation": str(getattr(runtime, "workspace_revision",
+                                           getattr(runtime, "product_revision", "0"))),
+            }
+            closure_plan["deferred_paths"] = []
+            setattr(runtime, "_request_source_closure", closure_plan)
+            return {"changed": False, "windowed": 0, "paths": (),
+                    "deferred_paths": (), "closure": closure_plan}
         return {"changed": False, "windowed": 0, "paths": ()}
     try:
         _public_path(path)
@@ -3989,6 +4046,31 @@ def verify_final_source_delivery(
             and receipt.get("status") == "UNKNOWN"):
         receipt["status"] = "COMPLETE"
         receipt["new_output_without_source"] = True
+    if (plan.get("scope_source") == "discovery"
+            and plan.get("read_only_empty_scope") is True
+            and not selected_paths and not declared_paths and not revision_paths
+            and not deferred_paths and not proof_failure and authorization_verified
+            and receipt.get("status") == "UNKNOWN"):
+        read_receipts = plan.get("read_source_receipts", {})
+        read_sources_verified = (
+            isinstance(read_receipts, Mapping)
+            and set(source_map) == set(read_receipts)
+            and all(
+                isinstance(receipt, Mapping)
+                and isinstance(receipt.get("revision"), str)
+                and isinstance(receipt.get("reference"), str)
+                and bool(receipt["reference"].strip())
+                and source_revision(source_map[path]) == receipt["revision"]
+                for path, receipt in read_receipts.items()
+                if isinstance(path, str) and isinstance(source_map.get(path), str)
+            )
+            and all(isinstance(path, str) and isinstance(source, str)
+                    for path, source in source_map.items())
+        )
+        if read_sources_verified:
+            receipt["status"] = "COMPLETE"
+            receipt["empty_discovery_scope_verified"] = True
+            receipt["read_source_receipts"] = copy.deepcopy(dict(read_receipts))
     receipt["context_digest"] = context_digest
     receipt["submitted_http_bytes_digest"] = submitted_http_bytes_digest or "UNVERIFIED"
     receipt["workspace_authorization"] = {
@@ -4714,9 +4796,22 @@ def _projected_editable_page(runtime: object, facts: WorkspacePathFacts,
 
 def editable_product_paths(runtime: object) -> tuple[str, ...] | UnavailableEvidence:
     """Declared editable PRODUCT files (target first): existing, no tests, no evaluator scope."""
-    root = getattr(getattr(runtime, "owner", None), "root", None)
+    owner = getattr(runtime, "owner", None)
+    root = getattr(owner, "root", None)
     if root is None:
         return ()
+    row = getattr(owner, "task_row", None)
+    if isinstance(row, Mapping) and row.get("scope_source") == "discovery":
+        from kernel_edit_affordance import WIDENED_PATHS_KEY
+        raw = row.get(WIDENED_PATHS_KEY, ())
+        values = ((raw,) if isinstance(raw, str) else
+                  raw if isinstance(raw, Sequence) and not isinstance(raw, (bytes, bytearray))
+                  else ())
+        base = Path(root).resolve()
+        return tuple(sorted({str(path).replace("\\", "/").lstrip("./") for path in values
+                             if str(path).strip()
+                             and _eligible_editable_path(
+                                 base, str(path).replace("\\", "/").lstrip("./"))}))
     projected = project_workspace_paths(runtime, lambda facts: _projected_editable_page(runtime, facts))
     if projected is not None:
         return projected
@@ -5870,7 +5965,7 @@ def render_deferred_source_notice(
     if not truthful_read_panels_enabled():
         return _render_deferred_source_notice_r2fo(paths)
     return _render_truthful_deferred_source_notice(
-        paths, delivered_source_ranges=delivered_source_ranges)
+        paths, delivered_source_ranges=delivered_source_ranges, range_deferrals=True)
 
 
 def _upsert_live_workspace_deferred_notice(messages, paths, **kwargs):

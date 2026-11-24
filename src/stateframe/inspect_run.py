@@ -92,7 +92,8 @@ def overview(run: Path) -> str:
         if isinstance(problems, dict) and problems.get("unknown"):
             lines.append(f"problems: unknown ({problems['unknown']})")
         elif isinstance(problems, dict):
-            lines.append(f"problems: {problems.get('errors', 0)} errors, {problems.get('warnings', 0)} warnings")
+            lines.append(f"problems: {problems.get('errors', 0)} errors, {problems.get('warnings', 0)} warnings"
+                         + (" (incomplete)" if problems.get("self_errors") else ""))
     lines.append(f"{'send':>4}  {'bytes':>7}  {'frame B':>7}  {'msgs':>4}  {'roles':<10} "
                  f"{'prompt':>7}  {'cached':>7}  action")
     for path in files:

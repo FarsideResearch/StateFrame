@@ -19,8 +19,9 @@ from pathlib import Path
 from kernel_nav_basics import missing_path_message
 from kernel_navigation_pages import directory_page
 from kernel_source_delivery import (
-    READ_CONTRACT_FIELDS, NormalizedReadRequest, ReadArgumentError,
-    deliver_source, normalize_read_request,
+    READ_CONTRACT_FIELDS, NormalizedReadRequest, NonRegularReadPath as _NonRegularReadPath,
+    ReadArgumentError, _signature_for_stat, deliver_source,
+    normalize_read_request, read_regular_file as _read_regular_file,
 )
 from kernel_launch_identity_cost import ENVIRONMENT, UNKNOWN, PhaseMeter
 from kernel_read_evidence import note_read_evidence
@@ -67,9 +68,7 @@ def _source_identity(root: Path, path: Path) -> str:
 
 
 def _file_signature(path: Path) -> tuple[int, int, int, int, int]:
-    stat = path.stat()
-    return (int(stat.st_dev), int(stat.st_ino), int(stat.st_size),
-            int(stat.st_mtime_ns), int(stat.st_ctime_ns))
+    return _signature_for_stat(path.stat())
 
 
 def _workspace_generation(measurement: object) -> str | None:
@@ -481,6 +480,14 @@ def _ordinary_read_receipt(step: object, raw: str, start: int, reason: str) -> d
     ).as_dict()
 
 
+def _append_decoding_note(text: str, metadata: Mapping[str, object],
+                          request: NormalizedReadRequest) -> str:
+    note = metadata.get("decoding_note")
+    result = text + "\n" + note if isinstance(note, str) else text
+    return result if len(result) <= request.max_chars and (
+        request.max_bytes is None or len(result.encode("utf-8")) <= request.max_bytes) else text
+
+
 def _record_requested_byte_delivery(
         delivery: MutableMapping[str, object] | None, *, status: str,
         content: str = "", metadata: Mapping[str, object] | None = None,
@@ -603,10 +610,12 @@ def execute_read(root: Path, p: Path, raw: str, display: str, start: int, *,
         if expected_revision:
             # Revision-pinned reads bypass stat-keyed content so coordinates
             # are checked against current bytes, even when a cache has a page.
-            fresh_revision_bytes = p.read_bytes()
+            fresh_revision_bytes, opened_signature = _read_regular_file(p)
             try:
                 signature = _file_signature(p)
             except OSError:
+                signature = None
+            if signature != opened_signature:
                 signature = None
             cache_entry = (_store_source(
                 measurement, identity, fresh_revision_bytes, signature, generation,
@@ -724,6 +733,8 @@ def execute_read(root: Path, p: Path, raw: str, display: str, start: int, *,
                     )
                 except (AttributeError, OSError, TypeError, ValueError):
                     pass
+            if observation == cached_observation:
+                observation = _append_decoding_note(observation, cached_metadata, request)
             if (str(cached_metadata.get("result_class", "OK")) == "OK"
                     and result_truth and repeat_request is None):
                 note = result_note(
@@ -742,12 +753,13 @@ def execute_read(root: Path, p: Path, raw: str, display: str, start: int, *,
             if fresh_revision_bytes is not None:
                 read_bytes = fresh_revision_bytes
             else:
-                read_bytes = p.read_bytes()
+                read_bytes, opened_signature = _read_regular_file(p)
                 try:
                     after_signature = _file_signature(p)
                 except OSError:
                     after_signature = None
-                if signature is not None and after_signature == signature:
+                if (signature is not None and after_signature == signature
+                        and opened_signature == signature):
                     cache_entry = _store_source(
                         measurement, identity, read_bytes, signature, generation)
                 else:
@@ -763,7 +775,7 @@ def execute_read(root: Path, p: Path, raw: str, display: str, start: int, *,
         now = time.perf_counter_ns()
         delivery_elapsed_ns += now - (delivery_segment_started or now)
         delivery_segment_started = now
-        if measurement.retained is not None:
+        if measurement.retained is not None and b"\0" not in read_bytes:
             # Retention has its own extraction/binding/journaling meters; do not
             # attribute its work to the request-delivery phase.
             delivery_segment_started = None
@@ -854,6 +866,8 @@ def execute_read(root: Path, p: Path, raw: str, display: str, start: int, *,
             except (AttributeError, OSError, TypeError, ValueError):
                 pass
         observation = source.text
+        if source.result_class == "OK":
+            observation = _append_decoding_note(observation, source.metadata, request)
         dedup_key = _page_cache_key(
             request, identity, str(source.metadata.get("revision") or ""),
             source.metadata, source.content)
@@ -920,12 +934,16 @@ def execute_read(root: Path, p: Path, raw: str, display: str, start: int, *,
         if delivery is not None:
             delivery.update(shaped)
             delivery["host_outcome"] = (
-                "OBSERVED" if source.result_class in {"OK", "OUT_OF_RANGE"}
+                "OBSERVED" if source.result_class in {"OK", "OUT_OF_RANGE", "BINARY"}
                 else "UNKNOWN"
             )
+            if source.result_class == "BINARY":
+                delivery.update({"failure_class": "BINARY_FILE", "delivery_status": "WITHHELD",
+                                 "requested_bytes_delivered": 0})
             if source.result_class != "OK":
                 delivery["read_reuse"] = _ordinary_read_receipt(
-                    step, raw, start, f"host_result:{source.result_class}")
+                    step, raw, start, "binary_file" if source.result_class == "BINARY"
+                    else f"host_result:{source.result_class}")
             if source.result_class == "OK":
                 exact_reuse = False
                 try:
@@ -1020,7 +1038,7 @@ def execute_read(root: Path, p: Path, raw: str, display: str, start: int, *,
                 effective_range=source.metadata.get("effective_range"))
             if note:
                 observation += "\n" + note
-        return source.result_class, observation, read_bytes
+        return source.result_class, observation, None if source.result_class == "BINARY" else read_bytes
     except ReadArgumentError as error:
         repair = error.as_dict(path=raw)
         if delivery is not None:
@@ -1042,6 +1060,19 @@ def execute_read(root: Path, p: Path, raw: str, display: str, start: int, *,
             })
         return "INVALID_ARGUMENT", json.dumps(
             repair, sort_keys=True, ensure_ascii=False, separators=(",", ":")), None
+    except _NonRegularReadPath:
+        message = f"REFUSED NON_REGULAR_FILE: {display} is not a regular file."
+        if delivery is not None:
+            delivery.update({
+                "schema": "read-page/1", "path": display, "effective_range": None,
+                "result_class": "NON_REGULAR_FILE", "refusal_cause": "non_regular_file",
+                "byte_length": 0,
+                "host_outcome": "REFUSED", "failure_class": "NON_REGULAR_FILE",
+                "delivery_status": "WITHHELD",
+                "requested_bytes_delivered": 0,
+                "read_reuse": _ordinary_read_receipt(step, raw, start, "non_regular_file"),
+            })
+        return "NON_REGULAR_FILE", message, None
     except OSError as error:
         if delivery is not None:
             delivery.update({

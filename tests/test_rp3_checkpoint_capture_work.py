@@ -6,6 +6,7 @@ import os
 import sys
 import time
 from collections import Counter
+from contextlib import contextmanager
 
 import kernel_workspace_index as index
 import pytest
@@ -16,6 +17,8 @@ from kernel_workspace_refs import bind_run_store
 from kernel_workspace_state import WorkspaceFence, WorkspaceState, _PayloadSpool
 
 from stateframe.engine import kernel_checkpoint as checkpoint
+from stateframe.engine.kernel_boundary_recovery import BoundaryRecoveryStop
+from stateframe import resume
 
 
 @pytest.fixture
@@ -133,28 +136,32 @@ def test_dense_workspace_and_growing_run_have_bounded_checkpoint_work(boundary, 
     assert max(unchanged_seconds, changed_seconds) < 10
 
 
-def test_known_refusal_reports_allowlisted_stage_and_keeps_failure_limit(boundary, monkeypatch):
+def test_known_refusal_stays_visible_without_disabling_saving(boundary, monkeypatch):
     run, _, _ = boundary
     monkeypatch.setattr(checkpoint, "_SIGNING_KEY", [])
     monkeypatch.setenv(checkpoint.MODE_ENV, "on")
     monkeypatch.setenv(checkpoint.EVERY_ENV, "1")
-    monkeypatch.setattr(checkpoint, "_sends", lambda _: 1)
+    sends = {"count": 0}
+    monkeypatch.setattr(checkpoint, "_sends", lambda _: sends["count"])
 
     def must_not_collect(_):
         pytest.fail("an unsigned boundary started semantic capture")
 
     monkeypatch.setattr(checkpoint, "collect", must_not_collect)
-    for step in range(1, checkpoint.MAX_CONSECUTIVE_FAILURES + 2):
+    # A new send must remain eligible after repeated refusals; the old ceiling blocked recovery.
+    for step in range(1, checkpoint.FAILURE_WARNING_THRESHOLD + 2):
+        sends["count"] = step
         checkpoint.save_point(sys._getframe(), step, run / "worker")
 
     assert checkpoint.latest(run) is None
     assert checkpoint.failure_summary() == {
-        "checkpoint_failures": checkpoint.MAX_CONSECUTIVE_FAILURES,
-        "checkpoint_saving_disabled": True,
+        "checkpoint_failures": checkpoint.FAILURE_WARNING_THRESHOLD + 1,
+        "checkpoint_saving_disabled": False,
     }
     events = [json.loads(line) for line in (run / "checkpoints/events.jsonl").read_text().splitlines()]
     failures = [event for event in events if event["event"] == "checkpoint_failed"]
-    assert len(failures) == checkpoint.MAX_CONSECUTIVE_FAILURES
+    assert len(failures) == checkpoint.FAILURE_WARNING_THRESHOLD + 1
+    assert not any(event["event"] == "checkpoint_disabled" for event in events)
     assert {event["failure_stage"] for event in failures} == {"admission"}
     assert {event["failure_reason"] for event in failures} == {"checkpoint refused"}
 
@@ -164,6 +171,142 @@ def test_known_refusal_reports_allowlisted_stage_and_keeps_failure_limit(boundar
     error = checkpoint.ObjectCaptureError("unlisted", UntrustedReason("checkpoint refused"))
     assert checkpoint._failure_reason(error) == "unexpected writer error"
     assert checkpoint._capture_stage(error) == {}
+
+
+def test_checkpoint_failure_recovery_waits_for_new_send_and_keeps_resume_candidate(
+        boundary, monkeypatch):
+    run, _, _ = boundary
+    monkeypatch.setenv(checkpoint.MODE_ENV, "on")
+    monkeypatch.setenv(checkpoint.EVERY_ENV, "1")
+    monkeypatch.setenv(checkpoint.KEEP_ENV, "2")
+    monkeypatch.setenv("STATEFRAME_WORKSPACE_OBJECTS", "off")
+    monkeypatch.setattr(checkpoint, "_async_enabled", lambda: False)
+    monkeypatch.setattr(checkpoint, "_low_disk_space", lambda _run: None)
+    sends = {"count": 1}
+    monkeypatch.setattr(checkpoint, "_sends", lambda _run: sends["count"])
+    checkpoint._STATE.update(
+        failed=0, consecutive_failed=0, disabled=None, last_sends=None,
+        restored_step=None, saved=0, warned=set(),
+    )
+
+    attempts = []
+    real_save = checkpoint.save
+
+    def observe_save(frame, step, run_dir, *, background=False):
+        attempts.append((sends["count"], step))
+        return real_save(frame, step, run_dir, background=background)
+
+    monkeypatch.setattr(checkpoint, "save", observe_save)
+    real_collect = checkpoint.collect
+
+    def fail_three_captures(frame):
+        if sends["count"] in {2, 3, 4}:
+            raise checkpoint.ObjectCaptureError("admission", "injected capture failure")
+        return real_collect(frame)
+
+    monkeypatch.setattr(checkpoint, "collect", fail_three_captures)
+    worker = run / "worker"
+    checkpoint.save_point(None, 1, worker)
+    first = checkpoint.latest(run)
+    assert first is not None
+
+    sends["count"] = 2
+    checkpoint.save_point(None, 2, worker)
+    assert len(attempts) == 2
+    checkpoint.save_point(None, 3, worker)
+    assert len(attempts) == 2  # the failed send count is not attempted twice
+
+    for send, step in ((3, 4), (4, 5)):
+        sends["count"] = send
+        checkpoint.save_point(None, step, worker)
+    events = [json.loads(line) for line in
+              (run / "checkpoints" / "events.jsonl").read_text().splitlines()]
+    failures = [event for event in events if event.get("event") == "checkpoint_failed"]
+    assert len(failures) == 3
+    assert checkpoint.latest(run) == first
+    selected = resume.select_checkpoint(run, [{"send": 2}], run / "wire")
+    assert selected is not None and selected["dir"] == str(first)
+
+    sends["count"] = 5  # the capture fault has cleared; a new send makes saving reachable
+    checkpoint.save_point(None, 6, worker)
+    recovered = checkpoint.latest(run)
+    assert recovered is not None and recovered != first
+    selected = resume.select_checkpoint(run, [{"send": 2}], run / "wire")
+    assert selected is not None and selected["dir"] == str(first)
+    assert attempts == [(1, 1), (2, 2), (3, 4), (4, 5), (5, 6)]
+
+
+@pytest.mark.parametrize("stop_type", [KeyboardInterrupt, BoundaryRecoveryStop])
+def test_fourth_checkpoint_attempt_propagates_stop_after_transaction_cleanup(
+        boundary, monkeypatch, stop_type):
+    run, _, _ = boundary
+    monkeypatch.setenv(checkpoint.MODE_ENV, "on")
+    monkeypatch.setenv(checkpoint.EVERY_ENV, "1")
+    monkeypatch.setenv("STATEFRAME_WORKSPACE_OBJECTS", "off")
+    monkeypatch.setattr(checkpoint, "_async_enabled", lambda: False)
+    monkeypatch.setattr(checkpoint, "_low_disk_space", lambda _run: None)
+    sends = {"count": 0}
+    monkeypatch.setattr(checkpoint, "_sends", lambda _run: sends["count"])
+    checkpoint._STATE.update(
+        failed=0, consecutive_failed=0, disabled=None, last_sends=None,
+        restored_step=None, saved=0, warned=set(),
+    )
+    real_collect = checkpoint.collect
+
+    def fail_first_three_captures(frame):
+        if sends["count"] <= 3:
+            raise checkpoint.ObjectCaptureError("admission", "injected capture failure")
+        return real_collect(frame)
+
+    def stop_in_transaction(*_args, **_kwargs):
+        raise stop_type("engine stop")
+
+    monkeypatch.setattr(checkpoint, "collect", fail_first_three_captures)
+    monkeypatch.setattr(checkpoint, "_save_into", stop_in_transaction)
+    worker = run / "worker"
+    for sends["count"] in range(1, 4):
+        checkpoint.save_point(None, sends["count"], worker)
+
+    sends["count"] = 4
+    with pytest.raises(stop_type, match="engine stop"):
+        checkpoint.save_point(None, 4, worker)
+
+    root = run / "checkpoints"
+    assert not list(root.glob(".0004-*.tmp"))
+    rows = [json.loads(line) for line in (root / "events.jsonl").read_text().splitlines()]
+    assert len([row for row in rows if row.get("event") == "checkpoint_failed"]) == 3
+
+
+def test_object_capture_preserves_boundary_stop_after_stack_cleanup(boundary, monkeypatch):
+    run, _, state = boundary
+    monkeypatch.setenv(checkpoint.MODE_ENV, "on")
+    monkeypatch.setenv(checkpoint.EVERY_ENV, "1")
+    monkeypatch.setenv("STATEFRAME_WORKSPACE_OBJECTS", "on")
+    monkeypatch.setattr(checkpoint, "_sends", lambda _run: 1)
+    checkpoint._STATE.update(
+        failed=0, consecutive_failed=0, disabled=None, last_sends=None,
+        restored_step=None, warned=set(),
+    )
+    exited = []
+    pin = state.pin
+
+    @contextmanager
+    def track_pin(*args, **kwargs):
+        try:
+            with pin(*args, **kwargs) as value:
+                yield value
+        finally:
+            exited.append(True)
+
+    def stop(_frame):
+        raise BoundaryRecoveryStop("engine stop")
+
+    monkeypatch.setattr(state, "pin", track_pin)
+    monkeypatch.setattr(checkpoint, "collect", stop)
+    with pytest.raises(BoundaryRecoveryStop, match="engine stop"):
+        checkpoint.save_point(sys._getframe(), 1, run / "worker")
+
+    assert exited == [True]
 
 
 def test_workspace_writer_refuses_capture_before_run_tail(boundary, monkeypatch):

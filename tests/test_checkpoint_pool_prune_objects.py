@@ -178,6 +178,61 @@ def _assert_kept_checkpoint_loads(checkpoint_dir: Path, restored: Path) -> None:
     assert (restored / "worker" / "candidates" / "kept.bin").read_bytes() == b"kept bytes"
 
 
+def test_prune_objects_keeps_newest_quarantine_and_drops_dead_verifications(tmp_path, monkeypatch):
+    root = tmp_path / "checkpoints"
+    objects = root / checkpoint.OBJECT_DIR
+    objects.mkdir(parents=True)
+    object_name = f"{'a' * 64}-444"
+    other_object_name = f"{'b' * 64}-444"
+    live_name = f"{'c' * 64}-444"
+    missing_name = f"{'d' * 64}-444"
+    live = objects / live_name
+    live.write_bytes(b"live")
+    os.link(live, tmp_path / "snapshot-link")
+    old = objects / f"quarantine-9-{object_name}"
+    newest = objects / f"quarantine-10-{object_name}"
+    old_symlink = objects / f"quarantine-8-{object_name}"
+    separate = objects / f"quarantine-3-{other_object_name}"
+    malformed = objects / "quarantine-11-not-an-object-444"
+    leading_zero = objects / f"quarantine-010-{object_name}"
+    unrelated = objects / "leave-this-alone"
+    external = tmp_path / "external"
+    external.write_bytes(b"outside the object folder")
+    old_symlink.symlink_to(external)
+    for path in (old, newest, separate, malformed, leading_zero, unrelated):
+        path.write_bytes(b"quarantined")
+    info = live.stat()
+    live_identity = (os.getpid(), os.fspath(live), info.st_dev, info.st_ino,
+                     info.st_size, info.st_mtime_ns, "live-digest")
+    missing = (os.getpid(), os.fspath(objects / missing_name), 0, 0, 0, 0, "gone-digest")
+    stale = (os.getpid(), os.fspath(live), 0, 0, info.st_size, info.st_mtime_ns, "stale-digest")
+    monkeypatch.setattr(checkpoint, "_VERIFIED_OBJECTS", {live_identity, missing, stale})
+
+    checkpoint._prune_objects(root)
+
+    assert live.is_file() and newest.is_file() and separate.is_file()
+    assert not old.exists()
+    assert old_symlink.is_symlink() and external.read_bytes() == b"outside the object folder"
+    assert malformed.is_file() and leading_zero.is_file()
+    assert unrelated.read_bytes() == b"quarantined"
+    assert checkpoint._VERIFIED_OBJECTS == {live_identity}
+
+
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="object-folder link check requires POSIX")
+def test_prune_objects_does_not_follow_symlinked_object_folder(tmp_path):
+    root = tmp_path / "checkpoints"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    orphan = outside / f"{'e' * 64}-444"
+    orphan.write_bytes(b"must stay outside the store")
+    (root / checkpoint.OBJECT_DIR).symlink_to(outside, target_is_directory=True)
+
+    checkpoint._prune_objects(root)
+
+    assert orphan.read_bytes() == b"must stay outside the store"
+
+
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="crash sweep requires POSIX save behavior")
 def test_save_crash_after_each_pool_unlink_keeps_retained_checkpoints_loadable(tmp_path, monkeypatch):
     monkeypatch.setenv(checkpoint.KEEP_ENV, "1")
@@ -269,5 +324,9 @@ def test_twenty_saves_report_pool_bytes_for_appearing_and_disappearing_file(tmp_
             live.unlink()
             live = None
         _save(run, step)
-    pool_bytes = _allocated_pool_bytes(run / "checkpoints" / checkpoint.POOL_DIR)
-    print(f"POOL_BYTES_AFTER_20_SAVES={pool_bytes}")
+    root = run / "checkpoints"
+    pool_bytes = _allocated_pool_bytes(root / checkpoint.POOL_DIR)
+    quarantine_bytes = sum(path.stat().st_blocks * 512
+                           for path in (root / checkpoint.OBJECT_DIR).glob("quarantine-*"))
+    print(f"POOL_BYTES_AFTER_20_SAVES={pool_bytes + quarantine_bytes} "
+          f"QUARANTINE_BYTES={quarantine_bytes}")

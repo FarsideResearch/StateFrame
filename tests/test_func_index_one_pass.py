@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -155,3 +156,335 @@ def test_rebuild_uses_renamed_deleted_and_edited_sources():
     assert "old_name.py" in first.by_path and "old_name.py" not in second.by_path
     assert "deleted.py" in first.by_path and "deleted.py" not in second.by_path
     assert [row.name for row in second.by_path["edited.py"]] == ["bravo", "<module>"]
+
+
+# The deliberately slow reference below walks the syntax tree once for file facts
+# and once for every function's bag. It keeps the indexing contract independent of
+# the production traversal strategy.
+_REFERENCE_PATTERNS = {
+    "cmp_flip": r" >= | <= | > | < ",
+    "bool_flip": r" and | or ",
+    "none_flip": r" is None| is not None",
+    "arith_flip": r"\w [+\-] \w",
+    "not_flip": r"\bnot\b",
+}
+
+
+def _reference_words(value):
+    out = set()
+    for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", value):
+        for part in re.split(r"_+", token):
+            for word in re.findall(r"[A-Z]?[a-z]+|[A-Z]{2,}", part):
+                if len(word) >= 3:
+                    out.add(word.lower())
+    return out
+
+
+def _reference_add(bag, values, weight):
+    for value in values:
+        bag[value] = max(bag.get(value, 0.0), weight)
+
+
+def _reference_constructs(source):
+    return {name: len(re.findall(pattern, source))
+            for name, pattern in _REFERENCE_PATTERNS.items()}
+
+
+def _reference_functions(tree):
+    def visit(node, prefix):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                qualname = prefix + child.name
+                yield child, qualname
+                yield from visit(child, qualname + ".")
+            elif isinstance(child, ast.ClassDef):
+                yield from visit(child, prefix + child.name + ".")
+            else:
+                yield from visit(child, prefix)
+
+    yield from visit(tree, "")
+
+
+def _reference_function_bag(function):
+    bag = {}
+    _reference_add(bag, _reference_words(function.name), 3.0)
+    args = function.args
+    for arg in list(args.args) + list(args.posonlyargs) + list(args.kwonlyargs):
+        _reference_add(bag, _reference_words(arg.arg), 1.5)
+
+    # Revisit the entire function subtree for each record, as the original slow
+    # per-function formulation did. Nested definitions intentionally contribute
+    # to enclosing functions as well as receiving their own records.
+    for node in ast.walk(function):
+        if node is function:
+            continue
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            _reference_add(bag, _reference_words(node.name), 1.5)
+        elif isinstance(node, ast.ClassDef):
+            _reference_add(bag, _reference_words(node.name), 1.5)
+        elif isinstance(node, ast.Name):
+            _reference_add(bag, _reference_words(node.id), 1.0)
+        elif isinstance(node, ast.Attribute):
+            _reference_add(bag, _reference_words(node.attr), 1.2)
+    return bag
+
+
+def _reference_record(**values):
+    return values
+
+
+def _reference_file(path, source):
+    path_words = _reference_words(path)
+    lines = source.splitlines()
+    file_bag = {}
+    _reference_add(file_bag, path_words, 3.0)
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return file_bag, [], [
+            _reference_record(
+                func_id=f"{path}::<module>::1", path=path, name="<module>",
+                qualname="<module>", lineno=1, end_lineno=max(1, len(lines)),
+                loc=max(1, len(lines)), is_module=True,
+                ident_bag=dict(file_bag), doc_bag={},
+                construct_counts=_reference_constructs(source),
+                parent_path_words=path_words, parent_import_words=set(),
+            )
+        ], True
+
+    imports = set()
+    modules = set()
+    module_terms = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            _reference_add(file_bag, _reference_words(node.name), 2.5)
+            _reference_add(file_bag,
+                           _reference_words((ast.get_docstring(node) or "")[:300]),
+                           1.5)
+        elif isinstance(node, ast.ClassDef):
+            class_words = _reference_words(node.name)
+            _reference_add(file_bag, class_words, 2.5)
+            _reference_add(file_bag,
+                           _reference_words((ast.get_docstring(node) or "")[:300]),
+                           1.5)
+            module_terms.append((class_words, 2.5))
+        elif isinstance(node, ast.Name):
+            name_words = _reference_words(node.id)
+            _reference_add(file_bag, name_words, 1.0)
+            module_terms.append((name_words, 0.8))
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                imports.update(_reference_words(alias.name))
+                modules.add(alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imports.update(_reference_words(node.module))
+            modules.add(node.module.split(".")[0])
+
+    _reference_add(file_bag,
+                   _reference_words((ast.get_docstring(tree) or "")[:300]), 2.0)
+
+    records = []
+    covered = set()
+    for function, qualname in _reference_functions(tree):
+        start = function.lineno
+        end = getattr(function, "end_lineno", function.lineno)
+        doc_bag = {}
+        _reference_add(doc_bag,
+                       _reference_words((ast.get_docstring(function) or "")[:400]),
+                       1.5)
+        records.append(_reference_record(
+            func_id=f"{path}::{qualname}::{start}", path=path,
+            name=function.name, qualname=qualname, lineno=start,
+            end_lineno=end, loc=max(1, end - start + 1), is_module=False,
+            ident_bag=_reference_function_bag(function), doc_bag=doc_bag,
+            construct_counts=_reference_constructs(
+                "\n".join(lines[start - 1:end])),
+            parent_path_words=path_words, parent_import_words=imports,
+        ))
+        if function.col_offset == 0:
+            covered.update(range(start, end + 1))
+
+    module_lines = [line for number, line in enumerate(lines, 1)
+                    if number not in covered]
+    module_bag = {}
+    _reference_add(module_bag, imports, 1.0)
+    for tokens, weight in module_terms:
+        _reference_add(module_bag, tokens, weight)
+    module_doc = {}
+    _reference_add(module_doc,
+                   _reference_words((ast.get_docstring(tree) or "")[:400]), 2.0)
+    records.append(_reference_record(
+        func_id=f"{path}::<module>::1", path=path, name="<module>",
+        qualname="<module>", lineno=1, end_lineno=max(1, len(lines)),
+        loc=max(1, len(module_lines)), is_module=True,
+        ident_bag=module_bag, doc_bag=module_doc,
+        construct_counts=_reference_constructs("\n".join(module_lines)),
+        parent_path_words=path_words, parent_import_words=imports,
+    ))
+    return file_bag, sorted(modules), records, False
+
+
+def _reference_index(files):
+    file_idx = {}
+    file_df = {}
+    paths_by_module = {}
+    for path in files:
+        module = Path(path).stem
+        existing = paths_by_module.get(module)
+        if existing is None:
+            paths_by_module[module] = path
+        elif isinstance(existing, list):
+            existing.append(path)
+        else:
+            paths_by_module[module] = [existing, path]
+
+    adjacency = {path: set() for path in files}
+    records = []
+    for path, source in files.items():
+        bag, imports, file_records, syntax_error = _reference_file(path, source)
+        file_idx[path] = bag
+        if not syntax_error:
+            for word in bag:
+                file_df[word] = file_df.get(word, 0) + 1
+        records.extend(file_records)
+        if syntax_error:
+            continue
+        for module in imports:
+            neighbors = paths_by_module.get(module, ())
+            if isinstance(neighbors, str):
+                neighbors = (neighbors,)
+            for neighbor in neighbors:
+                if neighbor != path:
+                    adjacency[path].add(neighbor)
+                    adjacency[neighbor].add(path)
+
+    def record_bag(record):
+        result = dict(record["ident_bag"])
+        for word, weight in record["doc_bag"].items():
+            result[word] = max(result.get(word, 0.0), weight)
+        return result
+
+    df = {}
+    by_path = {}
+    for record in records:
+        for word in record_bag(record):
+            df[word] = df.get(word, 0) + 1
+        by_path.setdefault(record["path"], []).append(record)
+    return {
+        "records": records, "df": df, "n": len(records),
+        "file_idx": file_idx, "file_df": file_df, "file_n": len(files),
+        "adj": adjacency, "by_path": by_path,
+    }
+
+
+def _actual_index(index):
+    return {
+        "records": index.records, "df": index.df, "n": index.n,
+        "file_idx": index.file_idx, "file_df": index.file_df,
+        "file_n": index.file_n, "adj": index.adj, "by_path": index.by_path,
+    }
+
+
+def _actual_and_slow_reference(files):
+    import func_index
+
+    actual = _normalize(_actual_index(func_index.build_func_index(files)))
+    return actual, _normalize(_reference_index(files))
+
+
+class TestSlowReferenceComparison:
+    def test_nested_classes_decorators_async_and_expressions_match(self):
+        source = '''
+"""A module docstring with acorn details."""
+from collections import deque
+
+@decorate_with(LEVEL)
+async def outer_service(payload, /, retries=2, *, timeout=5):
+    """An outer service for queued payload work."""
+    transform = lambda item: item.value.strip()
+    selected = [transform(item) for item in payload if item.ready]
+
+    class LocalWorker:
+        """A local worker class."""
+        @classmethod
+        def create(cls, values):
+            return deque(values)
+
+    async def inner_worker(value):
+        """An inner worker for the service."""
+        return await value.run()
+
+    if retries:
+        def conditional_worker(value):
+            return inner_worker(value)
+
+    return selected
+'''
+        actual, expected = _actual_and_slow_reference({"complex_module.py": source})
+        assert actual == expected
+
+
+class TestFallbackReferenceComparison:
+    def test_syntax_error_non_ascii_and_empty_sources_match(self):
+        files = {
+            "broken.py": "def unfinished(:\n    return 3\n",
+            "unicode_names.py": (
+                '"""Crème brûlée and 東京."""\n'
+                'naïve_value = "façade 東京"\n'
+                "def café_handler(entrée):\n"
+                "    return entrée + len(naïve_value)\n"
+            ),
+            "empty_module.py": "",
+        }
+        actual, expected = _actual_and_slow_reference(files)
+        assert actual == expected
+
+
+class TestReverseFileOrderReferenceComparison:
+    def test_reversed_file_order_matches_slow_reference(self):
+        files = {
+            "zeta.py": "def zulu(value):\n    return value\n",
+            "alpha.py": "def alpha(value):\n    return value\n",
+            "middle.py": "if READY:\n    def conditional():\n        return 1\n",
+        }
+        reversed_files = dict(reversed(list(files.items())))
+        actual, expected = _actual_and_slow_reference(reversed_files)
+        assert actual == expected
+
+
+class TestLinearAstVisits:
+    @staticmethod
+    def _nested_source(depth):
+        lines = ["def level_0(value):"]
+        indentation = "    "
+        for number in range(1, depth):
+            lines.append(indentation + f"def level_{number}(value):")
+            indentation += "    "
+        lines.append(indentation + "return value")
+        return "\n".join(lines) + "\n"
+
+    def test_ast_child_visits_scale_linearly_with_nested_depth(self, monkeypatch):
+        import func_index
+
+        original = ast.iter_child_nodes
+
+        def visits_for(depth):
+            count = 0
+
+            def counting_children(node):
+                nonlocal count
+                children = list(original(node))
+                count += len(children)
+                return iter(children)
+
+            with monkeypatch.context() as patch:
+                patch.setattr(ast, "iter_child_nodes", counting_children)
+                func_index.build_func_index({
+                    f"deep_{depth}.py": self._nested_source(depth),
+                })
+            return count
+
+        shallow = visits_for(24)
+        deep = visits_for(48)
+        assert deep > shallow
+        assert deep <= shallow * 2.7

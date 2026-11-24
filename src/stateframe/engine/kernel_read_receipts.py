@@ -30,7 +30,8 @@ READ_STATUSES = frozenset({
 def typed_status(status: str) -> str:
     aliases = {"READ_CURSOR_INVALID": "INVALID_ARGUMENT", "READ_CURSOR_STALE": "STALE_CURSOR",
                "NOT_FOUND": "MISSING", "INVALID_STREAM": "INVALID_ARGUMENT",
-               "INVALID_OFFSET": "INVALID_ARGUMENT", "INVALID_LIMIT": "INVALID_ARGUMENT"}
+               "INVALID_OFFSET": "INVALID_ARGUMENT", "INVALID_LIMIT": "INVALID_ARGUMENT",
+               "BINARY": "BINARY_FILE", "NON_REGULAR_FILE": "REFUSED"}
     status = aliases.get(status, status)
     return status if status in READ_STATUSES else "ERROR"
 

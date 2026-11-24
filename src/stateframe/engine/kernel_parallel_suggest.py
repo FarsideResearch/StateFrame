@@ -286,7 +286,12 @@ def frame_suggestion(runtime: object, plan: Mapping[str, object],
                if isinstance(unit, Mapping) and isinstance(unit.get("path"), str)}
     declared = row.get("editable_paths")
     product_files = row.get("files")
-    if isinstance(declared, (list, tuple)) and declared:
+    if row.get("scope_source") == "discovery":
+        from kernel_edit_affordance import WIDENED_PATHS_KEY
+        widened = row.get(WIDENED_PATHS_KEY, ())
+        editable = ((widened,) if isinstance(widened, str) else
+                    widened if isinstance(widened, (list, tuple)) else ())
+    elif isinstance(declared, (list, tuple)) and declared:
         editable = declared
     elif isinstance(product_files, Mapping):
         product_paths = tuple(path for path in product_files
