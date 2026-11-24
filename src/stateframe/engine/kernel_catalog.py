@@ -1682,6 +1682,19 @@ def _edit_applied(record: Receipt) -> bool:
 
 
 def _check_settled(record: Receipt) -> bool:
+    try:
+        from kernel_check_watchdog import execution_stop_outcome, validate_execution_stop
+        stop = validate_execution_stop(record.get("execution_stop"))
+    except (TypeError, ValueError):
+        stop = None
+    if (stop is not None and stop.get("scope") == "check"
+            and stop.get("cleanup_ok") is True
+            and record.get("execution_complete") is False
+            and str(record.get("outcome") or "").upper() == execution_stop_outcome(stop)):
+        # A validated host stop closes the check attempt without producing a
+        # test verdict. Keep that no-verdict observation, rather than minting
+        # check_not_settled debt that would prevent a new request.
+        return True
     if type(record.get("settled")) is bool:
         return bool(record["settled"])
     if str(record.get("status") or "").upper() == "INVALID":

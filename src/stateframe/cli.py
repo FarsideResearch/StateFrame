@@ -619,6 +619,7 @@ def _print_summary(summary: dict) -> None:
         ("limitation", " ".join(item.split())[:160])
         for item in limitations if isinstance(item, str) and item.strip()
     ] if isinstance(limitations, list) else []
+    transport_failure = summary.get("provider_transport_failure")
     rows = [
         ("outcome", f"runtime={summary['runtime_outcome']} checks={summary['check_outcome']} "
          f"artifact={summary['artifact']}"),
@@ -647,6 +648,14 @@ def _print_summary(summary: dict) -> None:
           if "test_files_changed" in summary else []),
         ("run directory", summary["run_dir"]),
     ]
+    if isinstance(transport_failure, dict):
+        status = transport_failure.get("status")
+        status_label = f"HTTP {status}" if type(status) is int else "status unknown"
+        last_error = transport_failure.get("last_error")
+        error_label = last_error if isinstance(last_error, str) and last_error else "unknown"
+        sent = transport_failure.get("request_sent")
+        sent_label = "yes" if sent is True else "no" if sent is False else "unknown"
+        rows.append(("provider transport", f"{status_label}; last error={error_label}; request sent={sent_label}"))
     resumed = summary.get("resume")
     if isinstance(resumed, dict):
         how = ("faithful replay" if resumed.get("faithful") else

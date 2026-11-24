@@ -27,6 +27,10 @@ class FrameFit5Error(Exception):
     """Stands in for the typed frame-fit fault from the L4 incident."""
 
 
+class HarnessTransportFault(Exception):
+    outcome = "HARNESS_TRANSPORT"
+
+
 # ---- outcomes.engine_error_reason ----------------------------------------------------------------
 
 def test_err_outcome_reason_names_class_and_message():
@@ -124,6 +128,34 @@ def test_catch_all_returns_class_and_message_and_records_reason_row(tmp_path, mo
     assert len(fields["fault_id"]) == 16
     assert fields["cause_chain"] == "[]"
     assert fields["primary_fault_id"] == fields["fault_id"]
+
+
+def test_worker_transport_terminal_records_request_identity(tmp_path, monkeypatch, reason_log):
+    run_dir = tmp_path / "run"
+    journal_parent = run_dir / "worker" / "measurement-runs"
+    journal_parent.mkdir(parents=True)
+    private_temp = tmp_path / "worker-tmp"
+    private_temp.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(private_temp))
+    monkeypatch.setenv("STATEFRAME_HOME", str(tmp_path / "stateframe-home"))
+    monkeypatch.setattr(sys, "argv", [sys.argv[0]])
+    runtime_type = importlib.import_module("kernel_stateframe_runtime").StateFrameRuntime
+    original_init = runtime_type.__init__
+
+    def scoped_init(self: object, owner: object, **kwargs: object) -> None:
+        kwargs["output"] = journal_parent
+        original_init(self, owner, **kwargs)
+
+    monkeypatch.setattr(runtime_type, "__init__", scoped_init)
+
+    def raise_transport(*_args: object, **_kwargs: object) -> object:
+        raise HarnessTransportFault("provider request failed")
+
+    monkeypatch.setattr(react_repair, "ask_tools", raise_transport)
+    result = react_repair.work(_fixture_row(tmp_path / "fixture", "transport-request-id"))
+
+    assert result["result"] == "HARNESS_TRANSPORT"
+    assert isinstance(result.get("request_id"), str) and result["request_id"]
 
 
 def test_catch_all_fault_id_is_stable_for_the_same_incident(tmp_path):
@@ -299,6 +331,184 @@ def test_fixture_envelope_names_class_and_message_through_summary_and_projection
 
     projected = outcomes.project(summary)
     assert projected["engine_error_reason"] == f"engine error: FrameFit5Error: {INCIDENT_MESSAGE}"
+
+
+@pytest.mark.parametrize(("http_status", "submission_state", "request_sent"), [
+    (503, "unknown", True), (None, "sent", True),
+    (None, "not_sent", False), (None, "unknown", "unknown"),
+])
+def test_harness_transport_projection_uses_recorded_cause_and_keeps_exit_policy(
+        tmp_path, http_status, submission_state, request_sent):
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "engine-result.json").write_text(json.dumps({"result": {
+        "result": "HARNESS_TRANSPORT", "error_type": "HarnessTransportError",
+        "failure_origin": "harness", "request_id": "terminal-request",
+    }}), encoding="utf-8")
+    journal = run / "worker" / "measurement-runs" / "one" / "events.jsonl"
+    journal.parent.mkdir(parents=True)
+    events = [
+        {"kind": "transport_error", "outcome": None, "request_id": "terminal-request", "http_status": 502,
+         "transport_reason": "upstream_timeout", "error_type": "TimeoutError",
+         "submission_state": "sent", "retry_scheduled": True},
+        {"kind": "transport_error", "outcome": "HARNESS_TRANSPORT", "request_id": "terminal-request",
+         "http_status": http_status,
+         "transport_reason": "upstream_unavailable", "error_type": "ConnectionError",
+         "submission_state": submission_state, "retry_scheduled": False},
+    ]
+    journal.write_text("".join(json.dumps(event) + "\n" for event in events), encoding="utf-8")
+
+    summary = runner.summarize(run, 0.0)
+    summary["child_exit_code"] = 0
+    projected = outcomes.project(summary)
+    summary.update(projected)
+    previous = {"runtime_outcome": "missing_result", "engine_terminal": summary["engine_terminal"]}
+
+    assert summary["runtime_outcome"] == "provider_transport_failure"
+    assert summary["provider_transport_failure"] == {
+        "status": http_status, "last_error": "upstream_unavailable", "request_sent": request_sent,
+    }
+    assert outcomes.exit_code(summary) == outcomes.exit_code(previous) == 2
+    assert outcomes.resume_hint_applies(summary) == outcomes.resume_hint_applies(previous) is True
+
+
+def test_harness_transport_retry_abort_projects_last_recorded_attempt(tmp_path):
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "engine-result.json").write_text(json.dumps({"result": {
+        "result": "HARNESS_TRANSPORT", "failure_origin": "harness", "request_id": "terminal-request",
+    }}), encoding="utf-8")
+    journal = run / "worker" / "measurement-runs" / "one" / "events.jsonl"
+    journal.parent.mkdir(parents=True)
+    journal.write_text(json.dumps({
+        "kind": "provider_transport_retry_aborted", "outcome": "HARNESS_TRANSPORT",
+        "request_id": "terminal-request",
+        "reason": "response_already_received",
+        "attempt_reasons": [{"http_status": 503, "reason": "upstream_timeout",
+                             "error_type": "TimeoutError"}],
+    }) + "\n", encoding="utf-8")
+
+    terminal = runner.summarize(run, 0.0)["engine_terminal"]
+
+    assert terminal["provider_transport_failure"] == {
+        "status": 503, "last_error": "upstream_timeout", "request_sent": True,
+    }
+
+
+def test_harness_transport_ignores_journal_evidence_from_an_earlier_request(tmp_path):
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "engine-result.json").write_text(json.dumps({"result": {
+        "result": "HARNESS_TRANSPORT", "error_type": "TimeoutError",
+        "request_id": "terminal-request", "failure_origin": "harness",
+    }}), encoding="utf-8")
+    journal = run / "worker" / "measurement-runs" / "one" / "events.jsonl"
+    journal.parent.mkdir(parents=True)
+    journal.write_text(json.dumps({
+        "kind": "transport_error", "outcome": "HARNESS_TRANSPORT",
+        "request_id": "earlier-request", "transport_attempt": 1,
+        "http_status": 503, "transport_reason": "upstream_unavailable",
+        "error_type": "ConnectionError", "submission_state": "sent",
+    }) + "\n", encoding="utf-8")
+
+    summary = runner.summarize(run, 0.0)
+
+    assert summary["engine_terminal"]["provider_transport_failure"] == {
+        "status": None, "last_error": "TimeoutError", "request_sent": "unknown",
+    }
+
+
+def test_harness_transport_retry_abort_keeps_submission_state_for_same_attempt(tmp_path):
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "engine-result.json").write_text(json.dumps({"result": {
+        "result": "HARNESS_TRANSPORT", "error_type": "TimeoutError",
+        "request_id": "terminal-request", "failure_origin": "harness",
+    }}), encoding="utf-8")
+    journal = run / "worker" / "measurement-runs" / "one" / "events.jsonl"
+    journal.parent.mkdir(parents=True)
+    events = [
+        {"kind": "transport_error", "request_id": "terminal-request",
+         "transport_attempt": 1, "submission_state": "not_sent",
+         "error_type": "TimeoutError", "http_status": None},
+        {"kind": "provider_transport_retry_aborted", "outcome": "HARNESS_TRANSPORT",
+         "request_id": "terminal-request", "attempt": 2,
+         "reason": "total_deadline_expired",
+         "attempt_reasons": [{"attempt": 1, "error_type": "TimeoutError",
+                              "http_status": None}]},
+    ]
+    journal.write_text("".join(json.dumps(event) + "\n" for event in events), encoding="utf-8")
+
+    terminal = runner.summarize(run, 0.0)["engine_terminal"]
+
+    assert terminal["provider_transport_failure"] == {
+        "status": None, "last_error": "TimeoutError", "request_sent": False,
+    }
+
+
+@pytest.mark.parametrize(("child_exit_code", "candidate_error"), [
+    (1, None), (0, {"reason": "candidate conflict"}),
+])
+def test_harness_transport_does_not_override_existing_engine_errors(child_exit_code, candidate_error):
+    summary = {
+        "child_exit_code": child_exit_code,
+        "candidate_error": candidate_error,
+        "engine_terminal": {"result": "HARNESS_TRANSPORT"},
+    }
+    summary.update(outcomes.project(summary))
+
+    assert summary["runtime_outcome"] == "engine_error"
+    assert outcomes.exit_code(summary) == 2
+    assert outcomes.resume_hint_applies(summary) is True
+
+
+@pytest.mark.parametrize(("child_exit_code", "cancelled", "timed_out", "expected"), [
+    (130, True, False, "cancelled"), (124, False, True, "budget_stop"),
+])
+def test_non_transport_runtime_does_not_keep_transport_cause(
+        child_exit_code, cancelled, timed_out, expected):
+    summary = {
+        "child_exit_code": child_exit_code,
+        "engine_terminal": {"result": "HARNESS_TRANSPORT", "provider_transport_failure": {
+            "status": 503, "last_error": "upstream_timeout", "request_sent": True,
+        }},
+    }
+
+    runner._project_final_outcome(summary, {"cancelled": cancelled, "timed_out": timed_out})
+
+    assert summary["runtime_outcome"] == expected
+    assert "provider_transport_failure" not in summary["engine_terminal"]
+    assert "provider_transport_failure" not in summary
+
+
+def test_non_transport_terminal_projection_does_not_gain_transport_details():
+    projected = outcomes.project({"child_exit_code": 0, "engine_terminal": {
+        "result": "HARNESS_CONTRACT", "error_message": "bad seal"}})
+
+    assert projected["runtime_outcome"] == "engine_error"
+    assert "provider_transport_failure" not in projected
+
+
+def test_cli_summary_reports_provider_transport_cause(tmp_path, capsys):
+    from stateframe import cli
+
+    (tmp_path / "final.diff").write_text("", encoding="utf-8")
+    cli._print_summary({
+        "run_dir": str(tmp_path),
+        "runtime_outcome": "provider_transport_failure",
+        "check_outcome": "not_run",
+        "artifact": "none",
+        "tests_before": {"command": None, "passed": None},
+        "tests_after": {"command": None},
+        "engine_result": "HARNESS_TRANSPORT",
+        "engine_terminal": {},
+        "provider_transport_failure": {
+            "status": 503, "last_error": "upstream_unavailable", "request_sent": True,
+        },
+        "files_changed": [],
+    })
+
+    assert "provider transport: HTTP 503; last error=upstream_unavailable; request sent=yes" in capsys.readouterr().out
 
 
 # ---- _child terminal construction -----------------------------------------------------------------

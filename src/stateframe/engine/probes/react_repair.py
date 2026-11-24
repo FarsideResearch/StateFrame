@@ -11746,6 +11746,7 @@ def work(d, *, resume=None):
                         "edits": _reported_edits, "tests": _reported_checks,
                         "behaviour": "unverified",
                         "error_type": type(e).__name__, "failure_origin": failure_origin,
+                        "request_id": _prepared.capture.request_id,
                         **_location,
                     }
                     measurement.journal.emit(
@@ -16512,7 +16513,8 @@ def work(d, *, resume=None):
                 edits=_reported_progress_counts(locals())[0],
                 tests=_reported_progress_counts(locals())[1],
                 behaviour="unverified", error_type=type(exc).__name__,
-                failure_origin="harness", **_location)
+                failure_origin="harness",
+                request_id=getattr(measurement, "current_request_id", None), **_location)
             if measurement is not None:
                 measurement.system_outcome = _harness_outcome
                 measurement.journal.emit(

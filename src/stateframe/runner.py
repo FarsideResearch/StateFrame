@@ -4360,6 +4360,9 @@ def summarize(run: Path, started: float,
         "minimum_context_tokens", "configured_context_tokens", "minimum_prompt_tokens",
         "minimum_measure_method", "message", "candidate_paths")
         if key in result}
+    if result.get("result") == "HARNESS_TRANSPORT":
+        summary["engine_terminal"]["provider_transport_failure"] = outcomes.provider_transport_failure(
+            run, result)
     # Replay refusals keep their actionable detail in the event, not the terminal receipt.
     # Preserve it for the final CLI summary and --json, which suppresses live events.
     log_path = run / "engine.log"
@@ -5354,6 +5357,14 @@ def _start_files_skipped_line(work: workcopy.WorkCopy) -> str:
     return f"start files skipped: {len(work.skipped)} total" + (f"; {names}" if names else "") + extra
 
 
+def _project_final_outcome(summary: dict[str, object], projection_args: dict[str, object]) -> None:
+    summary.update(outcomes.project(summary, **projection_args))
+    if summary.get("runtime_outcome") != "provider_transport_failure":
+        terminal = summary.get("engine_terminal")
+        if isinstance(terminal, dict):
+            terminal.pop("provider_transport_failure", None)
+
+
 def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: workcopy.WorkCopy,
              spec: dict) -> dict[str, object]:
     required_ledger_enabled = _required_test_ledger_enabled()
@@ -5652,7 +5663,7 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
         check_repo=work.copy,
         declared_test_command=declared_test_evidence(
             options.test_cmd, options.check_cmd, options.check_source, options.runner_kind))
-    summary.update(outcomes.project(summary, **projection_args))
+    _project_final_outcome(summary, projection_args)
     summary["exit_code"] = outcomes.exit_code(summary)
     summary["succeeded"] = succeeded(summary)
     _refuse_submitted_delivery(summary)

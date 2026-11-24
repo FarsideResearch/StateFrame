@@ -809,6 +809,43 @@ class HostEvidence:
                         # execution effect; certification still requires the
                         # separate subprocess evidence above.
                         status = "applied"
+                elif (effect.tool == "run_tests" and result == "NO_VERDICT"
+                      and record.get("before_binding") == current
+                      and record.get("after_binding") == current
+                      and record.get("changes") == []
+                      and any(receipt.get("kind") == "test"
+                              and receipt.get("result_class") == "NO_VERDICT"
+                              for receipt in matching)):
+                    # A matching action closure plus the runner's authenticated
+                    # stop record proves this read-only check ended without a
+                    # verdict. It settles the effect for continuation purposes;
+                    # the receipt remains unresolved for task completion.
+                    from kernel_check_watchdog import (
+                        execution_stop_outcome, validate_execution_stop,
+                    )
+                    tests = [test for test in self.scan_rows()
+                             if test["kind"] == "test_subprocess_completed"
+                             and test.get("producer") == "test_subprocess"
+                             and test.get("continuation_effect_id") == effect.effect_id
+                             and test.get("continuation_dispatch_ref") == effect.dispatch_ref
+                             and test.get("continuation_id") == effect.intention_id
+                             and test.get("request_id") == effect.request_id
+                             and effect.intent_sequence < test["sequence"] < event["sequence"]]
+                    if len(tests) == 1:
+                        test = tests[0]
+                        try:
+                            stop = validate_execution_stop(test.get("execution_stop"))
+                        except (TypeError, ValueError):
+                            stop = None
+                        if (stop is not None and stop.get("scope") == "check"
+                                and stop.get("cleanup_ok") is True
+                                and test.get("execution_complete") is False
+                                and test.get("outcome") == execution_stop_outcome(stop)
+                                and type(test.get("exit_code")) is int
+                                and test.get("binding") == current
+                                and test.get("after_binding") == current
+                                and test.get("binding_stable") is True):
+                            status = "not_applied"
         if status == "unknown":
             # Q23: host evidence can prove a refused/malformed edit never ran;
             # keep that effect out of the red-terminal dead end.

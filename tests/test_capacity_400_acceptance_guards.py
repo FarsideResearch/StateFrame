@@ -127,7 +127,7 @@ def test_capacity_retry_is_not_rearmed_by_degeneration_resend(tmp_path: Path) ->
                         if event.get("kind") == "capacity_retry"]
     assert len(capacity_retries) == 1, (capacity_retries, case.summary, case.output)
     assert len(case.requests) == 3, (len(case.requests), case.summary, case.output)
-    _assert_base_terminal(case, "HARNESS_TRANSPORT", "missing_result")
+    _assert_base_terminal(case, "HARNESS_TRANSPORT", "provider_transport_failure")
 
 
 def test_response_format_schema_400_is_not_capacity(tmp_path: Path) -> None:
