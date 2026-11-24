@@ -16,6 +16,8 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+from kernel_verdict import execution_stop_cause
+
 
 MODE_ENV = "STATEFRAME_TOKENLAB_V33_LEAN"
 SCHEMA = "stateframe-v33-lean/1"
@@ -97,6 +99,9 @@ def difficulty(frame: Mapping[str, object] | None = None,
         if depth > 3:
             return
         if isinstance(value, Mapping):
+            if execution_stop_cause(value) is not None:
+                statuses.append("UNRESOLVED")
+                return
             for key, item in value.items():
                 if key in {"status", "result", "result_class", "outcome", "check_status", "state"}:
                     statuses.append(str(item).upper())
@@ -108,6 +113,9 @@ def difficulty(frame: Mapping[str, object] | None = None,
     collect_statuses(current)
     for row in (*_rows(current.get("test_receipts")), *_rows(current.get("receipts")),
                 *tuple(receipts)):
+        if execution_stop_cause(row) is not None:
+            statuses.append("UNRESOLVED")
+            continue
         for key in ("status", "result", "result_class", "outcome"):
             if row.get(key) is not None:
                 statuses.append(str(row[key]).upper())
@@ -203,7 +211,7 @@ def _compact_stateframe(content: str) -> str:
         if not isinstance(value, Mapping):
             return value
         result: dict[str, object] = {}
-        for key in ("state", "status", "result", "result_class", "selectors"):
+        for key in ("state", "status", "result", "result_class", "selectors", "reason_code"):
             if key in value:
                 result[key] = copy.deepcopy(value[key])
         evidence = value.get("evidence")

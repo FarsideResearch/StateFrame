@@ -23,7 +23,10 @@ from kernel_read_working_set import evictfix_enabled
 from kernel_non_product_paths import NON_PRODUCT_PARTS, is_non_product  # noqa: F401 (re-export)
 from probes.stateframe_shadow import Turn, _refresh_derived, fold_turn, initial_frame
 from kernel_test_artifact_policy import TestArtifactPolicy, discover_test_artifact_policy
-from kernel_verdict import NO_HOST_CHECKS, SATISFIED, UNRESOLVED, Verdict, evaluate_required_tests
+from kernel_verdict import (
+    NO_HOST_CHECKS, SATISFIED, UNRESOLVED, Verdict, evaluate_required_tests,
+    execution_stop_cause,
+)
 
 if TYPE_CHECKING:
     from kernel_workspace_index import EntryFilter
@@ -673,11 +676,17 @@ class LiveProjection:
         facts["verdicts"], facts["test_observations"] = [], []
         for receipt in test_receipts:
             bound = receipt.get("binding", {})
+            stopped_cause = execution_stop_cause(receipt)
             for selector in receipt.get("selectors", []):
                 identity = digest({"receipt": receipt["receipt_id"], "selector": selector})
                 turn = receipt.get("step", 0)
                 verdict = {"receipt_id": identity, "turn": turn, "selector": selector,
-                           "exit": receipt["exit_code"] if receipt.get("binding_stable") is True else None}
+                           "exit": (receipt["exit_code"]
+                                    if stopped_cause is None
+                                    and receipt.get("binding_stable") is True else None)}
+                if stopped_cause is not None:
+                    verdict.update(status="UNRESOLVED",
+                                   reason_code="CHECK_STOPPED:" + stopped_cause)
                 facts["verdicts"].append(verdict)
                 facts["test_observations"].append({**verdict, "binding": {
                     key: {"status": "bound", "value": bound[key]} if bound.get(key)

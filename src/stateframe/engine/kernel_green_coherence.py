@@ -26,7 +26,7 @@ from kernel_counterexample_visibility import (
     counterexample_ids,
     render_counterexample_blocks,
 )
-from kernel_verdict import NO_HOST_CHECKS
+from kernel_verdict import NO_HOST_CHECKS, execution_stop_cause
 
 
 MODE_ENV = "STATEFRAME_GREEN_COHERENCE"
@@ -868,7 +868,15 @@ def _selectors_match_required(selectors: Sequence[str], required: Sequence[str])
 
 def _normalize_current_test_row(row: dict[str, object], *, required: Sequence[str],
                                 current_row: bool) -> dict[str, object]:
-    """Expose a bound zero-exit public check as PASS on the coherent surface."""
+    """Normalize host stops and expose bound zero-exit checks on the coherent surface."""
+    stop_cause = execution_stop_cause(row)
+    if stop_cause is not None:
+        row["status"] = "UNRESOLVED"
+        row["reason_code"] = "CHECK_STOPPED:" + stop_cause
+        for key in ("result", "result_class", "verdict"):
+            if key in row:
+                row[key] = "UNRESOLVED"
+        return row
     if not current_row or row.get("exit_code") != 0:
         return row
     selectors = _row_selectors(row)

@@ -12,7 +12,7 @@ import os
 from collections.abc import Mapping, Sequence
 
 from kernel_verdict import (CONFLICT, SATISFIED, UNRESOLVED, VIOLATED, Verdict,
-                            evaluate_required_tests)
+                            evaluate_required_tests, execution_stop_cause)
 
 MODE_ENV = "STATEFRAME_LEAN_RENDER"
 VERSION = "stateframe-lean/1"
@@ -108,6 +108,8 @@ def _status(row: object) -> str:
         return "NOT_RUN"
     if not isinstance(row, Mapping):
         return str(row).upper()
+    if execution_stop_cause(row) is not None:
+        return "UNRESOLVED"
     for key in ("result_class", "result", "status", "outcome", "verdict"):
         if row.get(key) is not None:
             return str(row[key]).upper()
@@ -295,16 +297,34 @@ def _authority_receipt(frame: Mapping[str, object], authority: Mapping[str, obje
     if authority.get("authoritative"):
         checks = authority.get("checks")
         status = _status(checks)
+        verdict = _frame_verdict(frame, authority.get("required", ()))
+        stop_reason = next((reason for reason in verdict.reason_codes
+                            if reason.startswith("CHECK_STOPPED:")), None)
+        if stop_reason:
+            status = "FAILED" if verdict.state == VIOLATED else "UNRESOLVED"
         if status == "NOT_RUN" and frame.get("valid_product_verification") is True:
             status = "CERTIFIED"
-        return {"status": status, "selector": _authority_selector(authority),
-                "revision": _authority_revision(frame, authority)}
+        receipt = {"status": status, "selector": _authority_selector(authority),
+                   "revision": _authority_revision(frame, authority)}
+        if stop_reason:
+            receipt["reason_code"] = stop_reason
+        return receipt
     return _latest_test(frame)
 
 
 def _authority_certification(frame: Mapping[str, object], authority: Mapping[str, object],
                              receipt: Mapping[str, object] | None) -> str:
     """Derive certification from the same current-check authority as the receipt."""
+    verdict = authority.get("verdict")
+    state = getattr(verdict, "state", None)
+    if state != UNRESOLVED:
+        current_verdict = _frame_verdict(frame, authority.get("required", ()))
+        if (any(reason.startswith("CHECK_STOPPED:") for reason in current_verdict.reason_codes)
+                and current_verdict.state != VIOLATED):
+            return "UNVERIFIED"
+    else:
+        if any(reason.startswith("CHECK_STOPPED:") for reason in verdict.reason_codes):
+            return "UNVERIFIED"
     if isinstance(frame.get("terminal_status"), Mapping):
         status = str(frame["terminal_status"].get("public_check_status", "")).upper()
         if status == "PASS":
@@ -314,8 +334,6 @@ def _authority_certification(frame: Mapping[str, object], authority: Mapping[str
     from kernel_sweep_fixes import certification_for_completion, enabled as sweep_fixes_enabled
     if sweep_fixes_enabled():
         return certification_for_completion(authority.get("completion", {}))
-    verdict = authority.get("verdict")
-    state = getattr(verdict, "state", None)
     if state == SATISFIED:
         return "GREEN_CURRENT"
     if state == VIOLATED:

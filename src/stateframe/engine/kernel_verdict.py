@@ -54,6 +54,19 @@ _TEST_KINDS = {
     "run_tests",
     "pytest",
 }
+_EXECUTION_STOP_CAUSES = frozenset({
+    "no_progress", "resource_limit", "user_deadline", "cancelled",
+    "external_signal", "supervision_error", "telemetry_unavailable",
+})
+_EXECUTION_STOP_OUTCOMES = {
+    "NO_PROGRESS": "no_progress",
+    "RESOURCE_LIMIT": "resource_limit",
+    "USER_DEADLINE": "user_deadline",
+    "CANCELLED": "cancelled",
+    "EXTERNAL_SIGNAL": "external_signal",
+    "SUPERVISION_ERROR": "supervision_error",
+    "TELEMETRY_UNAVAILABLE": "telemetry_unavailable",
+}
 
 
 def _generator_fixes_enabled() -> bool:
@@ -1141,7 +1154,63 @@ def _binding_instability_reason(row: Mapping[str, object]) -> str:
     return "BINDING_UNSTABLE:" + code + (":" + "|".join(normalized) if normalized else "")
 
 
+def execution_stop_cause(row: Mapping[str, object]) -> str | None:
+    """Return a validated host stop cause without inferring from an exit code."""
+    from kernel_check_watchdog import validate_execution_stop
+
+    observations: list[Mapping[str, object]] = [row]
+    for key in ("typed_observation", "termination_evidence", "observation",
+                "observation_certificate"):
+        value = row.get(key)
+        if isinstance(value, Mapping):
+            observations.append(value)
+    for observation in observations:
+        if observation.get("execution_stop") is not None:
+            try:
+                stop = validate_execution_stop(observation.get("execution_stop"))
+            except ValueError:
+                stop = None
+            if stop is not None:
+                return str(stop["cause"])
+
+    incomplete = row.get("execution_complete") is False
+    for observation in observations:
+        completeness = observation.get("execution_completeness")
+        if (isinstance(completeness, Sequence)
+                and not isinstance(completeness, (str, bytes, bytearray))
+                and any(value is False for value in completeness)):
+            incomplete = True
+    if not incomplete:
+        return None
+    for observation in observations:
+        for key in ("termination_reason", "stop_cause", "cause"):
+            values = observation.get(key)
+            candidates = values if isinstance(values, Sequence) and not isinstance(
+                values, (str, bytes, bytearray)) else (values,)
+            for cause in candidates:
+                if isinstance(cause, str) and cause.strip().lower() in _EXECUTION_STOP_CAUSES:
+                    return cause.strip().lower()
+        for key in ("outcome", "outcomes", "result_class"):
+            values = observation.get(key)
+            candidates = values if isinstance(values, Sequence) and not isinstance(
+                values, (str, bytes, bytearray)) else (values,)
+            for outcome in candidates:
+                if isinstance(outcome, str):
+                    cause = _EXECUTION_STOP_OUTCOMES.get(
+                        outcome.strip().upper().replace("-", "_"))
+                    if cause is not None:
+                        return cause
+                    if outcome.strip().upper().replace("-", "_") == "INCOMPLETE":
+                        termination = observation.get("termination_reason")
+                        if isinstance(termination, str) and termination.strip().lower() in _EXECUTION_STOP_CAUSES:
+                            return termination.strip().lower()
+    return None
+
+
 def _exit_state(row: Mapping[str, object]) -> tuple[str, str]:
+    stop_cause = execution_stop_cause(row)
+    if stop_cause is not None:
+        return UNRESOLVED, "CHECK_STOPPED:" + stop_cause
     from kernel_step_contract import environment_check_reason
     if environment_check_reason(row) is not None:
         return UNRESOLVED, "ENVIRONMENT_BLOCKED"
@@ -1269,6 +1338,16 @@ def evaluate_required_tests(
         # an older pass. Otherwise a green receipt could survive an edit or a
         # test-time mutation merely because the newer observation was unusable.
         winners = _newest(covered)
+        stopped = [(_position, row, execution_stop_cause(row))
+                   for _position, row in winners]
+        stopped = [item for item in stopped if item[2] is not None]
+        if stopped:
+            for position, _row, cause in stopped:
+                supporting.append(wire_event_refs[position])
+                if cause is not None:
+                    reasons.append("CHECK_STOPPED:" + cause)
+            selector_states.append(UNRESOLVED)
+            continue
         if any(not _binding_is_current(row, current) for _position, row in winners):
             selector_states.append(UNRESOLVED)
             reasons.append(_binding_instability_reason(next(
@@ -1319,7 +1398,7 @@ __all__ = [
     "CONFLICT", "CompletionAssessment", "CompletionBasis", "CompletionDecision",
     "CompletionReducer", "DoneReducer", "NEEDS_WORK", "POLICY_VERSION", "REFUSED",
     "NO_HOST_CHECKS", "SATISFIED", "SEALED", "UNRESOLVED", "VIOLATED",
-    "TrustedTestReceipt", "Verdict",
+    "TrustedTestReceipt", "Verdict", "execution_stop_cause",
     "open_work_ids", "reduce_done", "repair_action_for", "repair_action_on_menu",
     "work_record_enabled",
     "evaluate_required_tests",

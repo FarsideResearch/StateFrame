@@ -232,8 +232,8 @@ def test_runner_drive_cleans_group_before_reaping_exited_leader(tmp_path, monkey
             engine.returncode = 0
 
     monkeypatch.setattr(runner, "_stop_group", stop)
-    options = SimpleNamespace(timeout_s=10, _deadline=None, python=sys.executable,
-                              shell_confirm=None, quiet=True, parallel_mode="off")
+    options = runner.RunOptions(repo=tmp_path, task="task", endpoint=None, timeout_s=10,
+                                python=sys.executable, quiet=True, parallel_mode="off")
     if survives:
         with pytest.raises(RuntimeError, match="engine survived process-group cleanup"):
             runner.drive(tmp_path, options)

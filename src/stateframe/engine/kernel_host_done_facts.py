@@ -398,9 +398,10 @@ class CheckResult:
     exit_code: int | None = None
     receipt_id: str | None = None
     source: str = "runner"
+    reason_code: str | None = None
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        result = {
             "status": self.status,
             "result": self.status,
             "selectors": list(self.selectors),
@@ -410,6 +411,9 @@ class CheckResult:
             "receipt_id": self.receipt_id,
             "source": self.source,
         }
+        if self.reason_code:
+            result["reason_code"] = self.reason_code
+        return result
 
 
 def _selectors(row: Mapping[str, object]) -> tuple[str, ...]:
@@ -423,6 +427,9 @@ def _selectors(row: Mapping[str, object]) -> tuple[str, ...]:
 
 
 def _status(row: Mapping[str, object]) -> str:
+    from kernel_verdict import execution_stop_cause
+    if execution_stop_cause(row) is not None:
+        return "UNRESOLVED"
     exit_code = row.get("exit_code", row.get("returncode"))
     if isinstance(exit_code, bool):
         exit_code = int(exit_code)
@@ -601,7 +608,7 @@ class DoneFacts:
             elif not last_check.current:
                 reasons.append("CHECK_NOT_CURRENT")
             elif last_check.status != "PASS":
-                reasons.append("CHECK_FAILED")
+                reasons.append(last_check.reason_code or "CHECK_FAILED")
         pass_selectors = tuple(passed)
         missing = [selector for selector in required
                    if not any(_selector_covers(selector, observed) for observed in pass_selectors)]
@@ -696,6 +703,8 @@ class DoneFacts:
                 receipt_id=(str(raw_check["receipt_id"])
                             if raw_check.get("receipt_id") is not None else None),
                 source=_as_text(raw_check.get("source")) or "runner",
+                reason_code=(str(raw_check["reason_code"])
+                             if raw_check.get("reason_code") is not None else None),
             )
         raw_lines = value.get("per_file_line_deltas", value.get("line_deltas", {}))
         line_deltas = raw_lines if isinstance(raw_lines, Mapping) else {}
@@ -784,8 +793,10 @@ def compute_done_facts(
     checks: list[CheckResult] = []
     current_rows: list[CheckResult] = []
     for row in rows:
+        from kernel_verdict import execution_stop_cause
+        stop_cause = execution_stop_cause(row)
         check = CheckResult(
-            status=_status(row),
+            status="UNRESOLVED" if stop_cause is not None else _status(row),
             selectors=_selectors(row),
             revision=_row_revision(row) or revision,
             current=_is_current(row, revision),
@@ -793,6 +804,7 @@ def compute_done_facts(
                        else None),
             receipt_id=_receipt_id(row),
             source=_as_text(row.get("source")) or "runner",
+            reason_code=("CHECK_STOPPED:" + stop_cause if stop_cause is not None else None),
         )
         checks.append(check)
         if check.current:

@@ -1,0 +1,2169 @@
+{
+  "schema": "stateframe-output-contract/1",
+  "field_path_notation": "Dot-separated object keys; [] selects each list item; {key} selects values under arbitrary object keys. Types are JSON types, array<T> for item types, and T|null for nullable values. optional:true permits a path to be absent. stable:true marks removals and type changes as breaks; stable:false reports them as notices; stable:'type' marks type changes as breaks and reports other changes as notices.",
+  "settings": [],
+  "notes": {
+    "settings": "pending"
+  },
+  "cli": [
+    {
+      "name": "chat",
+      "flags": "--api-key-env= --check= --check-cmd= --edit= --edit-scope= --endpoint= --git-tool --help --hooks= --instructions= --keep-checkpoints --max-turns= --mcp= --model= --mutation-audit= --mutation-domain= --mutation-hook= --mutation-network= --mutation-read= --mutation-retain= --mutation-write= --mutations= --no-git-tool --no-instructions --no-powerups --no-project-hooks --no-run-env --no-shell-ask --no-web --parallel= --parallel-check-permits= --parallel-max= --parallel-max-owned-bytes= --parallel-max-paths-per-subframe= --parallel-max-paths-total= --parallel-max-subframes= --parallel-min-subframes= --parallel-parent-reserve= --parallel-slots= --parallel-subframe-max-requests= --parallel-subframe-tokens= --powerup= --powerup-set= --profile= --protect-tests= --protected-test-glob= --pytest-plugins= --python= --repo= --route= --routes= --run-env --runner-kind= --session-dir= --shell= --shell-allow= --shell-ask --shell-deny= --shell-network= --shell-read= --shell-sandbox= --skill= --slot= --target= --test-cmd= --test-env= --test-python= --timeout= --tools= --trust-skill-tools --web --web-allow= --yolo -h",
+      "exit_codes": [
+        0,
+        2,
+        130
+      ]
+    },
+    {
+      "name": "config",
+      "flags": "--help -h",
+      "exit_codes": [
+        0,
+        2,
+        130
+      ]
+    },
+    {
+      "name": "config init",
+      "flags": "--help --path= -h",
+      "exit_codes": [
+        0,
+        2,
+        130
+      ]
+    },
+    {
+      "name": "contract",
+      "flags": "--help --json --schema-version -h",
+      "exit_codes": [
+        0,
+        2,
+        130
+      ]
+    },
+    {
+      "name": "gc",
+      "flags": "--apply --help --include-unfinished --json --keep-last= --older-than= --prune-seeds -h",
+      "exit_codes": [
+        0,
+        2,
+        130
+      ]
+    },
+    {
+      "name": "hooks",
+      "flags": "--help -h",
+      "exit_codes": [
+        0,
+        2,
+        130
+      ]
+    },
+    {
+      "name": "hooks trust",
+      "flags": "--help --remove --repo= -h",
+      "exit_codes": [
+        0,
+        2,
+        130
+      ]
+    },
+    {
+      "name": "inspect",
+      "flags": "--bytes --frame --help --messages --send= -h",
+      "exit_codes": [
+        0,
+        2,
+        130
+      ]
+    },
+    {
+      "name": "mutations",
+      "flags": "--help -h",
+      "exit_codes": [
+        0,
+        1,
+        2,
+        130
+      ]
+    },
+    {
+      "name": "mutations doctor",
+      "flags": "--help --json -h",
+      "exit_codes": [
+        0,
+        1,
+        2,
+        130
+      ]
+    },
+    {
+      "name": "mutations enable-level",
+      "flags": "--help --profile= -h",
+      "exit_codes": [
+        0,
+        1,
+        2,
+        130
+      ]
+    },
+    {
+      "name": "mutations list",
+      "flags": "--help --json --run= --scope= -h",
+      "exit_codes": [
+        0,
+        1,
+        2,
+        130
+      ]
+    },
+    {
+      "name": "mutations promote",
+      "flags": "--help --out= -h",
+      "exit_codes": [
+        0,
+        1,
+        2,
+        130
+      ]
+    },
+    {
+      "name": "mutations prune",
+      "flags": "--dry-run --help --json -h",
+      "exit_codes": [
+        0,
+        1,
+        2,
+        130
+      ]
+    },
+    {
+      "name": "mutations remove",
+      "flags": "--help --scope= -h",
+      "exit_codes": [
+        0,
+        1,
+        2,
+        130
+      ]
+    },
+    {
+      "name": "mutations retain",
+      "flags": "--help --scope= -h",
+      "exit_codes": [
+        0,
+        1,
+        2,
+        130
+      ]
+    },
+    {
+      "name": "mutations selftest",
+      "flags": "--help --json -h",
+      "exit_codes": [
+        0,
+        1,
+        2,
+        130
+      ]
+    },
+    {
+      "name": "mutations show",
+      "flags": "--help --json -h",
+      "exit_codes": [
+        0,
+        1,
+        2,
+        130
+      ]
+    },
+    {
+      "name": "powerups",
+      "flags": "--help -h",
+      "exit_codes": [
+        0,
+        2,
+        130
+      ]
+    },
+    {
+      "name": "powerups disable",
+      "flags": "--help --profile= -h",
+      "exit_codes": [
+        0,
+        2,
+        130
+      ]
+    },
+    {
+      "name": "powerups enable",
+      "flags": "--help --mode= --profile= --set= --trust-gating -h",
+      "exit_codes": [
+        0,
+        2,
+        130
+      ]
+    },
+    {
+      "name": "powerups install",
+      "flags": "--force --help -h",
+      "exit_codes": [
+        0,
+        2,
+        130
+      ]
+    },
+    {
+      "name": "powerups list",
+      "flags": "--help --profile= -h",
+      "exit_codes": [
+        0,
+        2,
+        130
+      ]
+    },
+    {
+      "name": "powerups promote",
+      "flags": "--help --name= -h",
+      "exit_codes": [
+        0,
+        2,
+        130
+      ]
+    },
+    {
+      "name": "powerups remove",
+      "flags": "--help -h",
+      "exit_codes": [
+        0,
+        2,
+        130
+      ]
+    },
+    {
+      "name": "powerups show",
+      "flags": "--help --profile= -h",
+      "exit_codes": [
+        0,
+        2,
+        130
+      ]
+    },
+    {
+      "name": "powerups trust",
+      "flags": "--help --remove --repo= -h",
+      "exit_codes": [
+        0,
+        2,
+        130
+      ]
+    },
+    {
+      "name": "rehydrate",
+      "flags": "--dry-run --help --offline -h",
+      "exit_codes": [
+        0,
+        1,
+        2,
+        130
+      ]
+    },
+    {
+      "name": "resume",
+      "flags": "--api-key-env= --container-is-sandbox --endpoint= --help --json --keep-checkpoints --keep-run-env --max-turns= --model= --quiet --replay-external --route= --routes= --shell= --shell-sandbox= --timeout= --yolo -h",
+      "exit_codes": [
+        0,
+        1,
+        2,
+        130
+      ]
+    },
+    {
+      "name": "run",
+      "flags": "--allow-source-tree --api-key-env= --check= --check-cmd= --container-is-sandbox --edit= --edit-scope= --endpoint= --git-tool --help --hooks= --in-place --instructions= --json --keep-checkpoints --keep-run-env --log-level= --max-turns= --mcp= --model= --mutation-audit= --mutation-domain= --mutation-hook= --mutation-network= --mutation-read= --mutation-retain= --mutation-write= --mutations= --no-git-tool --no-instructions --no-powerups --no-project-hooks --no-run-env --no-shell-ask --no-web --parallel= --parallel-check-permits= --parallel-max= --parallel-max-owned-bytes= --parallel-max-paths-per-subframe= --parallel-max-paths-total= --parallel-max-subframes= --parallel-min-subframes= --parallel-parent-reserve= --parallel-slots= --parallel-subframe-max-requests= --parallel-subframe-tokens= --powerup= --powerup-set= --profile= --protect-tests= --protected-test-glob= --pytest-plugins= --python= --quiet --repo= --route= --routes= --run-dir= --run-env --runner-kind= --shell= --shell-allow= --shell-ask --shell-deny= --shell-network= --shell-read= --shell-sandbox= --skill= --slot= --target= --task= --test-cmd= --test-env= --test-python= --timeout= --tools= --trust-skill-tools --web --web-allow= --yolo -h",
+      "exit_codes": [
+        0,
+        1,
+        2,
+        130
+      ]
+    },
+    {
+      "name": "skill",
+      "flags": "--help -h",
+      "exit_codes": [
+        0,
+        2,
+        130
+      ]
+    },
+    {
+      "name": "skill install",
+      "flags": "--force --help -h",
+      "exit_codes": [
+        0,
+        2,
+        130
+      ]
+    },
+    {
+      "name": "skill list",
+      "flags": "--help -h",
+      "exit_codes": [
+        0,
+        2,
+        130
+      ]
+    },
+    {
+      "name": "skill remove",
+      "flags": "--help -h",
+      "exit_codes": [
+        0,
+        2,
+        130
+      ]
+    },
+    {
+      "name": "stateframe",
+      "flags": "--help --version -h",
+      "exit_codes": [
+        0,
+        2,
+        130
+      ]
+    }
+  ],
+  "outputs": [
+    {
+      "file": "final.diff",
+      "format": "text",
+      "since": "unknown",
+      "optional": false,
+      "fields": []
+    },
+    {
+      "file": "summary.json",
+      "format": "json",
+      "since": "unknown",
+      "optional": false,
+      "fields": [
+        {
+          "name": "engine_result",
+          "type": "string|null",
+          "since": "unknown",
+          "stable": true,
+          "optional": false
+        },
+        {
+          "name": "engine_error_reason",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "engine_terminal.error_message",
+          "type": "string",
+          "since": "unknown",
+          "stable": true,
+          "optional": true
+        },
+        {
+          "name": "provider_sends",
+          "type": "integer",
+          "since": "unknown",
+          "stable": true,
+          "optional": false
+        },
+        {
+          "name": "requests",
+          "type": "integer|null",
+          "since": "unknown",
+          "stable": true,
+          "optional": true
+        },
+        {
+          "name": "runtime_outcome",
+          "type": "string",
+          "since": "unknown",
+          "stable": true,
+          "optional": false
+        },
+        {
+          "name": "engine_terminal.labels.certification",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "files_changed",
+          "type": "array<string>",
+          "since": "unknown",
+          "stable": true,
+          "optional": false
+        },
+        {
+          "name": "wall_seconds",
+          "type": "number",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "check_source",
+          "type": "string|null",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "check_outcome",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "tests_before.passed",
+          "type": "boolean|null",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "tests_before.command",
+          "type": "string|null",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "tests_after.passed",
+          "type": "boolean|null",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "tests_after.command",
+          "type": "string|null",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "problems",
+          "type": "object",
+          "since": "unknown",
+          "stable": true,
+          "optional": false
+        },
+        {
+          "name": "problems.unknown",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "problems.errors",
+          "type": "integer|null",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "problems.warnings",
+          "type": "integer|null",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "problems.by_cause",
+          "type": "object",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "problems.by_cause.{cause}",
+          "type": "object",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "problems.by_cause.{cause}.level",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "problems.by_cause.{cause}.count",
+          "type": "integer",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "problems.by_cause.{cause}.component",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "problems.by_cause.{cause}.what",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "problems.by_cause.{cause}.why",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "problems.by_cause.{cause}.first",
+          "type": "object",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "parallel.calls",
+          "type": "array<object>",
+          "since": "unknown",
+          "stable": true,
+          "optional": true
+        },
+        {
+          "name": "parallel.calls[]",
+          "type": "object",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "parallel.calls[].call_id",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "parallel.calls[].final_check",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "parallel.calls[].integration",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "parallel.calls[].measured",
+          "type": "object",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "parallel.calls[].measured.peak_active_subframes",
+          "type": "integer",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "parallel.subframes",
+          "type": "array<object>",
+          "since": "unknown",
+          "stable": true,
+          "optional": true
+        },
+        {
+          "name": "parallel.subframes[]",
+          "type": "object",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "parallel.subframes[].call_id",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "parallel.subframes[].subframe_id",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "parallel.subframes[].status",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "parallel.subframes[].reason",
+          "type": "string|null",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "parallel.subframes[].usage",
+          "type": "object",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "parallel.subframes[].usage.requests",
+          "type": "integer",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "parallel.subframes[].usage.physical_sends",
+          "type": "integer",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "parallel.subframes[].usage.prompt_tokens",
+          "type": "integer",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "parallel.subframes[].usage.completion_tokens",
+          "type": "integer",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "parallel.subframes[].usage.initial_frame_tokens",
+          "type": "integer|null",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "parallel.subframes[].requests",
+          "type": "integer",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "parallel.subframes[].wall_seconds",
+          "type": "number|null",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "hooks",
+          "type": "object",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "hooks.runs",
+          "type": "integer",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "hooks.denied",
+          "type": "integer",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "hooks.vetoes",
+          "type": "integer",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "hooks.errors",
+          "type": "integer",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "execution_boundary",
+          "type": "object",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "yolo",
+          "type": "boolean",
+          "since": "unknown",
+          "stable": true,
+          "optional": true
+        }
+      ]
+    },
+    {
+      "file": "engine-result.json",
+      "format": "json",
+      "since": "unknown",
+      "optional": true,
+      "fields": [
+        {
+          "name": "result",
+          "type": "object",
+          "since": "unknown",
+          "stable": true,
+          "optional": false
+        },
+        {
+          "name": "result.result",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "result.labels.certification",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "seconds",
+          "type": "number",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "exit_status",
+          "type": "integer",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        }
+      ],
+      "condition": "Written when the engine persists a terminal result.",
+      "stability": "internal"
+    },
+    {
+      "file": "spec.json",
+      "format": "json",
+      "since": "unknown",
+      "optional": false,
+      "fields": [
+        {
+          "name": "routes",
+          "type": "object",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "public_row.test_wrong_failed_nodes",
+          "type": "object",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "execution_boundary",
+          "type": "object",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "yolo",
+          "type": "boolean",
+          "since": "unknown",
+          "stable": true,
+          "optional": true
+        }
+      ],
+      "stability": "internal"
+    },
+    {
+      "file": "sends.jsonl",
+      "format": "jsonl",
+      "since": "unknown",
+      "optional": true,
+      "fields": [
+        {
+          "name": "send",
+          "type": "integer",
+          "since": "unknown",
+          "stable": true,
+          "optional": false
+        },
+        {
+          "name": "request_bytes",
+          "type": "integer",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "request_sha256",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "messages",
+          "type": "integer|null",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "seconds",
+          "type": "number",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "prompt_tokens",
+          "type": "integer|null",
+          "since": "unknown",
+          "stable": true,
+          "optional": false
+        },
+        {
+          "name": "completion_tokens",
+          "type": "integer|null",
+          "since": "unknown",
+          "stable": true,
+          "optional": false
+        },
+        {
+          "name": "cached_tokens",
+          "type": "integer|null",
+          "since": "unknown",
+          "stable": true,
+          "optional": false
+        },
+        {
+          "name": "actions",
+          "type": "array<string>",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        }
+      ],
+      "condition": "Written when the runner records provider send metadata."
+    },
+    {
+      "file": "wire/NNNN.request.json",
+      "format": "json",
+      "since": "unknown",
+      "optional": true,
+      "fields": [
+        {
+          "name": "messages",
+          "type": "array<object>",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "tools",
+          "type": "array<object>",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        }
+      ],
+      "condition": "Written when the run captures a provider request.",
+      "stability": "internal"
+    },
+    {
+      "file": "wire/NNNN.response.json",
+      "format": "json",
+      "since": "unknown",
+      "optional": true,
+      "fields": [
+        {
+          "name": "choices[]",
+          "type": "object",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "choices[].message.role",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "choices[].message.content",
+          "type": "string|null",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "choices[].message.tool_calls[]",
+          "type": "object",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "choices[].message.tool_calls[].function.name",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "choices[].message.tool_calls[].function.arguments",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "choices[].finish_reason",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        }
+      ],
+      "condition": "Written when the run captures a provider response.",
+      "stability": "internal"
+    },
+    {
+      "file": "engine.log",
+      "format": "prefixed-jsonl",
+      "since": "unknown",
+      "optional": true,
+      "fields": [
+        {
+          "name": "kind",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "request",
+          "type": "integer",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "turn",
+          "type": "integer|null",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "messages",
+          "type": "integer",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "roles",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "tools",
+          "type": "array<string>",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "send",
+          "type": "integer",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "request_bytes",
+          "type": "integer",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "request_sha256",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "seconds",
+          "type": "number",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "prompt_tokens",
+          "type": "integer|null",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "completion_tokens",
+          "type": "integer|null",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "cached_tokens",
+          "type": "integer|null",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "actions",
+          "type": "array<string>",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "error",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "detail",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "summary",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        }
+      ],
+      "condition": "Written when the engine records a structured event."
+    },
+    {
+      "file": "tests-after.txt",
+      "format": "text",
+      "since": "unknown",
+      "optional": true,
+      "fields": [],
+      "condition": "Written when post-edit check output is saved.",
+      "stability": "internal"
+    },
+    {
+      "file": "parallel/<call>/result.json",
+      "format": "json",
+      "since": "unknown",
+      "optional": true,
+      "fields": [
+        {
+          "name": "schema",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "call_id",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "final_check",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "integration",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "admission.status",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "admission.refusal.reason",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "final_check_receipt.schema",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "final_check_receipt.status",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "final_check_receipt.raw_evidence_ref",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "final_check_receipt.recipe_digest",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "final_check_receipt.product_manifest_digest",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "final_check_receipt.harness_manifest_digest",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "final_check_receipt.environment_digest",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "final_check_receipt.policy_digest",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "measured.peak_active_workers",
+          "type": "integer",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "outcomes[]",
+          "type": "object",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        }
+      ],
+      "condition": "Written after a parallel call persists its result."
+    },
+    {
+      "file": "parallel/<call>/outcomes.jsonl",
+      "format": "jsonl",
+      "since": "unknown",
+      "optional": true,
+      "fields": [
+        {
+          "name": "unit_id",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "status",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "reason",
+          "type": "string|null",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "usage",
+          "type": "object",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "wall_seconds",
+          "type": "number",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        }
+      ],
+      "condition": "Written when a parallel call records subframe outcomes."
+    },
+    {
+      "file": "parallel/<call>/host/units/<unit>/<n>.json",
+      "format": "json",
+      "since": "unknown",
+      "optional": true,
+      "fields": [
+        {
+          "name": "schema",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "call_id",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "unit_id",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "state",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        }
+      ],
+      "condition": "Written when host supervision records unit state.",
+      "stability": "internal"
+    },
+    {
+      "file": "parallel/<call>/checks/final/<sha256>.txt",
+      "format": "text",
+      "since": "unknown",
+      "optional": true,
+      "fields": [],
+      "condition": "Written when a final parallel check stores its result.",
+      "stability": "internal"
+    },
+    {
+      "file": "mutations/journal.jsonl",
+      "format": "jsonl",
+      "since": "unknown",
+      "optional": true,
+      "fields": [
+        {
+          "name": "kind",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "exit_code",
+          "type": "integer|null",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "timed_out",
+          "type": "boolean",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "stdout_overflow",
+          "type": "boolean",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "unit",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "call",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "files",
+          "type": "array<object>",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "observation",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        }
+      ],
+      "condition": "Written when a run records mutation journal events.",
+      "stability": "internal"
+    },
+    {
+      "file": "tool-tape.jsonl",
+      "format": "jsonl",
+      "since": "unknown",
+      "optional": true,
+      "fields": [
+        {
+          "name": "kind",
+          "type": "string",
+          "since": "unknown",
+          "stable": true,
+          "optional": false
+        },
+        {
+          "name": "call_id",
+          "type": "string",
+          "since": "unknown",
+          "stable": true,
+          "optional": false
+        },
+        {
+          "name": "tool",
+          "type": "string",
+          "since": "unknown",
+          "stable": true,
+          "optional": true
+        },
+        {
+          "name": "args",
+          "type": "object",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "replay_class",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "env_identity",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "exit_code",
+          "type": "integer|null",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        },
+        {
+          "name": "observation",
+          "type": "string|null",
+          "since": "unknown",
+          "stable": "type",
+          "optional": true
+        }
+      ],
+      "condition": "Written when a run records tool calls for replay.",
+      "stability": "internal"
+    },
+    {
+      "file": ".engine.lock",
+      "format": "opaque",
+      "optional": true,
+      "since": "unknown",
+      "fields": [],
+      "condition": "Written when a run acquires its directory lock.",
+      "stability": "internal"
+    },
+    {
+      "file": ".run.lock",
+      "format": "opaque",
+      "optional": true,
+      "since": "unknown",
+      "fields": [],
+      "condition": "Written when a run acquires its directory lock.",
+      "stability": "internal"
+    },
+    {
+      "file": "attempts/<n>/<path>",
+      "format": "mixed",
+      "optional": true,
+      "since": "unknown",
+      "fields": [],
+      "condition": "Written when a resumed run creates an attempt directory.",
+      "stability": "internal"
+    },
+    {
+      "file": "cas/<path>",
+      "format": "opaque",
+      "optional": true,
+      "since": "unknown",
+      "fields": [],
+      "condition": "Written when the run stores content-addressed files.",
+      "stability": "internal"
+    },
+    {
+      "file": "checks/<n>.json.z",
+      "format": "compressed-json",
+      "optional": true,
+      "since": "unknown",
+      "fields": [],
+      "condition": "Written when a check result is archived.",
+      "stability": "internal"
+    },
+    {
+      "file": "checkpoints/<path>",
+      "format": "mixed",
+      "optional": true,
+      "since": "unknown",
+      "fields": [],
+      "condition": "Written when checkpointing saves run state.",
+      "stability": "internal"
+    },
+    {
+      "file": "env-manifest.json",
+      "format": "json",
+      "optional": true,
+      "since": "unknown",
+      "fields": [],
+      "condition": "Written when a run environment is prepared.",
+      "stability": "internal"
+    },
+    {
+      "file": "env-sites.json",
+      "format": "json",
+      "optional": true,
+      "since": "unknown",
+      "fields": [],
+      "condition": "Written when environment locations are recorded.",
+      "stability": "internal"
+    },
+    {
+      "file": "exec-<id>/<path>",
+      "format": "mixed",
+      "optional": true,
+      "since": "unknown",
+      "fields": [],
+      "condition": "Written when a run launches an external command.",
+      "stability": "internal"
+    },
+    {
+      "file": "execution-delivery/<sha256>.json",
+      "format": "json",
+      "optional": true,
+      "since": "unknown",
+      "fields": [],
+      "condition": "Written when execution delivery is recorded.",
+      "stability": "internal"
+    },
+    {
+      "file": "hook-tape.jsonl",
+      "format": "jsonl",
+      "optional": true,
+      "since": "unknown",
+      "fields": [],
+      "condition": "Written when enabled hooks record events.",
+      "stability": "internal"
+    },
+    {
+      "file": "hooks/records.jsonl",
+      "format": "jsonl",
+      "optional": true,
+      "since": "unknown",
+      "fields": [],
+      "condition": "Written when configured hooks run.",
+      "stability": "internal"
+    },
+    {
+      "file": "hooks/out/<id>.err",
+      "format": "text",
+      "optional": true,
+      "since": "unknown",
+      "fields": [],
+      "condition": "Written when a hook captures standard error.",
+      "stability": "internal"
+    },
+    {
+      "file": "hooks/out/<id>.out",
+      "format": "text",
+      "optional": true,
+      "since": "unknown",
+      "fields": [],
+      "condition": "Written when a hook captures standard output.",
+      "stability": "internal"
+    },
+    {
+      "file": "parent/<path>",
+      "format": "mixed",
+      "optional": true,
+      "since": "unknown",
+      "fields": [],
+      "condition": "Written when a run snapshots repository inputs.",
+      "stability": "internal"
+    },
+    {
+      "file": "parallel/budget.json",
+      "format": "json",
+      "optional": true,
+      "since": "unknown",
+      "fields": [],
+      "condition": "Written when a parallel call records its budget.",
+      "stability": "internal"
+    },
+    {
+      "file": "parallel/host-metrics.json",
+      "format": "json",
+      "optional": true,
+      "since": "unknown",
+      "fields": [],
+      "condition": "Written when parallel host metrics are saved.",
+      "stability": "internal"
+    },
+    {
+      "file": "parallel/<call>/attempt-<n>/<path>",
+      "format": "mixed",
+      "optional": true,
+      "since": "unknown",
+      "fields": [],
+      "condition": "Written when a subframe attempt stores internal state.",
+      "stability": "internal"
+    },
+    {
+      "file": "parallel/<call>/final-contracts.json",
+      "format": "json",
+      "optional": true,
+      "since": "unknown",
+      "fields": [],
+      "condition": "Written when a parallel call stores final contracts.",
+      "stability": "internal"
+    },
+    {
+      "file": "parallel/<call>/host/exited-sequence.json",
+      "format": "json",
+      "optional": true,
+      "since": "unknown",
+      "fields": [],
+      "condition": "Written when host supervision records exit order.",
+      "stability": "internal"
+    },
+    {
+      "file": "parallel/<call>/host/units/<unit>/<n>.launch.json",
+      "format": "json",
+      "optional": true,
+      "since": "unknown",
+      "fields": [],
+      "condition": "Written when host supervision records a launch.",
+      "stability": "internal"
+    },
+    {
+      "file": "parallel/<call>/intent.json",
+      "format": "json",
+      "optional": true,
+      "since": "unknown",
+      "fields": [],
+      "condition": "Written when a parallel call stores its launch intent.",
+      "stability": "internal"
+    },
+    {
+      "file": "parallel/<call>/intervals/<id>.json",
+      "format": "json",
+      "optional": true,
+      "since": "unknown",
+      "fields": [],
+      "condition": "Written when a parallel call records unit intervals.",
+      "stability": "internal"
+    },
+    {
+      "file": "parallel/<call>/snapshots/<id>/<path>",
+      "format": "mixed",
+      "optional": true,
+      "since": "unknown",
+      "fields": [],
+      "condition": "Written when a parallel call snapshots subframe inputs.",
+      "stability": "internal"
+    },
+    {
+      "file": "parallel/<call>/units/<unit>/<path>",
+      "format": "mixed",
+      "optional": true,
+      "since": "unknown",
+      "fields": [],
+      "condition": "Written when a parallel call creates subframe run state.",
+      "stability": "internal"
+    },
+    {
+      "file": "requests.pack.xz",
+      "format": "xz",
+      "optional": true,
+      "since": "unknown",
+      "fields": [],
+      "condition": "Written when request records are sealed into a compressed pack.",
+      "stability": "internal"
+    },
+    {
+      "file": "shell-baseline/<sha256>/index.json",
+      "format": "json",
+      "optional": true,
+      "since": "unknown",
+      "fields": [],
+      "condition": "Written when shell baseline metadata is saved.",
+      "stability": "internal"
+    },
+    {
+      "file": "shell-baseline/<sha256>/objects.pack",
+      "format": "binary",
+      "optional": true,
+      "since": "unknown",
+      "fields": [],
+      "condition": "Written when shell baseline objects are packed.",
+      "stability": "internal"
+    },
+    {
+      "file": "shell-output-<id>.bin",
+      "format": "binary",
+      "optional": true,
+      "since": "unknown",
+      "fields": [],
+      "condition": "Written when a shell command spools binary output.",
+      "stability": "internal"
+    },
+    {
+      "file": "shell-output-<id>.json",
+      "format": "json",
+      "optional": true,
+      "since": "unknown",
+      "fields": [],
+      "condition": "Written when a shell command saves spool metadata.",
+      "stability": "internal"
+    },
+    {
+      "file": "skill-settings.json",
+      "format": "json",
+      "optional": true,
+      "since": "unknown",
+      "fields": [],
+      "condition": "Written when a run resolves selected skills.",
+      "stability": "internal"
+    },
+    {
+      "file": "tool-schema-budget-<id>.json",
+      "format": "json",
+      "optional": true,
+      "since": "unknown",
+      "fields": [],
+      "condition": "Written when a run measures its tool schema budget.",
+      "stability": "internal"
+    },
+    {
+      "file": "tool-settings.json",
+      "format": "json",
+      "optional": true,
+      "since": "unknown",
+      "fields": [],
+      "condition": "Written when a run saves resolved tool settings.",
+      "stability": "internal"
+    },
+    {
+      "file": "worker/candidates/<n>.json",
+      "format": "json",
+      "optional": true,
+      "since": "unknown",
+      "fields": [],
+      "condition": "Written when the run stores a worker candidate.",
+      "stability": "internal"
+    },
+    {
+      "file": "worker/continuation-workspaces/<id>/<path>",
+      "format": "mixed",
+      "optional": true,
+      "since": "unknown",
+      "fields": [],
+      "condition": "Written when the run persists worker continuation state.",
+      "stability": "internal"
+    },
+    {
+      "file": "worker/measurement-runs/<id>/<path>",
+      "format": "mixed",
+      "optional": true,
+      "since": "unknown",
+      "fields": [],
+      "condition": "Written when a worker records measurement data.",
+      "stability": "internal"
+    },
+    {
+      "file": "worker/repo-intel-cache/<id>/<path>",
+      "format": "mixed",
+      "optional": true,
+      "since": "unknown",
+      "fields": [],
+      "condition": "Written when a worker caches repository data.",
+      "stability": "internal"
+    },
+    {
+      "file": "worker/results/<path>",
+      "format": "mixed",
+      "optional": true,
+      "since": "unknown",
+      "fields": [],
+      "condition": "Written when a worker saves intermediate results.",
+      "stability": "internal"
+    },
+    {
+      "file": "workspace/<path>",
+      "format": "mixed",
+      "optional": true,
+      "since": "unknown",
+      "fields": [],
+      "condition": "Written when a run creates its working copy.",
+      "stability": "internal"
+    },
+    {
+      "file": "wire/NNNN.route.json",
+      "format": "json",
+      "optional": true,
+      "since": "unknown",
+      "fields": [],
+      "condition": "Written when routing metadata is captured for a provider request.",
+      "stability": "internal"
+    }
+  ],
+  "events": [
+    {
+      "name": "request",
+      "since": "unknown",
+      "fields": [
+        {
+          "name": "kind",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "request",
+          "type": "integer",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "turn",
+          "type": "integer|null",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "messages",
+          "type": "integer",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "roles",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "tools",
+          "type": "array<string>",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        }
+      ]
+    },
+    {
+      "name": "send",
+      "since": "unknown",
+      "fields": [
+        {
+          "name": "kind",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "send",
+          "type": "integer",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "request_bytes",
+          "type": "integer",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "request_sha256",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "seconds",
+          "type": "number",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "prompt_tokens",
+          "type": "integer|null",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "completion_tokens",
+          "type": "integer|null",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "cached_tokens",
+          "type": "integer|null",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "actions",
+          "type": "array<string>",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        }
+      ]
+    },
+    {
+      "name": "send_error",
+      "since": "unknown",
+      "fields": [
+        {
+          "name": "kind",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "send",
+          "type": "integer",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "error",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "detail",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": true
+        }
+      ]
+    },
+    {
+      "name": "tests",
+      "since": "unknown",
+      "fields": [
+        {
+          "name": "kind",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        },
+        {
+          "name": "summary",
+          "type": "string",
+          "since": "unknown",
+          "stable": false,
+          "optional": false
+        }
+      ]
+    }
+  ],
+  "commands": [
+    {
+      "name": "inspect",
+      "promised_json": {
+        "flags": [
+          "--send",
+          "--frame"
+        ],
+        "schema": "stateframe-f4/1",
+        "fields": [
+          {
+            "name": "schema",
+            "type": "string",
+            "since": "unknown",
+            "stable": false,
+            "optional": false
+          },
+          {
+            "name": "state.done_permission.state",
+            "type": "string",
+            "since": "unknown",
+            "stable": false,
+            "optional": false
+          },
+          {
+            "name": "state.blockers",
+            "type": "integer",
+            "since": "unknown",
+            "stable": false,
+            "optional": false
+          },
+          {
+            "name": "state.advisories",
+            "type": "integer",
+            "since": "unknown",
+            "stable": false,
+            "optional": false
+          },
+          {
+            "name": "state.public_checks.state",
+            "type": "string",
+            "since": "unknown",
+            "stable": false,
+            "optional": false
+          },
+          {
+            "name": "state.hypotheses[]",
+            "type": "object",
+            "since": "unknown",
+            "stable": false,
+            "optional": true
+          },
+          {
+            "name": "state.hypotheses_omitted",
+            "type": "integer",
+            "since": "unknown",
+            "stable": false,
+            "optional": true
+          },
+          {
+            "name": "state.framefit5.last_verdict.changed_since_check",
+            "type": "boolean",
+            "since": "unknown",
+            "stable": false,
+            "optional": true
+          },
+          {
+            "name": "state.framefit5.established_facts[].source",
+            "type": "string",
+            "since": "unknown",
+            "stable": false,
+            "optional": true
+          },
+          {
+            "name": "state.framefit5.next_site.path",
+            "type": "string|null",
+            "since": "unknown",
+            "stable": false,
+            "optional": true
+          },
+          {
+            "name": "state.framefit5.next_site.line",
+            "type": "integer|null",
+            "since": "unknown",
+            "stable": false,
+            "optional": true
+          },
+          {
+            "name": "state.framefit5.read_facts[].path",
+            "type": "string",
+            "since": "unknown",
+            "stable": false,
+            "optional": true
+          },
+          {
+            "name": "state.framefit5.read_facts[].lines.start",
+            "type": "integer",
+            "since": "unknown",
+            "stable": false,
+            "optional": true
+          },
+          {
+            "name": "state.framefit5.read_facts[].lines.end",
+            "type": "integer",
+            "since": "unknown",
+            "stable": false,
+            "optional": true
+          },
+          {
+            "name": "state.framefit5.applied_edits[].file",
+            "type": "string",
+            "since": "unknown",
+            "stable": false,
+            "optional": true
+          },
+          {
+            "name": "state.framefit5.applied_edits[].result_class",
+            "type": "string",
+            "since": "unknown",
+            "stable": false,
+            "optional": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "resume",
+      "promised_json": {
+        "flags": [
+          "--json"
+        ],
+        "fields": [
+          {
+            "name": "error",
+            "type": "string",
+            "since": "unknown",
+            "stable": false,
+            "optional": true
+          },
+          {
+            "name": "engine_result",
+            "type": "string",
+            "since": "unknown",
+            "stable": false,
+            "optional": false
+          },
+          {
+            "name": "engine_terminal",
+            "type": "object",
+            "since": "unknown",
+            "stable": false,
+            "optional": true
+          },
+          {
+            "name": "succeeded",
+            "type": "boolean",
+            "since": "unknown",
+            "stable": false,
+            "optional": true
+          },
+          {
+            "name": "exit_code",
+            "type": "integer",
+            "since": "unknown",
+            "stable": false,
+            "optional": false
+          }
+        ]
+      }
+    }
+  ]
+}

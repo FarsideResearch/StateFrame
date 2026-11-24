@@ -104,6 +104,8 @@ When the current cgroup is delegated and writable, and contains only StateFrame'
 
 Any other process in the cgroup prevents the leaf pattern. This includes an ancestor such as the calling shell and a sibling such as `tee` in a pipeline. StateFrame leaves that cgroup layout alone and uses `RLIMIT_DATA` for heap and private mappings plus sampled RSS supervision for shared mappings and `memfd` memory. The hard cgroup memory limit is available only when StateFrame is the only process family in a delegated cgroup and setup succeeds, for example when started directly with `systemd-run --user --scope -p Delegate=yes stateframe ...`. Under the fallback, memory can exceed the budget briefly between samples.
 
+For checks under the fallback with supervision, the `RLIMIT_DATA` ceiling is 2 GiB per process (or the check's budget when that is larger), and the supervisor enforces the memory budget between samples, so a check can briefly exceed its budget; `memfd` pages that are written but never mapped are not counted.
+
 Under the fallback, post-exit memory verification has no wall-clock cap. If a procfs read never returns (a kernel-level hang), finishing that check waits for it instead of failing the check.
 
 ## Environment seed storage

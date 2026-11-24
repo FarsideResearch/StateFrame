@@ -56,6 +56,10 @@ else:
 MAX_WALL_SECONDS = 900.0
 MAX_INPUT_BYTES = 4 * 1024 * 1024
 DEFAULT_CPU_SECONDS = 30.0
+# RLIMIT_DATA counts reserved writable memory, so runtimes such as Node cannot start under a
+# small value. With the resident-memory supervisor enforcing the real budget, this is the
+# per-process reservation ceiling; without the supervisor the budget itself stays the limit.
+SUPERVISED_DATA_CEILING_BYTES = 2 * 1024 * 1024 * 1024
 # Checks have no product CPU budget. A positive host override remains available.
 CHECK_CPU_BACKSTOP_SECONDS = None
 MAX_CPU_SECONDS = 86400.0
@@ -313,7 +317,8 @@ def _lowered_limits(current: tuple[int, int], limit: int) -> tuple[int, int]:
 def _resource_preexec(cpu_seconds: float | None, memory_bytes: int,
                       file_bytes: int, nofile: int, nproc: int,
                       cgroup: Path | None = None,
-                      memory_report_fd: int | None = None) -> Callable[[], None]:
+                      memory_report_fd: int | None = None,
+                      *, resident_supervised: bool = False) -> Callable[[], None]:
     cpu = (int(math.ceil(_limit_value("cpu_seconds", cpu_seconds, maximum=MAX_CPU_SECONDS)))
            if cpu_seconds is not None else None)
     memory = int(_limit_value("memory_bytes", memory_bytes, maximum=4 * 1024 * 1024 * 1024))
@@ -357,7 +362,9 @@ def _resource_preexec(cpu_seconds: float | None, memory_bytes: int,
             if cgroup_memory_configured and cgroup_joined:
                 memory_mechanism = "cgroup_memory_max"
             elif hasattr(resource, "RLIMIT_DATA"):
-                _lower_only(resource.RLIMIT_DATA, memory)
+                _lower_only(resource.RLIMIT_DATA,
+                            max(memory, SUPERVISED_DATA_CEILING_BYTES)
+                            if resident_supervised else memory)
                 memory_mechanism = "rlimit_data"
             else:  # Capability discovery should have rejected this before spawn.
                 raise RuntimeError("Linux RLIMIT_DATA memory fallback is unavailable")
@@ -896,6 +903,8 @@ class _ResidentMemorySupervisor:
                 self._stopped.wait(0.02)
         except BaseException as error:
             self._record_error(error)
+            # Nothing measures the unit once this thread ends, so do not leave it running.
+            self._stop_launch_unit()
         finally:
             if self.process.returncode is not None:
                 self._leader_exit_processed.set()
@@ -1042,7 +1051,11 @@ def sandboxed_popen(command: Sequence[object], root: str | os.PathLike[str], *,
             pass_fds=inherited_fds,
             preexec_fn=_resource_preexec(
                 cpu_seconds, memory_bytes, file_bytes, nofile, nproc, cgroup,
-                memory_report_fd=memory_writer)
+                memory_report_fd=memory_writer,
+                # Only this path starts the supervisor below, and it kills the child
+                # when that start fails.
+                resident_supervised=memory_writer is not None
+                and platform.system() == "Linux")
             if os.name != "nt" else None,
         )
     except BaseException:
