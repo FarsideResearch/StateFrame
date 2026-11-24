@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.9.1 (2026-11-24)
+
+- Completion recovery retries after source, result, evidence, or obligation progress and records a digest proof before refusing an unchanged retry; progress baselines survive resume.
+- Completion progress proofs now persist as per-reason deltas in existing journal state rows.
+- Recovery-result bookkeeping persists without advancing the public decision version, preserving request projections before the next recovery dispatch.
+- Failed-check diagnostics advance recovery only when the observed failure set strictly shrinks; prior journal proofs remain recognized during migration.
+- Fixed: non-test receipt intent and done-row oracle claims no longer change oracle obligation state.
+- Explicit task targets and edit paths can select common language and configuration-as-code files without changing default row contents.
+- Fixed: stopped-check measurements no longer change model-facing check references; stop cause and resource remain part of check identity.
+- Add opt-in `--container-is-sandbox` for trusted repositories, off by default. The container guide covers required shell levels, Docker limits, persistence, and remaining limits.
+- The first checkpoint of a large repository writes new files in parallel; each file is still flushed before it is renamed into place.
+
 ## 0.9.0 (2026-11-24)
 
 - Optional OTLP trace export for finished runs (off by default).

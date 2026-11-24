@@ -157,6 +157,10 @@ _WIRE_IDENTITY_METADATA_KEYS = frozenset({
     "previous_hash", "record_hash",
 })
 
+_WIRE_EXECUTION_STOP_IDENTITY_FIELDS = frozenset({
+    "schema", "cause", "scope", "resource",
+})
+
 
 # Host environment identity (installed packages, tool cache) is audit-only: it stays in
 # receipts and journal bindings but never enters a model-facing identity.
@@ -194,13 +198,20 @@ def wire_identity_content(value: object) -> object:
         return "<journal-position>"
     if isinstance(value, Mapping):
         excluded_fields = _wire_identity_excluded_fields()
-        return {
-            str(key): wire_identity_content(_without_env_derived(
-                str(key), wire_identity_field_value(key, item)))
-            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
-            if str(key) not in _WIRE_IDENTITY_METADATA_KEYS
-            and str(key) not in excluded_fields
-        }
+        public: dict[str, object] = {}
+        for key, item in sorted(value.items(), key=lambda pair: str(pair[0])):
+            key_text = str(key)
+            if key_text in _WIRE_IDENTITY_METADATA_KEYS or key_text in excluded_fields:
+                continue
+            item = wire_identity_field_value(key, item)
+            if key_text == "execution_stop" and isinstance(item, Mapping):
+                item = {
+                    name: field for name, field in item.items()
+                    if str(name) in _WIRE_EXECUTION_STOP_IDENTITY_FIELDS
+                }
+            public[key_text] = wire_identity_content(
+                _without_env_derived(key_text, item))
+        return public
     if isinstance(value, (list, tuple)):
         return [wire_identity_content(item) for item in value]
     if isinstance(value, (set, frozenset)):

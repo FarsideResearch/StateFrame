@@ -11,6 +11,18 @@ except ImportError:  # Windows has no passwd database.
     pwd = None
 
 
+def container_active() -> bool:
+    """Check either boundary import identity without importing the boundary."""
+    import sys
+
+    for name in ("stateframe.engine.kernel_execution_boundary", "kernel_execution_boundary"):
+        boundary = sys.modules.get(name)
+        active = getattr(boundary, "active", None)
+        if callable(active) and getattr(active(), "backend", None) == "container":
+            return True
+    return False
+
+
 def safe_home(env: Mapping[str, str] | None = None) -> Path | None:
     """Return the selected home directory, or ``None`` when the uid has no home.
 

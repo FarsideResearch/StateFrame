@@ -51,6 +51,7 @@ No currency code or free-form cost text is exported. An estimate is available wh
 valid token usage are present. Set `price_per_million_input_tokens` and
 `price_per_million_output_tokens` together in `[detail]` to estimate cost. Cost detail is off by
 default. The model hash, fixed provider, and strict engine version are part of the base trace.
+The provider is taken from a closed list; runs do not record a provider name, so it is `other`.
 
 The generic `OTEL_EXPORTER_OTLP_ENDPOINT` receives a `/v1/traces` suffix.
 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` selects the complete URL. Endpoints cannot contain a query,

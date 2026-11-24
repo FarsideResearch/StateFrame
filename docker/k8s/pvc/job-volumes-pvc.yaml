@@ -1,0 +1,16 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: sf-eks-stateframe
+spec:
+  template:
+    spec:
+      volumes:
+        - name: workspace
+          emptyDir: null
+          persistentVolumeClaim:
+            claimName: sf-eks-work
+        - name: home
+          emptyDir: null
+          persistentVolumeClaim:
+            claimName: sf-eks-home

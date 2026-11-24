@@ -60,6 +60,7 @@ Task file-scope rules also recognize these closed gerund forms: `editing only PA
 - `--allow-source-tree` (run): authorize a StateFrame editable source tree found in the `--test-python` environment. StateFrame validates the `src/stateframe` layout and adds that tree as a read-only shell root for the run.
 - `--shell-sandbox on|off` (default `on`): `off` requires `--shell unrestricted`, prints a host-access warning and is recorded as host authorization.
 - Resuming a run that recorded host execution requires `stateframe resume RUN --shell unrestricted --shell-sandbox off` again.
+- `--container-is-sandbox` (run and resume): opt in to using the current container as the boundary for a trusted repository. See [Running inside a container](container.md) for its requirements and limits.
 - `--run-env` / `--no-run-env`: run-local dependency environment; default on when shell is enabled, otherwise off.
 - `STATEFRAME_ENV_SEED_MAX_GB` (environment): soft limit for the shared environment seed store in decimal GB, default 10. Set it to `0` for unbounded storage. Eviction removes old seeds after a successful clone or during `stateframe gc`; rehydration rebuilds from the recorded distributions instead of copying when its seed is gone.
 - `--git-tool` / `--no-git-tool`: read-only Git tool, on by default when the source has Git metadata.

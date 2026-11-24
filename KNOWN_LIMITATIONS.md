@@ -98,6 +98,8 @@ After a run, review `git diff` (or the exported patch) before committing, and re
 
 ## Linux memory limits
 
+The memory one engine process uses grows with the size of the source files it loads and can be several times the size of that text.
+
 When the current cgroup is delegated and writable, and contains only StateFrame's process family, StateFrame moves that family into a `supervisor` child, enables available `memory` and `pids` controllers on the now-empty parent, and creates per-command sibling groups. When the memory controller is available, commands join those groups and StateFrame sets `memory.max` and verifies swap is off, writing `memory.swap.max` when present.
 
 Any other process in the cgroup prevents the leaf pattern. This includes an ancestor such as the calling shell and a sibling such as `tee` in a pipeline. StateFrame leaves that cgroup layout alone and uses `RLIMIT_DATA` for heap and private mappings plus sampled RSS supervision for shared mappings and `memfd` memory. The hard cgroup memory limit is available only when StateFrame is the only process family in a delegated cgroup and setup succeeds, for example when started directly with `systemd-run --user --scope -p Delegate=yes stateframe ...`. Under the fallback, memory can exceed the budget briefly between samples.

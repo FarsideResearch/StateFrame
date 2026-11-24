@@ -324,6 +324,8 @@ def _private_field_inventory() -> tuple[set[str], dict[str, dataclasses.Field]]:
             pass
         names.update(name for name in _literal_mapping_keys(builder)
                      if _field_is_private_or_audit(name))
+    # termination_reason is the stop cause: real check meaning, written only with a stop.
+    names.discard("termination_reason")
     return names, definitions
 
 
@@ -547,6 +549,7 @@ def test_private_fields_do_not_change_check_wire_identity(monkeypatch):
     assert required_new_fields <= fields, (
         "private field inventory missed new execution fields: "
         + ", ".join(sorted(required_new_fields - fields)))
+    assert "termination_reason" not in fields
     assert set(kernel_wire_identity.WIRE_AUDIT_ONLY_FIELDS) == {
         "memory_limit_mechanism", "memory_limit_killed",
         "memory_limit_reason", "cgroup_leaf_pattern",
@@ -880,3 +883,149 @@ def test_wire_identity_content_drops_environment_identity_recursively():
     }
     assert public_content != kernel_wire_identity.wire_identity_content(
         changed_product_content)
+
+
+_EXECUTION_STOP_MEASUREMENT_CHANGES = {
+    "requested": 101,
+    "effective": 91,
+    "observed": 81,
+    "mechanism": "cpu_limit",
+    "evidence": "inherited",
+    "inactivity_seconds": 2.5,
+    "progress_sequence": 4,
+    "last_progress_kind": None,
+    "cleanup_ok": False,
+}
+
+
+def _stopped_check_wire_outputs(
+        cause: str, exit_code: int, *, resource: str | None = None,
+        measurement_changes: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    from kernel_check_watchdog import execution_stop_outcome, validate_execution_stop
+
+    measurements: dict[str, object] = {
+        "requested": 100,
+        "effective": 90,
+        "observed": 80,
+        "mechanism": "rss",
+        "evidence": "observed",
+        "inactivity_seconds": 2.0,
+        "progress_sequence": 3,
+        "last_progress_kind": "cpu",
+        "cleanup_ok": True,
+    }
+    measurements.update(measurement_changes or {})
+    stop = validate_execution_stop({
+        "schema": "stateframe-execution-stop/1",
+        "cause": cause,
+        "scope": "check",
+        "resource": ("memory_bytes" if cause == "resource_limit" else None)
+        if resource is None else resource,
+        **measurements,
+    })
+    assert stop is not None
+
+    journal = SimpleNamespace(
+        task_id="private-wire-stop-task", run_id="a" * 32,
+        check_receipt_count=0, check_execution_allocations=0,
+        emit=lambda kind, **fields: {"kind": kind, **fields},
+    )
+    owner = SimpleNamespace(current_step=7, f2p_ids=[SELECTOR], _receipts=[])
+    runtime = SimpleNamespace(
+        owner=owner, revision=BINDING["product_revision"], journal=journal,
+        test_receipts=[], host_check_receipts=[], _check_output_receipts={},
+        micrograph_wire=None,
+    )
+    runtime.binding = lambda: dict(BINDING)
+    runtime._test_invalidation_receipt_fields = lambda *_args: {}
+    receipt = check_receipts.record_check_output(
+        runtime, selector=SELECTOR, status="UNKNOWN", outcome="UNKNOWN",
+        sequence=7, revision=BINDING["product_revision"], exit_code=exit_code,
+        stdout="partial output\n", execution_complete=False,
+        typed_observation={"execution_stop": stop}, termination_reason=cause,
+    )
+    public_receipt = check_receipts._public_receipt(
+        runtime._check_output_receipts[receipt["receipt_id"]], journal)
+    runtime.host_check_receipts[:] = [public_receipt]
+    event = {
+        "kind": "test_subprocess_completed", "producer": "test_subprocess",
+        "selectors": [SELECTOR], "selector_scope": [SELECTOR],
+        "exit_code": exit_code, "status": "UNKNOWN",
+        "revision": BINDING["product_revision"], "binding": dict(BINDING),
+        "after_binding": dict(BINDING), "binding_stable": True,
+        "sequence": 7, "likely_initiator": None,
+        "execution_stop": stop, "outcome": execution_stop_outcome(stop),
+        "execution_complete": False, "termination_reason": cause,
+    }
+    stateframe_runtime.StateFrameRuntime._record_test_completion_receipt(
+        runtime, event, (public_receipt,))
+    check_ref = kernel_wire_truth_facts._current_public_check(runtime, BINDING)[1]
+    return {
+        "check_execution_ref": check_ref,
+        "rendered_wire_fact": kernel_wire_truth_facts.render_fact_messages(
+            {"check_execution_ref": check_ref}),
+    }
+
+
+def _assert_stop_measurements_do_not_change_check_wire(cause: str, exit_code: int) -> None:
+    baseline = _stopped_check_wire_outputs(cause, exit_code)
+    for name, value in _EXECUTION_STOP_MEASUREMENT_CHANGES.items():
+        changed = _stopped_check_wire_outputs(
+            cause, exit_code, measurement_changes={name: value})
+        assert changed == baseline, (
+            f"execution_stop measurement {name} changed check wire for {cause}")
+    changed_all = _stopped_check_wire_outputs(
+        cause, exit_code, measurement_changes=_EXECUTION_STOP_MEASUREMENT_CHANGES)
+    assert changed_all == baseline, (
+        f"all execution_stop measurements changed check wire for {cause}")
+
+
+@pytest.mark.parametrize("exit_code", [-9, -15, 137, 124])
+@pytest.mark.parametrize("cause", [
+    "no_progress", "resource_limit", "user_deadline", "external_signal",
+])
+def test_execution_stop_measurements_do_not_change_check_wire_identity(
+        cause: str, exit_code: int) -> None:
+    _assert_stop_measurements_do_not_change_check_wire(cause, exit_code)
+
+
+def test_execution_stop_cause_and_resource_change_check_wire_identity() -> None:
+    external_signal = _stopped_check_wire_outputs("external_signal", -15)
+    user_deadline = _stopped_check_wire_outputs("user_deadline", -15)
+    assert external_signal["check_execution_ref"] != user_deadline["check_execution_ref"]
+    assert external_signal["rendered_wire_fact"] != user_deadline["rendered_wire_fact"]
+
+    memory_stop = _stopped_check_wire_outputs(
+        "resource_limit", 137, resource="memory_bytes")
+    cpu_stop = _stopped_check_wire_outputs(
+        "resource_limit", 137, resource="cpu_seconds")
+    assert memory_stop["check_execution_ref"] != cpu_stop["check_execution_ref"]
+    assert memory_stop["rendered_wire_fact"] != cpu_stop["rendered_wire_fact"]
+
+
+def test_execution_stop_wire_guard_detects_restored_measurements(monkeypatch) -> None:
+    fields = frozenset({
+        "schema", "cause", "scope", "resource", *_EXECUTION_STOP_MEASUREMENT_CHANGES,
+    })
+    monkeypatch.setattr(
+        kernel_wire_identity, "_WIRE_EXECUTION_STOP_IDENTITY_FIELDS", fields)
+    with pytest.raises(AssertionError, match="execution_stop measurement requested"):
+        _assert_stop_measurements_do_not_change_check_wire("no_progress", -9)
+
+
+def test_content_without_execution_stop_keeps_head_wire_hash() -> None:
+    journal = SimpleNamespace(task_id="stop-wire-pinned-head")
+    content = {
+        "messages": [{"role": "user", "content": "Check candidate"}],
+        "nested": {"meaning": "kept"},
+    }
+    assert kernel_wire_identity.content_wire_id(
+        journal, "stop-check", 7,
+        kernel_wire_identity.wire_identity_content(content),
+    ) == "e9c2c7ba7e3b7868d5bc"
+    unchanged = {
+        "execution_stop": "opaque value",
+        "nested": {"requested": 100, "observed": 80},
+    }
+    assert kernel_wire_identity.wire_identity_content(unchanged) == unchanged

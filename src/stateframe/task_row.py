@@ -15,19 +15,12 @@ import re
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+from .engine.kernel_secret_paths import is_secret_file
 from .task_file_scope import TaskFileScopeError, parse_task_file_scope
 from .workcopy import WorkCopy, WorkCopyError
 from .test_runners import (discover_pytest_paths, is_test_file, judging_test_paths,
                            protected_paths, validate_patterns)
 
-TEXT_SUFFIXES = {
-    ".py", ".pyi", ".txt", ".md", ".rst", ".toml", ".cfg", ".ini", ".json", ".yaml", ".yml",
-    ".csv", ".sql", ".html", ".css", ".js", ".ts", ".sh", ".in",
-}
-GENERIC_SUFFIXES = {
-    ".jsx", ".tsx", ".mjs", ".cjs", ".mts", ".cts", ".go", ".rs",
-    ".c", ".h", ".cc", ".cpp", ".hpp",
-}
 TASK_PATH = re.compile(r"(?<![\w./-])(?:(?:[\w.-]+/)+[\w.-]*|[\w.-]+\.[\w-]+)")
 TASK_ACTION = re.compile(r"\b(build|creat(?:e|ing)|write|produce|save|generate|add|read|load|use)\b",
                          re.IGNORECASE)
@@ -67,13 +60,43 @@ def discover_checks(files: dict[str, str], *, repo: Path | None = None) -> list[
     return list(discover_pytest_paths(files, repo=repo))
 
 
-def _text_files(work: WorkCopy, suffixes: set[str], names: set[str],
-                chosen: set[str]) -> dict[str, str]:
+PYTEST, GENERIC, ENTRY, TARGET = "p", "g", "e", "t"
+# p=pytest row, g=generic row, e=generic entry hint, t=explicit target or edit.
+_SOURCE_MODES = {
+    ".py": "pget", ".pyi": "pgt", ".txt": "pgt", ".md": "pgt", ".rst": "pgt",
+    ".toml": "pgt", ".cfg": "pgt", ".ini": "pgt", ".json": "pgt", ".yaml": "pgt",
+    ".yml": "pgt", ".csv": "pgt", ".sql": "pgt", ".html": "pgt", ".css": "pgt",
+    ".js": "pget", ".ts": "pget", ".sh": "pget", ".in": "pgt",
+    ".jsx": "get", ".tsx": "get", ".mjs": "gt", ".cjs": "gt", ".mts": "gt",
+    ".cts": "gt", ".go": "get", ".rs": "get", ".c": "get", ".h": "gt",
+    ".cc": "get", ".cpp": "get", ".hpp": "gt",
+    ".vue": "t", ".tf": "t", ".tfvars": "t", ".hcl": "t", ".java": "t", ".kt": "t",
+    ".cs": "t", ".rb": "t", ".php": "t", ".swift": "t", ".scala": "t", ".scss": "t",
+    ".less": "t", ".svelte": "t", ".proto": "t", ".graphql": "t", ".gradle": "t",
+    ".xml": "t", ".ps1": "t", ".bat": "t", ".lua": "t", ".dart": "t", ".r": "t",
+    ".jl": "t", ".pl": "t", ".ex": "t", ".exs": "t",
+    "Makefile": "pgt", "makefile": "gt", "GNUmakefile": "gt", "Dockerfile": "t",
+}
+
+
+def is_product_source(path: str, mode: str) -> bool:
+    """Whether a path fits a task-row mode; non-text files are absent before this check."""
+    if mode not in {PYTEST, GENERIC, ENTRY, TARGET}:
+        return False
+    name = PurePosixPath(path).name
+    suffix = PurePosixPath(path).suffix
+    return bool(name and not is_secret_file(name)
+                and mode in (_SOURCE_MODES.get(suffix, "") + _SOURCE_MODES.get(name, "")))
+
+
+def _product_texts(work: WorkCopy, mode: str, requested: set[str],
+                   large: set[str]) -> dict[str, str]:
     def wanted(path: str) -> bool:
-        return Path(path).suffix in suffixes or Path(path).name in names
+        return is_product_source(path, mode) or (
+            path in requested and is_product_source(path, TARGET))
 
     try:
-        return {path: text for path, text in work.text_files(wanted, chosen.__contains__).items()
+        return {path: text for path, text in work.text_files(wanted, large.__contains__).items()
                 if wanted(path)}
     except WorkCopyError as error:
         raise TaskRowError(f"cannot prepare repository text: {error}") from error
@@ -324,11 +347,11 @@ def editable_large_files(work: WorkCopy, row: dict[str, object]) -> set[str]:
     if row.get("scoped_edits") or row.get("scope_source") == "discovery" or row.get("task_file_scope"):
         return set()
     generic = row.get("runner_kind") == "generic"
-    suffixes = TEXT_SUFFIXES | GENERIC_SUFFIXES if generic else TEXT_SUFFIXES
+    mode = GENERIC if generic else PYTEST
     test_roots = ("tests/", "test/", "__tests__/") if generic else ("tests/",)
     closed = {*(row.get("public_tests") or ()), *(row.get("protected_test_paths") or ())}
     return {path for path in work.large_files
-            if Path(path).suffix in suffixes and path not in closed
+            if mode in _SOURCE_MODES.get(Path(path).suffix, "") and path not in closed
             and not is_test_file(path) and not path.startswith(test_roots)}
 
 
@@ -353,10 +376,10 @@ def build_row(work: WorkCopy, *, task: str, checks: list[str] | None = None,
     if missing:
         raise TaskRowError("check file(s) not found in the repository: " + ", ".join(missing))
     parsed_scope = _parse_task_scope(task)
-    chosen = {*declared_checks, *(path.strip() for path in edit_paths or ()), *(parsed_scope.paths or ()),
-              *((target.strip(),) if target else ()),
+    requested = {*(path.strip() for path in edit_paths or ()), *((target.strip(),) if target else ())}
+    chosen = {*declared_checks, *requested, *(parsed_scope.paths or ()),
               *(path for path in work.large_files if is_test_file(path))}
-    texts = _text_files(work, TEXT_SUFFIXES, {"Makefile", "setup.py"}, chosen)
+    texts = _product_texts(work, PYTEST, requested, chosen)
     if not declared_checks:
         raise TaskRowError("no test files found; pass --check <path> for at least one pytest file")
     unreadable = [path for path in declared_checks if path not in texts]
@@ -468,9 +491,11 @@ def _build_generic_row(work: WorkCopy, *, task: str, checks: list[str] | None,
         raise TaskRowError("--task is empty")
     patterns = validate_patterns(list(protected_test_globs))
     parsed_scope = _parse_task_scope(task)
-    chosen = {repo_relative(path) for path in (*(checks or ()), *(edit_paths or ()), *((target,) if target else ()))}
-    chosen.update(parsed_scope.paths or ())
-    texts = _text_files(work, TEXT_SUFFIXES | GENERIC_SUFFIXES, {"Makefile", "makefile", "GNUmakefile", "Cargo.toml"}, chosen)
+    selected_target = repo_relative(target) if target else None
+    edits = [repo_relative(path) for path in edit_paths or []]
+    requested = {*edits, *((selected_target,) if selected_target else ())}
+    chosen = {*(repo_relative(path) for path in checks or ()), *requested, *(parsed_scope.paths or ())}
+    texts = _product_texts(work, GENERIC, requested, chosen)
     declared = [repo_relative(path) for path in checks or []]
     missing = [path for path in declared if path not in work.baseline]
     if missing:
@@ -495,10 +520,8 @@ def _build_generic_row(work: WorkCopy, *, task: str, checks: list[str] | None,
     product = {path: text for path, text in texts.items()
                if path not in protected and (protect_tests != "all" or
                    not path.startswith(("tests/", "test/", "__tests__/")))}
-    selected_target = repo_relative(target) if target else None
     if selected_target is not None and selected_target not in product:
         raise TaskRowError(f"--target {selected_target} is not a product source file in the repository")
-    edits = [repo_relative(path) for path in edit_paths or []]
     bad = [path for path in edits if path not in product]
     if bad:
         raise TaskRowError("--edit file(s) are not product source files in the repository: "
@@ -515,8 +538,7 @@ def _build_generic_row(work: WorkCopy, *, task: str, checks: list[str] | None,
     candidates = source_files or product
     entry = selected_target or next(
         (path for path in sorted(candidates)
-         if Path(path).suffix in {".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs",
-                                  ".c", ".cc", ".cpp", ".sh"}
+         if is_product_source(path, ENTRY)
          and not path.endswith("/__init__.py")), None)
     entry = entry or guess_entry(candidates, {})
     if named:

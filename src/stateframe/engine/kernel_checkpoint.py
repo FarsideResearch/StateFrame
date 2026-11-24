@@ -22,6 +22,7 @@ Stdlib only.
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import ctypes
 import contextvars
 import fcntl
@@ -3069,6 +3070,31 @@ def _store_object(path: str, info: os.stat_result, digest: str, objects: Path) -
     return final, written
 
 
+def _store_object_batch(batch, objects: Path, minimum: int = 8) -> dict[str, tuple[Path, int]]:
+    if len(batch) < minimum:
+        return {item[3]: _store_object(*item[:3], objects) for item in batch}
+    stopped = threading.Event()
+
+    def store(item):
+        if stopped.is_set():
+            return None
+        try:
+            return _store_object(*item[:3], objects)
+        except BaseException as error:
+            if isinstance(error, KeyboardInterrupt) or getattr(error, "boundary_recovery_stop", False):
+                stopped.set()
+            raise
+
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        try:
+            futures = [pool.submit(store, item) for item in batch]
+            return {item[3]: future.result() for item, future in zip(batch, futures)}
+        except BaseException as error:
+            if isinstance(error, KeyboardInterrupt) or getattr(error, "boundary_recovery_stop", False):
+                stopped.set()
+            raise
+
+
 def _link_or_copy(stored: Path, destination: str | Path, live: Path, relpath: str,
                   digests: dict[str, str] | None, counts: dict[str, int]) -> str:
     """Hard-link ``stored`` to ``destination``; a filesystem refusing the link gets a private copy.
@@ -3149,6 +3175,30 @@ def _copy_tree(source: Path, target: Path, previous: Path | None,
     src_root, dst_root = os.fspath(source), os.fspath(target)
     prev_root = None if previous is None else os.fspath(previous)
     pending = [""]
+    batch, names = [], {}
+
+    def account_object(stored, new_bytes, digest, destination, path, relpath):
+        _note_new_bytes(new_bytes)
+        status = _link_or_copy(stored, destination, Path(path), relpath, digests, counts)
+        if status == "linked":
+            stored_info = os.stat(stored)
+            durable_inodes.add((stored_info.st_dev, stored_info.st_ino))
+        if digests is not None:
+            digests[relpath] = digest
+        counts["copied" if new_bytes or status != "linked" else "linked"] += 1
+
+    def flush_objects() -> None:
+        if not batch:
+            return
+        stored = _store_object_batch(list(names.values()), objects)
+        for path, info, digest, destination, relpath in batch:
+            name = f"{digest}-{stat.S_IMODE(info.st_mode):o}"
+            object_path, new_bytes = stored[name]
+            stored[name] = (object_path, 0)
+            account_object(object_path, new_bytes, digest, destination, path, relpath)
+        batch.clear()
+        names.clear()
+
     if home is not None or home_subtree is not None or excluded:
         if _snapshot_path_excluded(source, home, home_subtree, excluded):
             return counts
@@ -3225,19 +3275,20 @@ def _copy_tree(source: Path, target: Path, previous: Path | None,
                     counts["cloned" if cloned else "copied"] += 1
                     continue
             if objects is not None:
-                stored, new_bytes = _store_object(path, info, digest, objects)
-                _note_new_bytes(new_bytes)
-                status = _link_or_copy(stored, destination, Path(path), relpath, digests, counts)
-                if status == "linked":
-                    stored_info = os.stat(stored)
-                    durable_inodes.add((stored_info.st_dev, stored_info.st_ino))
-                if digests is not None:
-                    digests[relpath] = digest
-                counts["copied" if new_bytes or status != "linked" else "linked"] += 1
+                object_name = f"{digest}-{stat.S_IMODE(info.st_mode):o}"
+                if os.path.lexists(objects / object_name):
+                    stored, new_bytes = _store_object(path, info, digest, objects)
+                    account_object(stored, new_bytes, digest, destination, path, relpath)
+                else:
+                    batch.append((path, info, digest, destination, relpath))
+                    names.setdefault(object_name, (path, info, digest, object_name))
+                    if len(batch) == 256:
+                        flush_objects()
                 continue
             cloned = _capture_private(Path(path), info, destination, relpath, digests)
             _note_new_bytes(0 if cloned else info.st_size)
             counts["cloned" if cloned else "copied"] += 1
+    flush_objects()
     return counts
 
 

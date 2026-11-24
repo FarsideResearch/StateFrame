@@ -11,6 +11,7 @@ import tempfile
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 
 from kernel_effects import (
     BaselineStore, ContentStore, EffectError, Manifest, effect_policy_for_run, manifest_digest,
@@ -24,7 +25,15 @@ from kernel_tool_settings import ToolSettings
 from kernel_tool_tape import (ToolReplayRefused, ToolTapeError, replay_decision, replay_mode_active,
                               tape_for_run, verify_intent, verify_reexecution)
 
-from kernel_safe_paths import safe_home
+from kernel_safe_paths import container_active, safe_home
+
+BACKEND_CONTAINER = "container"
+
+
+def active() -> SimpleNamespace:
+    """Expose the selected backend without loading the boundary module."""
+    return SimpleNamespace(backend=BACKEND_CONTAINER if container_active() else "platform")
+
 
 SHELL_SCHEMA = {"type": "function", "function": {
     "name": "shell", "description": "Run a bounded foreground shell command. Output is not source-read or check evidence.",
@@ -155,6 +164,17 @@ def _command_may_change_environment(command: str, custom, effects,
     return _effects_touch_environment(effects, workspace, environment)
 
 
+def _container_tampered_protected_tests(baseline: Manifest, current: Manifest,
+                                        paths) -> tuple[str, ...]:
+    return tuple(sorted(path for path in paths
+                        if path not in baseline or path not in current
+                        or baseline[path].digest != current[path].digest))
+
+
+def _container_test_tamper_notice(paths: tuple[str, ...]) -> str:
+    return "DETECTED PROTECTED_TEST_TAMPERED: post-command hash changed for " + ", ".join(paths)
+
+
 class ShellExecutionFailed(BaseException):
     """Fatal shell boundary failure; ordinary tool-error recovery must not swallow it."""
 
@@ -208,6 +228,7 @@ class ShellTool:
         self._environment_identity_cache: tuple[int, str] | None = None
         self.root = None
         self.workspace_effects = None
+        self.protected_test_paths: set[str] = set()
         self._pending_baseline_root: Path | None = None
         self._load_effect_policy = None
         self._post_manifest_reuse_enabled = True
@@ -269,6 +290,16 @@ class ShellTool:
         if self.root is not None:
             raise RuntimeError("shell workspace is already bound")
         self.root = workspace.resolve(strict=True)
+        self.protected_test_paths = set()
+        for name in baseline_tests:
+            path = Path(name)
+            if path.is_absolute():
+                try:
+                    path = path.relative_to(self.root)
+                except ValueError:
+                    continue
+            if not path.is_absolute() and ".." not in path.parts:
+                self.protected_test_paths.add(path.as_posix())
         self._clear_post_manifest()
         home = self.run_dir / "shell-home"
         home.mkdir(mode=0o700, exist_ok=True)
@@ -287,7 +318,8 @@ class ShellTool:
             # Inspection resolves trusted host tools, never executables installed by a prior command.
             environment["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
         self.capability = replace(cap, env=environment,
-            network=self.settings.shell_network if writable else "none",
+            network=(self.settings.shell_network if writable or active().backend == BACKEND_CONTAINER
+                     else "none"),
             read_roots=(*cap.read_roots, env_root),
             write_roots=cap.write_roots if writable else (home,),
             sandboxed=self.settings.host_authorization is None)
@@ -600,8 +632,17 @@ class ShellTool:
         if not result.cleanup.ok:
             self._clear_post_manifest()
             return ShellReply(f"REFUSED CLEANUP_FAILED: {result.cleanup.detail}", fatal=True)
+        container_backend = active().backend == BACKEND_CONTAINER
+        if container_backend:
+            post_manifest = self._scan()
+            tampered = _container_tampered_protected_tests(
+                self.baseline, post_manifest, self.protected_test_paths)
+        else:
+            post_manifest = None
+            tampered = ()
         if workspace_effects is None:
-            effects = reconcile(self.root, before, self._scan(), self.policy,
+            manifest = post_manifest if container_backend else self._scan()
+            effects = reconcile(self.root, before, manifest, self.policy,
                                 self.store, self.baseline_store)
         else:
             effects = workspace_effects.settle(before_tree, before, self.policy, call_id)
@@ -661,7 +702,9 @@ class ShellTool:
         if any(reason == "outside task file scope" for _, reason in effects.restored):
             observation = ("REFUSED OUTSIDE_TASK_SCOPE: the task says to change no other file; "
                            "workspace write was restored\n" + observation)
-        if any(reason.startswith("protected test tree:") for _, reason in effects.restored):
+        if tampered:
+            observation = _container_test_tamper_notice(tampered) + "\n" + observation
+        elif any(reason.startswith("protected test tree:") for _, reason in effects.restored):
             observation = "REFUSED PROTECTED_TEST: workspace write was restored\n" + observation
         head = observation
         observation = ""

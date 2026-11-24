@@ -36,12 +36,21 @@ from kernel_check_watchdog import (CheckWatchdog, CheckWatchdogConfig, LaunchPro
                                    SAMPLE_SECONDS, MAX_SAMPLE_GAP, ProgressSnapshot,
                                    host_check_cpu_seconds, progress_sample)
 from kernel_reason_log import emit_kill, emit_refusal
-from kernel_test_isolation import SandboxReadGrants, isolated_command, sandbox_executable
+if __package__:
+    from .kernel_test_isolation import SandboxReadGrants, isolated_command, sandbox_executable
+else:
+    from kernel_test_isolation import SandboxReadGrants, isolated_command, sandbox_executable
 from sf_launch import (
     _cgroup_leaf_pattern_status,
     _cgroup_memory_limit_configured,
     _command_cgroup,
 )
+if __package__:
+    from .kernel_safe_paths import container_active
+    from .kernel_test_isolation import NO_SANDBOX_BINARY_CONTAINER
+else:
+    from kernel_safe_paths import container_active
+    from kernel_test_isolation import NO_SANDBOX_BINARY_CONTAINER
 
 
 MAX_WALL_SECONDS = 900.0
@@ -152,8 +161,9 @@ def policy_memory_limit_mechanism(result: object) -> str | None:
 def capability_report() -> CapabilityReport:
     """Return the host capability matrix without starting a child process."""
     system = platform.system()
-    backend_name = "sandbox-exec" if system == "Darwin" else "bwrap" if system == "Linux" else None
-    executable = sandbox_executable(backend_name) if backend_name else None
+    container = sys.platform.startswith("linux") and container_active()
+    backend_name = "container" if container else "sandbox-exec" if system == "Darwin" else "bwrap" if system == "Linux" else None
+    executable = NO_SANDBOX_BINARY_CONTAINER if container else sandbox_executable(backend_name) if backend_name else None
     required_limits = (
         "RLIMIT_CPU", "RLIMIT_FSIZE", "RLIMIT_CORE", "RLIMIT_NOFILE",
     )
@@ -162,9 +172,9 @@ def capability_report() -> CapabilityReport:
         hasattr(resource, "RLIMIT_DATA") if system == "Linux"
         else hasattr(resource, "RLIMIT_AS") or hasattr(resource, "RLIMIT_DATA")
     )
-    network_isolated = system in {"Darwin", "Linux"}
+    network_isolated = system in {"Darwin", "Linux"} and not container
     available = bool(
-        executable and network_isolated and limits_available and memory_available
+        executable and (container or network_isolated) and limits_available and memory_available
     )
     reasons: list[str] = []
     if system not in {"Darwin", "Linux"}:
@@ -182,11 +192,12 @@ def capability_report() -> CapabilityReport:
         backend=executable,
         available=available,
         network_isolated=network_isolated and executable is not None,
-        path_contained=available,
+        path_contained=available and not container,
         cpu_limited=limits_available,
         memory_limited=memory_available,
         output_bounded=True,
-        reason="; ".join(reasons) if reasons else None,
+        reason=("container boundary; network, path, and secret isolation unknown"
+                if container else "; ".join(reasons) if reasons else None),
     )
 
 

@@ -219,6 +219,7 @@ class InformationPolicy:
         return row  # Baseline keeps the historical row identity and mutation semantics.
 
     def manifest(self) -> dict:
+        container_boundary = self.isolation_backend == "no sandbox binary: container"
         return {**self.effective,
                 "policy_requested": dict(self.requested), "policy_effective": dict(self.effective),
                 "ordinary_brief_hash": text_hash(self.ordinary_brief),
@@ -229,9 +230,10 @@ class InformationPolicy:
                                         "live_grader_feedback": bool(self.live_exposures)},
                 "memory_policy": "DISABLED_UNPROVENANCED" if self.strict else "HISTORICAL",
                 "test_isolation_backend": self.isolation_backend,
-                "test_isolation_binary_sha256": (hashlib.sha256(Path(self.isolation_backend).read_bytes()).hexdigest()
-                                                  if self.isolation_backend else None),
-                "artifact_boundary": "WORKSPACE_TOOLS_AND_OS_ISOLATED_TESTS" if self.strict else "HISTORICAL"}
+                "test_isolation_binary_sha256": (None if not self.isolation_backend or container_boundary else
+                                                  hashlib.sha256(Path(self.isolation_backend).read_bytes()).hexdigest()),
+                "artifact_boundary": ("CURRENT_CONTAINER_UNVERIFIED" if container_boundary else
+                                      "WORKSPACE_TOOLS_AND_OS_ISOLATED_TESTS" if self.strict else "HISTORICAL")}
 
     def check_path(self, root: Path, value: str) -> bool:
         if not self.strict:

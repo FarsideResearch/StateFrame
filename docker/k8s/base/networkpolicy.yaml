@@ -1,0 +1,31 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sf-eks-stateframe-egress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: sf-eks-stateframe
+  policyTypes:
+    - Egress
+  egress:
+    # Standard cluster DNS service labels. Adjust only if the cluster uses other labels.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Reserved documentation address. Replace it and port 443 with the endpoint egress IP/CIDR and port.
+    - to:
+        - ipBlock:
+            cidr: 198.51.100.1/32
+      ports:
+        - protocol: TCP
+          port: 443

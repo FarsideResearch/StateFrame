@@ -21,6 +21,7 @@ import threading
 import tempfile
 import time
 from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from io import IncrementalNewlineDecoder
@@ -51,6 +52,7 @@ from .engine.kernel_safe_paths import safe_expanduser, safe_home
 
 if TYPE_CHECKING:
     from .endpoint import ProviderEpoch
+    from .engine.kernel_execution_boundary import Boundary
     from .engine.kernel_hooks import HookSet
 
 PACKAGE = Path(__file__).resolve().parent
@@ -598,6 +600,8 @@ class RunOptions:
     _send1_wave4: bool | None = field(default=None, init=False, repr=False)
     _resuming: bool = field(default=False, init=False, repr=False)
     _cli_yolo: bool = field(default=False, repr=False)
+    _execution_boundary: Boundary | None = field(default=None, init=False, repr=False)
+    _accepted_execution_boundary: dict[str, object] | None = field(default=None, init=False, repr=False)
     _provider_epoch: ProviderEpoch | None = field(default=None, init=False, repr=False)
     # Environment for the repository's tests (engine checks and --test-cmd), e.g. test-only
     # settings a project needs to import. Declared to the engine as host task env keys.
@@ -771,7 +775,9 @@ def run_test_cmd(command: str, cwd: Path, timeout_s: float | None = None,
                  deadline: float | None = None, test_python: str | None = None,
                  runner_kind: str = "pytest", capture_output: bool = False,
                  check_settings: dict[str, str] | None = None,
-                 required_test_ledger: bool = False) -> dict[str, object]:
+                 required_test_ledger: bool = False,
+                 protected_test_hashes: dict[str, str] | None = None,
+                 execution_boundary: dict[str, object] | None = None) -> dict[str, object]:
     """Check a throwaway copy through the engine policy in a fresh interpreter.
 
     ``test_python``: the interpreter the command runs, handed to an engine that reads STATEFRAME_TEST_PYTHON so its
@@ -782,7 +788,11 @@ def run_test_cmd(command: str, cwd: Path, timeout_s: float | None = None,
                                 pytest_plugins=pytest_plugins, test_python=test_python,
                                 runner_kind=runner_kind, capture_output=capture_output,
                                 required_test_ledger=required_test_ledger,
-                                **({"check_settings": check_settings} if check_settings is not None else {}))
+                                **({"protected_test_hashes": protected_test_hashes}
+                                   if protected_test_hashes is not None else {}),
+                                **({"check_settings": check_settings} if check_settings is not None else {}),
+                                **({"execution_boundary": execution_boundary}
+                                   if execution_boundary is not None else {}))
     except (outer_checks.OuterCheckError, OSError) as error:
         raise RunError(str(error)) from error
 
@@ -1635,13 +1645,27 @@ def _probe_capabilities(options: RunOptions) -> dict[str, object]:
     try:
         # -P omits cwd from imports without hiding user-site packages that the
         # engine child can use. The allowlisted environment also drops PYTHONPATH.
-        probe = subprocess.run([options.python, "-P", "-B", "-c", _CAPABILITY_PROBE],
-                               cwd=PACKAGE, env={k: v for k, v in os.environ.items() if k in PASS_ENV},
-                               capture_output=True, text=True, check=False,
-                               timeout=min(10, _remaining(options)))
-        if probe.returncode != 0:
-            raise ValueError("probe exited unsuccessfully")
-        receipt = json.loads(probe.stdout)
+        probe_env = {k: v for k, v in os.environ.items() if k in PASS_ENV}
+        command = [options.python, "-P", "-B", "-c", _CAPABILITY_PROBE]
+        if options._execution_boundary is None:
+            probe = subprocess.run(command, cwd=PACKAGE, env=probe_env,
+                                   capture_output=True, text=True, check=False,
+                                   timeout=min(10, _remaining(options)))
+            if probe.returncode != 0:
+                raise ValueError("probe exited unsuccessfully")
+            probe_output = probe.stdout
+        else:
+            from .engine.kernel_execution_policy import run_sandboxed
+
+            with tempfile.TemporaryDirectory(prefix="stateframe-capability-probe-") as directory:
+                probe = run_sandboxed(command, directory, env=probe_env,
+                                      timeout=min(10, _remaining(options)), output_limit=1 << 20)
+            if probe.timed_out or probe.completed.returncode != 0:
+                raise ValueError("probe exited unsuccessfully")
+            probe_output = probe.completed.stdout
+            if isinstance(probe_output, bytes):
+                probe_output = probe_output.decode("utf-8", "strict")
+        receipt = json.loads(probe_output)
         if not isinstance(receipt, dict) or any(
             not isinstance(receipt.get(key), dict)
             or type(receipt[key].get("enabled")) is not bool
@@ -1663,6 +1687,66 @@ def _probe_capabilities(options: RunOptions) -> dict[str, object]:
         item["detail"] = " ".join(item["detail"].split())[:240]
         parts.append(f"{label} {state} ({item['detail']})")
     return {**receipt, "python": options.python, "display": "capabilities: " + ", ".join(parts)}
+
+
+def _validate_container_launch_options(options: RunOptions) -> None:
+    if options._execution_boundary is None:
+        return
+    if options.tool_settings.shell == "read-only":
+        raise RunError("CONTAINER_CONFLICT")
+    if options.tool_settings.host_authorization is not None:
+        raise RunError("CONTAINER_CONFLICT")
+    if options.tool_settings.mcp_files:
+        raise RunError("CONTAINER_UNSUPPORTED:mcp")
+    if options.parallel_mode != "off":
+        raise RunError("CONTAINER_UNSUPPORTED:parallel-child")
+    level = (options.mutations if options.mutations is not None else
+             options.extra_env.get("STATEFRAME_MUTATIONS",
+                 os.environ.get("STATEFRAME_MUTATIONS",
+                                profiles.load(options.profile).get("STATEFRAME_MUTATIONS", "off"))))
+    if str(level).strip().lower() != "off" or options.mutation_hooks:
+        raise RunError("CONTAINER_MUTATIONS")
+    if options._cli_yolo:
+        raise RunError("CONTAINER_CONFLICT")
+    if options.tool_settings.shell_network != "full":
+        raise RunError("CONTAINER_NETWORK")
+    if options.tool_settings.shell not in ("off", "standard", "unrestricted"):
+        raise RunError("CONTAINER_CONFLICT")
+
+
+def _engine_child_launch(options: RunOptions, run: Path) -> tuple[list[str], Path]:
+    selected = options._execution_boundary is not None
+    if sys.platform == "linux":
+        python_executable = Path(os.path.abspath(options.python))
+        child_argv = f"{str(CHILD)!r},{str(run)!r}"
+        if selected:
+            child_argv += ", '--container-is-sandbox'"
+        bootstrap = (
+            "'stateframe._child.py';import os,runpy,sys;"
+            f"sys.path[0]={str(CHILD.parent)!r};"
+            f"sys.argv=[{child_argv}];"
+            f"os.chdir({str(run)!r});runpy.run_path({str(CHILD)!r},run_name='__main__')"
+        )
+        return [f"./{python_executable.name}", "-B", "-c", bootstrap, "stateframe._child"], python_executable.parent
+    command = [str(options.python), "-B", str(CHILD), str(run)]
+    if selected:
+        command.append("--container-is-sandbox")
+    return command, run
+
+
+def _validate_boundary_channel(options: RunOptions, spec: dict) -> None:
+    record = spec.get("execution_boundary")
+    selected = options._execution_boundary
+    if selected is not None and record is None:
+        raise RunError("CONTAINER_UNSUPPORTED:engine-child-spec")
+    if record is None:
+        return
+    from .engine import kernel_execution_boundary as boundary
+
+    try:
+        boundary.check_resume(record, selected or boundary._DEFAULT_BOUNDARY)
+    except boundary.BoundaryRefused as error:
+        raise RunError(error.code) from error
 
 
 def engine_supports_unbounded_steps() -> bool:
@@ -1698,6 +1782,8 @@ def profile_steps(profile: str) -> int:
 def _write_run_spec_atomic(run_dir: Path, spec: dict, *, mode: int | None = None) -> None:
     """Publish a spec atomically without changing its existing privacy mode."""
     path = run_dir / "spec.json"
+    if mode is None and isinstance(spec.get("execution_boundary"), dict):
+        mode = 0o600
     _write_json_atomic(path, spec, mode=mode)
 
 
@@ -1740,8 +1826,11 @@ def _write_hook_terminal_summary(run_dir: Path, *, runtime_outcome: str, engine_
         "problems": _problems_summary(run_dir),
     }
     try:
-        if json.loads((run_dir / "spec.json").read_text(encoding="utf-8")).get("yolo") is True:
+        spec = json.loads((run_dir / "spec.json").read_text(encoding="utf-8"))
+        if spec.get("yolo") is True:
             summary["yolo"] = True
+        if isinstance(spec.get("execution_boundary"), dict):
+            summary["execution_boundary"] = spec["execution_boundary"]
     except (OSError, ValueError, AttributeError):
         pass
     _write_json_atomic(run_dir / "summary.json", summary)
@@ -1821,6 +1910,7 @@ def _configure_workspace_objects(run: Path, environment: dict, extra_env: Mappin
 
 
 def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy, dict]:
+    _validate_container_launch_options(options)
     prepare_started = time.monotonic_ns()
     if options._send1_wave4 is None:
         options._send1_wave4 = _startup_optimization_enabled()
@@ -2209,6 +2299,8 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
         "public_row": row,
         "tool_settings": settings.as_dict(),
         **({"yolo": True} if options._cli_yolo else {}),
+        **({"execution_boundary": options._execution_boundary.record()}
+           if options._execution_boundary is not None else {}),
         "custom_tools_digest": custom.digest,
         "custom_executables": {tool.name: tool.executable_digest for tool in custom.tools},
         "skills": records,
@@ -2302,7 +2394,7 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
         except hook_host.HookConfigError as error:
             raise RunError(str(error)) from error
     if hooks is None:
-        _write_json_atomic(run / "spec.json", spec)
+        _write_run_spec_atomic(run, spec)
     return run, work, spec
 
 
@@ -3186,6 +3278,7 @@ def drive(run: Path, options: RunOptions, printer=print) -> int:
     spec_path = run / "spec.json"
     if spec_path.exists():
         spec = json.loads(spec_path.read_text())
+        _validate_boundary_channel(options, spec)
         environment = spec["environment"]
         sources = spec.setdefault("environment_sources", {})
         # No engine wall unless the user set a run limit: the engine reads an unset wall as no deadline.
@@ -3240,26 +3333,10 @@ def drive(run: Path, options: RunOptions, printer=print) -> int:
         else:
             environment.pop("CAPABILITY_ATTEMPT_DEADLINE_MONOTONIC", None)
         _write_run_spec_atomic(run, spec)
+    elif options._execution_boundary is not None:
+        raise RunError("CONTAINER_UNSUPPORTED:engine-child-spec")
     _reason_log.configure(level=_resolved_log_level(options), problems_path=run / PROBLEMS_FILE)
-    # Keep the engine identity near the front of Linux argv: narrow `ps args`
-    # output can truncate the absolute _child.py path even though the child is direct.
-    # Start from the selected interpreter directory so Python retains venv discovery
-    # and sys.executable while argv stays short; then restore the engine's normal cwd/path.
-    if sys.platform == "linux":
-        python_executable = Path(os.path.abspath(options.python))
-        child_bootstrap = (
-            "'stateframe._child.py';import os,runpy,sys;"
-            f"sys.path[0]={str(CHILD.parent)!r};"
-            f"sys.argv=[{str(CHILD)!r},{str(run)!r}];"
-            f"os.chdir({str(run)!r});"
-            f"runpy.run_path({str(CHILD)!r},run_name='__main__')"
-        )
-        command = [f"./{python_executable.name}", "-B", "-c", child_bootstrap,
-                   "stateframe._child"]
-        child_cwd = python_executable.parent
-    else:
-        command = [str(options.python), "-B", str(CHILD), str(run)]
-        child_cwd = run
+    command, child_cwd = _engine_child_launch(options, run)
     log_path = run / "engine.log"
     result_path = run / "engine-result.json"
     previous_result = _result_generation(result_path)
@@ -4131,7 +4208,9 @@ def _route_costs(run: Path, route_spec: dict, sends: list[dict],
             if as_edit is not None and total["estimated_cost"] is not None else None}
 
 
-def summarize(run: Path, started: float) -> dict[str, object]:
+def summarize(run: Path, started: float,
+              execution_boundary: Boundary | None = None,
+              accepted_execution_boundary: dict[str, object] | None = None) -> dict[str, object]:
     sends = []
     path = run / "sends.jsonl"
     if path.exists():
@@ -4217,6 +4296,15 @@ def summarize(run: Path, started: float) -> dict[str, object]:
     }
     if spec.get("yolo") is True:
         summary["yolo"] = True
+    if execution_boundary is not None:
+        expected_boundary = execution_boundary.record()
+        summary["execution_boundary"] = expected_boundary
+        if spec.get("execution_boundary") != (accepted_execution_boundary
+                                                if accepted_execution_boundary is not None
+                                                else expected_boundary):
+            summary["candidate_error"] = "DETECTED CONTAINER_RESUME_MISMATCH: run record changed"
+    elif isinstance(spec.get("execution_boundary"), dict):
+        summary["execution_boundary"] = spec["execution_boundary"]
     if spec_diagnostic is not None:
         summary.update(run_spec_diagnostic=spec_diagnostic,
                        capabilities=None, provider_capabilities=None, prompt_cache_slot=None,
@@ -4356,6 +4444,11 @@ def _step_limit_line(options: RunOptions) -> str:
 
 
 def run(options: RunOptions, printer=print) -> dict[str, object]:
+    _validate_container_launch_options(options)
+    if options._execution_boundary is not None:
+        from .engine import kernel_execution_boundary
+
+        kernel_execution_boundary.activate(options._execution_boundary)
     _resolved_run_dir(options)
     _validate_stateframe_home_boundary(options)
     _capture_stateframe_home_identity(options)
@@ -4503,7 +4596,9 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
                 timeout_s: float | None = None, quiet: bool = False, model: str | None = None,
                 keep_checkpoints: bool = False, keep_run_env: bool = False, replay_external: bool = False,
                 route_cli: list[str] | None = None, routes_file: Path | None = None,
-                _yolo_cli: bool = False, host_authorization: bool = False, printer=print) -> dict[str, object]:
+                _yolo_cli: bool = False, host_authorization: bool = False,
+                _execution_boundary: Boundary | None = None,
+                printer=print) -> dict[str, object]:
     """Continue an interrupted run in place (see ``stateframe.resume``).
 
     ``model`` continues under another model NAME the endpoint serves (the same weights listed differently,
@@ -4514,6 +4609,33 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
         recorded_spec = json.loads((run_dir / "spec.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         recorded_spec = {}
+    recorded_boundary = (recorded_spec.get("execution_boundary")
+                         if isinstance(recorded_spec, dict) else None)
+    if (_execution_boundary is not None
+            or isinstance(recorded_spec, dict) and "execution_boundary" in recorded_spec):
+        from .engine import kernel_execution_boundary
+
+        current_boundary = _execution_boundary or kernel_execution_boundary._DEFAULT_BOUNDARY
+        kernel_execution_boundary.check_resume(recorded_boundary, current_boundary)
+    if _execution_boundary is not None:
+        settings = recorded_spec.get("tool_settings") if isinstance(recorded_spec, dict) else None
+        if isinstance(settings, dict) and settings.get("shell") == "read-only":
+            raise kernel_execution_boundary.BoundaryRefused("CONTAINER_CONFLICT")
+        from .mutate_host import spec_requests_mutations
+
+        if isinstance(recorded_spec, dict) and spec_requests_mutations(recorded_spec):
+            raise kernel_execution_boundary.BoundaryRefused("CONTAINER_MUTATIONS")
+        if not isinstance(recorded_spec, dict) or recorded_spec.get("parallel_mode", "off") != "off":
+            raise kernel_execution_boundary.BoundaryRefused("CONTAINER_UNSUPPORTED:parallel-child")
+        if not isinstance(settings, dict) or settings.get("shell_network") != "full":
+            raise kernel_execution_boundary.BoundaryRefused("CONTAINER_NETWORK")
+        if settings.get("mcp_files") or recorded_spec.get("mcp_tools_digest"):
+            raise kernel_execution_boundary.BoundaryRefused("CONTAINER_UNSUPPORTED:mcp")
+        if recorded_spec.get("yolo") is True or host_authorization:
+            raise kernel_execution_boundary.BoundaryRefused("CONTAINER_CONFLICT")
+        if settings.get("shell") not in ("off", "standard", "unrestricted"):
+            raise kernel_execution_boundary.BoundaryRefused("CONTAINER_CONFLICT")
+        kernel_execution_boundary.activate(_execution_boundary)
     if (isinstance(recorded_spec, dict) and recorded_spec.get("yolo") is True) != _yolo_cli:
         raise resume_module.ResumeRefused(
             "--yolo is required to resume a yolo run, and --yolo only applies to a yolo run")
@@ -4674,6 +4796,9 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
          pytest_plugins=environment.get("STATEFRAME_TASK_PYTEST_PLUGINS"),
          keep_checkpoints=keep_checkpoints, keep_run_env=keep_run_env,
          allow_source_tree=bool(spec.get("allow_source_tree", False)))
+    options._execution_boundary = _execution_boundary
+    options._accepted_execution_boundary = (deepcopy(recorded_boundary)
+                                            if isinstance(recorded_boundary, dict) else None)
     options._stateframe_home_identity = current_identity
     options._send1_wave4 = spec.get(_STARTUP_SPEC_KEY) is True
     options._resuming = True
@@ -5176,7 +5301,10 @@ def _export_final_diff(work: workcopy.WorkCopy, run_dir: Path,
 
 
 def _check_summary(check: dict[str, object]) -> dict[str, object]:
-    result = {key: check[key] for key in ("command", "exit_code", "passed", "candidate_sha256") if key in check}
+    result = {key: check[key] for key in
+              ("command", "exit_code", "passed", "candidate_sha256", "execution_boundary") if key in check}
+    if "protected_test_tampered" in check:
+        result["protected_test_tampered"] = check["protected_test_tampered"]
     if check.get("execution_stop") is not None:
         result.update({key: check[key] for key in
                        ("execution_stop", "execution_complete", "termination_reason", "outcome") if key in check})
@@ -5237,6 +5365,14 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
         shlex.quote(p) for p in spec["public_row"]["public_check_paths"])) \
         if options.runner_kind != "generic" else options.test_cmd
     check_settings = _check_settings(spec["environment"])
+    execution_boundary = (options._execution_boundary.record()
+                         if options._execution_boundary is not None else None)
+    protected_test_hashes = None
+    if options._execution_boundary is not None:
+        protected_test_hashes = {
+            path: work.baseline[path] for path in spec["public_row"].get("protected_test_paths", ())
+            if path in work.baseline
+        }
     before = ({"command": None, "exit_code": None, "passed": None, "tail": "no check available"}
               if test_cmd is None else run_test_cmd(
                   test_cmd.replace("python ", shlex.quote(_tests_python(options)) + " ", 1)
@@ -5247,7 +5383,9 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
                           runner_kind=options.runner_kind,
                           capture_output=options.protect_tests in {"task", "off"},
                           required_test_ledger=(required_ledger_enabled and required_ledger is not None
-                                                and options.runner_kind == "pytest")))
+                                                and options.runner_kind == "pytest"),
+                          protected_test_hashes=protected_test_hashes,
+                          execution_boundary=execution_boundary))
     observe_required_run("baseline", before)
     printer(f"before: {test_cmd or '(none)'} -> {outcomes.check_label(before)} "
             f"(exit {before['exit_code']})")
@@ -5353,7 +5491,9 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
                                  check_settings=check_settings, test_python=_outer_test_python(options),
                                  runner_kind=options.runner_kind, capture_output=True,
                                  required_test_ledger=(required_ledger_enabled and required_ledger is not None
-                                                       and options.runner_kind == "pytest"))
+                                                       and options.runner_kind == "pytest"),
+                                 protected_test_hashes=protected_test_hashes,
+                                 execution_boundary=execution_boundary)
             observe_required_run("current", after)
             post_check_digests = {} if candidate_file_digests is not None else None
             post_check_digest = candidate_digest(work.copy, file_digests=post_check_digests)
@@ -5398,7 +5538,11 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
                 run_dir, startup_home_identity=options._stateframe_home_identity)
         except (CommitExportError, OSError, ValueError, subprocess.TimeoutExpired) as error:
             commits = {"error": str(error)}
-    summary = summarize(run_dir, started)
+    summary = summarize(run_dir, started, options._execution_boundary,
+                        options._accepted_execution_boundary)
+    if isinstance(summary.get("candidate_error"), str):
+        candidate_error = str(summary["candidate_error"])
+        printer(candidate_error)
     queue_wait_warning = _queue_wait_warning(run_dir)
     if queue_wait_warning is not None:
         summary["provider_queue_wait_warning"] = queue_wait_warning

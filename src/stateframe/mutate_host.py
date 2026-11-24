@@ -68,6 +68,11 @@ def start(spec: Mapping[str, object], run: Path) -> object | None:
     options = spec.get("mutations")
     if not isinstance(options, Mapping):
         return None
+    if __package__:
+        from .engine.kernel_safe_paths import container_active
+    else:
+        from engine.kernel_safe_paths import container_active
+    if container_active(): raise RuntimeError("CONTAINER_UNSUPPORTED:mutations")
     refusal = mutation_platform_error(sys.platform, requested=True)
     if refusal is not None:
         raise RuntimeError(refusal)

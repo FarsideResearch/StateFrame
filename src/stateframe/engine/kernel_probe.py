@@ -582,6 +582,12 @@ def _read_policy_metadata(read_fd: int) -> tuple[str, ...]:
 
 def _run_child(snapshot: pathlib.Path, code: str, *, executable: str,
                wall_seconds: float, cpu_seconds: float, memory_bytes: int) -> _ChildResult:
+    from kernel_safe_paths import container_active
+
+    if container_active():
+        from kernel_execution_boundary import BoundaryRefused
+
+        raise BoundaryRefused("CONTAINER_UNSUPPORTED:python-probe")
     meta_read, meta_write = os.pipe()
     os.set_inheritable(meta_write, True)
     env = dict(os.environ)

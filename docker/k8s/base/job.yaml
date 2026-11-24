@@ -1,0 +1,121 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: sf-eks-stateframe
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sf-eks-stateframe
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 0
+        fsGroup: 0
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: stateframe
+          image: sf-eks-stateframe:replace-with-build-tag
+          imagePullPolicy: IfNotPresent
+          command:
+            - /usr/bin/tini
+            - -g
+            - --
+            - python
+            - -c
+          args:
+            - |
+              import os
+
+              task = os.environ.pop("STATEFRAME_TASK")
+              extra_args = os.environ.pop("STATEFRAME_EXTRA_ARGS", "")
+              argv = [
+                  "stateframe", "run",
+                  "--repo", "/workspace/repo",
+                  "--task", task,
+                  "--in-place",
+              ]
+              if "API_KEY" in os.environ:
+                  argv.extend(["--api-key-env", "API_KEY"])
+              argv.extend(extra_args.split())
+              os.execvp(argv[0], argv)
+          env:
+            - name: STATEFRAME_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: sf-eks-runtime
+                  key: endpoint
+            - name: STATEFRAME_ALLOW_REMOTE_ENDPOINT
+              value: "1"
+            - name: STATEFRAME_MODEL
+              valueFrom:
+                configMapKeyRef:
+                  name: sf-eks-runtime
+                  key: model
+            # Trusted repositories only: task code can read the provider key and use
+            # any egress allowed by the NetworkPolicy.
+            - name: STATEFRAME_EXTRA_ARGS
+              value: "--container-is-sandbox --shell unrestricted --shell-network full"
+            - name: STATEFRAME_TASK
+              valueFrom:
+                configMapKeyRef:
+                  name: sf-eks-runtime
+                  key: task
+            - name: API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sf-eks-credentials
+                  key: api-key
+                  optional: true
+            - name: HOME
+              value: /home/sf
+            - name: STATEFRAME_HOME
+              value: /home/sf/.stateframe
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 0
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: repository
+              mountPath: /workspace/repo
+            - name: home
+              mountPath: /home/sf
+            - name: temporary
+              mountPath: /tmp
+      volumes:
+        - name: workspace
+          emptyDir:
+            sizeLimit: 2Gi
+        - name: repository
+          persistentVolumeClaim:
+            claimName: sf-eks-repository
+        - name: home
+          emptyDir:
+            sizeLimit: 2Gi
+        - name: temporary
+          emptyDir:
+            medium: Memory
+            sizeLimit: 256Mi

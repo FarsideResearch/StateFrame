@@ -19,6 +19,7 @@ import time
 from typing import Callable, Mapping, Sequence
 
 if __package__:
+    from .kernel_safe_paths import container_active
     from .kernel_effects import (
         ContentStore, Effect, EffectError, EffectPolicy, Entry, Reconciliation,
         WorkspaceEffectPolicy, diff, manifest_digest, reconcile, scan,
@@ -36,6 +37,7 @@ if __package__:
         _RUN_PATH, _pairs, _constant, _file_sha, _regular_no_symlink, _shebang,
     )
 else:
+    from kernel_safe_paths import container_active
     from kernel_effects import (
         ContentStore, Effect, EffectError, EffectPolicy, Entry, Reconciliation,
         WorkspaceEffectPolicy, diff, manifest_digest, reconcile, scan,
@@ -1227,6 +1229,12 @@ class HookRunner:
                 selected.append((index, hook))
             elif hook.event == event and matches(hook, **match_values):
                 selected.append((index, hook))
+        if selected and container_active():
+            if __package__:
+                from .kernel_execution_boundary import BoundaryRefused
+            else:
+                from kernel_execution_boundary import BoundaryRefused
+            raise BoundaryRefused("CONTAINER_UNSUPPORTED:hooks")
         runs: list[HookRunResult] = []
         entries: list[PanelEntry] = []
         writes: list[WriterResult] = []
