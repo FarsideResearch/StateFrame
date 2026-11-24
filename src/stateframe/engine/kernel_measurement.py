@@ -2511,7 +2511,8 @@ class HarnessTransportError(ConnectionError):
                  transport_class: str | None = None,
                  server_error: str | None = None,
                  attempt_reasons: Sequence[Mapping[str, object]] = (),
-                 capacity_detail: str | None = None) -> None:
+                 capacity_detail: str | None = None,
+                 retry_after_s: float | None = None) -> None:
         status = f" HTTP {http_status}" if http_status is not None else ""
         detail = f"; {capacity_detail}" if capacity_detail is not None else ""
         super().__init__(f"transport failed after {attempts} attempt(s): {error_type}{status}{detail}")
@@ -2522,6 +2523,7 @@ class HarnessTransportError(ConnectionError):
         self.transport_class = transport_class
         self.server_error = server_error
         self.attempt_reasons = tuple(dict(reason) for reason in attempt_reasons)
+        self.retry_after_s = retry_after_s
         if transport_class == "contract":
             # The provider rejected the REQUEST (schema/grammar/4xx): a harness
             # contract defect, terminal, never retried, never charged to the model.
@@ -2547,6 +2549,21 @@ class ProviderHTTPError(HarnessTransportError):
         }.get(self.http_status, "request rejected")
         hint = "; check the API key" if self.http_status == 401 else ""
         self.args = (f"provider returned HTTP {self.http_status} ({description}){hint}",)
+
+
+class ProviderRateLimitError(HarnessTransportError):
+    """A terminal 429 outcome, kept under the provider transport failure projection."""
+
+    def __init__(self, *, attempts: int, error_type: str, server_error: str | None,
+                 attempt_reasons: Sequence[Mapping[str, object]], quota_exhausted: bool,
+                 retry_after_s: float | None = None) -> None:
+        super().__init__(attempts=attempts, error_type=error_type, http_status=429,
+                         relay_error=None, transport_class="capacity",
+                         server_error=server_error, attempt_reasons=attempt_reasons,
+                         retry_after_s=retry_after_s)
+        message = ("provider quota exhausted (HTTP 429)" if quota_exhausted
+                   else "provider rate limit (HTTP 429)")
+        self.args = (message,)
 
 
 class ProviderRequestTimeoutError(HarnessTransportError):
@@ -2648,7 +2665,8 @@ def _server_error_from(exc: BaseException, key: str = "") -> str | None:
     return safe_server_error(_http_error_body(exc), key)
 
 
-def _parsed_server_error(text: str | None) -> dict[str, object] | None:
+def _parsed_server_error(
+        text: str | None, *, include_code: bool = False) -> dict[str, object] | None:
     """``{"message", "type"}`` from a JSON provider error body, when present."""
     if not text:
         return None
@@ -2658,9 +2676,58 @@ def _parsed_server_error(text: str | None) -> dict[str, object] | None:
         return {"message": text[:2048], "type": None}
     error = payload.get("error") if isinstance(payload, dict) else None
     if isinstance(error, dict):
-        return {"message": str(error.get("message", ""))[:2048],
-                "type": error.get("type") if isinstance(error.get("type"), str) else None}
+        parsed = {"message": str(error.get("message", ""))[:2048],
+                  "type": error.get("type") if isinstance(error.get("type"), str) else None}
+        if include_code and isinstance(error.get("code"), str):
+            parsed["code"] = error["code"]
+        return parsed
     return {"message": text[:2048], "type": None}
+
+
+_PROVIDER_QUOTA_ERROR_CODES = frozenset({
+    "insufficient_quota", "billing_hard_limit_reached", "billing_not_active",
+})
+
+
+def _provider_quota_exhausted(server_error: str | None) -> bool:
+    """Recognize only typed, closed-set quota codes; provider prose is never authoritative."""
+    parsed = _parsed_server_error(server_error, include_code=True)
+    return bool(parsed and any(parsed.get(field) in _PROVIDER_QUOTA_ERROR_CODES
+                               for field in ("type", "code")))
+
+
+def _retry_after_value(error: BaseException) -> float | None:
+    value = getattr(error, "retry_after_s", None)
+    if type(value) not in (int, float) or value < 0:
+        return None
+    try:
+        seconds = float(value)
+    except (OverflowError, ValueError):
+        return None
+    if math.isfinite(seconds):
+        return seconds
+    return None
+
+
+# The host wrapper sets this so a wait is shown while it happens; the journal alone is not shown.
+RATE_LIMIT_NOTICE = None
+
+
+def _wait_interruptibly(capture: object, delay: float) -> None:
+    """Wait in short slices so signal or capture cancellation stops a long provider delay."""
+    stop_at = time.monotonic() + delay
+    if not math.isfinite(stop_at):
+        stop_at = math.inf
+    while True:
+        cancelled = getattr(capture, "cancel_requested", False)
+        if callable(getattr(cancelled, "is_set", None)):
+            cancelled = cancelled.is_set()
+        if cancelled:
+            raise KeyboardInterrupt("provider retry cancelled")
+        remaining = stop_at - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(0.1, remaining))
 
 
 def _transport_metadata(exc: BaseException) -> tuple[str, int | None, str | None]:
@@ -3494,6 +3561,9 @@ class RequestCapture:
             transport_attempt_limit if transport_attempt_limit is not None
             else configured_attempts,
         )
+        explicit_transport_attempt_cap = (
+            configured_attempts if os.environ.get(TRANSPORT_MAX_ATTEMPTS_ENV) is not None else None
+        )
         per_request_timeout_active = per_request_timeout_seconds() is not None
         ttft_retry_budget_on = ttft_retry_budget_enabled()
         ttft_retry_budget_limit = (
@@ -3508,6 +3578,9 @@ class RequestCapture:
         ttft_retry_budget_deadline: float | None = None
         ttft_retry_deadline: float | None = None
         ttft_retry_deadline_reason: str | None = None
+        rate_limit_retry_started = False
+        rate_limit_count = 0
+        rate_limit_wait_started_at: float | None = None
         capacity_retry_used = self._capacity_retry_count > 0
 
         first_submission_event_id: str | None = None
@@ -3569,7 +3642,7 @@ class RequestCapture:
                 # record already binds body, source, menu and owner authority;
                 # legacy repair/refresh paths must never see sealed bytes.
                 pass
-            elif attempt > 0 and frozen_retry_only:
+            elif attempt > 0 and (frozen_retry_only or rate_limit_retry_started):
                 from kernel_boundary_recovery import BoundaryRecoveryStop
                 current_contract = getattr(self, "request_action_contract", None)
                 current_contract_digest = (
@@ -4234,33 +4307,49 @@ class RequestCapture:
                 transport_class = _classify_transport(http_status, server_error_body, error_type)
                 matched_reason = _llama_format_failure_reason(
                     http_status, server_error_body)
-                capacity_reason = capacity_400_reason(http_status, server_error_body)
+                # A 429 that names the context window is a size problem: waiting cannot cure it,
+                # so it takes the one-time refit instead of the rate-limit retry.
+                capacity_reason = capacity_400_reason(
+                    400 if http_status == 429 else http_status, server_error_body)
                 if capacity_reason is not None:
                     matched_reason = capacity_reason
                     from kernel_capacity_retry import learn_context_limit, reported_context_limit
                     learn_context_limit(
                         self.journal, endpoint, str(body.get("model") or ""), key,
                         reported_context_limit(server_error_body))
-                model_format_failure = matched_reason == LLAMA_FORMAT_FAILURE_REASON
+                rejected_429 = http_status == 429
+                rate_limited = rejected_429 and capacity_reason is None
+                model_format_failure = (
+                    not rate_limited and matched_reason == LLAMA_FORMAT_FAILURE_REASON)
                 if model_format_failure:
                     transport_class = "model_format"
-                liveness_lost = is_provider_liveness_timeout_error(exc)
+                liveness_lost = (
+                    not rate_limited and is_provider_liveness_timeout_error(exc))
                 response_bytes_received = getattr(
                     exc, "response_bytes_received", False) is True
-                submission_state = getattr(exc, "submission_state", "unknown")
+                rate_limit_retry_started = rate_limit_retry_started or rate_limited
+                rate_limit_count += int(rate_limited)  # selects the backoff step only; never a limit
+                retry_after_s = _retry_after_value(exc)
+                quota_exhausted = rate_limited and _provider_quota_exhausted(server_error_body)
+                submission_state = "rejected" if rejected_429 else getattr(
+                    exc, "submission_state", "unknown")
                 if not isinstance(submission_state, str) or not submission_state:
                     submission_state = "unknown"
-                usage_state = getattr(exc, "usage_state", "unknown")
+                usage_state = "not_incurred" if rejected_429 else getattr(
+                    exc, "usage_state", "unknown")
                 if submission_state in {"not_sent", "not_submitted"}:
                     usage_state = "not_incurred"
-                transient = (not model_format_failure and transport_class != "contract"
-                             and _transport_retryable(
-                    exc, elapsed_ns=elapsed_ns, http_status=http_status,
-                    relay_error=relay_error, error_type=error_type,
-                    transport_class=transport_class, matched_reason=matched_reason))
+                transient = (
+                    (rate_limited and not quota_exhausted and not response_bytes_received)
+                    or (not model_format_failure and transport_class != "contract"
+                        and _transport_retryable(
+                            exc, elapsed_ns=elapsed_ns, http_status=http_status,
+                            relay_error=relay_error, error_type=error_type,
+                            transport_class=transport_class, matched_reason=matched_reason))
+                )
                 response_already_received = self._durable_response_received()
                 request_timed_out = (
-                    per_request_timeout_active
+                    not rate_limited and per_request_timeout_active
                     and not response_bytes_received
                     and not liveness_lost
                     and error_type != "SendStallTimeout"
@@ -4277,6 +4366,9 @@ class RequestCapture:
                     HARNESS_CONTRACT if transport_class == "contract" else HARNESS_TRANSPORT)
                 if liveness_lost:
                     transport_reason = "liveness_timeout"
+                elif rate_limited:
+                    transport_reason = ("provider_quota_exhausted" if quota_exhausted
+                                        else "provider_rate_limited")
                 elif isinstance(relay_error, str):
                     transport_reason = relay_error
                 else:
@@ -4302,7 +4394,7 @@ class RequestCapture:
                         else:
                             ttft_retry_deadline = ttft_retry_budget_deadline
                             ttft_retry_deadline_reason = "ttft_retry_budget_exhausted"
-                else:
+                elif not rate_limited:
                     ordinary_attempt_count += 1
                 ttft_retry_index = ttft_retry_count + 1 if ttft_retry else None
                 cumulative_ttft_wait = (
@@ -4311,37 +4403,64 @@ class RequestCapture:
                 )
                 attempt_reasons.append({
                     "attempt": attempt + 1,
-                    "attempt_kind": "ttft_retry" if ttft_retry else "ordinary_transport",
+                    "attempt_kind": ("ttft_retry" if ttft_retry else
+                                     "provider_rate_limit" if rate_limited else
+                                     "ordinary_transport"),
                     "ordinary_attempt_count": ordinary_attempt_count,
                     "reason": transport_reason,
                     "error_type": error_type,
                     "http_status": http_status,
                     "relay_error": relay_error,
+                    **({"retry_after_s": retry_after_s}
+                       if rate_limited and retry_after_s is not None else {}),
                     **({"ttft_retry_index": ttft_retry_index}
                        if ttft_retry_index is not None else {}),
                 })
                 has_attempt = (
                     True if ttft_retry
-                    else ordinary_attempt_count < ordinary_attempt_limit
+                    else ((rate_limited or ordinary_attempt_count < ordinary_attempt_limit)
+                          # The user's cap counts ordinary and 429 attempts, not TTFT retries.
+                          and (explicit_transport_attempt_cap is None
+                               or ordinary_attempt_count + rate_limit_count
+                               < explicit_transport_attempt_cap))
                 )
                 retry_attempt_failed = timeout_retry_attempt == attempt
                 if request_timed_out and not ttft_retry:
                     has_attempt = has_attempt and not timeout_retry_used
                 elif retry_attempt_failed and not ttft_retry:
                     has_attempt = False
+                backoff_delay = (
+                    0.0 if request_timed_out or relay_error == "relay_ttft_timeout" else
+                    configured_backoff if configured_backoff is not None else
+                    POLICY.transport_delay(
+                        rate_limit_count if rate_limited else max(1, ordinary_attempt_count))
+                )
                 delay = (
                     _ttft_retry_delay_seconds(int(ttft_retry_index))
-                    if ttft_retry and ttft_retry_index is not None
-                    else 0.0 if request_timed_out or relay_error == "relay_ttft_timeout"
-                    else (configured_backoff if configured_backoff is not None
-                          else POLICY.transport_delay(ordinary_attempt_count))
+                    if ttft_retry and ttft_retry_index is not None else backoff_delay
                 )
+                if rate_limited:
+                    delay = max(backoff_delay, retry_after_s or 0.0)
+                elif http_status == 503 and transient and retry_after_s is not None:
+                    delay = max(backoff_delay, retry_after_s)
                 retry_deadline = deadline
                 if ttft_retry_deadline is not None:
                     retry_deadline = (
                         ttft_retry_deadline if retry_deadline is None
                         else min(retry_deadline, ttft_retry_deadline)
                     )
+                rate_limit_queue_deadline = None
+                if rate_limited and transient:
+                    from kernel_bounded_http import queue_wait_max_seconds
+                    queue_wait_cap = queue_wait_max_seconds()
+                    if queue_wait_cap is not None:
+                        if rate_limit_wait_started_at is None:
+                            rate_limit_wait_started_at = time.monotonic()
+                        rate_limit_queue_deadline = rate_limit_wait_started_at + queue_wait_cap
+                        retry_deadline = (
+                            rate_limit_queue_deadline if retry_deadline is None else
+                            min(retry_deadline, rate_limit_queue_deadline)
+                        )
                 remaining_after = (
                     None if retry_deadline is None
                     else retry_deadline - time.monotonic()
@@ -4443,12 +4562,24 @@ class RequestCapture:
                         ttft_retry_deadline_reason or "ttft_retry_budget_exhausted")
                 elif model_format_failure:
                     retry_blocked_reason = "model_format_outcome"
+                elif rate_limited and quota_exhausted:
+                    retry_blocked_reason = "provider_quota_exhausted"
+                elif rate_limited and response_bytes_received:
+                    retry_blocked_reason = "response_bytes_received"
                 elif response_already_received:
                     retry_blocked_reason = "response_already_received"
                 elif capacity_reason is not None and capacity_retry_used:
                     retry_blocked_reason = "capacity_retry_exhausted"
                 elif capacity_reason is not None and capacity_retry_refit_error is not None:
                     retry_blocked_reason = "capacity_refit_failed:" + capacity_retry_refit_error
+                elif rate_limited and not has_attempt:
+                    retry_blocked_reason = "attempt_limit"
+                elif (rate_limited and rate_limit_queue_deadline is not None
+                      and (deadline is None or rate_limit_queue_deadline <= deadline)
+                      and (remaining_after is None or remaining_after <= delay)):
+                    retry_blocked_reason = "queue_wait_cap"
+                elif rate_limited and remaining_after is not None and remaining_after <= delay:
+                    retry_blocked_reason = "deadline"
                 elif not transient:
                     retry_blocked_reason = (
                         "ambiguous_submission" if submission_state == "unknown"
@@ -4479,7 +4610,8 @@ class RequestCapture:
                     transport_class=transport_class,
                     submission_state=submission_state,
                     usage_state=usage_state,
-                    server_error=_parsed_server_error(server_error_body),
+                    server_error=_parsed_server_error(
+                        server_error_body, include_code=rate_limited),
                     server_error_body=server_error_body,
                     request_bytes=len(wire),
                     outcome=terminal_outcome if not retry_scheduled else None,
@@ -4488,9 +4620,16 @@ class RequestCapture:
                     retry_blocked_reason=retry_blocked_reason,
                     transport_attempt=attempt + 1, retry_index=attempt,
                     retry_budget=("capacity" if capacity_retry_scheduled else
-                                  "ttft" if ttft_retry else "ordinary_transport"),
+                                  "ttft" if ttft_retry else
+                                  "rate_limit" if rate_limited else "ordinary_transport"),
                     ordinary_attempt_count=ordinary_attempt_count,
                     ordinary_attempt_limit=ordinary_attempt_limit,
+                    **({"retry_after_s": retry_after_s,
+                        "response_bytes_received": response_bytes_received,
+                        "quota_exhausted": quota_exhausted}
+                       if rate_limited else {}),
+                    **({"retry_after_s": retry_after_s}
+                       if http_status == 503 and retry_after_s is not None else {}),
                     ttft_retry_index=ttft_retry_index,
                     ttft_retry_budget_seconds=ttft_retry_budget_limit,
                     cumulative_ttft_wait_seconds=cumulative_ttft_wait,
@@ -4544,6 +4683,21 @@ class RequestCapture:
                         )
                         self._capacity_retry_count += 1
                         capacity_retry_used = True
+                    if rate_limited:
+                        self.journal.emit(
+                            "provider_rate_limited",
+                            producer="kernel_measurement", fact_owner="HOST",
+                            request_id=self.request_id, step=self.step,
+                            transport_attempt=attempt + 1, http_status=429,
+                            retry_delay_seconds=delay,
+                            **({"retry_after_s": retry_after_s}
+                               if retry_after_s is not None else {}),
+                            ordinary_attempt_count=ordinary_attempt_count,
+                            ordinary_attempt_limit=ordinary_attempt_limit,
+                            retry_scheduled=True, dispatch=False,
+                        )
+                        if RATE_LIMIT_NOTICE is not None:
+                            RATE_LIMIT_NOTICE(http_status=429, retry_delay_seconds=delay)
                     if ttft_retry:
                         ttft_retry_count += 1
                     self.journal.emit(
@@ -4562,7 +4716,8 @@ class RequestCapture:
                         request_bytes=len(wire),
                         payload_hash="sha256:" + hashlib.sha256(wire).hexdigest(),
                         retry_budget=("capacity" if capacity_retry_scheduled else
-                                      "ttft" if ttft_retry else "ordinary_transport"),
+                                      "ttft" if ttft_retry else
+                                      "rate_limit" if rate_limited else "ordinary_transport"),
                         ordinary_attempt_count=ordinary_attempt_count,
                         ordinary_attempt_limit=ordinary_attempt_limit,
                         ttft_retry_index=ttft_retry_index,
@@ -4576,6 +4731,8 @@ class RequestCapture:
                     )
                     if capacity_retry_scheduled:
                         _wait_for_transport_retry(delay)
+                    elif rate_limited or (http_status == 503 and retry_after_s is not None):
+                        _wait_interruptibly(self, delay)
                     else:
                         time.sleep(delay)
                     if capacity_retry_scheduled:
@@ -4614,13 +4771,21 @@ class RequestCapture:
                         http_status=http_status, relay_error=relay_error,
                         server_error=server_error_body,
                         attempt_reasons=attempt_reasons) from exc
+                if rate_limited:
+                    raise ProviderRateLimitError(
+                        attempts=attempt + 1, error_type=error_type,
+                        server_error=server_error_body,
+                        attempt_reasons=attempt_reasons,
+                        quota_exhausted=quota_exhausted,
+                        retry_after_s=retry_after_s) from exc
                 raise _transport_error_class(relay_error)(
                     attempts=attempt + 1, error_type=error_type,
                     http_status=http_status, relay_error=relay_error,
                     transport_class=transport_class,
                     server_error=server_error_body,
                     attempt_reasons=attempt_reasons,
-                    capacity_detail=capacity_detail) from exc
+                    capacity_detail=capacity_detail,
+                    retry_after_s=retry_after_s) from exc
             try:
                 response = json.loads(raw_response)
             except (json.JSONDecodeError, UnicodeDecodeError, TypeError) as exc:

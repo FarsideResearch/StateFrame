@@ -3148,6 +3148,11 @@ def _render_event(event: dict) -> str | None:
     kind = event.get("kind")
     if kind == "cache_write_failed":
         return f"warning: could not write startup cache {event.get('cache')} ({event.get('error')})"
+    if kind == "provider_rate_limited":
+        wait = event.get("retry_delay_seconds")
+        if type(wait) in (int, float) and math.isfinite(wait) and wait >= 0:
+            return f"provider rate limited (HTTP 429); retrying in {wait:g} seconds"
+        return "provider rate limited (HTTP 429); retrying"
     if kind == "provider_dialects":
         endpoints = event.get("endpoints")
         if not isinstance(endpoints, list):
@@ -3476,7 +3481,8 @@ def drive(run: Path, options: RunOptions, printer=print) -> int:
                     _warn_checkpoint_event(event, checkpoint_warned)
                     rendered = _render_event(event)
                     if rendered and (not options.quiet or event.get("kind") in {
-                            "token_counting_unavailable", "engine_error", "cache_write_failed"}):
+                            "token_counting_unavailable", "engine_error", "cache_write_failed",
+                            "provider_rate_limited"}):
                         printer(rendered)
             log.write(output.finish())
             if not exited and engine_status is not None:

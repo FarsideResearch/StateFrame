@@ -6,6 +6,8 @@ uses provider-origin health probes during the wait instead of a first-byte timeo
 from __future__ import annotations
 
 from collections.abc import Callable
+import datetime as _datetime
+import email.utils
 import errno
 import functools
 import ipaddress
@@ -84,7 +86,8 @@ class BoundedTransportError(ConnectionError):
                  relay_error: str | None, server_error: str | None = None,
                  error_detail: str | None = None,
                  pre_response_failure: bool = False,
-                 response_bytes_received: bool = False) -> None:
+                 response_bytes_received: bool = False,
+                 retry_after_s: float | None = None) -> None:
         suffix = f" HTTP {http_status}" if http_status is not None else ""
         detail_suffix = f": {error_detail}" if error_detail else ""
         super().__init__(f"bounded HTTP child failed: {error_type}{suffix}{detail_suffix}")
@@ -96,6 +99,7 @@ class BoundedTransportError(ConnectionError):
         self.server_error = server_error
         self.pre_response_failure = pre_response_failure
         self.response_bytes_received = response_bytes_received
+        self.retry_after_s = retry_after_s
 
 
 SERVER_ERROR_BYTES = 2048
@@ -289,6 +293,26 @@ def send_stall_seconds() -> float:
     if not math.isfinite(seconds) or not 10 <= seconds <= 600:
         raise ValueError("STATEFRAME_SEND_STALL_S must be between 10 and 600 seconds")
     return seconds
+
+
+def _retry_after_seconds(value: str | None) -> float | None:
+    """Parse Retry-After using the OTLP transport's delta/date rules, without header text."""
+    if value is None or len(value) > 128:
+        return None
+    if value.isascii() and (value.isdecimal() or re.fullmatch(r"[0-9]+\.[0-9]+", value)):
+        try:
+            seconds = float(value)
+            return seconds if math.isfinite(seconds) and seconds >= 0 else None
+        except (ValueError, OverflowError):
+            return None
+    try:
+        parsed = email.utils.parsedate_to_datetime(value)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=_datetime.timezone.utc)
+        seconds = (parsed - _datetime.datetime.now(_datetime.timezone.utc)).total_seconds()
+        return max(0.0, seconds) if math.isfinite(seconds) else None
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 def _provider_probe_origin(endpoint: str) -> tuple[str, str, int | None] | None:
@@ -837,6 +861,15 @@ def _child_transport_error(diagnostic: bytes, key: str, endpoint: str) -> Except
     error_detail = failure.get("error_detail")
     error_detail = (safe_transport_detail(error_detail, key)
                     if isinstance(error_detail, str) else None)
+    retry_after = failure.get("retry_after_s")
+    retry_after_s = None
+    if type(retry_after) in (int, float) and retry_after >= 0:
+        try:
+            candidate = float(retry_after)
+        except (OverflowError, ValueError):
+            candidate = math.inf
+        if math.isfinite(candidate):
+            retry_after_s = candidate
     if kind == "SendStallTimeout":
         sent = failure.get("bytes_sent")
         total = failure.get("bytes_total")
@@ -866,6 +899,7 @@ def _child_transport_error(diagnostic: bytes, key: str, endpoint: str) -> Except
         error_detail=error_detail,
         pre_response_failure=failure.get("pre_response_failure") is True,
         response_bytes_received=failure.get("response_bytes_received") is True,
+        retry_after_s=retry_after_s,
     )
 
 
@@ -1567,9 +1601,23 @@ def _child() -> None:
             return result
         except urllib.error.HTTPError as error:
             attempt["http_status"] = error.code
-            error_body = _read_response_body(
-                error, tracker, deadline=tracker.response_deadline,
-                socket_timeout=packet["socket_timeout"], max_bytes=MAX_ERROR_BYTES)
+            error.retry_after_s = _retry_after_seconds(error.headers.get("Retry-After"))
+            if error.code == 429:
+                # A 429's own diagnostic body is not a model response. Preserve a
+                # separately attached partial-response fact if a transport supplied one.
+                error.rate_limit_rejection = True
+            try:
+                error_body = _read_response_body(
+                    error, tracker, deadline=tracker.response_deadline,
+                    socket_timeout=packet["socket_timeout"], max_bytes=MAX_ERROR_BYTES)
+            except Exception as body_error:
+                body_error.http_status = error.code
+                body_error.retry_after_s = error.retry_after_s
+                if error.code == 429:
+                    body_error.rate_limit_rejection = True
+                    body_error.response_bytes_received = (
+                        getattr(body_error, "response_bytes_received", False) is True)
+                raise
             error.relay_error = _relay_error_label(error_body)
             error.server_error = safe_server_error(error_body, packet["key"])
             raise
@@ -1604,6 +1652,8 @@ def _child() -> None:
                                     http.client.RemoteDisconnected))
         )
         error.response_bytes_received = (
+            getattr(error, "response_bytes_received", False) is True
+            if getattr(error, "rate_limit_rejection", False) else
             tracker.first_response_at is not None
             or any(attempt["http_status"] is not None for attempt in attempts)
         )
@@ -1661,6 +1711,14 @@ if __name__ == "__main__":
         relay_error = getattr(error, "relay_error", None)
         server_error = getattr(error, "server_error", None)
         redirect_target_host = getattr(error, "target_host", None)
+        retry_after_s = getattr(error, "retry_after_s", None)
+        try:
+            retry_after_s = (float(retry_after_s)
+                             if type(retry_after_s) in (int, float)
+                             and retry_after_s >= 0
+                             and math.isfinite(float(retry_after_s)) else None)
+        except (OverflowError, ValueError):
+            retry_after_s = None
         sys.stderr.write(json.dumps({"error_type": type(error).__name__,
                                      "error_detail": safe_transport_detail(error),
                                      "http_status": status if type(status) is int else None,
@@ -1674,6 +1732,7 @@ if __name__ == "__main__":
                                          error, "pre_response_failure", False) is True,
                                      "response_bytes_received": getattr(
                                          error, "response_bytes_received", False) is True,
+                                     "retry_after_s": retry_after_s,
                                      **({"redirect_target_host": redirect_target_host}
                                         if type(redirect_target_host) is str else {}),
                                       **({"bytes_sent": error.bytes_sent,

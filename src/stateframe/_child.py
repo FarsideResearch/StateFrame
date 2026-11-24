@@ -775,6 +775,16 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
     kernel_bounded_http.request_bytes = recorded
 
 
+def install_rate_limit_notice() -> None:
+    """Show each provider rate-limit wait as it starts."""
+    import kernel_measurement
+
+    def notice(**fields: object) -> None:
+        emit("provider_rate_limited", **fields)
+
+    kernel_measurement.RATE_LIMIT_NOTICE = notice
+
+
 def install_token_count_warning() -> None:
     """Report fallback once per child, including failures before checked_ask."""
     from kernel_request_diet import RequestTokenMeter
@@ -2068,6 +2078,7 @@ def _main(argv: list[str], lifetime: ExitStack, *, teardown: EngineTeardown | No
         previous_checks = Path(resume["previous_attempt"]) / "checks" if resume is not None else None
         install_check_recorder(run, replayer, previous_checks)
         install_token_count_warning()
+        install_rate_limit_notice()
         install_checked_ask(rr, spec, run, hook_wiring,
                             live_slot=live_slot, replayer=replayer,
                             managed_slot=unit_spec is not None)
