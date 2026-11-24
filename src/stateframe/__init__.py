@@ -1,5 +1,5 @@
 """StateFrame: an agent engine whose model requests carry a typed state frame instead of chat history."""
-__version__ = "0.8.34"
+__version__ = "0.8.35"
 
 _STARTUP_SWITCH = "STATEFRAME_SEND1_WAVE4"
 _STARTUP_SPEC_KEY = "send1_wave4"

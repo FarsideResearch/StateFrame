@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.35 (2026-11-24)
 
 - Changed: the normalized public test verdict row is written to the journal when the verdict or its binding changes, and again after a checkpoint or resume, instead of on every check.
 - Fixed: a provider reply of HTTP 400, 401, 403 or 404 that ends a run is reported as a provider error with its status instead of a request-seal failure.
