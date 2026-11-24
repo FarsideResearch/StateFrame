@@ -251,7 +251,10 @@ def _applied_edit_rows(receipts: object, file_deltas: object,
         path = raw.get("file", raw.get("path"))
         if path in (None, ""):
             continue
-        supplied[str(path)] = {str(key): _safe(value) for key, value in raw.items()}
+        normalized = {str(key): _safe(value) for key, value in raw.items()}
+        supplied[str(path)] = normalized
+        if normalized.get("snapshot_unavailable") is True:
+            open_items.append(f"applied_edit_snapshot_unavailable:{path}")
 
     result: dict[str, dict[str, object]] = dict(supplied)
     applied_paths: set[str] = set()
@@ -275,8 +278,12 @@ def _applied_edit_rows(receipts: object, file_deltas: object,
             if path_value in (None, ""):
                 continue
             path = str(path_value)
-            applied_paths.add(path)
             delta = deltas.get(path, {})
+            if (delta.get("status") == "unavailable"
+                    or result.get(path, {}).get("snapshot_unavailable") is True):
+                open_items.append(f"applied_edit_snapshot_unavailable:{path}")
+                continue
+            applied_paths.add(path)
             before = (
                 change.get("before_revision", change.get("before", raw.get("before_revision")))
                 or _file_revision(change.get("before_binding", raw.get("before_binding")), path)
@@ -387,6 +394,12 @@ def build_manifest(*, phase: str, files_changed: object, claims: object,
                    journal_applied_edits: object = None) -> dict[str, object]:
     """Build a deterministic host record without granting claims authority."""
     checks, receipt_open_items = _check_rows(receipts)
+    unavailable_paths = {
+        str(row.get("path", row.get("file")))
+        for row in _items(file_deltas)
+        if isinstance(row, Mapping) and row.get("status") == "unavailable"
+        and row.get("path", row.get("file")) not in (None, "")
+    }
     if journal_applied_edits is None:
         edit_rows, edit_open_items = _applied_edit_rows(
             receipts, file_deltas, applied_edits)
@@ -395,7 +408,15 @@ def build_manifest(*, phase: str, files_changed: object, claims: object,
             {str(key): _safe(value) for key, value in row.items()}
             for row in _items(journal_applied_edits) if isinstance(row, Mapping)
         ]
+        retained = []
         edit_open_items = []
+        for row in edit_rows:
+            path = row.get("file", row.get("path"))
+            if path in unavailable_paths:
+                edit_open_items.append(f"applied_edit_snapshot_unavailable:{path}")
+            else:
+                retained.append(row)
+        edit_rows = retained
     latest_check = copy.deepcopy(checks[-1]) if checks else None
     claim_rows, evidence_refs, _ = _claim_inputs(claims)
     receipt_ids = {str(row["receipt_id"]) for row in checks}
@@ -487,14 +508,14 @@ class DeliveryManifestTracker:
     def __init__(self, root: str | os.PathLike[str], baseline: Mapping[str, object],
                  journal: object, runtime: object = None):
         self.root = Path(root)
-        self.baseline = dict(baseline)
+        self.baseline = baseline
         self.journal = journal
         self.runtime = runtime
         self.last_manifest: dict[str, object] | None = None
         self.last_prepared: dict[str, object] | None = None
         self._pending_manifest: dict[str, object] | None = None
         self._pending_workspace_snapshot: tuple[
-            object, tuple[object, ...], dict[str, bytes]
+            object, tuple[object, ...], Mapping[str, bytes]
         ] | None = None
         self.claims: object = None
         # STATEFRAME_PROMPT_DIET (off by default): last *confirmed-rendered*
@@ -521,10 +542,10 @@ class DeliveryManifestTracker:
             return (str(root), None, None)
         return (str(root), identity.st_dev, identity.st_ino)
 
-    def _capture_workspace_snapshot(self) -> dict[str, bytes] | None:
+    def _capture_workspace_snapshot(self) -> Mapping[str, bytes] | None:
         try:
             from kernel_host_done_facts import workspace_snapshot
-            return workspace_snapshot(self.root)
+            return workspace_snapshot(self.root, live=True)
         except (ImportError, OSError, TypeError, ValueError):
             return None
 
@@ -549,7 +570,8 @@ class DeliveryManifestTracker:
                        if snapshot is _SNAPSHOT_UNSET else snapshot)
             if not isinstance(current, Mapping):
                 return [], []
-            deltas = diff_snapshots(self.baseline, current)
+            deltas = diff_snapshots(self.baseline, current, journal=self.journal,
+                                    consumer="delivery_manifest")
             return [delta.path for delta in deltas], [delta.to_dict() for delta in deltas]
         except (ImportError, OSError, TypeError, ValueError):
             return [], []
@@ -582,6 +604,7 @@ class DeliveryManifestTracker:
 
     def _applied_edits(self, receipts: object, *, read_content: bool = True) -> list[dict[str, object]]:
         """Pair settled edit receipts with revision-bound workspace hunks."""
+        from kernel_host_done_facts import SnapshotChanged, _log_snapshot_changed
         provided: list[dict[str, object]] = []
         for raw in _items(receipts):
             if not isinstance(raw, Mapping):
@@ -620,7 +643,13 @@ class DeliveryManifestTracker:
                         current = (self.root / relative).read_bytes()
                     except OSError:
                         continue
-                    before = self.baseline.get(path)
+                    try:
+                        before = self.baseline.get(path)
+                    except SnapshotChanged:
+                        _log_snapshot_changed(self.journal, "delivery_manifest", path)
+                        row["snapshot_unavailable"] = True
+                        provided.append(row)
+                        continue
                     before_bytes = before if isinstance(before, bytes) else (
                         str(before).encode("utf-8", "surrogateescape") if before is not None else b"")
                     before_text = before_bytes.decode("utf-8", "replace").splitlines(keepends=True)
@@ -849,7 +878,10 @@ class DeliveryManifestTracker:
             self._pending_diet_digest = None
         self._pending_manifest = build_manifest(
             phase="prepared", files_changed=changed, file_deltas=deltas,
-            claims=self.claims, receipts=receipts, open_items=(), payload=payload,
+            claims=self.claims, receipts=receipts,
+            open_items=[f"snapshot_unavailable:{row['path']}" for row in deltas
+                        if isinstance(row, Mapping) and row.get("status") == "unavailable"],
+            payload=payload,
             source_revision=self._source_revision(), exposure={
                 "selected": "UNVERIFIABLE", "rendered": True,
                 "submitted": False, "response_received": False, "records": [],
@@ -895,7 +927,10 @@ class DeliveryManifestTracker:
             self._diet_last_request_id = request_id
         manifest = build_manifest(
             phase="prepared", files_changed=changed, file_deltas=deltas,
-            claims=self.claims, receipts=receipts, open_items=(), payload=payload,
+            claims=self.claims, receipts=receipts,
+            open_items=[f"snapshot_unavailable:{row['path']}" for row in deltas
+                        if isinstance(row, Mapping) and row.get("status") == "unavailable"],
+            payload=payload,
             source_revision=self._source_revision(), exposure={
                 "selected": "UNVERIFIABLE", "rendered": True,
                 "submitted": False, "response_received": False,
@@ -968,7 +1003,11 @@ class DeliveryManifestTracker:
             rows, request_id=request_id, phase="done")
         manifest = build_manifest(
             phase="done", files_changed=changed, file_deltas=deltas,
-            claims=claims, receipts=rows, open_items=open_items, payload=payload,
+            claims=claims, receipts=rows,
+            open_items=[*open_items, *(
+                f"snapshot_unavailable:{row['path']}" for row in deltas
+                if isinstance(row, Mapping) and row.get("status") == "unavailable")],
+            payload=payload,
             source_revision=self._source_revision(), omissions=(
                 ["final_payload_not_prepared"] if not payload else
                 ["request_not_submitted"] if not exposure.get("submitted") else

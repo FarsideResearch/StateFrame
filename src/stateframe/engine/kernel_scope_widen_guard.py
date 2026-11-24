@@ -78,6 +78,27 @@ def read(path: Path) -> bytes:
         return source.read()
 
 
+def read_chunks(path: Path, block_size: int = 1 << 20):
+    """Read a regular file in bounded chunks under the same widening fence as read()."""
+    admission = _ADMITTED.get(_key(path))
+    if admission is None:
+        source = path.open("rb")
+    else:
+        root, relative, expected = admission
+        descriptor, _ = _open(root, relative, os.O_RDONLY, expected)
+        source = os.fdopen(descriptor, "rb")
+
+    def chunks():
+        with source:
+            while True:
+                chunk = source.read(block_size)
+                if not chunk:
+                    return
+                yield chunk
+
+    return chunks()
+
+
 def verify(path: Path) -> None:
     admission = _ADMITTED.get(_key(path))
     if admission is None:

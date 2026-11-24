@@ -777,7 +777,8 @@ def run_test_cmd(command: str, cwd: Path, timeout_s: float | None = None,
                  check_settings: dict[str, str] | None = None,
                  required_test_ledger: bool = False,
                  protected_test_hashes: dict[str, str] | None = None,
-                 execution_boundary: dict[str, object] | None = None) -> dict[str, object]:
+                 execution_boundary: dict[str, object] | None = None,
+                 check_tool_root: str | None = None) -> dict[str, object]:
     """Check a throwaway copy through the engine policy in a fresh interpreter.
 
     ``test_python``: the interpreter the command runs, handed to an engine that reads STATEFRAME_TEST_PYTHON so its
@@ -792,7 +793,8 @@ def run_test_cmd(command: str, cwd: Path, timeout_s: float | None = None,
                                    if protected_test_hashes is not None else {}),
                                 **({"check_settings": check_settings} if check_settings is not None else {}),
                                 **({"execution_boundary": execution_boundary}
-                                   if execution_boundary is not None else {}))
+                                   if execution_boundary is not None else {}),
+                                **({"check_tool_root": check_tool_root} if check_tool_root else {}))
     except (outer_checks.OuterCheckError, OSError) as error:
         raise RunError(str(error)) from error
 
@@ -988,6 +990,18 @@ def engine_switches(engine_dir: Path = ENGINE_DIR) -> frozenset[str]:
 
 def engine_reads_test_python(engine_dir: Path = ENGINE_DIR) -> bool:
     return TEST_PYTHON_ENV in engine_switches(engine_dir)
+
+
+def _is_user_test_command(options: "RunOptions") -> bool:
+    """True only for the user's own --test-cmd, never a discovered or model-written check."""
+    return bool(options.test_cmd and not options.check_cmd and options.runner_kind == "generic"
+                and options.check_source == DECLARED_TEST_SOURCE)
+
+
+def _check_tool_option(spec: Mapping[str, object]) -> dict[str, str]:
+    record = spec.get("check_tool_root")
+    root = record.get("root") if isinstance(record, Mapping) else None
+    return {"check_tool_root": root} if isinstance(root, str) else {}
 
 
 def _outer_test_python(options: "RunOptions") -> str | None:
@@ -2098,6 +2112,23 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
             hook_host.refuse_run_dir_under_roots(run, hooks)
         except hook_host.HookConfigError as error:
             raise RunError(str(error)) from error
+    check_tool_root = None
+    if options.test_cmd and options._execution_boundary is None:
+        message = preflight.missing_program_message(
+            options.test_cmd, test_env=options.test_env, repo=options.repo,
+            user_test_command=_is_user_test_command(options),
+            run_probe=lambda command, cwd: run_test_cmd(
+                command, cwd, test_env=options.test_env, python=_tests_python(options),
+                pytest_plugins=options.pytest_plugins, deadline=options._deadline,
+                test_python=_outer_test_python(options), runner_kind=options.runner_kind))
+        if message is not None:
+            raise RunError(message)
+        tool_root = preflight.check_tool_root(
+            options.test_cmd, test_env=options.test_env, repo=options.repo,
+            user_test_command=_is_user_test_command(options))[0]
+        if tool_root is not None:
+            check_tool_root = tool_root.record()
+            printer(f"check sandbox: {tool_root.root} is mounted read-only for {tool_root.program}")
     if options.run_dir is None:
         private_directory(run.parent.parent, "runs", run.name)
     else:
@@ -2321,6 +2352,7 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
         "test_cmd": options.test_cmd,
         "check_cmd": options.check_cmd,
         "check_source": options.check_source,
+        **({"check_tool_root": check_tool_root} if check_tool_root is not None else {}),
         "runner_kind": options.runner_kind,
         "protected_test_globs": list(protected_globs),
         "protect_tests": options.protect_tests,
@@ -5385,7 +5417,8 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
                           required_test_ledger=(required_ledger_enabled and required_ledger is not None
                                                 and options.runner_kind == "pytest"),
                           protected_test_hashes=protected_test_hashes,
-                          execution_boundary=execution_boundary))
+                          execution_boundary=execution_boundary,
+                          **_check_tool_option(spec)))
     observe_required_run("baseline", before)
     printer(f"before: {test_cmd or '(none)'} -> {outcomes.check_label(before)} "
             f"(exit {before['exit_code']})")
@@ -5493,7 +5526,8 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
                                  required_test_ledger=(required_ledger_enabled and required_ledger is not None
                                                        and options.runner_kind == "pytest"),
                                  protected_test_hashes=protected_test_hashes,
-                                 execution_boundary=execution_boundary)
+                                 execution_boundary=execution_boundary,
+                                 **_check_tool_option(spec))
             observe_required_run("current", after)
             post_check_digests = {} if candidate_file_digests is not None else None
             post_check_digest = candidate_digest(work.copy, file_digests=post_check_digests)

@@ -1,17 +1,24 @@
 """Pool pruning must ignore the shared object store and fail closed on bad checkpoints."""
 from __future__ import annotations
 
+import ast
+import fcntl
+import io
 import json
 import os
 import pickle
 import random
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
+from fixtures.process_signals import record_identity, signal_run_verified
 from stateframe.engine import kernel_checkpoint as checkpoint
+from stateframe.engine import kernel_reason_log as reason_log
 
 
 @pytest.fixture(autouse=True)
@@ -33,9 +40,9 @@ def _synthetic_checkpoint_environment(monkeypatch):
                         lambda stream, payload, _ctx, protocol=5: pickle.dump(payload, stream))
 
 
-def _save(run: Path, step: int) -> Path:
+def _save(run: Path, step: int, *, background: bool = False) -> Path:
     checkpoint._STATE["setup"] = {"code": sys._getframe().f_code, "line": 0, "funcs": frozenset()}
-    return checkpoint.save(sys._getframe(), step, run)
+    return checkpoint.save(sys._getframe(), step, run, background=background)
 
 
 def _pool_path(run: Path, name: str) -> Path:
@@ -70,6 +77,165 @@ def test_save_prunes_orphans_but_keeps_checkpoint_and_live_files(tmp_path, monke
     _pool_path(run, live_only).write_bytes(b"pool copy")
     checkpoint._prune_pool(run / "checkpoints", run)
     assert _pool_path(run, live_only).is_file()
+
+
+def test_prune_memory_error_is_logged_without_replacing_rejection(tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    run.mkdir()
+    monkeypatch.setattr(checkpoint, "_STATE", {})
+    monkeypatch.setattr(checkpoint, "_SAVE", {})
+    prune_roots = []
+
+    def fail_prune(root):
+        prune_roots.append(root)
+        raise MemoryError("simulated allocation failure")
+
+    def reject_publication(*_args, **_kwargs):
+        raise checkpoint.CheckpointError("original publication rejection")
+
+    monkeypatch.setattr(checkpoint, "_prune_objects", fail_prune)
+    monkeypatch.setattr(checkpoint, "_publish_staged_artifacts", reject_publication)
+    reason_log.reset_for_tests()
+    output = io.StringIO()
+    reason_log.configure(level="WARN", stream=output)
+    try:
+        with pytest.raises(checkpoint.CheckpointError, match="original publication rejection"):
+            _save(run, 1)
+
+        assert prune_roots == [run / "checkpoints", run / "checkpoints"]
+        logged = reason_log.run_summary()["by_cause"][
+            "fallback:checkpoint_object_prune_failed"]
+        assert logged["component"] == "kernel_checkpoint"
+        assert logged["why"] == "transaction cleanup continued without object pruning"
+        assert output.getvalue().count("checkpoint object pruning failed") == 1
+    finally:
+        reason_log.reset_for_tests()
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="production writer cleanup requires fork")
+def test_every_production_transaction_cleanup_holds_checkpoint_lock(tmp_path, monkeypatch):
+    source = Path(checkpoint.__file__)
+    module = ast.parse(source.read_text(encoding="utf-8"))
+    production_sites = set()
+
+    class CleanupCallVisitor(ast.NodeVisitor):
+        def __init__(self):
+            self.scopes = []
+
+        def visit_FunctionDef(self, node):
+            self.scopes.append(node.name)
+            self.generic_visit(node)
+            self.scopes.pop()
+
+        def visit_AsyncFunctionDef(self, node):
+            self.scopes.append(node.name)
+            self.generic_visit(node)
+            self.scopes.pop()
+
+        def visit_Call(self, node):
+            if (isinstance(node.func, ast.Name)
+                    and node.func.id == "_cleanup_checkpoint_transaction"):
+                assert self.scopes, "production cleanup call must be inside a function"
+                production_sites.add((self.scopes[-1], node.lineno))
+            self.generic_visit(node)
+
+    CleanupCallVisitor().visit(module)
+    assert production_sites
+    assert {caller for caller, _line in production_sites} == {
+        "save", "_save_into", "_reap", "_sweep_stale_locked", "_fork_writer",
+    }
+    save_sites = {site for site in production_sites if site[0] == "save"}
+    assert len(save_sites) == 2, "cover both save cleanup branches, including reap leftovers"
+
+    events_file = tmp_path / "cleanup-calls.jsonl"
+    real_cleanup = checkpoint._cleanup_checkpoint_transaction
+
+    def observe_cleanup(root, tmp):
+        caller = sys._getframe(1)
+        with (root / ".checkpoint.lock").open("a+b") as probe:
+            try:
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                lock_held = True
+            else:
+                fcntl.flock(probe, fcntl.LOCK_UN)
+                lock_held = False
+        event = {"caller": caller.f_code.co_name, "line": caller.f_lineno,
+                 "pid": os.getpid(), "lock_held": lock_held}
+        with events_file.open("ab") as stream:
+            stream.write(json.dumps(event).encode("utf-8") + b"\n")
+        real_cleanup(root, tmp)
+
+    monkeypatch.setattr(checkpoint, "_cleanup_checkpoint_transaction", observe_cleanup)
+    monkeypatch.setattr(checkpoint, "_STATE", {
+        "failed": 0, "consecutive_failed": 0, "disabled": False,
+    })
+    monkeypatch.setattr(checkpoint, "_SAVE", {})
+
+    def reject_publication(*_args, **_kwargs):
+        raise checkpoint.CheckpointError("cleanup caller coverage rejection")
+
+    monkeypatch.setattr(checkpoint, "_publish_staged_artifacts", reject_publication)
+    run = tmp_path / "in-process"
+    run.mkdir()
+    root = run / "checkpoints"
+    root.mkdir()
+    stale_tmp = root / f".9999-{os.getpid()}.tmp"
+    stale_tmp.mkdir()
+    with pytest.raises(checkpoint.CheckpointError, match="cleanup caller coverage rejection"):
+        _save(run, 1)
+    assert not stale_tmp.exists(), "save() must reap its same-process leftover under the lock"
+
+    background_run = tmp_path / "background"
+    background_run.mkdir()
+    writer_launched_after = time.time()
+    _save(background_run, 2, background=True)
+    try:
+        outcome = checkpoint.finish_background_writer()
+    finally:
+        child = checkpoint._STATE.get("child")
+        if child:
+            try:
+                identity = record_identity(
+                    child, launched_after=writer_launched_after,
+                    command_fragment=Path(sys.executable).name,
+                )
+                signal_run_verified(
+                    background_run, child, identity, signal.SIGKILL,
+                    deadline=time.monotonic(), what="checkpoint writer cleanup",
+                    require_checkpoint_saved=False,
+                )
+            except ProcessLookupError:
+                pass
+            checkpoint.finish_background_writer()
+    assert outcome is not None and outcome["outcome"] == "failed"
+
+    stale_root = tmp_path / "stale" / "checkpoints"
+    stale_root.mkdir(parents=True)
+    stale_sweep_tmp = stale_root / f".0003-{os.getpid() + 1_000_000_000}.tmp"
+    stale_sweep_tmp.mkdir()
+    monkeypatch.setattr(checkpoint, "_pid_alive", lambda _pid: False)
+    assert checkpoint._sweep_stale(stale_root) == 1
+
+    observed = [json.loads(line) for line in events_file.read_text(encoding="utf-8").splitlines()]
+    observed_sites = {(event["caller"], event["line"]) for event in observed}
+    assert observed_sites == production_sites
+    assert len(observed) == len(production_sites)
+    assert all(event["lock_held"] for event in observed), observed
+
+
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt, SystemExit])
+def test_cleanup_still_propagates_process_interrupts(tmp_path, monkeypatch, interrupt):
+    root = tmp_path / "checkpoints"
+    tmp = root / ".0001-interrupted.tmp"
+    tmp.mkdir(parents=True)
+
+    def interrupt_prune(_root):
+        raise interrupt("preserve process control")
+
+    monkeypatch.setattr(checkpoint, "_prune_objects", interrupt_prune)
+    with pytest.raises(interrupt, match="preserve process control"):
+        checkpoint._cleanup_checkpoint_transaction(root, tmp)
 
 
 _REFUSAL_CASES = (
@@ -330,3 +496,40 @@ def test_twenty_saves_report_pool_bytes_for_appearing_and_disappearing_file(tmp_
                            for path in (root / checkpoint.OBJECT_DIR).glob("quarantine-*"))
     print(f"POOL_BYTES_AFTER_20_SAVES={pool_bytes + quarantine_bytes} "
           f"QUARANTINE_BYTES={quarantine_bytes}")
+
+
+@pytest.mark.parametrize("next_step", [5, 6], ids=["same-step", "later-step"])
+def test_failed_writer_tree_left_by_a_held_lock_is_removed_by_the_next_save(tmp_path, next_step):
+    run = tmp_path / "run"
+    root = run / "checkpoints"
+    root.mkdir(parents=True)
+    tree = root / f".0005-{os.getpid()}.tmp"
+    tree.mkdir()
+    (tree / "state.pkl").write_bytes(b"partial")
+    other = root / f".0005-{os.getppid()}.tmp"
+    other.mkdir()
+    pid = os.fork()
+    if pid == 0:
+        os._exit(1)
+    saved = dict(checkpoint._STATE)
+    try:
+        checkpoint._STATE.update(child=pid, child_tmp=tree, child_run_dir=run, child_step=5,
+                                 child_writer_generation="5:0", child_journal_offset=0,
+                                 child_journal_file_id=None, child_journal_missing=True)
+        with (root / ".checkpoint.lock").open("a+b") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            while not checkpoint._reap():
+                time.sleep(0.01)
+            assert tree.is_dir()
+            assert checkpoint._sweep_stale(root) == 0
+        assert checkpoint._sweep_stale(root) == 0
+        assert tree.is_dir()
+
+        final = _save(run, next_step)
+
+        assert checkpoint.latest(run) == final
+        assert not tree.exists()
+        assert other.is_dir()
+    finally:
+        checkpoint._STATE.clear()
+        checkpoint._STATE.update(saved)

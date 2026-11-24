@@ -16,7 +16,8 @@ import difflib
 import hashlib
 import json
 import os
-from collections.abc import Callable, Mapping, Sequence
+import stat
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar
@@ -29,6 +30,7 @@ if TYPE_CHECKING:
 
 
 _T = TypeVar("_T")
+_SNAPSHOT_UNAVAILABLE = object()
 
 
 MODE_ENV = "STATEFRAME_HOST_DONE_FACTS"
@@ -41,6 +43,209 @@ _IGNORED_PARTS = frozenset({
     ".git", ".hg", ".svn", "__pycache__", ".pytest_cache", ".ruff_cache",
     ".mypy_cache", ".test-tmp", ".tox",
 })
+
+
+class SnapshotChanged(OSError):
+    """A captured file can no longer be proven to match its recorded digest."""
+
+    def __init__(self, path: str, reason: str = "snapshot copy changed"):
+        super().__init__(f"{path}: {reason}")
+        self.path = path
+        self.reason = reason
+
+
+def _open_regular_nofollow(root: Path, relative: str) -> int:
+    """Open a regular file below root without following any path component."""
+    parts = Path(relative).parts
+    if not parts or Path(relative).is_absolute() or any(part in {"", ".", ".."} for part in parts):
+        raise OSError("invalid snapshot path")
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory = getattr(os, "O_DIRECTORY", 0)
+    flags = os.O_RDONLY | nofollow | directory
+    current = os.open(root, flags)
+    try:
+        for part in parts[:-1]:
+            next_fd = os.open(part, flags, dir_fd=current)
+            os.close(current)
+            current = next_fd
+        file_fd = os.open(parts[-1], os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0),
+                          dir_fd=current)
+    finally:
+        os.close(current)
+    if not stat.S_ISREG(os.fstat(file_fd).st_mode):
+        os.close(file_fd)
+        raise OSError("snapshot entry is not a regular file")
+    return file_fd
+
+
+def _read_regular(root: Path, relative: str) -> tuple[bytes, str, int]:
+    digest = hashlib.sha256()
+    chunks: list[bytes] = []
+    size = 0
+    fd = _open_regular_nofollow(root, relative)
+    try:
+        with os.fdopen(fd, "rb") as stream:
+            while True:
+                chunk = stream.read(1 << 20)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                chunks.append(chunk)
+                size += len(chunk)
+    except BaseException:
+        # fdopen owns the descriptor once constructed.
+        raise
+    return b"".join(chunks), digest.hexdigest(), size
+
+
+def _hash_regular(root: Path, relative: str) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    size = 0
+    fd = _open_regular_nofollow(root, relative)
+    with os.fdopen(fd, "rb") as stream:
+        while True:
+            chunk = stream.read(1 << 20)
+            if not chunk:
+                break
+            digest.update(chunk)
+            size += len(chunk)
+    return digest.hexdigest(), size
+
+
+class SnapshotFiles(Mapping[str, bytes]):
+    """Digest-backed file mapping with bounded small-file caching."""
+
+    SMALL_FILE_LIMIT = 64 * 1024
+    BODY_CACHE_LIMIT = 16 * 1024 * 1024
+
+    def __init__(self, rows: Mapping[str, tuple[str, int]] | None = None, *,
+                 bodies: Mapping[str, bytes] | None = None,
+                 own: Sequence[str] | set[str] = (),
+                 start_root: str | os.PathLike[str] | None = None,
+                 live_root: str | os.PathLike[str] | None = None):
+        self._rows = dict(rows or {})
+        self._bodies = dict(bodies or {})
+        self._body_cache_size = sum(
+            len(body) for body in self._bodies.values()
+            if len(body) <= self.SMALL_FILE_LIMIT)
+        self._start_root = Path(start_root) if start_root is not None else None
+        self._live_root = Path(live_root) if live_root is not None else None
+        self._live_races: set[str] = set()
+        self._own = frozenset(own)  # no proven copy elsewhere: these bodies stay here
+        self._unproven: set[str] = set()
+
+    def __getitem__(self, path: str) -> bytes:
+        if path not in self._rows:
+            raise KeyError(path)
+        body = self._bodies.get(path)
+        if body is not None:
+            if path in self._unproven:
+                if hashlib.sha256(body).hexdigest() != self._rows[path][0]:
+                    raise SnapshotChanged(path, "restored body differs from its digest")
+                self._unproven.discard(path)
+            return body
+        digest, size = self._rows[path]
+        if self._live_root is not None:
+            try:
+                body, actual_digest, actual_size = _read_regular(self._live_root, path)
+            except OSError as error:
+                raise SnapshotChanged(path, "live file is unavailable") from error
+            if actual_digest != digest or actual_size != size:
+                self._rows[path] = (actual_digest, actual_size)
+                self._live_races.add(path)
+            self._cache_small(path, body)
+            return body
+        root = self._start_root
+        if root is None:
+            raise SnapshotChanged(path, "no start snapshot is available")
+        try:
+            body, actual_digest, actual_size = _read_regular(root, path)
+        except OSError as error:
+            raise SnapshotChanged(path, "start snapshot file is unavailable") from error
+        if actual_digest != digest or actual_size != size:
+            raise SnapshotChanged(path, "start snapshot digest differs")
+        self._cache_small(path, body)
+        return body
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._rows)
+
+    def __len__(self) -> int:
+        return len(self._rows)
+
+    def __contains__(self, path: object) -> bool:
+        return path in self._rows
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Mapping):
+            return NotImplemented
+        if len(self) != len(other) or any(path not in other for path in self):
+            return False
+        try:
+            return all(self[path] == other[path] for path in self)
+        except (SnapshotChanged, OSError, KeyError):
+            return False
+
+    def digest_for_path(self, path: str) -> str | None:
+        row = self._rows.get(path)
+        return row[0] if row is not None else None
+
+    def size_for_path(self, path: str) -> int | None:
+        row = self._rows.get(path)
+        return row[1] if row is not None else None
+
+    def read_for_diff(self, path: str) -> bytes:
+        """Load one changed body; live rows are rehashed from the bytes read."""
+        return self[path]
+
+    def changed_during_read(self, path: str) -> bool:
+        return path in self._live_races
+
+    def __deepcopy__(self, _memo: object) -> SnapshotFiles:
+        return self  # the rows do not change, and a copy would lose the start root
+
+    def rebind_start_snapshot(self, root: str | os.PathLike[str] | None) -> None:
+        self._start_root = Path(root) if root is not None else None
+
+    def rebind_live_root(self, root: str | os.PathLike[str] | None) -> None:
+        self._live_root = Path(root) if root is not None else None
+
+    def _cache_small(self, path: str, body: bytes) -> None:
+        if (len(body) <= self.SMALL_FILE_LIMIT and path not in self._bodies
+                and self._body_cache_size + len(body) <= self.BODY_CACHE_LIMIT):
+            self._bodies[path] = body
+            self._body_cache_size += len(body)
+
+    def __getstate__(self) -> dict[str, object]:
+        small_bodies: dict[str, bytes] = {}
+        kept = 0
+        for path in self._rows:
+            body = self._bodies.get(path)
+            if body is not None and path in self._own:
+                small_bodies[path] = body
+            elif (body is not None and len(body) <= self.SMALL_FILE_LIMIT
+                    and kept + len(body) <= self.BODY_CACHE_LIMIT):
+                small_bodies[path] = body
+                kept += len(body)
+        return {
+            "_rows": self._rows,
+            "_bodies": small_bodies,
+            "_own": sorted(self._own),
+            "_start_root": None,
+            "_live_root": self._live_root,
+        }
+
+    def __setstate__(self, state: Mapping[str, object]) -> None:
+        self._rows = dict(state.get("_rows", {}))
+        raw_bodies = state.get("_bodies", {})
+        self._bodies = dict(raw_bodies) if isinstance(raw_bodies, Mapping) else {}
+        self._body_cache_size = sum(len(body) for body in self._bodies.values())
+        self._start_root = None
+        raw_live_root = state.get("_live_root")
+        self._live_root = Path(raw_live_root) if raw_live_root is not None else None
+        self._live_races = set()
+        self._own = frozenset(state.get("_own", ()))
+        self._unproven = set(self._bodies)
 
 
 def host_done_facts_mode() -> str:
@@ -132,18 +337,48 @@ def _path_is_ignored(relative: Path) -> bool:
     return any(part in _IGNORED_PARTS for part in relative.parts)
 
 
-def workspace_snapshot(root: str | os.PathLike[str]) -> dict[str, bytes]:
-    """Capture regular workspace files as a relative-path/content map.
+def _capture_worker_file(root: Path, relative: str, *, keep_body: bool,
+                          small_body: bool) -> tuple[str, int, bytes | None]:
+    digest = hashlib.sha256()
+    size = 0
+    fd = _open_regular_nofollow(root, relative)
+    info = os.fstat(fd)
+    chunks: list[bytes] | None = (
+        [] if keep_body or (small_body and info.st_size <= SnapshotFiles.SMALL_FILE_LIMIT)
+        else None
+    )
+    with os.fdopen(fd, "rb") as stream:
+        while True:
+            chunk = stream.read(1 << 20)
+            if not chunk:
+                break
+            digest.update(chunk)
+            size += len(chunk)
+            if chunks is not None:
+                chunks.append(chunk)
+    body = b"".join(chunks) if chunks is not None else None
+    return digest.hexdigest(), size, body
+
+
+def workspace_snapshot(root: str | os.PathLike[str], *,
+                       start_snapshot: str | os.PathLike[str] | None = None,
+                       live: bool = False) -> SnapshotFiles:
+    """Capture regular workspace paths as digests with lazily loaded bodies.
 
     The snapshot deliberately excludes VCS and test-cache directories.  The
     runtime writes its measurement output outside the task workspace; this
     small exclusion set also prevents runner cache churn from becoming a
     solver edit.
     """
-    base = Path(root)
+    base = Path(os.path.realpath(root))
     if not base.exists() or not base.is_dir():
-        return {}
-    result: dict[str, bytes] = {}
+        return SnapshotFiles(live_root=base if live else None)
+    source_root = (Path(start_snapshot)
+                   if start_snapshot is not None and not live else None)
+    rows: dict[str, tuple[str, int]] = {}
+    bodies: dict[str, bytes] = {}
+    own: set[str] = set()
+    small_body_bytes = 0
     for current, dirs, files in os.walk(base, topdown=True, followlinks=False):
         current_path = Path(current)
         dirs[:] = sorted(
@@ -161,15 +396,81 @@ def workspace_snapshot(root: str | os.PathLike[str]) -> dict[str, bytes]:
             if _path_is_ignored(relative):
                 continue
             try:
-                result[relative.as_posix()] = path.read_bytes()
+                relative_text = relative.as_posix()
+                source_digest = None
+                if source_root is not None:
+                    try:
+                        source_digest, _source_size = _hash_regular(source_root, relative_text)
+                    except OSError:
+                        pass
+                # Without a matching start copy the original in-memory bytes are
+                # retained so callers keep the old snapshot contract.
+                keep_body = ((source_root is None and not live)
+                             or (source_root is not None and source_digest is None))
+                digest, size, body = _capture_worker_file(
+                    base, relative_text, keep_body=keep_body,
+                    small_body=not keep_body,
+                )
+                matched_source = source_digest == digest
+                if not live and not matched_source and not keep_body:
+                    if body is None:
+                        body, digest, size = _read_regular(base, relative_text)
+                    keep_body = True
+                rows[relative_text] = (digest, size)
+                if body is not None:
+                    if keep_body:
+                        bodies[relative_text] = body
+                        own.add(relative_text)
+                    elif (size <= SnapshotFiles.SMALL_FILE_LIMIT
+                          and small_body_bytes + size <= SnapshotFiles.BODY_CACHE_LIMIT):
+                        bodies[relative_text] = body
+                        small_body_bytes += size
             except OSError:
                 # An unreadable path cannot be represented as a false edit.
                 # The host's test/check receipt remains the evidence gate.
                 continue
-    return {relative: result[relative] for relative in sorted(result, key=Path)}
+    ordered_rows = {relative: rows[relative] for relative in sorted(rows, key=Path)}
+    ordered_bodies = {relative: bodies[relative] for relative in ordered_rows
+                      if relative in bodies}
+    return SnapshotFiles(
+        ordered_rows, bodies=ordered_bodies, own=own,
+        start_root=source_root if not live else None,
+        live_root=base if live else None,
+    )
 
 
 snapshot_workspace = workspace_snapshot
+
+
+def rebind_workspace_snapshots(runtime: object, start_snapshot: object) -> None:
+    """Rebind restored lazy snapshots to this attempt's spec-owned parent tree."""
+    if start_snapshot is None:
+        return
+    seen: set[int] = set()
+
+    def rebind(value: object, *, live_root: object = None) -> None:
+        if value is None or id(value) in seen:
+            return
+        seen.add(id(value))
+        method = getattr(value, "rebind_start_snapshot", None)
+        if callable(method):
+            method(start_snapshot)
+        live_method = getattr(value, "rebind_live_root", None)
+        if live_root is not None and callable(live_method):
+            live_method(live_root)
+
+    owner = getattr(runtime, "owner", None)
+    root = getattr(owner, "root", None)
+    rebind(getattr(runtime, "_host_done_facts_baseline", None))
+    rebind(getattr(runtime, "_delivery_contract_baseline", None))
+    delivery = getattr(runtime, "delivery_contract", None)
+    rebind(getattr(delivery, "baseline", None))
+    pending = getattr(delivery, "_pending_workspace_snapshot", None)
+    if isinstance(pending, tuple) and len(pending) == 3:
+        rebind(pending[2], live_root=root)
+    lock = getattr(runtime, "green_lock", None)
+    sources = getattr(lock, "_starting_product_sources", None)
+    rebind(getattr(sources, "_snapshot", None))
 
 
 def _lines(content: bytes) -> list[str]:
@@ -193,9 +494,18 @@ def _line_change(before: bytes, after: bytes) -> tuple[int, int]:
     return added, deleted
 
 
+def _snapshot_digest(snapshot: Mapping[str, object], path: str) -> str:
+    digest_for_path = getattr(snapshot, "digest_for_path", None)
+    if callable(digest_for_path):
+        digest = digest_for_path(path)
+        if digest is not None:
+            return str(digest)
+    return hashlib.sha256(_content_bytes(snapshot[path])).hexdigest()
+
+
 def _snapshot_revision(snapshot: Mapping[str, object]) -> str:
-    rows = [(str(path), hashlib.sha256(_content_bytes(content)).hexdigest())
-            for path, content in sorted(snapshot.items(), key=lambda item: str(item[0]))]
+    rows = [(str(path), _snapshot_digest(snapshot, str(path)))
+            for path in sorted(snapshot, key=str)]
     return "workspace:" + _digest(rows)
 
 
@@ -286,6 +596,7 @@ def pinned_run_identity(provider: RunIdentityProvider) -> tuple[bytes, RunIdenti
 
 def _pinned_done_workspace(
         root: Path, baseline: Mapping[str, object], *, needs_revision: bool,
+        journal: object | None = None,
 ) -> tuple[tuple[FileDelta, ...], str | None] | None:
     from kernel_workspace_state import WorkspaceUnavailable
     from kernel_workspace_tree import File
@@ -296,21 +607,37 @@ def _pinned_done_workspace(
             return projection.facts
         after = {path: entry.sha256.hex() for path, entry in projection.files
                  if isinstance(entry, File) and not _path_is_ignored(Path(path))}
-        before = {str(path): _content_bytes(content) for path, content in baseline.items()}
-        changed = {path for path, content in before.items()
-                   if hashlib.sha256(content).hexdigest() != after.get(path)}
-        changed.update(after.keys() - before.keys())
+        before_paths = {str(path) for path in baseline}
+        before = {path: _snapshot_hash(baseline, path) for path in before_paths}
+        changed = {path for path in before_paths
+                   if before[path] != after.get(path)}
+        changed.update(after.keys() - before_paths)
         current_changes = {}
         for path in sorted(changed & after.keys()):
             content = (root / path).read_bytes()
             if hashlib.sha256(content).hexdigest() != after[path]:
                 raise WorkspaceUnavailable("completion file changed during pinned read")
             current_changes[path] = content
-        deltas = diff_snapshots({path: before[path] for path in changed & before.keys()},
-                                current_changes)
+        before_changes: dict[str, object] = {}
+        for path in changed & before_paths:
+            try:
+                before_changes[path] = _snapshot_body(baseline, path)
+            except SnapshotChanged:
+                before_changes[path] = _SNAPSHOT_UNAVAILABLE
+        deltas = []
+        for path in sorted(changed):
+            if before_changes.get(path) is _SNAPSHOT_UNAVAILABLE:
+                _log_snapshot_changed(journal, "host_done_facts", path)
+                deltas.append(FileDelta(
+                    path=path, status="unavailable", before_sha256=before.get(path),
+                    after_sha256=after.get(path)))
+            else:
+                old = ({path: before_changes[path]} if path in before_changes else {})
+                new = ({path: current_changes[path]} if path in current_changes else {})
+                deltas.extend(diff_snapshots(old, new))
         revision = "workspace:" + _digest(sorted(after.items())) if needs_revision else None
         projection.baseline = baseline
-        projection.facts = (deltas, revision)
+        projection.facts = (tuple(deltas), revision)
         return projection.facts
 
     return _pin_completion(root, "completion-diff", project)
@@ -362,26 +689,60 @@ class FileDelta:
         }
 
 
-def diff_snapshots(before: Mapping[str, object], after: Mapping[str, object]) -> tuple[FileDelta, ...]:
-    """Return deterministic typed deltas for the host workspace diff."""
-    old = {str(path): _content_bytes(content) for path, content in before.items()}
-    new = {str(path): _content_bytes(content) for path, content in after.items()}
+def _snapshot_body(snapshot: Mapping[str, object], path: str) -> bytes:
+    reader = getattr(snapshot, "read_for_diff", None)
+    value = reader(path) if callable(reader) else snapshot[path]
+    return _content_bytes(value)
+
+
+def _snapshot_hash(snapshot: Mapping[str, object], path: str) -> str | None:
+    return _snapshot_digest(snapshot, path) if path in snapshot else None
+
+
+def _log_snapshot_changed(journal: object | None, consumer: str, path: str) -> None:
+    emit = getattr(journal, "emit", None)
+    if callable(emit):
+        emit("workspace_snapshot_changed", producer="kernel_host_done_facts",
+             dispatch=False, consumer=consumer, path=path,
+             reason_code="SNAPSHOT_CHANGED")
+
+
+def diff_snapshots(before: Mapping[str, object], after: Mapping[str, object], *,
+                   journal: object | None = None,
+                   consumer: str = "workspace_diff") -> tuple[FileDelta, ...]:
+    """Return deterministic deltas, loading bodies only after digest differences."""
     deltas: list[FileDelta] = []
-    for path in sorted(set(old) | set(new)):
-        before_bytes = old.get(path, b"")
-        after_bytes = new.get(path, b"")
-        if path in old and path in new and before_bytes == after_bytes:
+    old_paths = {str(path) for path in before}
+    new_paths = {str(path) for path in after}
+    for path in sorted(old_paths | new_paths):
+        before_hash = _snapshot_hash(before, path)
+        after_hash = _snapshot_hash(after, path)
+        if before_hash is not None and after_hash is not None and before_hash == after_hash:
+            continue
+        try:
+            before_bytes = _snapshot_body(before, path) if before_hash is not None else b""
+            after_bytes = _snapshot_body(after, path) if after_hash is not None else b""
+        except SnapshotChanged:
+            _log_snapshot_changed(journal, consumer, path)
+            deltas.append(FileDelta(
+                path=path, status="unavailable", added_lines=0, deleted_lines=0,
+                before_lines=0, after_lines=0,
+                before_sha256=before_hash, after_sha256=after_hash,
+            ))
+            continue
+        # A file that changed back while it was read has no delta: the bytes read decide.
+        if before_hash is not None and after_hash is not None and before_bytes == after_bytes:
             continue
         added, deleted = _line_change(before_bytes, after_bytes)
         deltas.append(FileDelta(
             path=path,
-            status="added" if path not in old else "deleted" if path not in new else "modified",
+            status="added" if before_hash is None else "deleted" if after_hash is None else "modified",
             added_lines=added,
             deleted_lines=deleted,
-            before_lines=len(_lines(before_bytes)) if path in old else 0,
-            after_lines=len(_lines(after_bytes)) if path in new else 0,
-            before_sha256=(hashlib.sha256(before_bytes).hexdigest() if path in old else None),
-            after_sha256=(hashlib.sha256(after_bytes).hexdigest() if path in new else None),
+            before_lines=len(_lines(before_bytes)) if before_hash is not None else 0,
+            after_lines=len(_lines(after_bytes)) if after_hash is not None else 0,
+            before_sha256=before_hash,
+            after_sha256=_snapshot_hash(after, path) if after_hash is not None else None,
         ))
     return tuple(deltas)
 
@@ -749,6 +1110,7 @@ def compute_done_facts(
     claims: object = None,
     runner_evidence: Mapping[str, object] | None = None,
     pinned_baseline: bool = False,
+    journal: object | None = None,
 ) -> DoneFacts:
     """Build facts solely from a workspace snapshot and typed host receipts.
 
@@ -775,13 +1137,16 @@ def compute_done_facts(
     pinned = None
     if pinned_baseline:
         try:
-            pinned = _pinned_done_workspace(Path(root), before, needs_revision=revision is None)
+            pinned = _pinned_done_workspace(Path(root), before,
+                                            needs_revision=revision is None,
+                                            journal=journal)
         except (OSError, ValueError):
             # Preserve legacy snapshot behavior for roots or paths the fence cannot admit.
             pass
     if pinned is None:
-        after = workspace_snapshot(root)
-        deltas = diff_snapshots(before, after)
+        after = workspace_snapshot(root, live=True)
+        deltas = diff_snapshots(before, after, journal=journal,
+                                consumer="host_done_facts")
         revision = revision or _snapshot_revision(after)
     else:
         deltas, snapshot_revision = pinned
@@ -824,6 +1189,8 @@ def compute_done_facts(
                      "net_lines": delta.net_lines}
         for delta in deltas
     }
+    unavailable = ["snapshot_unavailable:" + delta.path for delta in deltas
+                   if delta.status == "unavailable"]
     return DoneFacts(
         current_revision=revision,
         changed_files=tuple(delta.path for delta in deltas),
@@ -833,7 +1200,8 @@ def compute_done_facts(
         public_tests_required=required,
         public_tests_ran=tuple(public_ran),
         public_tests_passed=tuple(public_passed),
-        unresolved_gating_items=_unique_text(unresolved_gating_items),
+        unresolved_gating_items=_unique_text(_sequence(unresolved_gating_items)
+                                             + tuple(unavailable)),
         empty_diff=not bool(deltas),
         claims=_claims(claims),
     )

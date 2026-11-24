@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Linux: a `--test-cmd` that starts with `npm`, `npx`, `pnpm` or `yarn` works from a Node installation in the home directory; only that installation is mounted, read-only, and the run records it.
+- A test command whose program the check sandbox cannot see is refused before the repository is copied, and the message suggests a system-wide install or the absolute path.
+- Memory: the engine keeps digests of the start files and reads a body from the run's start copy only when a changed file needs it; tree revisions hash files in blocks.
+- Fixed: the engine waits for and reaps its last checkpoint writer before it exits, and a save whose cleanup fails keeps its original error; leftover temporary trees of an earlier save are removed by the next one.
+- Fixed: the checkpoint writer's inactivity timer restarts after each finished unit of work, so a long save that is making progress is no longer ended; a launcher that blocks the timer signal, a group stop during the fork and a broken stderr no longer change its result.
+
+
 ## 0.9.3 (2026-11-24)
 
 - Fixed: a check the host stopped is shown as unresolved with a `CHECK_STOPPED:<cause>` reason instead of as a failure; it continues to block done. A real failure of another check stays visible.

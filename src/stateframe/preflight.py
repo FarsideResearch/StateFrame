@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import os
 import platform
+import shlex
 import shutil
 import sys
+import tempfile
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Mapping, Sequence
 
 from .engine.kernel_safe_paths import safe_expanduser
 
@@ -96,3 +98,74 @@ def sandbox_available() -> bool:
     else:
         return False
     return shutil.which(command) is not None
+
+
+MISSING_PROGRAM_EXIT = 113
+_SANDBOX_VISIBLE = ("/usr", "/bin", "/lib", "/lib64")
+
+
+def check_tool_root(command: str, *, test_env: Mapping[str, str] | None, repo: Path,
+                    user_test_command: bool):
+    """The package-manager install root a check mounts, and why one was refused."""
+    if not user_test_command or not sys.platform.startswith("linux"):
+        return None, None
+    try:
+        arguments = shlex.split(command)
+    except ValueError:
+        return None, None
+    if not arguments or arguments[0] not in {"npm", "npx", "pnpm", "yarn"}:
+        return None, None
+    from .engine.kernel_check_tool_root import find_tool_root
+    path = (test_env or {}).get("PATH", os.environ.get("PATH", os.defpath))
+    return find_tool_root(arguments[0], path, repo)
+
+
+def missing_program_message(command: str, *, test_env: Mapping[str, str] | None,
+                            repo: Path, user_test_command: bool,
+                            run_probe: Callable[[str, Path], Mapping[str, object]]) -> str | None:
+    """Return a refusal only when the check sandbox itself reports the program as absent.
+
+    Names the sandbox certainly sees are answered without a probe. Anything uncertain, such as
+    a relative PATH entry or a probe that could not run, is left to the check itself.
+    """
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        arguments = shlex.split(command)
+    except ValueError:
+        return None
+    program = arguments[0] if arguments else ""
+    if not program or "/" in program or "\0" in program or program.startswith("-"):
+        return None
+    if command.startswith("python "):
+        return None  # The runner substitutes the selected interpreter.
+    path = (test_env or {}).get("PATH", os.environ.get("PATH", os.defpath))
+    if not all(os.path.isabs(entry) for entry in path.split(os.pathsep)):
+        return None
+    found = shutil.which(program, path=path)
+    if found is not None and Path(found).is_relative_to(sys.prefix):
+        return None
+    if found is not None and any(
+            Path(found).is_relative_to(root) and Path(found).resolve().is_relative_to("/usr")
+            for root in _SANDBOX_VISIBLE):
+        return None
+    tool_root, refusal = check_tool_root(command, test_env=test_env, repo=repo,
+                                         user_test_command=user_test_command)
+    if tool_root is not None:
+        return None
+    probe = shlex.join(["sh", "-c", f'command -v "$0" >/dev/null || exit {MISSING_PROGRAM_EXIT}', program])
+    try:
+        with tempfile.TemporaryDirectory(prefix="stateframe-program-") as directory:
+            empty = Path(directory) / "repo"
+            empty.mkdir()
+            result = run_probe(probe, empty)
+    except (RuntimeError, OSError, ValueError):
+        return None
+    if result.get("exit_code") != MISSING_PROGRAM_EXIT:
+        return None
+    if found is None:
+        return (f"check command not found: {program}; install it or change the test command")
+    example = shlex.join([found, *arguments[1:]])
+    reason = f"; not mounted: {refusal}" if refusal else ""
+    return (f"check command not found in the check sandbox: {program} (installed at {found}{reason}); "
+            f"install it system-wide or try its absolute path: --test-cmd {shlex.quote(example)}")

@@ -9,8 +9,10 @@ from pathlib import Path
 from textwrap import dedent
 
 import pytest
-from fixtures.process_signals import record_identity, signal_run_owned, signal_run_verified
 from _timeouts import scaled
+from fixtures.process_signals import (
+    record_identity, signal_run_owned, signal_run_verified,
+)
 from stateframe import runner
 from stateframe.engine.kernel_exec_tracker import ProcessTable, capture_launch_identity
 
@@ -209,13 +211,23 @@ def test_interrupt_requests_stop_before_escalating(tmp_path, monkeypatch, respon
     monkeypatch.setattr(runner, "_stop_group", record_stop_group)
 
     descendant_identity = []
+    descendant_signal_identity = []
     launched_after = time.time()
 
     def interrupt(_):
-        ready = tmp_path / "descendant-ready"
-        descendant_identity.append(record_identity(
-            int(ready.read_text().split()[0]), launched_after=launched_after,
-            command_fragment="descendant-ready"))
+        descendant_pid = int((tmp_path / "descendant-ready").read_text().split()[0])
+        identity = ProcessTable().identity(descendant_pid)
+        descendant_identity.append(identity)
+        if identity is None:
+            descendant_signal_identity.append(None)
+        else:
+            try:
+                descendant_signal_identity.append(record_identity(
+                    descendant_pid, launched_after=launched_after,
+                    command_fragment="descendant-stop-requested",
+                ))
+            except ProcessLookupError:
+                descendant_signal_identity.append(None)
         raise KeyboardInterrupt
 
     try:
@@ -257,21 +269,31 @@ def test_interrupt_requests_stop_before_escalating(tmp_path, monkeypatch, respon
             # may already belong to someone else.
             try:
                 if process_holder[0].poll() is None:
-                    signal_run_owned(tmp_path, process_holder[0], signal.SIGKILL, deadline=0,
-                                     what="teardown cleanup", require_checkpoint_saved=False,
-                                     group=True)
+                    signal_run_owned(
+                        tmp_path, process_holder[0], signal.SIGKILL,
+                        deadline=time.monotonic(), what="engine teardown test cleanup",
+                        require_checkpoint_saved=False, group=True,
+                    )
             except OSError:
                 pass
             try:
                 process_holder[0].wait(timeout=scaled(60))
             except subprocess.TimeoutExpired:
                 pytest.fail("test engine leader did not exit after process-group cleanup")
-        for expected in descendant_identity:
-            try:
-                signal_run_verified(tmp_path, expected.pid, expected, signal.SIGKILL, deadline=0,
-                                    what="teardown cleanup", require_checkpoint_saved=False)
-            except (OSError, RuntimeError, subprocess.SubprocessError):
-                pass  # already gone, exiting, or no longer the recorded process
+        for expected, recorded in zip(descendant_identity, descendant_signal_identity):
+            if expected is None or recorded is None:
+                continue
+            current = ProcessTable().identity(expected.pid)
+            if current is not None and current.start == expected.start and not current.zombie:
+                try:
+                    signal_run_verified(
+                        tmp_path, expected.pid, recorded, signal.SIGKILL,
+                        deadline=time.monotonic(),
+                        what="engine teardown descendant cleanup",
+                        require_checkpoint_saved=False,
+                    )
+                except ProcessLookupError:
+                    pass
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="requires Linux orphan adoption")

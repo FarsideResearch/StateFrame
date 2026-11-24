@@ -21,6 +21,9 @@ REVIEWED_SIGNALS = {
         "ProcessLookupError proves the PID is gone.",
     ("stateframe/engine/kernel_pid_liveness.py", "os.killpg(pgid, 0)"):
         "Signal zero probes group existence; Linux /proc distinguishes zombie-only groups from live groups.",
+    ("stateframe/engine/kernel_checkpoint.py", "os.kill(pid, signal.SIGKILL)"):
+        "The engine ends its own forked checkpoint writer, which it has not reaped (so the pid "
+        "cannot be recycled), only when an operator stop was requested.",
     ("stateframe/engine/kernel_exec_supervisor.py", "os.kill(row.pid, signal.SIGKILL)"):
         "The row is this supervisor's direct child and only its serve loop reaps it.",
     ("stateframe/engine/kernel_exec_tracker.py", "os.killpg(launch_identity.pid, sig)"):

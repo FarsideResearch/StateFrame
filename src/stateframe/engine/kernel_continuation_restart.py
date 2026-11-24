@@ -390,6 +390,7 @@ SAFE_TAIL = frozenset({
     # target leg regenerates (the legacy behaviour). token_estimate_fallback: per-endpoint notice.
     "route_proposal_preserved", "token_estimate_fallback",
     "read_attempt", "read_result",  # audit only; never source/selection authority
+    "workspace_snapshot_changed",  # notice only: the body is proven again on every read
     "read_capture_skipped", "read_capture_failed",  # audit only; delivery is unchanged
     # Edit protocol audit records: the request map is re-minted per send and the repair ledger
     # resumes from the checkpoint's edit_repair_ledger field, never from these events.

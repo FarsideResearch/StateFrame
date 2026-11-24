@@ -768,6 +768,60 @@ def _read_product_sources(root: Path, paths: set[str]) -> dict[str, str]:
     return sources
 
 
+class _StartingProductSources(Mapping[str, str]):
+    """Starting product text, read from the proven start copy when a changed file needs it."""
+
+    def __init__(self, snapshot: Mapping[str, object], digests: Mapping[str, str],
+                 kept: Mapping[str, str]):
+        self._snapshot, self._digests, self._kept = snapshot, dict(digests), dict(kept)
+        self._logged: set[str] = set()
+
+    def __iter__(self):
+        yield from sorted({*self._digests, *self._kept})
+
+    def __len__(self) -> int:
+        return len({*self._digests, *self._kept})
+
+    def __getitem__(self, relative: str) -> str:
+        if relative in self._kept:
+            return self._kept[relative]
+        expected = self._digests[relative]
+        try:
+            raw = self._snapshot[relative]
+            if not isinstance(raw, bytes) or hashlib.sha256(raw).hexdigest() != expected:
+                raise ValueError("starting source differs from its recorded digest")
+            # Match the strict UTF-8 and universal newlines of read_text.
+            return raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+        except (OSError, UnicodeError, ValueError, KeyError) as exc:
+            if relative not in self._logged:
+                self._logged.add(relative)
+                emit_reason(
+                    "fallback", "green_lock_product_source_read_failed", "green_lock",
+                    "product source file was skipped",
+                    "the starting source could not be proven and read as UTF-8 text",
+                    journal=False, dropped=builtin_exception_name(exc),
+                )
+            raise KeyError(relative) from exc
+
+    def checkpoint_snapshot(self) -> dict[str, object]:
+        return {"schema": "stateframe-starting-product-sources/1",
+                "digests": dict(sorted(self._digests.items())),
+                "kept": dict(sorted(self._kept.items()))}
+
+    @classmethod
+    def restore(cls, state: Mapping[str, object], runtime: object) -> _StartingProductSources:
+        digests, kept = state.get("digests"), state.get("kept")
+        return cls(_starting_baseline(runtime) or {},
+                   digests if isinstance(digests, Mapping) else {},
+                   kept if isinstance(kept, Mapping) else {})
+
+
+def _starting_baseline(runtime: object) -> Mapping[str, object] | None:
+    baseline = (getattr(runtime, "_host_done_facts_baseline", None)
+                or getattr(runtime, "_delivery_contract_baseline", None))
+    return baseline if isinstance(baseline, Mapping) else None
+
+
 def _bound_current(receipt: Mapping[str, object], current: Mapping[str, object]) -> bool:
     after_binding = receipt.get("after_binding", receipt.get("binding"))
     return (
@@ -812,8 +866,7 @@ class GreenLock:
         self._starting_binding: Mapping[str, object] | None = None
         self._starting_revision: object = None
         self._starting_product_files: dict[str, object] = {}
-        self._starting_product_sources: dict[str, str] = {}
-        self._deferred_product_sources: dict[str, bytes] = {}
+        self._starting_product_sources: Mapping[str, str] = {}
         self._starting_editable_product_files: dict[str, object] = {}
         self._starting_editable_product_paths: tuple[str, ...] = ()
         if self.mode in {"on", "terminal"}:
@@ -1036,42 +1089,22 @@ class GreenLock:
 
     def _capture_terminal_sources(self, binding: Mapping[str, object] | None) -> None:
         self._starting_product_files = _binding_product_files(binding)
-        self._deferred_product_sources.clear()
-        admission = sys.modules.get("stateframe.workspace_start_snapshot")
         root = getattr(getattr(self.runtime, "owner", None), "root", None)
-        original_files = binding.get("product_files") if isinstance(binding, Mapping) else None
-        if (admission is not None and root is not None and self._starting_product_files
-                and isinstance(original_files, Mapping)
-                and not getattr(self.runtime, "restart_enabled", False)
-                and admission.startup_observation(root, "terminal-source") is not None):
-            baseline = (getattr(self.runtime, "_host_done_facts_baseline", None)
-                        or getattr(self.runtime, "_delivery_contract_baseline", None))
-            if isinstance(baseline, Mapping):
-                eager_paths = set()
-                for relative, expected in self._starting_product_files.items():
-                    raw = baseline.get(relative)
-                    if (isinstance(raw, bytes) and original_files.get(relative) == expected
-                            and expected == "sha256:" + hashlib.sha256(raw).hexdigest()):
-                        self._deferred_product_sources[relative] = raw
-                    else:
-                        eager_paths.add(relative)
-                self._starting_product_sources = _read_product_sources(root, eager_paths)
-                return
-        self._starting_product_sources = _product_sources(
-            self.runtime, binding, self._starting_product_files)
-
-    def _materialize_starting_product_sources(self) -> None:
-        deferred = getattr(self, "_deferred_product_sources", None)
-        if not deferred:
+        baseline = _starting_baseline(self.runtime)
+        digest_for_path = getattr(baseline, "digest_for_path", None)
+        if root is None or not self._starting_product_files or not callable(digest_for_path):
+            self._starting_product_sources = _product_sources(
+                self.runtime, binding, self._starting_product_files)
             return
-        for relative, raw in deferred.items():
-            try:
-                # Match the strict UTF-8 and universal newlines of read_text.
-                source = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
-            except UnicodeError:
-                continue
-            self._starting_product_sources[relative] = source
-        deferred.clear()
+        lazy, eager = {}, set()
+        for relative, expected in self._starting_product_files.items():
+            digest = digest_for_path(relative)
+            if digest is not None and expected == "sha256:" + digest:
+                lazy[relative] = digest
+            else:
+                eager.add(relative)
+        self._starting_product_sources = _StartingProductSources(
+            baseline, lazy, _read_product_sources(root, eager))
 
     @staticmethod
     def _row_is_applied_product_edit(row: Mapping[str, object]) -> bool:
@@ -1116,7 +1149,6 @@ class GreenLock:
                 and revision is not None and revision != self._starting_revision)
 
     def _terminal_change_diff(self) -> str:
-        self._materialize_starting_product_sources()
         current = _current_binding(self.runtime)
         if isinstance(current, UnavailableEvidence):
             return ("--- a/<product>\n+++ b/<product>\n"
@@ -1125,11 +1157,19 @@ class GreenLock:
         current_files = _binding_product_files(current)
         fallback_paths = set(self._starting_product_files)
         fallback_paths.update(self._starting_product_sources)
-        current_sources = _product_sources(self.runtime, current, fallback_paths)
         paths = sorted(set(self._starting_product_files)
                        | set(current_files)
-                       | set(self._starting_product_sources)
-                       | set(current_sources))
+                       | set(self._starting_product_sources))
+        if current_files and self._starting_product_files:
+            # Equal digests mean equal text: only changed files are read.
+            paths = [path for path in paths
+                     if self._starting_product_files.get(path) != current_files.get(path)]
+            root = getattr(getattr(self.runtime, "owner", None), "root", None)
+            current_sources = (_read_product_sources(root, set(paths) & set(current_files))
+                               if root is not None else {})
+        else:
+            current_sources = _product_sources(self.runtime, current, fallback_paths)
+            paths = sorted({*paths, *current_sources})
         changed: list[tuple[str, str | None, str | None]] = []
         for path in paths:
             before = self._starting_product_sources.get(path)
@@ -1143,7 +1183,7 @@ class GreenLock:
 
         lines: list[str] = []
         for path, before, after in changed:
-            before_known = path not in self._starting_product_files or path in self._starting_product_sources
+            before_known = path not in self._starting_product_files or before is not None
             after_known = path not in current_files or path in current_sources
             if not before_known or not after_known:
                 lines.extend((f"--- a/{path}", f"+++ b/{path}",

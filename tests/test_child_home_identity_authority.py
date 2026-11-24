@@ -255,6 +255,36 @@ def test_refused_save_keeps_only_bytes_an_accepted_checkpoint_holds(
     monkeypatch.setattr(checkpoint, "_fsync_snapshot", original)
     assert checkpoint.validate(checkpoint.save(None, 3, run))["step"] == 3
 
+def test_stale_checkpoint_transaction_prunes_only_unreferenced_objects(
+        child_identity, monkeypatch: pytest.MonkeyPatch) -> None:
+    _home, run, _spec, _pin = child_identity
+    root = run / "checkpoints"
+    objects = root / checkpoint.OBJECT_DIR
+    objects.mkdir(parents=True)
+
+    prior = root / "0001-1234"
+    (prior / "run").mkdir(parents=True)
+    (prior / checkpoint.META_FILE).write_text("{}", encoding="utf-8")
+    referenced = objects / ("a" * 64 + "-600")
+    referenced.write_bytes(b"kept by prior checkpoint")
+    os.link(referenced, prior / "run" / "saved")
+
+    stale = root / ".0002-987654321.tmp"
+    (stale / "run").mkdir(parents=True)
+    orphan = objects / ("b" * 64 + "-600")
+    orphan.write_bytes(b"only the interrupted transaction")
+    os.link(orphan, stale / "run" / "captured")
+    assert orphan.stat().st_nlink == 2
+
+    monkeypatch.setattr(checkpoint, "_pid_alive", lambda _pid: False)
+    assert checkpoint._sweep_stale(root) == 1
+
+    assert not stale.exists()
+    assert not orphan.exists()
+    assert referenced.read_bytes() == b"kept by prior checkpoint"
+    assert referenced.stat().st_nlink == 2
+
+
 @pytest.mark.parametrize("absolute_override", [False, True])
 def test_home_change_only_refused_when_it_changes_effective_home(
         child_identity, monkeypatch: pytest.MonkeyPatch, absolute_override: bool) -> None:

@@ -440,6 +440,12 @@ def test_module_snapshot_keeps_new_typed_state_but_not_attempt_replay_control():
 
     assert saved == {"future_typed_state": module.future_typed_state}
 
+    checkpoint_module = types.ModuleType("kernel_checkpoint")
+    checkpoint_module.__file__ = kernel_checkpoint.__file__
+    checkpoint_module._LAST_WRITER_OUTCOME = {"outcome": "saved"}
+    saved_checkpoint = kernel_checkpoint._module_state(checkpoint_module.__name__, checkpoint_module)
+    assert "_LAST_WRITER_OUTCOME" not in saved_checkpoint
+
 
 def test_restore_keeps_complete_tool_tape_for_later_resume(tmp_path):
     run = tmp_path / "run"
