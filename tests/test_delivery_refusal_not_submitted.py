@@ -193,7 +193,7 @@ def test_in_place_addition_disappearing_during_reporting_uses_apply_refusal(
     scan = workcopy.changed_files
     export = runner._export_final_diff
     inspect = runner.inspect_test_changes
-    read_bytes = Path.read_bytes
+    hash_file = workcopy._hash_file
     read_text = Path.read_text
 
     def scan_then_delete(target: workcopy.WorkCopy) -> dict[str, str]:
@@ -205,12 +205,12 @@ def test_in_place_addition_disappearing_during_reporting_uses_apply_refusal(
     def export_then_delete_on_read(*args):
         error = export(*args)
 
-        def read_after_export(target: Path) -> bytes:
+        def hash_after_export(target: Path) -> str:
             if target == path and path.exists():
                 path.unlink()
-            return read_bytes(target)
+            return hash_file(target)
 
-        monkeypatch.setattr(Path, "read_bytes", read_after_export)
+        monkeypatch.setattr(workcopy, "_hash_file", hash_after_export)
         return error
 
     def inspect_with_late_deletion(target: workcopy.WorkCopy):

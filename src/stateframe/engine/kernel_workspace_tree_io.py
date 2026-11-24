@@ -820,28 +820,20 @@ class CheckoutPolicy:
     allow_symlinks: bool
     allow_internal_hardlinks: bool
     mode_mask: int
-    max_entries: int
     max_file_bytes: int
-    max_total_bytes: int
 
     def __post_init__(self) -> None:
         if (type(self.allow_symlinks) is not bool or type(self.allow_internal_hardlinks) is not bool
                 or type(self.mode_mask) is not int or not 0 <= self.mode_mask <= 0o7777
-                or any(type(limit) is not int or limit < 0 for limit in (
-                    self.max_entries, self.max_file_bytes, self.max_total_bytes
-                ))):
+                or type(self.max_file_bytes) is not int or self.max_file_bytes < 0):
             raise ValueError("invalid workspace checkout policy")
 
 
 def _checkout_entries(lease: ObjectLease, tree: Digest, policy: CheckoutPolicy) -> dict[Rel, TreeEntry]:
     entries = {}
-    total = 0
     for path, _, entry in _entries(_Reader(lease), tree):
-        if path and len(entries) > policy.max_entries:
-            raise ObjectIntegrityError("workspace checkout exceeds entry limit")
         if entry.kind == "file":
-            total += entry.size
-            if entry.size > policy.max_file_bytes or total > policy.max_total_bytes:
+            if entry.size > policy.max_file_bytes:
                 raise ObjectIntegrityError("workspace checkout exceeds byte limit")
             if entry.hardlinked and not policy.allow_internal_hardlinks:
                 raise ObjectIntegrityError("workspace checkout disallows hardlinks")

@@ -697,9 +697,7 @@ def restore_checkpoint(run: Path, directory: Path, frame) -> dict:
             _compatible(value)
             meta, (run_meta, workspace_meta) = _metadata(lease, checkpoint.restore_meta)
             control, blobs = _read_state(lease, checkpoint.state)
-            policy = CheckoutPolicy(allow_symlinks=True, allow_internal_hardlinks=True, mode_mask=0o7777,
-                                    max_entries=200_000, max_file_bytes=_MAX_PAYLOAD_BYTES,
-                                    max_total_bytes=16 << 30)
+            policy = CheckoutPolicy(True, True, 0o7777, _MAX_PAYLOAD_BYTES)
             root = run / "checkpoints"
             recover_activation(run)
             stage = Path(tempfile.mkdtemp(prefix=".workspace-restore-", dir=root))

@@ -1,5 +1,3 @@
-"""Bounded one-time auto-offer rules."""
-
 from __future__ import annotations
 
 import fnmatch
@@ -7,7 +5,7 @@ import os
 import re
 from pathlib import Path
 
-from .powerup_manifest import Manifest, PowerupError
+from .powerup_manifest import Manifest
 
 
 def _offer_matches(manifest: Manifest, repo: Path, task: str, loop: str) -> bool:
@@ -19,15 +17,11 @@ def _offer_matches(manifest: Manifest, repo: Path, task: str, loop: str) -> bool
     paths: list[str] = []
     if offer.get("any_files") or offer.get("all_of"):
         pending = [repo]
-        visited = 0
         while pending:
             directory = pending.pop()
             with os.scandir(directory) as iterator:
                 entries = []
                 for entry in iterator:
-                    visited += 1
-                    if visited > 20_000:
-                        raise PowerupError("offer scan exceeds 20000 entries")
                     entries.append(entry)
             for entry in sorted(entries, key=lambda item: item.name, reverse=True):
                 if entry.is_dir(follow_symlinks=False):

@@ -64,6 +64,17 @@ def source_digest(source: str | bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def parse_settings_version() -> str:
+    int_limit = getattr(sys, "get_int_max_str_digits", lambda: 0)()
+    return (f"ast-{sys.version_info.major}.{sys.version_info.minor}"
+            f":digits-{int_limit}:recursion-{sys.getrecursionlimit()}"
+            f":optimize-{sys.flags.optimize}:exec-type-comments-0-feature-default")
+
+
+def parse_cache_key(source: str | bytes) -> str:
+    return f"{source_digest(source)}:{parse_settings_version()}"
+
+
 def _remember(store: OrderedDict, key: object, value: object, limit: int) -> None:
     store[key] = value
     store.move_to_end(key)
@@ -141,7 +152,7 @@ def parse(source: str, filename: str = "<unknown>", *,
         return ast.parse(source, filename=filename)
     data = source.encode("utf-8", "surrogatepass")
     source_bytes = len(data)
-    key = source_digest(data)
+    key = parse_cache_key(data)
     with _LOCK:
         entry = _TREES.get(key)
         if entry is not None:
@@ -190,7 +201,7 @@ def parse(source: str, filename: str = "<unknown>", *,
 def derived(kind: Hashable, source: str, filename: str,
             build: Callable[[ast.Module], _T]) -> _T:
     """Cache ``build(parse(source, filename))`` under ``(kind, filename, sha256)``."""
-    key = (kind, str(filename), source_digest(source))
+    key = (kind, str(filename), parse_cache_key(source))
     with _LOCK:
         if key in _DERIVED:
             _DERIVED.move_to_end(key)
@@ -271,4 +282,5 @@ def stats() -> dict[str, int]:
 
 __all__ = ["MAX_DERIVED", "MAX_TREES", "MAX_TREE_RETAINED_BYTES",
            "MIN_TREE_RETAINED_BYTES", "clear", "derived", "derived_source",
-           "gc_paused", "parse", "parse_file", "source_digest", "stats"]
+           "gc_paused", "parse", "parse_cache_key", "parse_file", "parse_settings_version",
+           "source_digest", "stats"]

@@ -314,29 +314,46 @@ def test_plain_refuses_unsupported_settings_before_materialization(tmp_path, mon
     assert not (tmp_path / 'not-created').exists()
 
 
-def test_huge_generated_file_stops_before_capture_or_promotion(tmp_path):
+def test_huge_generated_file_is_streamed_into_capture(tmp_path):
     from kernel_effects import MAX_FILE_BYTES
     workspace = tmp_path / 'workspace'
     workspace.mkdir()
     store = ContentStore(tmp_path)
     with (workspace / 'huge').open('wb') as stream:
         stream.truncate(MAX_FILE_BYTES + 1)
-    with pytest.raises(EffectError, match='byte limit'):
-        store.capture(workspace, scan(workspace, exclude=lambda _: False))
-    assert list(store.root.iterdir()) == []
+
+    manifest = scan(workspace, exclude=lambda _: False)
+    store.capture(workspace, manifest)
+
+    assert manifest['huge'].size == MAX_FILE_BYTES + 1
+    store.verify(manifest['huge'].digest)
 
 
-def test_aggregate_and_entry_limits_are_enforced(tmp_path, monkeypatch):
-    import kernel_effects
-    for name in ('a', 'b'):
-        (tmp_path / name).write_bytes(b'12345678')
-    monkeypatch.setattr(kernel_effects, 'MAX_WORKSPACE_BYTES', 10)
-    with pytest.raises(EffectError, match='aggregate'):
-        scan(tmp_path, exclude=lambda _: False)
-    monkeypatch.setattr(kernel_effects, 'MAX_WORKSPACE_BYTES', 100)
-    monkeypatch.setattr(kernel_effects, 'MAX_WORKSPACE_ENTRIES', 1)
-    with pytest.raises(EffectError, match='entry-count'):
-        scan(tmp_path, exclude=lambda _: False)
+def test_engine_scan_accepts_more_than_20000_entries(tmp_path, monkeypatch):
+    from kernel_effects import Entry
+
+    for index in range(20_001):
+        (tmp_path / f"file-{index:05d}").touch()
+    monkeypatch.setattr(Path, "read_bytes", lambda *_: pytest.fail("scan retained file content"))
+
+    manifest = scan(tmp_path, exclude=lambda _: False)
+
+    assert len(manifest) == 20_001
+    assert isinstance(manifest["file-00000"], Entry)
+    assert not hasattr(manifest["file-00000"], "__dict__")
+
+
+def test_engine_scan_accepts_more_than_256_mib_in_eligible_files(tmp_path):
+    from kernel_effects import MAX_FILE_BYTES
+
+    for index in range(17):
+        with (tmp_path / f"file-{index:02d}").open("wb") as stream:
+            stream.truncate(MAX_FILE_BYTES)
+
+    manifest = scan(tmp_path, exclude=lambda _: False)
+
+    assert len(manifest) == 17
+    assert sum(entry.size for entry in manifest.values()) == 17 * MAX_FILE_BYTES
 
 
 @pytest.mark.host_sandbox

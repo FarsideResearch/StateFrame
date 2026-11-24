@@ -1,7 +1,7 @@
 [FANOUT CONTINUATION]
-unit=invoicing; owns=shop/invoicing.py; check=tests/test_invoicing.py; status=COMMITTED; check_result=PASS; child_sends=1; changed_paths=shop/invoicing.py; contract=True
-unit=pricing; owns=shop/pricing.py; check=tests/test_pricing.py; status=COMMITTED; check_result=PASS; child_sends=1; changed_paths=shop/pricing.py; contract=True
-unit=shipping; owns=shop/shipping.py; check=tests/test_shipping.py; status=REFUSED; check_result=NOT_RUN; child_sends=0; changed_paths=none; contract=None
+subframe=invoicing; owns=shop/invoicing.py; check=tests/test_invoicing.py; status=COMMITTED; check_result=PASS; child_sends=1; changed_paths=shop/invoicing.py; contract=True
+subframe=pricing; owns=shop/pricing.py; check=tests/test_pricing.py; status=COMMITTED; check_result=PASS; child_sends=1; changed_paths=shop/pricing.py; contract=True
+subframe=shipping; owns=shop/shipping.py; check=tests/test_shipping.py; status=REFUSED; check_result=NOT_RUN; child_sends=0; changed_paths=none; contract=None
 refusal=SUBFRAME_CONTEXT_TOO_LARGE: first_frame_tokens=35136; cap=33344
 final_check=FAIL; final_integration=FAILED
 remaining=[shipping]

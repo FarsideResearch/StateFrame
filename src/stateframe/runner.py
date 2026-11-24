@@ -36,7 +36,7 @@ from .test_runners import (DECLARED_TEST_SOURCE, declared_test_evidence, discove
 from .test_changes import inspect_test_changes
 from . import resume as resume_module
 from .endpoint import CHAT_SUFFIX, Endpoint, EndpointError, _is_loopback
-from .task_row import EDIT_SCOPE_WIDEN_CAP, build_row, widened_scope_paths
+from .task_row import EDIT_SCOPE_WIDEN_CAP, build_row, editable_large_files, widened_scope_paths
 from .engine import kernel_reason_log as _reason_log
 from .engine.kernel_custom_tools import CustomToolError, load_tool_files
 from .engine.kernel_mcp_tools import load_mcp_files, discover as discover_mcp
@@ -192,6 +192,9 @@ def _dropped_discovery_candidate_paths(work: workcopy.WorkCopy, row: dict,
         if changed:
             dropped.append(path)
     return sorted(dropped)
+
+
+_fresh_resume_workcopy = resume_module.fresh_workcopy
 
 
 MUTATION_CANDIDATE_CONFLICT = "mutation_candidate_conflict"
@@ -2022,7 +2025,13 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
             if error.name != f"{__package__}.workspace_start_snapshot":
                 raise
     if pin_parent is None:
-        shutil.copytree(work.copy, run / "parent", symlinks=False)
+        try:
+            workcopy.copy_tree(work.copy, run / "parent", work._copies,
+                               space=workcopy._CopySpace(run / "parent"))
+        except OSError as error:
+            workcopy._raise_disk_full(work.original, run / "parent", 1024 * 1024,
+                                      (run / "parent", work.copy), error)
+            raise
     else:
         pin_parent(work, run / "parent")
     work.snapshot = run / "parent"
@@ -4288,10 +4297,9 @@ def candidate_digest(root: Path, *, file_digests: dict[str, str] | None = None) 
                 continue
             rel = path.relative_to(root)
             try:
-                data = path.read_bytes()
+                manifest[rel.as_posix()] = workcopy._hash_file(path)
             except OSError as error:
                 raise workcopy.WorkCopyScanError(f"cannot read candidate file {path}: {error}") from error
-            manifest[rel.as_posix()] = hashlib.sha256(data).hexdigest()
     if file_digests is not None:
         file_digests.update(manifest)
     return hashlib.sha256(json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -4822,7 +4830,7 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
                         "records, then the run continues live")
             from .shell_host import provision
             provision(options, run_dir, spec)
-            work = resume_module.fresh_workcopy(run_dir, options.repo)
+            work = _fresh_resume_workcopy(run_dir, options.repo)
             if start_context_missing and "start_context" not in spec["hooks"]:
                 from . import __version__, hook_host
                 try:
@@ -4864,7 +4872,7 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
             _write_run_spec_atomic(run_dir, spec)
             from .shell_host import provision
             provision(options, run_dir, spec)
-            work = resume_module.fresh_workcopy(run_dir, options.repo)
+            work = _fresh_resume_workcopy(run_dir, options.repo)
             return _execute(options, started, printer, run_dir, work, spec)
     finally:
         options._deadline = None
@@ -5175,6 +5183,17 @@ def _check_summary(check: dict[str, object]) -> dict[str, object]:
     return result
 
 
+def _start_files_skipped_rows(work: workcopy.WorkCopy) -> list[dict[str, str]]:
+    return [{"path": path, "reason": work.skip_reasons.get(path, "excluded")}
+            for path in work.skipped[:200]]
+
+
+def _start_files_skipped_line(work: workcopy.WorkCopy) -> str:
+    names = "; ".join(work.skipped[:5])
+    extra = "; additional names omitted" if len(work.skipped) > 5 else ""
+    return f"start files skipped: {len(work.skipped)} total" + (f"; {names}" if names else "") + extra
+
+
 def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: workcopy.WorkCopy,
              spec: dict) -> dict[str, object]:
     required_ledger_enabled = _required_test_ledger_enabled()
@@ -5206,6 +5225,8 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
 
     printer(f"working copy: {work.copy} ({len(work.baseline)} files; original untouched"
             f"{' until the end (--in-place)' if options.in_place else ''})")
+    if work.skipped:
+        printer(_start_files_skipped_line(work))
     if options.runner_kind != "generic":
         printer(f"starting file hint: {spec['public_row']['entry']['path']}; "
                 f"checks: {', '.join(spec['public_row']['public_check_paths'])}")
@@ -5278,7 +5299,7 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
             return {"checkpoint_refused": refused, "child_exit_code": child_exit, "run_dir": str(run_dir)}
     terminal = outcomes.terminal_receipt(run_dir)
     cancelled = cancelled or child_exit in (130, -2) or terminal.get("result") in ("CANCELLED", "CANCELED")
-    declared = set(spec["public_row"]["files"])
+    declared = set(spec["public_row"]["files"]) | editable_large_files(work, spec["public_row"])
     task_scope = set(spec["public_row"].get("task_file_scope") or ())
     candidate, written, candidate_error = None, [], None
     dropped_paths: list[str] = []
@@ -5404,6 +5425,8 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
         "candidate_paths_dropped": dropped_paths,
         "candidate_files_written": written,
         "files_changed": sorted(changed_files),
+        "start_files_skipped": _start_files_skipped_rows(work),
+        "start_files_skipped_total": len(work.skipped),
         "tests_before": _check_summary(before),
         "tests_after": _check_summary(after),
         "runner_kind": spec.get("runner_kind", "pytest"),

@@ -1,5 +1,8 @@
 """Foreground orchestration with only the process boundary substituted."""
 
+import hashlib
+import subprocess
+
 import pytest
 from _timeouts import scaled
 from kernel_effects import BaselineStore
@@ -10,8 +13,9 @@ from kernel_tool_tape import ToolReplayRefused, configure_replay, tape_for_run
 
 
 class ProcessBoundary:
-    def __init__(self, action=None, *, cleanup=True):
+    def __init__(self, action=None, *, cleanup=True, output=b"hi\n"):
         self.action, self.cleanup = action, cleanup
+        self.output = output
         self.calls = []
 
     def configure(self, cap):
@@ -21,8 +25,32 @@ class ProcessBoundary:
         self.calls.append((argv, cap, cwd))
         if self.action:
             self.action(cwd)
-        return ExecResult(0, False, b"hi\n", False, 3, 0.01,
+        return ExecResult(0, False, self.output, False, len(self.output), 0.01,
                           CleanupReport(self.cleanup, 0, (), "test cleanup"))
+
+
+class LocalProcessBoundary(ProcessBoundary):
+    def run(self, argv, cap, *, cwd):
+        self.calls.append((argv, cap, cwd))
+        result = subprocess.run(argv, cwd=cwd, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, check=False)
+        return ExecResult(result.returncode, False, result.stdout, False, len(result.stdout), 0.01,
+                          CleanupReport(True, 0, (), "test cleanup"))
+
+
+def _write_repeated(path, value, size):
+    block = value * (1 << 20)
+    with path.open("wb") as output:
+        for _ in range(size >> 20):
+            output.write(block)
+
+
+def _digest_file(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while block := source.read(1 << 20):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 @pytest.fixture
@@ -36,8 +64,8 @@ def setup_tool(tmp_path):
     row = {"files": {"app.py": "VALUE = 1\n"}, "scoped_edits": False,
            "allowed_product_paths": ["app.py"], "new_file_roots": []}
 
-    def make(action=None, settings=None, cleanup=True, row_override=None):
-        process = ProcessBoundary(action, cleanup=cleanup)
+    def make(action=None, settings=None, cleanup=True, row_override=None, output=b"hi\n"):
+        process = ProcessBoundary(action, cleanup=cleanup, output=output)
         tool = ShellTool(run, settings or ToolSettings(run_env=False), {}, process)
         tool.bind(root, row_override or row, {str(root / "test_app.py")})
         configure_replay(run, active=False)
@@ -181,6 +209,58 @@ def test_shell_reports_restored_out_of_scope_write_as_refused(setup_tool):
     assert reply.observation.startswith("REFUSED OUTSIDE_EDIT_SCOPE:")
     assert "rates.py (outside edit scope)" in reply.observation
     assert (root / "rates.py").read_text() == "RATE = 1\n"
+
+
+@pytest.mark.parametrize("allowed", [True, False], ids=["allowed", "denied"])
+def test_shell_command_handles_a_tracked_20_mib_file_and_restores_denied_edits(
+        setup_tool, allowed):
+    make, root, run = setup_tool
+    relative = "big.py" if allowed else "outside.py"
+    target = root / relative
+    size = 20 << 20
+    _write_repeated(target, b"A", size)
+    original_digest = _digest_file(target)
+    row = ({"files": {"big.py": "baseline"}, "scoped_edits": True,
+            "allowed_product_paths": ["big.py"], "new_file_roots": []} if allowed else
+           {"files": {"app.py": "VALUE = 1\n"}, "scoped_edits": True,
+            "allowed_product_paths": ["app.py"], "new_file_roots": []})
+    process = LocalProcessBoundary()
+    tool = ShellTool(run, ToolSettings(run_env=False), {}, process)
+    tool.bind(root, row, {str(root / "test_app.py")})
+    configure_replay(run, active=False)
+
+    reply = tool.execute({"command": f"dd if=/dev/zero of={relative} bs=1048576 count=20 status=none"},
+                         "large-file-write")
+
+    assert target.stat().st_size == size
+    if allowed:
+        expected = hashlib.sha256()
+        zeroes = bytes(1 << 20)
+        for _ in range(20):
+            expected.update(zeroes)
+        assert [(effect.path, effect.change) for effect in reply.applied] == [(relative, "modified")]
+        assert _digest_file(target) == expected.hexdigest()
+    else:
+        assert reply.observation.startswith("REFUSED OUTSIDE_EDIT_SCOPE:")
+        assert _digest_file(target) == original_digest
+
+
+def test_shell_command_can_write_and_delete_a_40_mib_file(setup_tool):
+    make, root, run = setup_tool
+    process = LocalProcessBoundary()
+    tool = ShellTool(run, ToolSettings(run_env=False), {}, process)
+    tool.bind(root, {"files": {"app.py": "VALUE = 1\n"}, "scoped_edits": False,
+                     "allowed_product_paths": ["app.py"], "new_file_roots": []},
+              {str(root / "test_app.py")})
+    configure_replay(run, active=False)
+
+    reply = tool.execute({
+        "command": "dd if=/dev/zero of=temporary.bin bs=1048576 count=40 status=none && rm temporary.bin",
+    }, "large-file-temporary")
+
+    assert not reply.observation.startswith("REFUSED ")
+    assert not (root / "temporary.bin").exists()
+    assert process.calls[0][0][2].endswith("rm temporary.bin")
 
 
 def test_replay_reexecutes_local_and_serves_taped_bytes(setup_tool):
@@ -699,3 +779,16 @@ def test_readonly_shell_does_not_narrow_explicit_custom_network_envelope(setup_t
     reply = tool.execute({"command": "pwd"}, "inspect")
     assert not reply.fatal
     assert process.calls[-1][1].network == "none"
+
+
+@pytest.mark.parametrize("command", ["head -c 12 big.txt", "grep -c row big.txt", "ls big.txt"])
+def test_output_about_a_large_file_reaches_the_model(setup_tool, command):
+    make, root, run = setup_tool
+    (root / "big.txt").write_bytes(b"row 1234567\n" * ((17 << 20) // 12))
+    tool = ShellTool(run, ToolSettings(run_env=False), {}, LocalProcessBoundary())
+    tool.bind(root, {"files": {"app.py": "VALUE = 1\n"}, "scoped_edits": True,
+                     "allowed_product_paths": ["app.py"], "new_file_roots": []}, {str(root / "test_app.py")})
+    configure_replay(run, active=False)
+    reply = tool.execute({"command": command}, "read-large")
+    expected = {"h": "row 1234567", "g": str((17 << 20) // 12), "l": "big.txt"}[command[0]]
+    assert expected in reply.observation and "omitted" not in reply.observation

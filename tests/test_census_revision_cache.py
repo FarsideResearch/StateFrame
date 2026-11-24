@@ -15,6 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import kernel_checkpoint as checkpoint
 import kernel_callsite_census as census
 import kernel_repo_catalog as catalog
 
@@ -100,6 +101,118 @@ def _site_visibility(packet):
     return {site["path"]: site["shown"] for group in packet.groups for site in group["sites"]}
 
 
+def test_revision_facts_do_not_enter_checkpoint_state_or_journal(tmp_path, monkeypatch):
+    _enable_census(monkeypatch, tmp_path)
+    root = _workspace(tmp_path)
+    _result, runtime = _prepare(root, "left.py")
+    assert census._CENSUS_REVISION_CACHE
+
+    module_state = checkpoint._module_state("kernel_callsite_census", census)
+    saved_cache = module_state["_CENSUS_REVISION_CACHE"]
+    assert type(saved_cache) is type(census._CENSUS_REVISION_CACHE)
+    assert not saved_cache
+    assert "model.Item" not in json.dumps(runtime.journal.events, sort_keys=True)
+
+
+def test_small_legacy_admission_ignores_new_compact_size_limit(tmp_path, monkeypatch):
+    key = ((tmp_path / "workspace").resolve().as_posix(), "admitted-revision")
+    index = SimpleNamespace(modules=())
+    structure = census._CensusStructure(
+        "run", "scope", "parser", {}, {}, {}, {"a.py": ()}, {"a.py": 0}, set(), set(), {},
+    )
+    builds = 0
+
+    def build():
+        nonlocal builds
+        builds += 1
+        return structure
+
+    monkeypatch.setattr(census, "_analysis_source_size", lambda _index: 430 * 1024)
+    monkeypatch.setattr(
+        census, "_compact_census_structure_bytes",
+        lambda _structure: census.MAX_CACHED_ANALYSIS_SOURCE_BYTES + 1,
+    )
+    for _ in range(2):
+        census._census_structure_for_revision(
+            key, revision="run", scope_key="scope", parser_version="parser",
+            index=index, build=build,
+        )
+
+    assert builds == 1
+
+
+def test_small_legacy_hit_keeps_the_v0830_unreadable_source_behavior(tmp_path, monkeypatch):
+    key = ((tmp_path / "workspace").resolve().as_posix(), "legacy-unreadable")
+    index = SimpleNamespace(modules=(SimpleNamespace(path="a.py"),))
+    index.read_content = lambda *_args, **_kwargs: pytest.fail("legacy hit re-read a source")
+    structure = census._CensusStructure(
+        "run", "scope", "parser", {}, {}, {}, {"a.py": ()}, {"a.py": 0}, set(), set(), {},
+    )
+    builds = 0
+
+    def build():
+        nonlocal builds
+        builds += 1
+        return structure
+
+    monkeypatch.setattr(census, "_analysis_source_size", lambda _index: 430 * 1024)
+    census._census_structure_for_revision(
+        key, revision="run", scope_key="scope", parser_version="parser", index=index, build=build,
+    )
+    reused = census._census_structure_for_revision(
+        key, revision="run", scope_key="scope", parser_version="parser",
+        index=index, build=build,
+    )
+
+    assert builds == 1
+    assert reused.complete is False
+
+
+def test_revision_cache_return_does_not_share_mutable_facts(tmp_path):
+    key = ((tmp_path / "workspace").resolve().as_posix(), "immutable-revision")
+    index = SimpleNamespace(modules=())
+    structure = census._CensusStructure(
+        "run", "scope", "parser", {}, {}, {}, {"a.py": ()}, {"a.py": 0}, {"bad.py"}, set(), {},
+    )
+    cached = census._census_structure_for_revision(
+        key, revision="run", scope_key="scope", parser_version="parser",
+        index=index, build=lambda: structure,
+    )
+    cached.calls_by_path["a.py"] = ()
+    cached.calls_by_path["injected.py"] = ()
+    cached.unresolved_by_path["a.py"] = 99
+    cached.partial_paths.clear()
+
+    reused = census._census_structure_for_revision(
+        key, revision="run", scope_key="scope", parser_version="parser",
+        index=index, build=lambda: pytest.fail("cache mutation caused a miss"),
+    )
+
+    assert reused.calls_by_path == {"a.py": ()}
+    assert reused.unresolved_by_path == {"a.py": 0}
+    assert reused.partial_paths == {"bad.py"}
+
+
+def test_compact_size_walk_counts_all_empty_structure_maps(monkeypatch):
+    structure = census._CensusStructure(
+        "r", "s", "p", {}, {}, {}, {}, {}, set(), set(), {},
+    )
+    empty_maps = (structure.parsed, structure.trees, structure.definitions, structure.importers_by_path)
+    expected_ids = {id(value) for value in empty_maps}
+    seen = set()
+    original_getsizeof = sys.getsizeof
+
+    def tracked_getsizeof(value, *args):
+        if isinstance(value, dict) and id(value) in expected_ids:
+            seen.add(id(value))
+        return original_getsizeof(value, *args)
+
+    monkeypatch.setattr(sys, "getsizeof", tracked_getsizeof)
+    census._compact_census_structure_bytes(structure)
+
+    assert seen == {id(value) for value in empty_maps}
+
+
 def test_counted_work_reuses_one_census_across_fresh_prepares(tmp_path, monkeypatch):
     _enable_census(monkeypatch, tmp_path)
     root = _workspace(tmp_path)
@@ -119,6 +232,412 @@ def test_counted_work_reuses_one_census_across_fresh_prepares(tmp_path, monkeypa
     assert left.status == right.status == "fired"
     assert _site_visibility(left.packet) == {"left.py": True, "right.py": False}
     assert _site_visibility(right.packet) == {"left.py": False, "right.py": True}
+
+
+def test_oversized_index_reuses_bounded_facts_without_reparsing_files(
+        tmp_path, monkeypatch, request):
+    _enable_census(monkeypatch, tmp_path)
+    root = _workspace(tmp_path)
+    distinct_right = RIGHT_SOURCE + b"# right file identity\n"
+    (root / "right.py").write_bytes(distinct_right)
+    monkeypatch.setattr(sys.modules[__name__], "RIGHT_SOURCE", distinct_right)
+    monkeypatch.setattr(
+        census, "_analysis_source_size",
+        lambda _index: census.MAX_CACHED_ANALYSIS_SOURCE_BYTES + 1,
+    )
+    parse_cache = census._parse_cache
+    parse_cache.clear()
+    request.addfinalizer(parse_cache.clear)
+    parse_calls = {}
+    original_parse = parse_cache.parse
+
+    def counted_parse(source, filename="<unknown>", *, on_miss=None):
+        digest = parse_cache.source_digest(source)
+        parse_calls[digest] = parse_calls.get(digest, 0) + 1
+        return original_parse(source, filename, on_miss=on_miss)
+
+    monkeypatch.setattr(parse_cache, "parse", counted_parse)
+    original_build = census._build_census_structure
+    builds = 0
+
+    def counted_build(*args, **kwargs):
+        nonlocal builds
+        builds += 1
+        return original_build(*args, **kwargs)
+
+    monkeypatch.setattr(census, "_build_census_structure", counted_build)
+    runtime = _runtime(root)
+    left, _ = _prepare(root, "left.py", runtime=runtime)
+    right, _ = _prepare(root, "right.py", runtime=runtime)
+
+    assert left.status == right.status == "fired"
+    assert _site_visibility(left.packet) == {"left.py": True, "right.py": False}
+    assert _site_visibility(right.packet) == {"left.py": False, "right.py": True}
+    assert builds == 1
+    assert len(parse_calls) == 3
+    assert set(parse_calls.values()) == {1}
+    cached = next(iter(census._CENSUS_REVISION_CACHE.values()))[1]
+    assert census._compact_census_structure_bytes(cached) <= census.MAX_CACHED_ANALYSIS_SOURCE_BYTES
+
+
+def test_oversized_syntax_partial_keeps_compact_cache_saving(tmp_path, monkeypatch):
+    _enable_census(monkeypatch, tmp_path)
+    root = _workspace(tmp_path)
+    (root / "broken.py").write_text("def incomplete(:\n")
+    index = catalog.build_structural_index(
+        root, priority_paths=("left.py", "right.py"), include_call_graph=False,
+        capture_scan_entries=True,
+    )
+    lease = SimpleNamespace(
+        index=index, cache=SimpleNamespace(index=index, overlay_index=None, analysis=None),
+        changed_paths=(), incremental=False, reuse_status="cold", reuse_reason=None,
+    )
+    monkeypatch.setattr(census, "acquire_index", lambda *_args, **_kwargs: lease)
+    monkeypatch.setattr(
+        census, "_analysis_source_size",
+        lambda _index: census.MAX_CACHED_ANALYSIS_SOURCE_BYTES + 1,
+    )
+    original_build = census._build_census_structure
+    builds = 0
+
+    def counted_build(*args, **kwargs):
+        nonlocal builds
+        builds += 1
+        return original_build(*args, **kwargs)
+
+    monkeypatch.setattr(census, "_build_census_structure", counted_build)
+    first, _ = _prepare(root, "left.py")
+    second, _ = _prepare(root, "right.py")
+
+    assert first.packet.coverage["status"] == second.packet.coverage["status"] == "PARTIAL"
+    assert builds == 1
+    assert lease.cache.analysis is None
+    assert census._CENSUS_REVISION_CACHE
+
+
+def test_oversized_source_read_failure_does_not_admit_compact_entry(tmp_path, monkeypatch):
+    _enable_census(monkeypatch, tmp_path)
+    root = _workspace(tmp_path)
+    (root / "broken.py").write_text("class Broken:\n    pass\n")
+    index = catalog.build_structural_index(
+        root, priority_paths=("left.py", "right.py"), include_call_graph=False,
+        capture_scan_entries=True,
+    )
+    lease = SimpleNamespace(
+        index=index, cache=SimpleNamespace(index=index, overlay_index=None, analysis=None),
+        changed_paths=(), incremental=False, reuse_status="cold", reuse_reason=None,
+    )
+    monkeypatch.setattr(census, "acquire_index", lambda *_args, **_kwargs: lease)
+    monkeypatch.setattr(
+        census, "_analysis_source_size",
+        lambda _index: census.MAX_CACHED_ANALYSIS_SOURCE_BYTES + 1,
+    )
+    original_read = index.read_content
+    failed = False
+
+    def fail_once(path, **kwargs):
+        nonlocal failed
+        if path == "broken.py" and not failed:
+            failed = True
+            raise OSError("injected source read failure")
+        return original_read(path, **kwargs)
+
+    monkeypatch.setattr(index, "read_content", fail_once)
+    original_build = census._build_census_structure
+    builds = 0
+
+    def counted_build(*args, **kwargs):
+        nonlocal builds
+        builds += 1
+        return original_build(*args, **kwargs)
+
+    monkeypatch.setattr(census, "_build_census_structure", counted_build)
+    first, _ = _prepare(root, "left.py")
+    assert first.packet.coverage["status"] == "PARTIAL"
+    assert not census._CENSUS_REVISION_CACHE
+
+    second, _ = _prepare(root, "right.py")
+    assert second.status == "fired"
+    assert builds == 2
+    assert census._CENSUS_REVISION_CACHE
+
+
+@pytest.mark.parametrize("body_state", ["changed", "missing"])
+def test_changed_or_unavailable_indexed_body_does_not_admit_compact_entry(
+        tmp_path, monkeypatch, body_state):
+    root = _workspace(tmp_path)
+    path = root / "broken.py"
+    path.write_text("class Broken:\n    pass\n")
+    index = catalog.build_structural_index(
+        root, priority_paths=("left.py", "right.py", "broken.py"), include_call_graph=False,
+    )
+    if body_state == "changed":
+        path.write_text("class Changed:\n    pass\n")
+    else:
+        path.unlink()
+    monkeypatch.setattr(
+        census, "_analysis_source_size", lambda _index: census.MAX_CACHED_ANALYSIS_SOURCE_BYTES + 1,
+    )
+
+    structure = census._census_structure_for_revision(
+        (root.resolve().as_posix(), body_state), revision="run", scope_key="scope",
+        parser_version="parser", index=index,
+        build=lambda: census._build_census_structure(
+            index, scope_key="scope", parser_version="parser",
+        ),
+    )
+
+    assert structure.read_failed
+    assert structure.partial_paths == {"broken.py"}
+    assert "broken.py" not in structure.parsed
+    assert not census._CENSUS_REVISION_CACHE
+
+
+@pytest.mark.parametrize("error_type", [LookupError, OSError, catalog.StructuralIndexError, ValueError])
+def test_source_paths_marks_every_index_read_failure(error_type):
+    index = SimpleNamespace(modules=(SimpleNamespace(path="unavailable.py"),))
+
+    def fail_read(*_args, **_kwargs):
+        raise error_type("body unavailable")
+
+    index.read_content = fail_read
+    failures = set()
+
+    parsed, trees, partial, _skipped = census._source_paths(index, failures)
+
+    assert not parsed and not trees
+    assert partial == failures == {"unavailable.py"}
+
+
+def test_source_paths_keeps_parser_oserror_partial(tmp_path, monkeypatch):
+    root = _workspace(tmp_path)
+    index = catalog.build_structural_index(root, include_call_graph=False)
+    parse = census._parse_cached_source
+
+    def fail_one_parse(source, path):
+        if path == "left.py":
+            raise OSError("parser unavailable")
+        return parse(source, path)
+
+    monkeypatch.setattr(census, "_parse_cached_source", fail_one_parse)
+
+    parsed, trees, partial, _skipped = census._source_paths(index)
+
+    assert "left.py" in partial
+    assert "left.py" not in parsed and "left.py" not in trees
+
+
+def test_transient_read_failure_keeps_legacy_partial_analysis(
+        tmp_path, monkeypatch):
+    _enable_census(monkeypatch, tmp_path)
+    root = _workspace(tmp_path)
+    index = catalog.build_structural_index(
+        root, priority_paths=("left.py", "right.py"), include_call_graph=False,
+        capture_scan_entries=True,
+    )
+    lease = SimpleNamespace(
+        index=index, cache=SimpleNamespace(index=index, overlay_index=None, analysis=None),
+        changed_paths=(), incremental=False, reuse_status="cold", reuse_reason=None,
+    )
+    monkeypatch.setattr(census, "acquire_index", lambda *_args, **_kwargs: lease)
+    original_read = index.read_content
+    failed = False
+
+    def fail_model_once(path, **kwargs):
+        nonlocal failed
+        if path == "model.py" and not failed:
+            failed = True
+            raise OSError("injected one-time read failure")
+        return original_read(path, **kwargs)
+
+    monkeypatch.setattr(index, "read_content", fail_model_once)
+    first, _ = _prepare(root, "left.py")
+
+    assert failed
+    assert first.status == "fired"
+    assert first.packet.coverage["status"] == "PARTIAL"
+    assert lease.cache.analysis is not None
+    assert lease.cache.analysis.partial_paths == {"model.py"}
+    assert len(census._CENSUS_REVISION_CACHE) == 1
+
+    second, _ = _prepare(root, "right.py")
+    assert second.status == "fired"
+    assert second.packet.coverage["status"] == "PARTIAL"
+    assert second.packet.coverage["files_partial"] == 1
+
+
+def test_large_compact_hit_reads_sources_without_reparsing(tmp_path, monkeypatch):
+    _enable_census(monkeypatch, tmp_path)
+    root = _workspace(tmp_path)
+    index = catalog.build_structural_index(
+        root, priority_paths=("left.py", "right.py"), include_call_graph=False,
+        capture_scan_entries=True,
+    )
+    lease = SimpleNamespace(
+        index=index, cache=SimpleNamespace(index=index, overlay_index=None, analysis=None),
+        changed_paths=(), incremental=False, reuse_status="cold", reuse_reason=None,
+    )
+    monkeypatch.setattr(census, "acquire_index", lambda *_args, **_kwargs: lease)
+    monkeypatch.setattr(
+        census, "_analysis_source_size",
+        lambda _index: census.MAX_CACHED_ANALYSIS_SOURCE_BYTES + 1,
+    )
+    first, _ = _prepare(root, "left.py")
+    assert first.status == "fired"
+
+    original_read = index.read_content
+    reads = []
+    denied = False
+
+    def counted_read(path, **kwargs):
+        nonlocal denied
+        reads.append(path)
+        if path == "model.py" and not denied:
+            denied = True
+            raise OSError("injected one-time census read denial")
+        return original_read(path, **kwargs)
+
+    monkeypatch.setattr(index, "read_content", counted_read)
+    parse_cache = census._parse_cache
+
+    def forbidden_parse(*_args, **_kwargs):
+        raise AssertionError("a compact cache hit parsed source again")
+
+    monkeypatch.setattr(parse_cache, "parse", forbidden_parse)
+    second, _ = _prepare(root, "right.py")
+
+    assert second.status == "fired"
+    assert denied
+    assert reads.count("model.py") == 2
+    assert set(reads) == {"left.py", "right.py", "model.py"}
+    assert _site_visibility(second.packet) == {"left.py": False, "right.py": True}
+
+
+@pytest.mark.parametrize("setting", ["get_int_max_str_digits", "getrecursionlimit"])
+def test_parser_settings_change_census_and_ast_cache_keys(monkeypatch, setting):
+    getter = getattr(sys, setting, None)
+    if not callable(getter):
+        pytest.skip(f"sys.{setting} is unavailable")
+    original_value = getter()
+    source = "value = 123\n"
+    parser_version = census._parser_version()
+    tree_key = census._parse_cache.parse_cache_key(source)
+
+    monkeypatch.setattr(sys, setting, lambda: original_value + 1)
+
+    assert census._parser_version() != parser_version
+    assert census._parse_cache.parse_cache_key(source) != tree_key
+
+
+def test_nonadmitted_revision_entry_keeps_incremental_bindings_after_syntax_repair(
+        tmp_path, monkeypatch):
+    _enable_census(monkeypatch, tmp_path)
+    root = _workspace(tmp_path)
+    index = catalog.build_structural_index(
+        root, priority_paths=("left.py", "right.py"), include_call_graph=False,
+        capture_scan_entries=True,
+    )
+    cache = SimpleNamespace(index=index, overlay_index=None, analysis=None)
+    lease = SimpleNamespace(
+        index=index, cache=cache, changed_paths=(), incremental=False,
+        reuse_status="cold", reuse_reason=None,
+    )
+    runtime = _runtime(root)
+    monkeypatch.setattr(census, "acquire_index", lambda *_args, **_kwargs: lease)
+    original_build = census._build_census_structure
+    builds = 0
+
+    def counted_build(*args, **kwargs):
+        nonlocal builds
+        builds += 1
+        return original_build(*args, **kwargs)
+
+    monkeypatch.setattr(census, "_build_census_structure", counted_build)
+    monkeypatch.setattr(census, "_CENSUS_REVISION_CACHE_MAX_CALLS", 1)
+    first, _ = _prepare(root, "left.py", runtime=runtime)
+
+    assert first.status == "fired"
+    assert not census._CENSUS_REVISION_CACHE
+    assert cache.analysis is not None and cache.analysis.complete
+    original_analysis = cache.analysis
+    original_bindings = cache.analysis.definitions["model.py"]
+
+    monkeypatch.setenv("STATEFRAME_CENSUS_INCREMENTAL", "on")
+    (root / "right.py").write_text("def incomplete(:\n")
+    index = catalog.build_structural_index(
+        root, priority_paths=("left.py", "right.py"), include_call_graph=False,
+        capture_scan_entries=True,
+    )
+    lease.index = index
+    cache.index = index
+    lease.incremental = True
+    lease.changed_paths = ("right.py",)
+    _prepare(root, "left.py", runtime=runtime)
+    assert cache.analysis is not original_analysis
+    assert cache.analysis.partial_paths == {"right.py"}
+    assert cache.analysis.definitions["model.py"] == original_bindings
+
+    (root / "right.py").write_bytes(RIGHT_SOURCE + b"# repaired\n")
+    index = catalog.build_structural_index(
+        root, priority_paths=("left.py", "right.py"), include_call_graph=False,
+        capture_scan_entries=True,
+    )
+    lease.index = index
+    cache.index = index
+    lease.changed_paths = ("right.py",)
+    repaired, _ = _prepare(root, "left.py", runtime=runtime)
+
+    assert repaired.status == "fired"
+    assert cache.analysis.definitions["model.py"] == original_bindings
+    assert set(cache.analysis.calls_by_path) == {"left.py", "right.py", "model.py"}
+    assert all(
+        call.identity.endswith("Item")
+        for path in ("left.py", "right.py")
+        for call in cache.analysis.calls_by_path[path]
+    )
+    assert builds == 1
+
+
+def test_turn0_cache_size_boundary_keeps_legacy_journal_events(tmp_path, monkeypatch):
+    _enable_census(monkeypatch, tmp_path)
+    monkeypatch.setenv("STATEFRAME_TURN0_PERSIST", "on")
+    monkeypatch.setattr(census._turn0, "cache_directory", lambda: tmp_path / "turn0-cache")
+    monkeypatch.setattr(
+        census._turn0, "make_context",
+        lambda *_args, **_kwargs: (SimpleNamespace(path=tmp_path / "context.json"), None),
+    )
+    root = _workspace(tmp_path)
+    index = catalog.build_structural_index(
+        root, priority_paths=("left.py", "right.py"), include_call_graph=False,
+        capture_scan_entries=True,
+    )
+    monkeypatch.setattr(census, "_runtime_persistence_task_id", lambda _runtime: "task")
+    parser_version = census._parser_version()
+
+    monkeypatch.setattr(
+        census, "_analysis_source_size",
+        lambda _index: census.MAX_CACHED_ANALYSIS_SOURCE_BYTES,
+    )
+    at_limit = _Journal()
+    context, _, _ = census._census_persistence_context(
+        index, _runtime(root), parser_version=parser_version, journal=at_limit,
+    )
+    assert context is not None
+    assert at_limit.events == []
+
+    monkeypatch.setattr(
+        census, "_analysis_source_size",
+        lambda _index: census.MAX_CACHED_ANALYSIS_SOURCE_BYTES + 1,
+    )
+    over_limit = _Journal()
+    context, _, _ = census._census_persistence_context(
+        index, _runtime(root), parser_version=parser_version, journal=over_limit,
+    )
+    assert context is None
+    assert over_limit.events == [
+        {"kind": "turn0_cache", "name": "census_index", "outcome": "miss", "dispatch": False},
+        {"kind": "cache_bypass", "name": "census_index", "reason": "limits", "dispatch": False},
+    ]
 
 
 def test_revision_change_invalidates_cached_census(tmp_path, monkeypatch):
@@ -343,6 +862,105 @@ def test_partial_census_is_reused_with_partial_coverage_preserved(tmp_path, monk
     assert first.packet.coverage["status"] == second.packet.coverage["status"] == "PARTIAL"
     assert first.packet.coverage["files_partial"] == second.packet.coverage["files_partial"] == 1
     assert builds == 1
+
+
+@pytest.mark.parametrize("mode", ["on", "shadow", "off"])
+def test_partial_analysis_keeps_v0830_refresh_behavior_through_edit_add_delete_repair(
+        tmp_path, monkeypatch, mode):
+    _enable_census(monkeypatch, tmp_path)
+    monkeypatch.setenv("STATEFRAME_CENSUS_INCREMENTAL", mode)
+    root = _workspace(tmp_path)
+    (root / "broken.py").write_text("def incomplete(:\n")
+    index = catalog.build_structural_index(
+        root, priority_paths=("left.py", "right.py"), include_call_graph=False,
+        capture_scan_entries=True,
+    )
+    cache = SimpleNamespace(index=index, overlay_index=None, analysis=None)
+    lease = SimpleNamespace(
+        index=index, cache=cache, changed_paths=(), incremental=False,
+        reuse_status="cold", reuse_reason=None,
+    )
+    monkeypatch.setattr(census, "acquire_index", lambda *_args, **_kwargs: lease)
+    runtime = _runtime(root)
+    first, _ = _prepare(root, "left.py", runtime=runtime)
+    assert first.status == "fired"
+    assert cache.analysis is not None
+    assert cache.analysis.partial_paths == {"broken.py"}
+
+    refreshes = []
+    original_refresh = census._refresh_census_structure
+
+    def counted_refresh(*args, **kwargs):
+        refreshes.append(tuple(kwargs["changed_paths"]))
+        return original_refresh(*args, **kwargs)
+
+    monkeypatch.setattr(census, "_refresh_census_structure", counted_refresh)
+    steps = (
+        ("model.py", lambda: (root / "model.py").write_text(
+            "class Item:\n    pass\n\n# edited\n"), {"broken.py"}),
+        ("added.py", lambda: (root / "added.py").write_text(
+            "from model import Item\nextra = Item()\n"), {"broken.py"}),
+        ("added.py", lambda: (root / "added.py").unlink(), {"broken.py"}),
+        ("broken.py", lambda: (root / "broken.py").write_text(
+            "class Repaired:\n    pass\n"), set()),
+    )
+    for changed_path, update, expected_partial in steps:
+        update()
+        index = catalog.build_structural_index(
+            root, priority_paths=("left.py", "right.py"), include_call_graph=False,
+            capture_scan_entries=True,
+        )
+        lease.index = index
+        cache.index = index
+        lease.incremental = True
+        lease.changed_paths = (changed_path,)
+        result, _ = _prepare(root, "left.py", runtime=runtime)
+        assert result.status == "fired"
+        assert cache.analysis is not None
+        assert cache.analysis.partial_paths == expected_partial
+
+    assert (len(refreshes) == len(steps)) is (mode in {"on", "shadow"})
+    shadows = [event for event in runtime.journal.events
+               if event["kind"] == "callsite_census_incremental_shadow"]
+    assert len(shadows) == (len(steps) if mode == "shadow" else 0)
+
+
+def test_turn0_persists_partial_analysis_and_keeps_hit_journal_event(tmp_path, monkeypatch):
+    _enable_census(monkeypatch, tmp_path)
+    monkeypatch.setenv("STATEFRAME_TURN0_PERSIST", "on")
+    monkeypatch.setattr(census._turn0, "cache_directory", lambda: tmp_path / "turn0")
+    monkeypatch.setattr(census._turn0, "_snapshot_digest", lambda: "fixed-snapshot")
+    root = _workspace(tmp_path)
+    (root / "broken.py").write_text("def incomplete(:\n")
+    monkeypatch.setattr(census, "_runtime_persistence_task_id", lambda _runtime: "partial-task")
+    lease = SimpleNamespace(index=None, cache=None, changed_paths=(), incremental=False,
+                            reuse_status="cold", reuse_reason=None)
+    monkeypatch.setattr(census, "acquire_index", lambda *_args, **_kwargs: lease)
+
+    index = catalog.build_structural_index(
+        root, priority_paths=("left.py", "right.py"), include_call_graph=False,
+        capture_scan_entries=True,
+    )
+    lease.index = index
+    first, first_runtime = _prepare(root, "left.py")
+    first_events = [event for event in first_runtime.journal.events
+                    if event["kind"] == "turn0_cache"]
+    assert [event["outcome"] for event in first_events] == ["miss"]
+
+    lease.index = catalog.build_structural_index(
+        root, priority_paths=("left.py", "right.py"), include_call_graph=False,
+        capture_scan_entries=True,
+    )
+    second, second_runtime = _prepare(root, "right.py")
+    second_events = [event for event in second_runtime.journal.events
+                     if event["kind"] == "turn0_cache"]
+    assert [event["outcome"] for event in second_events] == ["hit"]
+    monkeypatch.setenv("STATEFRAME_TURN0_PERSIST", "off")
+    cold, _ = _prepare(root, "right.py")
+    encode = lambda value: json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
+    assert first.packet.coverage["status"] == second.packet.coverage["status"] == "PARTIAL"
+    assert encode(second.messages) == encode(cold.messages)
+    assert second.packet.payload == cold.packet.payload
 
 
 def test_scoped_analysis_never_consumes_a_full_revision_cache_entry(tmp_path, monkeypatch):

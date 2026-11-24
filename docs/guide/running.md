@@ -410,9 +410,11 @@ Identical inputs give identical requests on the measured workload apart from thr
 The default shell mode runs bounded foreground commands and can start read-only
 background jobs in the composed loop. The sandbox and post-command effect checks
 enforce filesystem authority; the standard-mode program filter is a convenience.
-Executable-bit changes are restored, and reconciliation stops if a file exceeds
-16 MiB, aggregate regular-file bytes exceed 256 MiB, or the tree exceeds 20,000
-entries. Shell, job and custom-command output delivery shrinks to fit the measured
+Executable-bit changes are restored. Workspace effect scans, capture, and
+restoration stream in 1 MiB chunks with before-and-after identity checks and no
+per-file, entry-count, or aggregate-byte cutoff; operating-system errors fail
+reconciliation instead of accepting partial scans.
+Shell, job and custom-command output delivery shrinks to fit the measured
 request while the full taped observation remains on disk within collector limits.
 Shell output does not count as a source read or an engine check. Network installs
 need `--shell-network full`, and installs in the run environment last only for that

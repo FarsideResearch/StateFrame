@@ -7,7 +7,6 @@ import json
 import os
 import shutil
 import stat
-import sys
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -16,85 +15,18 @@ from threading import RLock
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
+from .workcopy import _READ_FLAGS, _Copies, _Stamp, _stamp
+
 if TYPE_CHECKING:
     from .workcopy import Limits, WorkCopy
 
 _MANIFEST = "parent-start.json"
-_MAX_MANIFEST_BYTES = 8 << 20
-_MAX_ENTRIES = 20_000
 _MAX_OVERLAY_BYTES = 64 << 20
 _CONTEXT_EXCLUSIONS = frozenset({"__pycache__", ".pytest_cache", ".test-tmp"})
-_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
-_Stamp = tuple[int, int, int, int, int, int, int, int, int]
-
-
-def _stamp(info: os.stat_result) -> _Stamp:
-    return (info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns,
-            info.st_ctime_ns, info.st_nlink, info.st_uid, info.st_gid)
 
 
 def _digest(value: object) -> str:
     return hashlib.sha256(json.dumps(value, separators=(",", ":")).encode()).hexdigest()
-
-
-def _reflink(source: int, target: int) -> None:
-    if sys.platform != "linux":
-        raise OSError(errno.ENOTSUP, "file clone unavailable")
-    import fcntl
-
-    fcntl.ioctl(target, 0x40049409, source)  # FICLONE
-
-
-class _Copies:
-    """Copy regular files to independent inodes, including after a partial clone."""
-
-    def __init__(self) -> None:
-        self.clone = True
-
-    def file(self, source: int, target: Path, info: os.stat_result, *,
-             data: bytes | None = None, writable: bool = False) -> _Stamp:
-        with target.open("xb") as output:
-            if self.clone:
-                try:
-                    _reflink(source, output.fileno())
-                except OSError as error:
-                    output.seek(0)
-                    output.truncate()
-                    if error.errno in {errno.EXDEV, errno.ENOTSUP, errno.ENOTTY, errno.ENOSYS}:
-                        self.clone = False
-                else:
-                    if os.fstat(output.fileno()).st_size == info.st_size:
-                        return self._metadata(source, output.fileno(), info, writable)
-                    output.seek(0)
-                    output.truncate()
-            if data is None:
-                os.lseek(source, 0, os.SEEK_SET)
-                # The source is checked again by the caller. Bound the copy if
-                # a file grows after its admitted size was checked.
-                remaining = info.st_size
-                while remaining:
-                    block = os.read(source, min(remaining, 1 << 20))
-                    if not block:
-                        raise OSError(errno.EIO, "snapshot source became shorter")
-                    output.write(block)
-                    remaining -= len(block)
-            else:
-                output.write(data)
-            output.flush()
-            return self._metadata(source, output.fileno(), info, writable)
-
-    @staticmethod
-    def _metadata(source: int, fd: int, info: os.stat_result, writable: bool) -> _Stamp:
-        mode = stat.S_IMODE(info.st_mode)
-        if sys.platform == "linux":
-            # Use open inodes, including for extended attributes and ACLs.
-            shutil.copystat(source, fd)
-            if writable and not mode & stat.S_IWUSR:
-                os.fchmod(fd, mode | stat.S_IWUSR)
-        else:
-            os.utime(fd, ns=(info.st_atime_ns, info.st_mtime_ns))
-            os.fchmod(fd, mode | stat.S_IWUSR if writable else mode)
-        return _stamp(os.fstat(fd))
 
 
 @dataclass
@@ -105,89 +37,90 @@ class _Admission:
 
 
 def admit_workcopy(work: WorkCopy, limits: Limits) -> None:
-    """Write both copies from the same bounded, descriptor-anchored admission."""
-    from .workcopy import (WorkCopyError, _copy_storage_error, _is_copy_storage_full, _ignored,
-                           _repository_scan_error, _source_file_error, _walk_source)
+    """Write both copies from the same descriptor-anchored admission."""
+    from .workcopy import (_TEXT_FILE_BYTES, WorkCopyError, _CopySpace, _copy_start_file, _hash_file, _ignored,
+                           _is_copy_storage_full, _repository_scan_error, _source_file_error, _walk_source)
+
+    space = _CopySpace(work.copy)
 
     def scan_error(path: Path, error: OSError) -> None:
         raise _repository_scan_error(path, error) from error
 
-    try:
-        work.copy.parent.mkdir(parents=True, exist_ok=True)
-        staging = tempfile.TemporaryDirectory(prefix=".workspace-start-", dir=work.copy.parent)
-    except OSError as error:
-        if _is_copy_storage_full(error):
-            raise _copy_storage_error() from error
-        raise
+    work.copy.parent.mkdir(parents=True, exist_ok=True)
+    staging = tempfile.TemporaryDirectory(prefix=".workspace-start-", dir=work.copy.parent)
     try:
         root = Path(staging.name)
         workspace, parent = root / "workspace", root / "parent"
         workspace.mkdir()
         parent.mkdir()
-        copies = _Copies()
+        copies = work._copies or _Copies(False)
         files: dict[str, tuple[str, _Stamp]] = {}
         directories = {Path(".")}
-        total = 0
         for directory, filenames, dir_fd in _walk_source(work.original, onerror=scan_error):
             here = directory.relative_to(work.original)
             for name in filenames:
                 relative = here / name
                 rel = relative.as_posix()
                 if _ignored(name, False):
-                    work.skipped.append(rel)
+                    work.note_skipped(rel, "excluded by file name")
                     continue
                 path = directory / name
                 try:
                     before = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
                 except OSError as error:
                     raise _source_file_error("inspect", path, error) from error
-                if not stat.S_ISREG(before.st_mode) or before.st_size > limits.max_file_bytes:
-                    work.skipped.append(rel)
+                if stat.S_ISLNK(before.st_mode):
+                    work.note_skipped(rel, "symbolic link")
+                    continue
+                if not stat.S_ISREG(before.st_mode):
+                    work.note_skipped(rel, "special file")
                     continue
                 try:
                     source = os.open(name, _READ_FLAGS, dir_fd=dir_fd)
                 except OSError as error:
-                    if error.errno != errno.ELOOP:
-                        raise _source_file_error("read", path, error) from error
-                    work.skipped.append(rel)
-                    continue
-                with os.fdopen(source, "rb") as stream:
-                    info = os.fstat(source)
-                    if (not stat.S_ISREG(info.st_mode)
-                            or info.st_size > limits.max_file_bytes
-                            or (info.st_dev, info.st_ino) != (before.st_dev, before.st_ino)):
-                        work.skipped.append(rel)
+                    if error.errno in {errno.ELOOP, errno.ENXIO}:
+                        work.note_skipped(rel, "symbolic link" if error.errno == errno.ELOOP else "special file")
                         continue
-                    if (len(work.baseline) >= limits.max_files
-                            or total + info.st_size > limits.max_total_bytes):
-                        raise WorkCopyError(
-                            f"repository is larger than the run limits ({limits.max_files} files, "
-                            f"{limits.max_total_bytes // (1024 * 1024)} MB); "
-                            "point --repo at a smaller tree")
+                    if isinstance(error, PermissionError):
+                        work.note_skipped(rel, "unreadable")
+                        continue
+                    raise _source_file_error("read", path, error) from error
+                with os.fdopen(source, "rb"):
+                    info = os.fstat(source)
+                    if not stat.S_ISREG(info.st_mode):
+                        work.note_skipped(rel, "special file")
+                        continue
+                    replaced = (info.st_dev, info.st_ino) != (before.st_dev, before.st_ino)
+                    if replaced and max(info.st_size, before.st_size) <= _TEXT_FILE_BYTES:
+                        raise WorkCopyError(f"repository file changed before admission: {rel}")
+                    if here not in directories:
+                        (workspace / here).mkdir(parents=True, exist_ok=True)
+                        (parent / here).mkdir(parents=True, exist_ok=True)
+                        directories.update((here, *here.parents))
                     try:
-                        data = stream.read(info.st_size + 1)
+                        copies.mode_only = True
+                        copied = _copy_start_file(copies, source, workspace / relative, rel, space)
+                        copies.mode_only = False
                     except OSError as error:
                         if _is_copy_storage_full(error):
-                            raise _copy_storage_error() from error
-                        raise _source_file_error("read", path, error) from error
-                    if len(data) != info.st_size or _stamp(os.fstat(source)) != _stamp(info):
-                        raise WorkCopyError(f"repository file changed during admission: {rel}")
-                total += len(data)
-                if here not in directories:
-                    (workspace / here).mkdir(parents=True, exist_ok=True)
-                    (parent / here).mkdir(parents=True, exist_ok=True)
-                    directories.update((here, *here.parents))
-                with (workspace / relative).open("x+b") as target:
-                    target.write(data)
-                    target.flush()
-                    os.fchmod(target.fileno(), stat.S_IMODE(info.st_mode))
-                    target_info = os.fstat(target.fileno())
-                    signature = copies.file(target.fileno(), parent / relative, target_info, data=data)
-                digest = hashlib.sha256(data).hexdigest()
-                files[rel] = (digest, signature)
-                work.baseline[rel] = digest
-        if not files:
-            raise WorkCopyError("repository has no files to work on")
+                            raise
+                        raise _source_file_error("copy", path, error) from error
+                    if not copied:
+                        work.note_skipped(rel, "changed while copying")
+                        continue
+                    if (workspace / relative).stat().st_size > _TEXT_FILE_BYTES:
+                        work.large_files.add(rel)
+                    workspace_fd = os.open(workspace / relative, _READ_FLAGS)
+                    try:
+                        target_info = os.fstat(workspace_fd)
+                        digest = _hash_file(workspace / relative)
+                        signature = copies.file(workspace_fd, parent / relative, target_info)
+                        if _stamp(os.fstat(workspace_fd)) != _stamp(target_info):
+                            raise WorkCopyError(f"workspace file changed during snapshot: {rel}")
+                    finally:
+                        os.close(workspace_fd)
+                    files[rel] = (digest, signature)
+                    work.baseline[rel] = digest
         directory_stamps = {}
         for directory in sorted(directories, reverse=True):
             shutil.copystat(workspace / directory, parent / directory, follow_symlinks=False)
@@ -195,17 +128,15 @@ def admit_workcopy(work: WorkCopy, limits: Limits) -> None:
         if os.path.lexists(work.copy):
             raise WorkCopyError(f"working copy destination already exists: {work.copy}")
         workspace.rename(work.copy)
-    except BaseException as error:
+    except BaseException:
         staging.cleanup()
-        if isinstance(error, OSError) and _is_copy_storage_full(error):
-            raise _copy_storage_error() from error
         raise
     work._admission = _Admission(staging, files, directory_stamps)
 
 
 def pin_parent(work: WorkCopy, destination: Path) -> Path:
     """Publish the immutable admitted parent. The parent rename commits its sidecar."""
-    from .workcopy import WorkCopyError
+    from .workcopy import WorkCopyError, _CopySpace, _raise_disk_full, copy_tree
 
     destination = Path(destination).absolute()
     if os.path.lexists(destination):
@@ -216,13 +147,18 @@ def pin_parent(work: WorkCopy, destination: Path) -> Path:
     admission = work._admission
     if admission is None:
         # A caller may use the same interface for a legacy workcopy.
-        shutil.copytree(work.copy, destination, symlinks=False)
+        try:
+            copy_tree(work.copy, destination, work._copies, space=_CopySpace(destination))
+        except OSError as error:
+            _raise_disk_full(work.original, destination, 1024 * 1024, (destination, work.copy), error)
+            raise
     else:
         assert isinstance(admission, _Admission)
         stage = Path(admission.staging.name)
         parent = stage / "parent"
         manifest = destination.parent / _MANIFEST
         manifest_stage = stage / _MANIFEST
+        published = False
         payload = {
             "version": 1, "name": destination.name,
             "directories": sorted(admission.directories.items()),
@@ -231,19 +167,18 @@ def pin_parent(work: WorkCopy, destination: Path) -> Path:
         try:
             payload["digest"] = _digest(payload)
             encoded = json.dumps(payload, separators=(",", ":")).encode()
-            publish_manifest = len(encoded) <= _MAX_MANIFEST_BYTES
-            if publish_manifest:
-                with open(manifest_stage, "xb", opener=_private_file) as stream:
-                    stream.write(encoded)
-                if os.path.lexists(manifest):
-                    raise WorkCopyError(f"parent snapshot manifest already exists: {manifest}")
-                manifest_stage.rename(manifest)
-            try:
-                parent.rename(destination)
-            except OSError:
-                if publish_manifest:
-                    manifest.unlink()
-                raise
+            with open(manifest_stage, "xb", opener=_private_file) as stream:
+                stream.write(encoded)
+            if os.path.lexists(manifest):
+                raise WorkCopyError(f"parent snapshot manifest already exists: {manifest}")
+            manifest_stage.rename(manifest)
+            published = True
+            parent.rename(destination)
+        except OSError as error:
+            if published:
+                manifest.unlink(missing_ok=True)
+            _raise_disk_full(work.original, destination, 1024 * 1024, (destination, work.copy), error)
+            raise
         finally:
             admission.staging.cleanup()
             work._admission = None
@@ -272,9 +207,9 @@ def _parent_manifest(parent: Path) -> dict[str, tuple[str, _Stamp]] | None:
             info = os.fstat(fd)
             if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
                     or info.st_mode & 0o077 or info.st_nlink != 1
-                    or not 0 < info.st_size <= _MAX_MANIFEST_BYTES):
+                    or info.st_size <= 0):
                 return None
-            data = stream.read(_MAX_MANIFEST_BYTES + 1)
+            data = stream.read()
             if len(data) != info.st_size or _stamp(os.fstat(fd)) != _stamp(info):
                 return None
             payload = json.loads(data)
@@ -382,7 +317,7 @@ def _inventory(root: Path) -> dict[str, _Stamp]:
                 path = prefix + entry.name
                 info = entry.stat(follow_symlinks=False)
                 result[path] = _stamp(info)
-                if info.st_dev != device or len(result) > _MAX_ENTRIES:
+                if info.st_dev != device:
                     raise OSError("worker inventory exceeds observation scope")
                 if stat.S_ISDIR(info.st_mode):
                     pending.append((entry.path, path + "/"))

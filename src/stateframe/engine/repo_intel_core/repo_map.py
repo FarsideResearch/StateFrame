@@ -172,14 +172,16 @@ def _fallback_extract_sigs(source: str, ext: str) -> list[str]:
     PY_STARTS = ("def ", "async def ", "class ")
     TS_STARTS = ("export ", "function ", "class ", "interface ", "type ", "const ", "async function ")
 
+    if ext == ".py":
+        starts = PY_STARTS
+    elif ext in (".ts", ".tsx", ".js", ".jsx"):
+        starts = TS_STARTS
+    else:
+        return sigs
     for line in source.splitlines():
         stripped = line.strip()
-        if ext == ".py":
-            if any(stripped.startswith(k) for k in PY_STARTS):
-                sigs.append(stripped[:_MAX_SIG_CHARS])
-        elif ext in (".ts", ".tsx", ".js", ".jsx") and any(
-            stripped.startswith(k) for k in TS_STARTS
-        ):
+        # One tuple match per line: large repos scan millions of lines here.
+        if stripped.startswith(starts):
             sigs.append(stripped[:_MAX_SIG_CHARS])
         if len(sigs) >= _MAX_SIGS_PER_FILE:
             break

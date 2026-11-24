@@ -330,7 +330,7 @@ def scope_typed_state_for_unit(
             if key in raw_verdict
         }
     verdict.setdefault("schema", "stateframe-framefit4-last-verdict/1")
-    verdict["line"] = "Unit-local check state is recorded in this frame."
+    verdict["line"] = "Subframe-local check state is recorded in this frame."
 
     contract: dict[str, object] = {
         key: copy.deepcopy(raw_contract[key])

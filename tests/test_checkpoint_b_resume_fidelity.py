@@ -229,12 +229,13 @@ def _script_document(example: str) -> dict[str, object]:
 
 
 def _command(example: str, repo: Path, run_dir: Path, url: str,
-             launcher: Path, profile: Path) -> list[str]:
+             launcher: Path, profile: Path, *, shell: str = "off",
+             task: str | None = None) -> list[str]:
     return [
         sys.executable, str(launcher), "run", "--repo", str(repo),
-        "--task", f"Complete the bundled {example} example and run its checks.",
+        "--task", task or f"Complete the bundled {example} example and run its checks.",
         "--endpoint", url, "--model", "scripted", "--run-dir", str(run_dir),
-        "--test-python", sys.executable, "--max-turns", "32", "--shell", "off",
+        "--test-python", sys.executable, "--max-turns", "32", "--shell", shell,
         "--keep-checkpoints", "--profile", str(profile), "--quiet",
     ]
 
@@ -387,11 +388,13 @@ def _run_interrupted(example: str, repo: Path, run_dir: Path, launcher: Path,
                      restore_hook: Path | None = None,
                      expect_unfaithful_restore: bool = False,
                      completed_actions: int = COMPLETED_ACTIONS,
-                     checkpoint_sends: int | None = None) -> InterruptedRun:
+                     checkpoint_sends: int | None = None,
+                     script_document: dict[str, object] | None = None,
+                     shell: str = "off", task: str | None = None) -> InterruptedRun:
     if checkpoint_sends is None:
         checkpoint_sends = completed_actions
     next_request = f"{completed_actions + 1:04d}.request.json"
-    script = PauseAfterActions(_script_document(example), completed_actions)
+    script = PauseAfterActions(script_document or _script_document(example), completed_actions)
     server = serve(script)
     url = f"http://127.0.0.1:{server.server_port}/v1"
     process: subprocess.Popen[str] | None = None
@@ -401,7 +404,8 @@ def _run_interrupted(example: str, repo: Path, run_dir: Path, launcher: Path,
     try:
         home.mkdir(parents=True, exist_ok=True)
         process = subprocess.Popen(
-            _command(example, repo, run_dir, url, launcher, profile),
+            _command(example, repo, run_dir, url, launcher, profile,
+                     shell=shell, task=task),
             env=_environment(home), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
         _wait_for_pause(script.waiting, process, 360, "first attempt")
@@ -585,6 +589,42 @@ def test_checkpoint_b_resume_matches_uninterrupted_control(
         f"control_raw_sha256={_digest(control.next_request)} "
         f"canonical_sha256={_digest(_canonical_request(outcome.resumed_request))}"
     )
+
+
+@pytest.mark.host_sandbox
+def test_checkpoint_resume_restores_a_20_mib_workspace_file(tmp_path: Path) -> None:
+    example = EXAMPLES[0]
+    folder = tmp_path / "large-workspace-checkpoint"
+    folder.mkdir()
+    repo = folder / "repo"
+    shutil.copytree(ROOT / "examples" / example, repo)
+    size = 20 << 20
+    expected = hashlib.sha256()
+    zeroes = bytes(1 << 20)
+    for _ in range(20):
+        expected.update(zeroes)
+    launcher = _write_launcher(folder / "fixed-seed.py")
+    profile = _write_profile(folder / "checkpoint-profile.json")
+    run = folder / "run"
+    script = _script_document(example)
+    script["steps"] = [
+        {"tool": "shell", "required": True,
+         "arguments": {"command": "dd if=/dev/zero of=shop/catalog.bin bs=1048576 count=20 status=none"}},
+        {"tool": "done", "required": True,
+         "arguments": {"summary": "The large workspace file persisted through resume."}},
+    ]
+
+    _run_interrupted(example, repo, run, launcher, profile, folder / "home",
+                     script_document=script, shell="standard",
+                     task="Create shop/catalog.bin as a 20 MiB file and preserve it through resume.")
+
+    restored = run / "workspace" / "shop" / "catalog.bin"
+    actual = hashlib.sha256()
+    with restored.open("rb") as source:
+        while data := source.read(1 << 20):
+            actual.update(data)
+    assert restored.stat().st_size == size
+    assert actual.hexdigest() == expected.hexdigest()
 
 
 @pytest.mark.host_sandbox

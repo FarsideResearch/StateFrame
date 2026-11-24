@@ -3,7 +3,7 @@
 Diagram: [ARCHITECTURE.md](../../ARCHITECTURE.md#request-lifecycle).
 
 1. **`stateframe run`** (`stateframe/cli.py` -> `stateframe/runner.py`) checks the interpreter, probes the endpoint (the model must be served, the slot must hold 65,536 tokens), chooses the test interpreter, and creates the run directory (default `~/.stateframe/runs/<repo>-<time>`).
-2. **Working copy.** `stateframe/workcopy.py` copies your repository into the run directory. Your original is only written with `--in-place`, and only after checks pass.
+2. **Working copy.** `stateframe/workcopy.py` reflinks your repository into the run directory when supported and otherwise streams copies in 1 MiB blocks. Files over 1 MiB stay in the workspace and are hashed, but are left out of task text. Your original is only written with `--in-place`, and only after checks pass.
 3. **Task row.** `stateframe/task_row.py` turns the working copy and your task into the engine's task description: the files, the starting file hint, the check files.
 4. **Before checks.** Your checks run once on the copy to record the starting point (`stateframe/outer_checks.py`, sandboxed, with your project's Python).
 5. **Engine child.** `stateframe/_child.py` starts the engine in its own process with the run's spec (`spec.json`: profile switches, model, endpoint, limits).
@@ -14,7 +14,7 @@ Diagram: [ARCHITECTURE.md](../../ARCHITECTURE.md#request-lifecycle).
    - it sends a sealed request body and records its bytes under `wire/`; a recognized provider context-limit rejection can refit the request and retry once within the same deadline;
    - it admits the tool against the current menu and its host-issued capability, then runs commands in the configured sandbox and network mode;
    - when mutations are enabled, `mutate` runs a one-shot unit in its dedicated sandbox. The typed mutation frame and fixed tool schema are absent when the level is `off`. The host records the observation and any authorized effect through the mutation journal and tool tape;
-   - for shell, job, Git, web and custom calls it records a tool-tape intent and completion for replay. Native file operations follow the edit replay path. Authorized workspace effects become receipts, invalidate stale reads and checks, and appear in the next frame. Executable-bit changes and other unauthorized effects are restored. Reconciliation refuses to promote effects if its 16 MiB per-file, 256 MiB aggregate or 20,000-entry bound is exceeded. Job state is snapshotted once for the request.
+   - for shell, job, Git, web and custom calls it records a tool-tape intent and completion for replay. Native file operations follow the edit replay path. Authorized workspace effects become receipts, invalidate stale reads and checks, and appear in the next frame. Executable-bit changes and other unauthorized effects are restored. Workspace hashing, capture, and restoration stream in 1 MiB chunks with no per-file, entry-count, or aggregate-byte cutoff; an operating-system error fails reconciliation rather than accepting a partial scan. Job state is snapshotted once for the request.
 7. **Done.** When the model calls `done`, the engine checks the result and stores it as the final candidate.
 8. **After checks.** StateFrame runs your checks again on that stored candidate, prints the diff and an outcome line, and with `--in-place` applies it to your repository.
 9. **Inspect.** `stateframe inspect <run-dir>` reads `wire/NNNN.request.json`, so what you see is what the model saw.

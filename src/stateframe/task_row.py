@@ -24,6 +24,10 @@ TEXT_SUFFIXES = {
     ".py", ".pyi", ".txt", ".md", ".rst", ".toml", ".cfg", ".ini", ".json", ".yaml", ".yml",
     ".csv", ".sql", ".html", ".css", ".js", ".ts", ".sh", ".in",
 }
+GENERIC_SUFFIXES = {
+    ".jsx", ".tsx", ".mjs", ".cjs", ".mts", ".cts", ".go", ".rs",
+    ".c", ".h", ".cc", ".cpp", ".hpp",
+}
 TASK_PATH = re.compile(r"(?<![\w./-])(?:(?:[\w.-]+/)+[\w.-]*|[\w.-]+\.[\w-]+)")
 TASK_ACTION = re.compile(r"\b(build|creat(?:e|ing)|write|produce|save|generate|add|read|load|use)\b",
                          re.IGNORECASE)
@@ -63,9 +67,14 @@ def discover_checks(files: dict[str, str], *, repo: Path | None = None) -> list[
     return list(discover_pytest_paths(files, repo=repo))
 
 
-def _text_files(work: WorkCopy) -> dict[str, str]:
+def _text_files(work: WorkCopy, suffixes: set[str], names: set[str],
+                chosen: set[str]) -> dict[str, str]:
+    def wanted(path: str) -> bool:
+        return Path(path).suffix in suffixes or Path(path).name in names
+
     try:
-        return work.text_files()
+        return {path: text for path, text in work.text_files(wanted, chosen.__contains__).items()
+                if wanted(path)}
     except WorkCopyError as error:
         raise TaskRowError(f"cannot prepare repository text: {error}") from error
 
@@ -310,6 +319,19 @@ def repo_relative(path: str) -> str:
     return normal
 
 
+def editable_large_files(work: WorkCopy, row: dict[str, object]) -> set[str]:
+    """Large text files a row without an edit scope lets the run change, though it does not inline them."""
+    if row.get("scoped_edits") or row.get("scope_source") == "discovery" or row.get("task_file_scope"):
+        return set()
+    generic = row.get("runner_kind") == "generic"
+    suffixes = TEXT_SUFFIXES | GENERIC_SUFFIXES if generic else TEXT_SUFFIXES
+    test_roots = ("tests/", "test/", "__tests__/") if generic else ("tests/",)
+    closed = {*(row.get("public_tests") or ()), *(row.get("protected_test_paths") or ())}
+    return {path for path in work.large_files
+            if Path(path).suffix in suffixes and path not in closed
+            and not is_test_file(path) and not path.startswith(test_roots)}
+
+
 def build_row(work: WorkCopy, *, task: str, checks: list[str] | None = None,
               target: str | None = None, task_id: str | None = None,
               edit_paths: list[str] | None = None, runner_kind: str = "pytest",
@@ -330,8 +352,11 @@ def build_row(work: WorkCopy, *, task: str, checks: list[str] | None = None,
     missing = [path for path in declared_checks if path not in work.baseline]
     if missing:
         raise TaskRowError("check file(s) not found in the repository: " + ", ".join(missing))
-    texts = {path: text for path, text in _text_files(work).items()
-             if Path(path).suffix in TEXT_SUFFIXES or Path(path).name in {"Makefile", "setup.py"}}
+    parsed_scope = _parse_task_scope(task)
+    chosen = {*declared_checks, *(path.strip() for path in edit_paths or ()), *(parsed_scope.paths or ()),
+              *((target.strip(),) if target else ()),
+              *(path for path in work.large_files if is_test_file(path))}
+    texts = _text_files(work, TEXT_SUFFIXES, {"Makefile", "setup.py"}, chosen)
     if not declared_checks:
         raise TaskRowError("no test files found; pass --check <path> for at least one pytest file")
     unreadable = [path for path in declared_checks if path not in texts]
@@ -369,7 +394,6 @@ def build_row(work: WorkCopy, *, task: str, checks: list[str] | None = None,
         steering = {path: texts[path] for path in sorted(steered) if path in texts}
     # Scoped rows declare only the scope's files editable; the whole repository is still in the
     # sandbox as context. Other tests stay in the repository copy, not the row.
-    parsed_scope = _parse_task_scope(task)
     product, scoped, scope_source = _resolve_edit_scope(
         task, all_product, target=target, edits=edits, steering=steering,
         parsed_scope=parsed_scope)
@@ -443,11 +467,10 @@ def _build_generic_row(work: WorkCopy, *, task: str, checks: list[str] | None,
     if not task.strip():
         raise TaskRowError("--task is empty")
     patterns = validate_patterns(list(protected_test_globs))
-    texts = {path: text for path, text in _text_files(work).items()
-             if Path(path).suffix in TEXT_SUFFIXES | {
-                 ".jsx", ".tsx", ".mjs", ".cjs", ".mts", ".cts", ".go", ".rs",
-                 ".c", ".h", ".cc", ".cpp", ".hpp",
-             } or Path(path).name in {"Makefile", "makefile", "GNUmakefile", "Cargo.toml"}}
+    parsed_scope = _parse_task_scope(task)
+    chosen = {repo_relative(path) for path in (*(checks or ()), *(edit_paths or ()), *((target,) if target else ()))}
+    chosen.update(parsed_scope.paths or ())
+    texts = _text_files(work, TEXT_SUFFIXES | GENERIC_SUFFIXES, {"Makefile", "makefile", "GNUmakefile", "Cargo.toml"}, chosen)
     declared = [repo_relative(path) for path in checks or []]
     missing = [path for path in declared if path not in work.baseline]
     if missing:
@@ -484,7 +507,6 @@ def _build_generic_row(work: WorkCopy, *, task: str, checks: list[str] | None,
     if not edits and not selected_target and len(product) > DECLARE_ALL_LIMIT:
         steered = set(declared) | set(judging_test_paths(tuple(test_files), test_command, ()))
         steering = {path: texts[path] for path in sorted(steered) if path in texts}
-    parsed_scope = _parse_task_scope(task)
     product, scoped, scope_source = _resolve_edit_scope(
         task, product, target=selected_target, edits=edits, steering=steering,
         parsed_scope=parsed_scope)

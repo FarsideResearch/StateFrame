@@ -33,8 +33,6 @@ _DISTRIBUTED_STATUS = re.compile(
 _NODE = re.compile(r"^\S+?\.py::.+$", re.MULTILINE)
 MAX_TEST_FILES = 400
 MAX_NODES = 20000
-MAX_FILE_BYTES = 16 * 1024 * 1024
-MAX_SOURCE_BYTES = 256 * 1024 * 1024
 _IDENTITY_SKIP_DIRS = frozenset({
     ".git", ".hg", ".svn", "__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache",
 })
@@ -42,6 +40,18 @@ _IDENTITY_SKIP_DIRS = frozenset({
 
 def _identity_walk_error(error: OSError) -> None:
     raise error
+
+
+def _file_digest(path: Path) -> str:
+    with path.open("rb") as source:
+        before, digest = os.fstat(source.fileno()), hashlib.sha256()
+        while block := source.read(1 << 20):
+            digest.update(block)
+        after = os.fstat(source.fileno())
+    if before.st_size != after.st_size or (before.st_mtime_ns, before.st_ctime_ns) != (
+            after.st_mtime_ns, after.st_ctime_ns):
+        raise ValueError(f"unit gate source changed while hashing: {path}")
+    return digest.hexdigest()
 
 
 def _artifact_paths(root: Path, runtime: object) -> set[str]:
@@ -64,7 +74,7 @@ def _artifact_paths(root: Path, runtime: object) -> set[str]:
 
 
 def source_identity(root: Path, *, exclude: Sequence[str] = (), runtime: object = None) -> str:
-    """Bounded workspace input identity, excluding only owned products/artifacts.
+    """Workspace input identity, excluding only owned products/artifacts.
 
     Constants-only modules, dotfiles and binary/data inputs all influence tests.
     Unknown input types must not fall outside the freshness boundary. Prune
@@ -74,14 +84,9 @@ def source_identity(root: Path, *, exclude: Sequence[str] = (), runtime: object 
     excluded = set(exclude)
     artifacts = _artifact_paths(root, runtime)
     sources: list[tuple[str, str]] = []
-    total_bytes = 0
-    entries = 0
     for directory, dirs, names in os.walk(root, onerror=_identity_walk_error):
         dirs[:] = sorted(name for name in dirs if name not in _IDENTITY_SKIP_DIRS
                          and (Path(directory) / name).relative_to(root).as_posix() not in artifacts)
-        entries += len(dirs) + len(names)
-        if entries > 20000:
-            raise ValueError("unit gate source identity exceeds entry bound")
         # os.walk does not follow directory symlinks. Silently omitting one
         # would certify an input tree that the tests can still import/read.
         if any((Path(directory) / name).is_symlink() for name in dirs):
@@ -95,14 +100,7 @@ def source_identity(root: Path, *, exclude: Sequence[str] = (), runtime: object 
                 raise ValueError("unit gate source escapes workspace")
             if not path.is_file():
                 raise ValueError("unit gate source identity cannot verify special file")
-            if path.stat().st_size > MAX_FILE_BYTES:
-                raise ValueError("unit gate source identity exceeds byte bound")
-            with path.open("rb") as stream:
-                data = stream.read(MAX_FILE_BYTES + 1)
-            total_bytes += len(data)
-            if len(data) > MAX_FILE_BYTES or total_bytes > MAX_SOURCE_BYTES:
-                raise ValueError("unit gate source identity exceeds byte bound")
-            sources.append((rel, hashlib.sha256(data).hexdigest()))
+            sources.append((rel, _file_digest(path)))
     # Old checkpoints may have discarded a red before retaining these same
     # bytes. A new authority namespace expires both accumulated node evidence
     # and completed passes even when the workspace itself did not change.
@@ -127,13 +125,7 @@ def pass_snapshot(unit, root: Path, evidence, test_sources: str) -> tuple[str, s
         if not source.resolve().is_relative_to(root.resolve()):
             raise ValueError("unit gate product escapes workspace")
         if source.is_file():
-            if source.stat().st_size > MAX_FILE_BYTES:
-                raise ValueError("unit gate product exceeds byte bound")
-            with source.open("rb") as stream:
-                data = stream.read(MAX_FILE_BYTES + 1)
-            if len(data) > MAX_FILE_BYTES:
-                raise ValueError("unit gate product exceeds byte bound")
-            files.append((path, hashlib.sha256(data).hexdigest()))
+            files.append((path, _file_digest(source)))
         else:
             files.append((path, None))
     product = hashlib.sha256(json.dumps(files, separators=(",", ":")).encode()).hexdigest()
@@ -184,7 +176,7 @@ def collection_command(command: Sequence[str], targets: Sequence[str], root: Pat
             count += 1
             if count > MAX_TEST_FILES:
                 raise ValueError("unit gate collection exceeds test-file bound")
-            if not path.resolve().is_relative_to(root.resolve()) or path.stat().st_size > MAX_FILE_BYTES:
+            if not path.resolve().is_relative_to(root.resolve()):
                 raise ValueError("unit gate test source exceeds workspace bounds")
             source = path.read_text(encoding="utf-8")
             if not any(re.search(r"\bdef\s+" + re.escape(name) + r"\s*\(", source) for name in names):

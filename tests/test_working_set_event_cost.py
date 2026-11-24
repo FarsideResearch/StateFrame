@@ -125,6 +125,30 @@ def test_small_read_persists_one_journal_event_per_world_observation(tmp_path):
                      if row["kind"] == "world_knowledge_event") == world.events
 
 
+def test_retained_archive_capacity_diagnostic_is_emitted_once_after_saturation():
+    from types import SimpleNamespace
+
+    from detreason.source_archive import SourceArchive
+    from kernel_retained_context import RetainedContext
+
+    retained = RetainedContext.__new__(RetainedContext)
+    retained.archive = SourceArchive("saturated", max_revisions=1)
+    retained.context_scope = None
+    retained._context_scope_error = None
+    retained._archive_capacity_exhausted = False
+    events = []
+    retained.journal = SimpleNamespace(emit=lambda kind, **fields: events.append((kind, fields)))
+
+    assert retained.observe_source("one.py", b"first", "read@1") is not None
+    assert retained.observe_source("two.py", b"second", "read@2") is None
+    assert retained.observe_source("three.py", b"third", "read@3") is None
+    # Bytes the full archive already holds are still observed.
+    assert retained.observe_source("one.py", b"first", "read@4") is not None
+    capacity_errors = [fields for kind, fields in events
+                       if kind == "retained_context_error" and fields.get("capacity_exhausted")]
+    assert len(capacity_errors) == 1
+
+
 def test_large_read_persists_complete_world_observations_in_durable_batches(tmp_path, monkeypatch):
     import os
 

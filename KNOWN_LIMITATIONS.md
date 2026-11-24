@@ -156,7 +156,7 @@ Large tasks or repositories can require more state and source context than fits.
 - A source-read sub-task with no turns left whose read fails ends the run `CONTINUATION_BLOCKED` and names the read instead of retrying.
 - Custom command definitions require a finite positive timeout no greater than 600 seconds; larger values fail at load.
 - Executable-bit changes are refused and restored, including creation of executable files. Shell deletion of an executable is refused; `file_delete` supports intentional removal, while `file_move` refuses executable sources. The sealed candidate does not carry executable-mode changes.
-- Workspace reconciliation stops without promoting command effects when any regular file exceeds 16 MiB, aggregate regular-file bytes exceed 256 MiB, or the tree exceeds 20,000 entries. These bounds also apply before execution when the snapshot is captured.
+- A change to a pytest configuration file over 16 MiB is refused. Otherwise workspace reconciliation has no limit on file size, entry count or total bytes.
 - The shipped product profile uses the composed loop. The plain loop accepts foreground shell but refuses background jobs and Git, web or custom tool settings before execution. Lean mode is not supported by the product profile.
 
 ## Parallel subframes
@@ -356,7 +356,7 @@ There is no step limit by default either. Pass `--max-turns N` to stop after N m
 - A rebuilt unanswered in-flight request that differs from its record writes `resume-divergence.json` and continues live; a changed completed request refuses replay before its recorded response is used. A tool-tape mismatch, incomplete operation or external operation without `--replay-external` instead refuses resume. On an earlier preview engine we saw request divergence from hash-seed-dependent ordering (fixed in this release) and from journal event-id drift (fixed in later engines).
 - Resume needs the same StateFrame version that started the run, and the same model name (or `--model` with the name the server now lists). It refuses a run made by another version, a run that already submitted its result, and a run whose records were changed or damaged.
 - Resuming across an upgrade is refused; finish or restart the run.
-- Resume keeps the run's original `--max-turns`: passing a different value is refused, except for a run that stopped at its step limit.
+- Resume keeps the run's original `--max-turns`: passing a different value is refused, except for a run that stopped at its step limit. A run that stopped early for another reason also keeps its limit; start a fresh run to use a different one.
 - A run that stopped at its step limit resumes only with a larger `--max-turns`, and then restarts live from request 1: the step limit is part of the first request, so neither the checkpoint nor the recorded requests can be reused. `stateframe resume` prints a WARNING when this happens.
 - A chat task stopped with Ctrl-C can be resumed with `stateframe resume <its run directory>`; the chat session itself does not pick the result up automatically.
 - Checkpoint restore is used only when you resume with the same `--max-turns`, endpoint and model name. Changing the endpoint or `--model` (for a renamed server model) resumes by replay; changing `--max-turns` restarts the run live from request 1 (see above).
@@ -365,6 +365,9 @@ There is no step limit by default either. Pass `--max-turns N` to stop after N m
 - Checkpoints are tied to the engine build and Python version that wrote them. Resume needs the engine release that started the run (see above), so after an upgrade finish the run on the old release or restart it.
 - Loading a checkpoint runs code that was saved with it. Only checkpoints signed with your own install key, owned by you and not writable by others are loaded. Treat a run directory like source code: do not resume one you got from someone else.
 - After a checkpoint resume, the time the run spent stopped does not count against an engine time budget; the engine's clock continues from the checkpoint.
+- Symbolic links in the repository, to files or directories, are not part of the working copy. A check that reads through one fails in the run. Skipped file links are listed at start.
+- A file over 1 MiB that keeps changing while the start copy is made is left out and listed as skipped. A smaller one refuses the start.
+- A run killed while its start copy is being written cannot be resumed. Start it again with a new run directory.
 - Checkpoint saving needs APFS clones or a POSIX fork; where neither works it saves more slowly or not at all, and resume replays.
 
 ## Repository search

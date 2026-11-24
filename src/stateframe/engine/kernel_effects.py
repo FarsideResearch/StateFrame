@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import fcntl
 import hashlib
 import json
 import os
@@ -16,8 +17,27 @@ from typing import BinaryIO, Callable, Iterable, Iterator, Literal, Mapping, Pro
 
 DISCOVERY_SCOPE_REFUSAL = "discovery scope is empty; no source path is admitted for writing"
 MAX_FILE_BYTES = 16 << 20
-MAX_WORKSPACE_BYTES = 256 << 20
-MAX_WORKSPACE_ENTRIES = 20000
+_FICLONE = 0x40049409
+_CLONE_UNSUPPORTED = {errno.EXDEV, errno.EINVAL, errno.ENOSYS, errno.ENOTTY, errno.EOPNOTSUPP}
+
+
+def _file_identity(info: os.stat_result) -> tuple[int, ...]:
+    # Links and their times may change while a shared object is read; its content does not.
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns)
+
+
+def _verify_fd(fd: int, digest: str) -> os.stat_result:
+    before = os.fstat(fd)
+    if not stat.S_ISREG(before.st_mode):
+        raise EffectError("invalid CAS file type")
+    actual, total = hashlib.sha256(), 0
+    while block := os.read(fd, 1 << 20):
+        total += len(block)
+        actual.update(block)
+    if total != before.st_size or actual.hexdigest() != digest or _file_identity(os.fstat(fd)) != _file_identity(before):
+        raise EffectError(f"CAS object {digest} is corrupt")
+    os.lseek(fd, 0, os.SEEK_SET)
+    return before
 
 
 class EffectError(RuntimeError):
@@ -89,18 +109,27 @@ class ContentStore:
         """Verify an existing CAS object with bounded memory and no link following."""
         fd = os.open(self._path(digest), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         try:
-            info = os.fstat(fd)
-            if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_FILE_BYTES:
-                raise EffectError("invalid CAS file type or size")
-            actual = hashlib.sha256()
-            total = 0
-            while block := os.read(fd, 1 << 20):
-                total += len(block)
-                if total > MAX_FILE_BYTES:
-                    raise EffectError("CAS file exceeds per-file byte limit")
-                actual.update(block)
-            if total != info.st_size or actual.hexdigest() != digest:
-                raise EffectError(f"CAS object {digest} is corrupt")
+            _verify_fd(fd, digest)
+        finally:
+            os.close(fd)
+
+    def copy_to(self, digest: str, output: BinaryIO) -> None:
+        fd = os.open(self._path(digest), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            before = _verify_fd(fd, digest)
+            try:
+                fcntl.ioctl(output.fileno(), _FICLONE, fd)
+                output.flush()
+            except (AttributeError, OSError) as error:
+                if isinstance(error, OSError) and error.errno is not None and error.errno not in _CLONE_UNSUPPORTED:
+                    raise
+                output.seek(0)
+                output.truncate()
+                while block := os.read(fd, 1 << 20):
+                    if output.write(block) != len(block):
+                        raise OSError("short copy to restored file")
+            if _file_identity(os.fstat(fd)) != _file_identity(before):
+                raise EffectError(f"CAS object {digest} changed while copying")
         finally:
             os.close(fd)
 
@@ -235,6 +264,26 @@ class BaselineStore:
             raise EffectError(f"rollback baseline object {digest} is corrupt")
         return data
 
+    def copy_to(self, digest: str, output: BinaryIO) -> None:
+        if self._index is None:
+            self._index = self._read_index()
+        if self._index is None or digest not in self._index:
+            ContentStore(self._directory).copy_to(digest, output)
+            return
+        offset, length, _ = self._index[digest]
+        with _open_baseline_file(self._root / "objects.pack") as pack:
+            pack.seek(offset)
+            remaining, actual = length, hashlib.sha256()
+            while remaining:
+                block = pack.read(min(1 << 20, remaining))
+                if not block:
+                    raise EffectError(f"rollback baseline object {digest} is corrupt")
+                remaining -= len(block)
+                actual.update(block)
+                output.write(block)
+        if actual.hexdigest() != digest:
+            raise EffectError(f"rollback baseline object {digest} is corrupt")
+
 
 @contextmanager
 def _open_baseline_file(path: Path) -> Iterator[BinaryIO]:
@@ -260,7 +309,7 @@ def _sync_baseline_directory(path: Path) -> None:
         os.close(fd)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Entry:
     kind: Literal["file", "symlink", "dir", "other"]
     mode: int
@@ -299,14 +348,16 @@ def _stream_source(
     """
     digest = hashlib.sha256()
     total = 0
+    before = os.fstat(fd)
     while block := os.read(fd, 1 << 20):
         total += len(block)
-        if total > entry.size or total > MAX_FILE_BYTES:
+        if total > entry.size:
             raise EffectError(f"workspace grew while capturing {relative}")
         digest.update(block)
         if output is not None:
             output.write(block)
-    if total != entry.size or digest.hexdigest() != entry.digest:
+    if (total != entry.size or digest.hexdigest() != entry.digest
+            or _file_identity(os.fstat(fd)) != _file_identity(before)):
         raise EffectError(f"workspace changed while capturing {relative}")
 
 
@@ -331,14 +382,9 @@ def _read_file(path: Path) -> bytes:
 
 
 def _validate_manifest_limits(manifest: Manifest) -> None:
-    if len(manifest) > MAX_WORKSPACE_ENTRIES:
-        raise EffectError("workspace exceeds entry-count limit")
-    sizes = [entry.size for entry in manifest.values() if entry.kind == "file"]
-    if (
-        any(size < 0 or size > MAX_FILE_BYTES for size in sizes)
-        or sum(sizes) > MAX_WORKSPACE_BYTES
-    ):
-        raise EffectError("workspace exceeds per-file or aggregate byte limit")
+    if any(entry.kind == "file" and entry.size < 0
+           for entry in manifest.values()):
+        raise EffectError("workspace file has an invalid size")
 
 
 def scan(workspace: Path, *, exclude: Callable[[str], bool]) -> Manifest:
@@ -347,27 +393,14 @@ def scan(workspace: Path, *, exclude: Callable[[str], bool]) -> Manifest:
     if not stat.S_ISDIR(os.lstat(root).st_mode):
         raise EffectError(f"workspace is not a directory: {root}")
     result: dict[str, Entry] = {}
-    total_bytes = 0
 
     def visit(directory: Path) -> None:
-        nonlocal total_bytes
         with os.scandir(directory) as children:
             for child in children:
                 relative = (directory / child.name).relative_to(root).as_posix()
                 if exclude(relative):
                     continue
-                if len(result) >= MAX_WORKSPACE_ENTRIES:
-                    raise EffectError("workspace exceeds entry-count limit")
                 info = child.stat(follow_symlinks=False)
-                if stat.S_ISREG(info.st_mode):
-                    total_bytes += info.st_size
-                    if (
-                        info.st_size > MAX_FILE_BYTES
-                        or total_bytes > MAX_WORKSPACE_BYTES
-                    ):
-                        raise EffectError(
-                            "workspace exceeds per-file or aggregate byte limit"
-                        )
                 mode = stat.S_IMODE(info.st_mode)
                 if stat.S_ISDIR(info.st_mode):
                     result[relative] = Entry("dir", mode, None, 0)
@@ -384,20 +417,18 @@ def scan(workspace: Path, *, exclude: Callable[[str], bool]) -> Manifest:
                     fd = os.open(child.path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
                     try:
                         opened = os.fstat(fd)
-                        if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+                        if _file_identity(opened) != _file_identity(info):
                             raise EffectError(
                                 f"workspace changed while scanning {relative}"
                             )
                         consumed = 0
-                        with os.fdopen(fd, "rb", closefd=False) as source:
-                            while block := source.read(1024 * 1024):
-                                consumed += len(block)
-                                if consumed > info.st_size or consumed > MAX_FILE_BYTES:
-                                    raise EffectError(
-                                        f"workspace grew while scanning {relative}"
-                                    )
-                                digest.update(block)
-                        if consumed != info.st_size:
+                        while block := os.read(fd, 1 << 20):
+                            consumed += len(block)
+                            if consumed > info.st_size:
+                                raise EffectError(f"workspace grew while scanning {relative}")
+                            digest.update(block)
+                        if (consumed != info.st_size
+                                or _file_identity(os.fstat(fd)) != _file_identity(opened)):
                             raise EffectError(
                                 f"workspace changed while scanning {relative}"
                             )
@@ -448,6 +479,7 @@ def diff(before: Manifest, after: Manifest) -> list[Effect]:
 
 class EffectReader(Protocol):
     def get(self, digest: str) -> bytes: ...
+    def copy_to(self, digest: str, output: BinaryIO) -> None: ...
 
 
 class EffectPolicy(Protocol):
@@ -750,17 +782,22 @@ def _restore(
     entry = baseline if use_baseline and baseline is not None else old
     if entry.digest is None:
         raise EffectError(f"baseline file has no digest: {relative}")
-    data = source.get(entry.digest)
+    copy_to = getattr(source, "copy_to", None)
+    stream = copy_to is not None and entry.size > MAX_FILE_BYTES
+    data = b"" if stream else source.get(entry.digest)
     target.parent.mkdir(parents=True, exist_ok=True)
-    if target.is_symlink() or (target.exists() and target.is_dir()):
-        _remove(target)
     fd, temporary = tempfile.mkstemp(prefix=".effect-", dir=target.parent)
     try:
         with os.fdopen(fd, "wb") as output:
-            output.write(data)
+            if stream:
+                copy_to(entry.digest, output)
+            else:
+                output.write(data)
             output.flush()
             os.fsync(output.fileno())
         os.chmod(temporary, entry.mode)
+        if target.is_symlink() or (target.exists() and target.is_dir()):
+            _remove(target)
         os.replace(temporary, target)
     finally:
         if os.path.exists(temporary):
@@ -828,11 +865,14 @@ def reconcile_effects(
                 and (effect.after is None or effect.after.kind == "file")
                 and PurePosixPath(effect.path).name in {
                     "pytest.ini", "tox.ini", "setup.cfg", "pyproject.toml"}):
-            original = store.get(effect.before.digest).decode("utf-8", errors="replace")
-            current = ((Path(workspace) / effect.path).read_text(
-                encoding="utf-8", errors="replace") if effect.after is not None else "")
-            if reason := policy.collection_guard(effect.path, False, original, current):
-                decision = False, reason
+            if effect.before.size > MAX_FILE_BYTES or effect.after and effect.after.size > MAX_FILE_BYTES:
+                decision = False, "large test configuration changes are not allowed"
+            else:
+                original = store.get(effect.before.digest).decode("utf-8", errors="replace")
+                current = ((Path(workspace) / effect.path).read_text(
+                    encoding="utf-8", errors="replace") if effect.after is not None else "")
+                if reason := policy.collection_guard(effect.path, False, original, current):
+                    decision = False, reason
         decisions.append((effect, *decision))
     # A rename to a name that is restored must not lose its source.
     lost = {effect.after.digest for effect, allowed, reason in decisions
@@ -850,7 +890,9 @@ def reconcile_effects(
     # A new directory is structural authority, not a product-file extension.
     # Keep it when an admitted descendant needs it, but never override protection.
     if isinstance(policy, WorkspaceEffectPolicy):
-        admitted = {effect.path for effect, allowed, _ in decisions if allowed}
+        admitted_parents = {
+            str(parent) for effect, allowed, _ in decisions if allowed
+            for parent in PurePosixPath(effect.path).parents}
         decisions = [
             (effect, True, "parent of authorized effect")
             if (
@@ -859,7 +901,7 @@ def reconcile_effects(
                 and effect.after is not None
                 and effect.after.kind == "dir"
                 and not policy.protected(effect.path)
-                and any(path.startswith(effect.path + "/") for path in admitted)
+                and effect.path in admitted_parents
             )
             else (effect, allowed, reason)
             for effect, allowed, reason in decisions
@@ -870,6 +912,7 @@ def reconcile_effects(
     # would discard authorized siblings of a denied child.
     denied_paths = {effect.path for effect, _ in denied}
     roots = []
+    root_paths = set()
     for effect, _ in sorted(
         denied, key=lambda item: (item[0].path.count("/"), item[0].path)
     ):
@@ -882,10 +925,11 @@ def reconcile_effects(
                 and (ancestor not in after or after[ancestor].kind != "dir")
             ):
                 candidate = str(parent)
-        if candidate not in roots and not any(
-            candidate.startswith(parent + "/") for parent in roots
+        if candidate not in root_paths and not any(
+            str(parent) in root_paths for parent in PurePosixPath(candidate).parents
         ):
             roots.append(candidate)
+            root_paths.add(candidate)
     failures = []
     failure_details = []
     if roots:

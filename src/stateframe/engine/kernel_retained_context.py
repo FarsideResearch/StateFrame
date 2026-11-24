@@ -137,6 +137,7 @@ class RetainedContext:
         self.owner, self.journal = owner, journal
         self.context_scope = scope
         self._context_scope_error = None
+        self._archive_capacity_exhausted = False
         if self.context_scope is not None:
             from kernel_context_scope import ContextScopeError
             self._context_scope_error = ContextScopeError
@@ -196,9 +197,17 @@ class RetainedContext:
         except SourceArchiveCapacityError as error:
             # Audit 2026-10-05 #2: a full archive is journaled, never fatal
             # Report retained-context failures without treating them as task success.
+            if self._archive_capacity_exhausted:
+                return None  # reported once; bytes the archive already holds are still observed
             self.journal.emit('retained_context_error', operation='retain',
                               error_type=type(error).__name__, capacity_exhausted=True,
                               path=path, bytes=len(content) if isinstance(content, bytes) else None)
+            archive = self.archive
+            self._archive_capacity_exhausted = (
+                len(archive.revisions) >= archive.max_revisions
+                or len(archive.seen_events) >= archive.max_events
+                or archive.used_bytes >= archive.max_bytes
+            )
             return None
         except NonProductSourceError as error:
             self.journal.emit('retained_context_error', operation='retain',
