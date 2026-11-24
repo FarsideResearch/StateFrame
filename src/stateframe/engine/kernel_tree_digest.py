@@ -40,7 +40,7 @@ def path_entry(path: Path, relative: str, reader: Callable[[Path], bytes] | None
         return unreadable_entry(relative)
 
 
-def compatible_revision(domain: str, rows: Sequence[tuple[str, bytes | None, str]]) -> str:
+def compatible_revision(domain: str, rows: Iterable[tuple[str, bytes | None, str]]) -> str:
     """Revision for sites whose value reaches model-visible text (request bytes).
 
     ``rows`` are (path, content, kind) in the site's own order, kind one of "file",
@@ -55,22 +55,49 @@ def compatible_revision(domain: str, rows: Sequence[tuple[str, bytes | None, str
     """
     if not domain or "/" not in domain:
         raise ValueError("tree digest domain must include a version")
-    if not rows:
+    legacy = hashlib.sha256()
+    typed = hashlib.sha256()
+    typed.update(b'\0{"entries":[')
+    safe = True
+    first = True
+    for path, content, kind in rows:
+        if not first:
+            typed.update(b",")
+        first = False
+        if (kind != "file" or not path or "\0" in path or content is None
+                or any(0xD800 <= ord(character) <= 0xDFFF for character in path)):
+            safe = False
+        else:
+            legacy.update(path.encode("utf-8") + b"\0")
+        if kind == "file" and content is not None:
+            file_hash = hashlib.sha256()
+            chunks = (content,) if isinstance(content, (bytes, bytearray, memoryview)) else content
+            has_nul = False
+            entry = None
+            try:
+                for chunk in chunks:
+                    file_hash.update(chunk)
+                    has_nul = has_nul or b"\0" in chunk
+                    legacy.update(chunk)
+            except OSError:  # the file could not be read to its end
+                safe = False
+                entry = unreadable_entry(path)
+            if has_nul:
+                safe = False
+            entry = entry or ["file", path, file_hash.hexdigest()]
+        else:
+            entry = (symlink_entry(path, os.fsdecode(content))
+                     if kind == "symlink" and content is not None
+                     else missing_entry(path) if kind == "missing"
+                     else unreadable_entry(path))
+        typed.update(json.dumps(entry, sort_keys=True, separators=(",", ":"),
+                                 ensure_ascii=True).encode("ascii"))
+    if first:
         return hashlib.sha256().hexdigest()
-    if all(kind == "file" and path and "\0" not in path and content is not None
-           and not any(0xD800 <= ord(character) <= 0xDFFF for character in path)
-           and b"\0" not in content
-           for path, content, kind in rows):
-        digest = hashlib.sha256()
-        for path, content, _kind in rows:
-            digest.update(path.encode("utf-8") + b"\0")
-            digest.update(content)
-        return digest.hexdigest()
-    entries = [file_entry(path, content) if kind == "file" and content is not None
-               else symlink_entry(path, os.fsdecode(content)) if kind == "symlink" and content is not None
-               else missing_entry(path) if kind == "missing" else unreadable_entry(path)
-               for path, content, kind in rows]
-    return _typed_compatible_revision(domain, entries)
+    typed.update(b'],"format":')
+    typed.update(json.dumps(domain, ensure_ascii=True, separators=(",", ":")).encode("ascii"))
+    typed.update(b"}")
+    return legacy.hexdigest() if safe else typed.hexdigest()
 
 
 def _typed_compatible_revision(domain: str, entries: Sequence[Sequence[str]]) -> str:

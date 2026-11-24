@@ -35,6 +35,7 @@ import os
 import pickle
 import random
 import re
+import signal
 import shutil
 import stat
 import sys
@@ -44,11 +45,14 @@ import time
 import types
 import weakref
 import zlib
+from collections.abc import Callable
 from pathlib import Path
 
 if __package__:
+    from .kernel_reason_log import emit_reason as _emit_reason
     from .kernel_secret_scan import SecretScanner
 else:
+    from kernel_reason_log import emit_reason as _emit_reason
     from kernel_secret_scan import SecretScanner
 
 SCHEMA = "stateframe-engine-checkpoint/1"
@@ -310,6 +314,12 @@ DROP_GLOBALS = {
         "rebuildable text of large receipts; never persisted",
     ("kernel_fl_checkpoint_capture", "_API"):
         "lazy import holder of checkpoint helper classes; re-created on first use",
+    ("kernel_checkpoint", "_LAST_WRITER_OUTCOME"):
+        "checkpoint writer completion belongs to this child process, not a restored attempt",
+    ("engine.kernel_checkpoint", "_LAST_WRITER_OUTCOME"):
+        "checkpoint writer completion belongs to this child process, not a restored attempt",
+    ("stateframe.engine.kernel_checkpoint", "_LAST_WRITER_OUTCOME"):
+        "checkpoint writer completion belongs to this child process, not a restored attempt",
     ("repo_intel_core.lsp_resolve", "_PROJECTS"):
         "jedi project cache holding a live jedi subprocess; rebuilt on demand from the files",
     ("kernel_request_auth_identity", "_AUTH_BINDING_SECRET_CACHE"):
@@ -753,6 +763,7 @@ def _check_snapshot_file(path: Path, *, digest_hint: str | None = None,
             tail = _check_registered_secrets(
                 block, tail, final=False, failure_type=_StateFileSecretError)
             digest.update(block)
+            _writer_progress()
         _check_registered_secrets(b"", tail, failure_type=_StateFileSecretError)
         after = os.fstat(descriptor)
         if (after.st_size, after.st_mtime_ns, after.st_ctime_ns) != (
@@ -2280,6 +2291,7 @@ class _StateWriter:
         self.digest.update(chunk)
         self.count += len(chunk)
         self._write_stored(self.compressor.compress(chunk))
+        _writer_progress()
         return len(chunk)
 
     def finish(self) -> None:
@@ -2401,6 +2413,7 @@ _STATE = {"saved": 0, "failed": 0, "restored_step": None, "disabled": None, "las
           "child": None, "child_tmp": None, "child_journal_offset": None,
           "child_journal_file_id": None, "child_journal_missing": False,
           "consecutive_failed": 0, "low_disk": False}
+_LAST_WRITER_OUTCOME: dict[str, object] | None = None
 # Warn once after repeated failures; save attempts are gated by new model sends.
 FAILURE_WARNING_THRESHOLD = 3
 
@@ -2421,7 +2434,17 @@ def _warn_once(key: str, text: str) -> None:
     warned = _STATE.setdefault("warned", set())
     if key not in warned:
         warned.add(key)
-        print(f"checkpoint: WARNING {text}", file=sys.stderr, flush=True)
+        warning = f"checkpoint: WARNING {text}"
+        try:
+            try:
+                fd = sys.stderr.fileno()
+            except (AttributeError, io.UnsupportedOperation):
+                print(warning, file=sys.stderr, flush=True)
+            else:
+                # Avoid leaving an unflushable warning in Python's stderr buffer.
+                os.write(fd, (warning + "\n").encode("ascii", "backslashreplace"))
+        except (OSError, ValueError):
+            pass
 
 
 def _keep() -> int:
@@ -2488,6 +2511,7 @@ def _pool_identity(path: Path) -> tuple[int, str]:
     with path.open("rb") as stream:
         for block in iter(lambda: stream.read(1 << 20), b""):
             digest.update(block)
+            _writer_progress()
     return info.st_size, digest.hexdigest()
 
 
@@ -3393,6 +3417,7 @@ def _prune_objects(root: Path) -> None:
 
         live: dict[str, tuple[int, int, int, int]] = {}
         for name in names:
+            _writer_progress()
             match = _OBJECT_NAME.fullmatch(name)
             if match is None:
                 continue
@@ -3441,6 +3466,7 @@ def _fsync_dir(path: Path) -> None:
         else:
             from kernel_turn_publication import sync_directory
         sync_directory(path)
+        _writer_progress()
         return
     try:
         fd = os.open(str(path), os.O_RDONLY)
@@ -3452,6 +3478,7 @@ def _fsync_dir(path: Path) -> None:
         pass
     finally:
         os.close(fd)
+    _writer_progress()
 
 
 def _fsync_file(path: Path) -> None:
@@ -3460,6 +3487,7 @@ def _fsync_file(path: Path) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
+    _writer_progress()
 
 
 def _fsync_snapshot(root: Path, new_pool_files: list[Path],
@@ -3566,8 +3594,9 @@ def _publish_staged_artifacts(root: Path, tmp: Path) -> None:
             if not stat.S_ISREG(source.lstat().st_mode):
                 raise CheckpointError("checkpoint artifact staging contains a non-file")
             relative = source.relative_to(staged_root).as_posix()
-            target = _artifact_path(root, relative)
+            _artifact_path(root, relative)
             staged_files.append((relative, source))
+            _writer_progress()
     staged_files.sort()
     owned: list[str] = []
     real_root = _real_path(root)
@@ -3575,6 +3604,7 @@ def _publish_staged_artifacts(root: Path, tmp: Path) -> None:
         target = _artifact_path(root, relative)
         if not _path_within(_real_path(target.parent), real_root):
             raise CheckpointError("checkpoint artifact target is outside its store")
+        _writer_progress()
         try:
             target_info = target.lstat()
         except FileNotFoundError:
@@ -3632,6 +3662,7 @@ def _publish_staged_artifacts(root: Path, tmp: Path) -> None:
                     raise
             _record(root.parent, event="link_fallback", target=relative)
         published_dirs.add(target.parent)
+        _writer_progress()
 
     for directory in published_dirs:
         _fsync_dir(directory)
@@ -3722,7 +3753,7 @@ def _checkpoint_artifact_references(root: Path) -> set[str] | None:
 
 
 def _cleanup_checkpoint_transaction(root: Path, tmp: Path) -> None:
-    """Remove only transaction-owned artifacts that no complete checkpoint references."""
+    """Remove transaction artifacts and safely prune unreferenced store objects."""
     marker = tmp / ARTIFACT_TRANSACTION_FILE
     try:
         document = json.loads(marker.read_text())
@@ -3755,6 +3786,15 @@ def _cleanup_checkpoint_transaction(root: Path, tmp: Path) -> None:
         _POOL_KNOWN.clear()
         _VERIFIED_POOL_IDENTITIES.clear()
         shutil.rmtree(tmp, ignore_errors=True)
+        try:
+            _prune_objects(root)
+        except Exception:
+            _emit_reason(
+                "fallback", "checkpoint_object_prune_failed", "kernel_checkpoint",
+                "checkpoint object pruning failed",
+                "transaction cleanup continued without object pruning",
+                level="WARN", journal=False,
+            )
 
 
 def _record(run_dir: Path, **fields) -> None:
@@ -3769,6 +3809,13 @@ def _record(run_dir: Path, **fields) -> None:
 
 ASYNC_ENV = "STATEFRAME_CHECKPOINT_ASYNC"
 CHILD_TIMEOUT_S = 600
+_WRITER_WATCHDOG = False  # armed only in the forked writer; this module is excluded from snapshots
+
+
+def _writer_progress() -> None:
+    """Renew the writer's inactivity alarm after it completes a unit of work."""
+    if _WRITER_WATCHDOG:
+        signal.alarm(CHILD_TIMEOUT_S)
 
 
 def _async_enabled() -> bool:
@@ -3843,6 +3890,25 @@ def save(frame, step: int, run_dir: Path, *, background: bool = False) -> Path:
         fcntl.flock(lock, fcntl.LOCK_EX)
         # The writer inherits this lock across fork; its publication and GC finish before
         # another process can inspect or change the pool or LATEST.
+        try:
+            leftovers = list(os.scandir(root))
+        except OSError:
+            leftovers = []
+        child_tmp = _STATE.get("child_tmp")
+        for entry in leftovers:
+            parts = entry.name[1:].split("-", 1) if entry.name.startswith(".") else []
+            if (len(parts) != 2 or not parts[0].isdigit()
+                    or parts[1] != f"{os.getpid()}.tmp"):
+                continue
+            candidate = Path(entry.path)
+            if child_tmp is not None and candidate == Path(child_tmp):
+                continue
+            try:
+                info = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if stat.S_ISDIR(info.st_mode):
+                _cleanup_checkpoint_transaction(root, candidate)
         final = root / f"{step:04d}-{os.getpid()}"
         tmp = root / f".{step:04d}-{os.getpid()}.tmp"
         if tmp.exists():
@@ -3854,7 +3920,6 @@ def save(frame, step: int, run_dir: Path, *, background: bool = False) -> Path:
         except BaseException:
             if _STATE.get("child_tmp") != tmp:
                 _cleanup_checkpoint_transaction(root, tmp)
-                _prune_objects(root)  # a refused save leaves no run-file bytes behind
             raise
         finally:
             _SAVE.clear()
@@ -4162,6 +4227,7 @@ def _save_into(payload, ctx, step, run_dir, root, final, tmp, clocks, started, c
         meta["signature"] = _signature(meta, meta["state_sha256"])
         with os.fdopen(os.open(tmp / META_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as stream:
             stream.write(json.dumps(meta, indent=1, sort_keys=True))
+        _writer_progress()
         _fsync_snapshot(tmp, new_pool_files, durable_inodes)
         if (root / CACHE_DIR).is_dir():
             _fsync_dir(root / CACHE_DIR)
@@ -4236,16 +4302,40 @@ def _low_disk_space(run_dir: Path) -> tuple[int, int] | None:
     return (free, floor) if free < floor else None
 
 
-def _reap() -> bool:
+def _reap(*, stop: bool = False) -> bool:
     """True when no background writer is running (reaps a finished one)."""
+    global _LAST_WRITER_OUTCOME
     pid = _STATE.get("child")
     if not pid:
         return True
-    try:
-        done, status = os.waitpid(pid, os.WNOHANG)
-    except ChildProcessError:
-        done, status = pid, 0
+    while True:
+        try:
+            done, status = os.waitpid(pid, os.WNOHANG)
+            break
+        except OSError as error:
+            if isinstance(error, InterruptedError) or error.errno == errno.EINTR:
+                continue
+            if not isinstance(error, ChildProcessError) and error.errno != errno.ECHILD:
+                raise
+            # Without a wait status the writer cannot be assumed to have succeeded.
+            done, status = pid, None
+            break
     if done == 0:
+        if stop:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            else:
+                if __package__:
+                    from .kernel_reason_log import emit_kill
+                else:
+                    from kernel_reason_log import emit_kill
+                emit_kill(
+                    "kernel_checkpoint", target="checkpoint writer", pid=pid,
+                    why="run was stopped while the last checkpoint was still being written",
+                    level="WARN", journal=False,
+                )
         return False
     _STATE["child"] = None
     tmp, _STATE["child_tmp"] = _STATE.get("child_tmp"), None
@@ -4256,22 +4346,56 @@ def _reap() -> bool:
     journal_offset, _STATE["child_journal_offset"] = _STATE.get("child_journal_offset"), None
     journal_file_id, _STATE["child_journal_file_id"] = _STATE.get("child_journal_file_id"), None
     journal_missing, _STATE["child_journal_missing"] = _STATE.get("child_journal_missing"), False
-    if os.waitstatus_to_exitcode(status) != 0:
-        if tmp is not None:
-            with (tmp.parent / ".checkpoint.lock").open("a+b") as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX)
-                _cleanup_checkpoint_transaction(tmp.parent, tmp)
-                _prune_objects(tmp.parent)  # a refused save leaves no run-file bytes behind
-            _sweep_stale(tmp.parent)
-        _SCANS.clear()  # the writer may have failed on a stale scan: rescan at the next boundary
+    try:
+        exit_code = os.waitstatus_to_exitcode(status) if status is not None else None
+    except (TypeError, ValueError):
+        exit_code = None
+    reason = None
+    if exit_code != 0:
         reason = _writer_failure_reason(
-            run_dir, step, writer_generation, pid, journal_offset,
-            journal_file_id, journal_missing=journal_missing,
+            run_dir, step, writer_generation, pid, journal_offset, journal_file_id,
+            journal_missing=journal_missing,
         )
+    outcome = {"step": step, "outcome": "saved" if exit_code == 0 else "failed",
+               "exit_code": exit_code}
+    if reason is not None:
+        outcome["reason"] = reason
+    _LAST_WRITER_OUTCOME = outcome
+    _record(
+        run_dir, event="checkpoint_writer_finished", step=step, background=True,
+        outcome=outcome["outcome"], exit_code=exit_code, failure_reason=reason,
+    )
+    if reason is not None:
+        if tmp is not None:
+            try:
+                with (tmp.parent / ".checkpoint.lock").open("a+b") as lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    _cleanup_checkpoint_transaction(tmp.parent, tmp)
+                _sweep_stale(tmp.parent)
+            except OSError:
+                # A lock holder owns the temporary for now; the next save/start sweeps it.
+                pass
+        _SCANS.clear()  # the writer may have failed on a stale scan: rescan at the next boundary
         _note_failure(run_dir, reason)
     else:
         _STATE["consecutive_failed"] = 0
     return True
+
+
+def finish_background_writer(
+        *, stop_requested: Callable[[], bool] | None = None,
+) -> dict[str, object] | None:
+    """Wait for and reap the final writer; repeated calls return the same outcome."""
+    stop_sent = False
+    while _STATE.get("child"):
+        stop = not stop_sent and stop_requested is not None and stop_requested()
+        if _reap(stop=stop):
+            break
+        stop_sent |= stop
+        # Poll so a stop handler can latch the request without interrupting waitpid.
+        time.sleep(0.02)
+    outcome = _LAST_WRITER_OUTCOME
+    return dict(outcome) if isinstance(outcome, dict) else None
 
 
 def _writer_journal_start(run_dir: Path) -> tuple[int, tuple[int, int] | None, bool]:
@@ -4417,52 +4541,67 @@ def _pid_alive(pid: int) -> bool:
 
 def _fork_writer(run_dir: Path, step: int, final: Path, write, tmp: Path,
                  *, diagnostic_payload=None) -> None:
+    global _LAST_WRITER_OUTCOME, _WRITER_WATCHDOG
     sys.stdout.flush()
     sys.stderr.flush()
     journal_offset, journal_file_id, journal_missing = _writer_journal_start(run_dir)
     writer_generation = f"{step}:{journal_offset}"
     forked = time.perf_counter()
-    pid = os.fork()
-    if pid == 0:  # the writer: pickle this frozen image, write, and leave without any cleanup
+    # A group stop must not run the engine's inherited SIGTERM handler in the
+    # child between fork and the writer's installation of its own disposition.
+    prior_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+    pid = None
+    try:
+        pid = os.fork()
+        if pid != 0:
+            _STATE["child"], _STATE["child_tmp"], _STATE["child_run_dir"] = pid, tmp, run_dir
+            _STATE["child_step"] = step
+            _STATE["child_writer_generation"] = writer_generation
+            _STATE["child_journal_offset"] = journal_offset
+            _STATE["child_journal_file_id"] = journal_file_id
+            _STATE["child_journal_missing"] = journal_missing
+            _STATE["fork_seconds"] = round(time.perf_counter() - forked, 3)
+            _LAST_WRITER_OUTCOME = None
+            return
+    finally:
+        if pid != 0:
+            signal.pthread_sigmask(signal.SIG_SETMASK, prior_mask)
+
+    # The writer: pickle this frozen image, write, and leave without any cleanup.
+    code = 1
+    try:
+        signal.signal(signal.SIGALRM, signal.SIG_DFL)
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        _WRITER_WATCHDOG = True
+        _writer_progress()
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGALRM, signal.SIGTERM})
         if __package__:
             from .kernel_exec_session import close_owner_pipe_writers_after_fork
         else:
             from kernel_exec_session import close_owner_pipe_writers_after_fork
         close_owner_pipe_writers_after_fork()
-        code = 1
-        try:
-            import signal
-            signal.signal(signal.SIGALRM, signal.SIG_DFL)
-            signal.alarm(CHILD_TIMEOUT_S)
-            started = time.perf_counter()
-            meta = write()
-            _record(run_dir, event="checkpoint_saved", step=step, dir=final.name, background=True,
-                    writer_generation=writer_generation, writer_pid=os.getpid(),
-                    seconds=round(time.perf_counter() - started, 3), sends=meta["sends"],
-                    state_bytes=meta["state_bytes"], chunks=len(meta["chunks"]))
-            code = 0
-        except BaseException as error:  # noqa: BLE001 - recorded, then exit
-            _cleanup_checkpoint_transaction(tmp.parent, tmp)
-            _prune_objects(tmp.parent)  # a refused save leaves no run-file bytes behind
-            reason = _failure_reason(error)
-            if (diagnostic_payload is not None and not _serialization_failure_fields(error)
-                    and (isinstance(error, pickle.PicklingError)
-                         or type(error) in {TypeError, AttributeError, RecursionError})):
-                _mark_serialization_failure(error, diagnostic_payload)
-            diagnostics = _serialization_failure_fields(error)
-            _record(run_dir, event="checkpoint_failed", step=step, background=True,
-                    error=reason, failure_reason=reason, writer_error_type=_safe_error_type(error),
-                    writer_generation=writer_generation, writer_pid=os.getpid(), **diagnostics)
-            _log_serialization_failure(diagnostics)
-        finally:
-            os._exit(code)
-    _STATE["child"], _STATE["child_tmp"], _STATE["child_run_dir"] = pid, tmp, run_dir
-    _STATE["child_step"] = step
-    _STATE["child_writer_generation"] = writer_generation
-    _STATE["child_journal_offset"] = journal_offset
-    _STATE["child_journal_file_id"] = journal_file_id
-    _STATE["child_journal_missing"] = journal_missing
-    _STATE["fork_seconds"] = round(time.perf_counter() - forked, 3)
+        started = time.perf_counter()
+        meta = write()
+        _writer_progress()
+        _record(run_dir, event="checkpoint_saved", step=step, dir=final.name, background=True,
+                writer_generation=writer_generation, writer_pid=os.getpid(),
+                seconds=round(time.perf_counter() - started, 3), sends=meta["sends"],
+                state_bytes=meta["state_bytes"], chunks=len(meta["chunks"]))
+        code = 0
+    except BaseException as error:  # noqa: BLE001 - recorded, then exit
+        _cleanup_checkpoint_transaction(tmp.parent, tmp)
+        reason = _failure_reason(error)
+        if (diagnostic_payload is not None and not _serialization_failure_fields(error)
+                and (isinstance(error, pickle.PicklingError)
+                     or type(error) in {TypeError, AttributeError, RecursionError})):
+            _mark_serialization_failure(error, diagnostic_payload)
+        diagnostics = _serialization_failure_fields(error)
+        _record(run_dir, event="checkpoint_failed", step=step, background=True,
+                error=reason, failure_reason=reason, writer_error_type=_safe_error_type(error),
+                writer_generation=writer_generation, writer_pid=os.getpid(), **diagnostics)
+        _log_serialization_failure(diagnostics)
+    finally:
+        os._exit(code)
 
 
 def _prune_chunks(root: Path, checkpoints: tuple[Path, ...] | None = None) -> None:
@@ -4479,6 +4618,7 @@ def _prune_chunks(root: Path, checkpoints: tuple[Path, ...] | None = None) -> No
     for chunk in folder.iterdir():
         if chunk.suffix in (".pkl", CHUNK_SUFFIX) and chunk.name not in referenced:
             chunk.unlink()
+        _writer_progress()
 
 
 def _checkpoints(root: Path) -> list[Path]:
@@ -4811,6 +4951,7 @@ def _prune_pool(root: Path, run_dir: Path, checkpoints: tuple[Path, ...] | None 
         for entry in os.scandir(store):
             if entry.name not in keep and not os.path.lexists(live / entry.name):
                 os.unlink(entry.path)
+            _writer_progress()
 
 
 def _validate(checkpoint: Path) -> tuple[dict, bytes]:

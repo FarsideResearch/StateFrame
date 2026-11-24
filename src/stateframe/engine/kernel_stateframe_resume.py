@@ -231,7 +231,10 @@ def _green_lock_snapshot(lock: object) -> dict[str, object] | None:
     state: dict[str, object] = {}
     for name in _GREEN_LOCK_FIELDS:
         value = getattr(lock, name, None)
-        if isinstance(value, bytes):
+        snapshot = getattr(value, "checkpoint_snapshot", None)
+        if name == "_starting_product_sources" and callable(snapshot):
+            value = snapshot()
+        elif isinstance(value, bytes):
             value = {"encoding": "hex", "value": value.hex()}
         elif isinstance(value, (set, frozenset, tuple)):
             value = sorted(value) if isinstance(value, (set, frozenset)) else list(value)
@@ -275,8 +278,16 @@ def _restore_green_lock(lock: object, expected: Mapping[str, object]) -> None:
                 raise ResumeError("green-lock fingerprint is malformed") from error
         if name in {"_refused_targets", "_overridden_targets"}:
             value = set(value) if isinstance(value, list) else value
-        elif name in {"_starting_product_files", "_starting_product_sources"}:
+        elif name == "_starting_product_files":
             value = dict(value) if isinstance(value, Mapping) else value
+        elif (name == "_starting_product_sources" and isinstance(value, Mapping)
+              and value.get("schema") == "stateframe-starting-product-sources/1"):
+            from kernel_green_lock import _StartingProductSources
+            value = _StartingProductSources.restore(value, getattr(lock, "runtime", None))
+            setattr(lock, name, value)
+            continue
+        elif name == "_starting_product_sources" and type(value) is dict:
+            value = dict(value)
         setattr(lock, name, copy.deepcopy(value))
 
 

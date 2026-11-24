@@ -190,6 +190,26 @@ def test_prune_objects_keeps_linked_and_drops_orphans_and_temporaries(tmp_path):
     assert sorted(p.name for p in objects.iterdir()) == [kept.name]
 
 
+@posix_only
+def test_prune_objects_preserves_data_when_descriptor_stat_is_unsupported(
+        tmp_path, monkeypatch):
+    root = tmp_path / "checkpoints"
+    objects = root / checkpoint.OBJECT_DIR
+    objects.mkdir(parents=True)
+    orphan = objects / ("a" * 64 + "-600")
+    orphan.write_text("leave untouched when safe pruning is unavailable")
+    original_stat = os.stat
+
+    def unsupported_descriptor_stat(path, *args, **kwargs):
+        if kwargs.get("dir_fd") is not None:
+            raise NotImplementedError("descriptor-relative stat is unavailable")
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(checkpoint.os, "stat", unsupported_descriptor_stat)
+    checkpoint._prune_objects(root)
+    assert orphan.read_text() == "leave untouched when safe pruning is unavailable"
+
+
 def test_save_point_saves_at_most_once_per_send(tmp_path, monkeypatch):
     run = tmp_path / "run"
     run.mkdir()

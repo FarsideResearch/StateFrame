@@ -256,6 +256,7 @@ def check_sandbox_exec_denial(python: str, timeout: float = 60.0) -> str | None:
 def isolated_command(command: list[str], root: Path, env: dict[str, str], *,
                      readonly_workspace: bool = False,
                      generic_check: bool = False,
+                     check_tool_root: str | None = None,
                      nproc_budget: int | None = None,
                      selected_python: str | None = None,
                      read_grants_out: list[SandboxReadGrants] | None = None,
@@ -399,6 +400,17 @@ def isolated_command(command: list[str], root: Path, env: dict[str, str], *,
     ca_roots, ca_mounts = _public_ca_mount_roots()
     prefixes ={str(Path(sys.prefix).resolve()), str(Path(sys.base_prefix).resolve())}
     prefixes.update(map(str, ca_mounts))
+    if check_tool_root and generic_check and not container:
+        # The root recorded when the run was prepared for the user's own test command. Every
+        # rule is checked again here, and a different answer mounts nothing.
+        if __package__:
+            from .kernel_check_tool_root import find_tool_root, sandbox_path
+        else:
+            from kernel_check_tool_root import find_tool_root, sandbox_path
+        tool_root, _refusal = find_tool_root(command[0], clean.get("PATH", ""), root)
+        if tool_root is not None and tool_root.root == check_tool_root:
+            prefixes.add(tool_root.root)
+            clean["PATH"] = sandbox_path(clean["PATH"], tool_root)
     if selected != Path(sys.executable):
         prefixes.update((str(selected), str(resolved_selected)))
         prefixes.update(interpreter_roots)

@@ -311,9 +311,8 @@ def test_success_row_carries_deterministic_identity_and_child_pid(tmp_path: Path
         )
         writer_pid = kernel_checkpoint._STATE["child"]
         assert writer_pid is not None
-        done, status = os.waitpid(writer_pid, 0)
-        assert done == writer_pid and os.waitstatus_to_exitcode(status) == 0
-        assert kernel_checkpoint._reap()
+        outcome = kernel_checkpoint.finish_background_writer()
+        assert outcome is not None and outcome["outcome"] == "saved" and outcome["exit_code"] == 0
         saved_rows = map(json.loads, reversed(journal.read_text().splitlines()))
         saved = next(row for row in saved_rows if row.get("event") == "checkpoint_saved")
         assert saved["writer_generation"] == f"{step}:{offset}"
@@ -350,9 +349,8 @@ def test_unwritable_events_journal_does_not_prevent_checkpoint_save(tmp_path: Pa
         kernel_checkpoint._fork_writer(run, 3, final, write_checkpoint, temporary)
         writer_pid = kernel_checkpoint._STATE["child"]
         assert writer_pid is not None
-        done, status = os.waitpid(writer_pid, 0)
-        assert done == writer_pid and os.waitstatus_to_exitcode(status) == 0
-        assert kernel_checkpoint._reap()
+        outcome = kernel_checkpoint.finish_background_writer()
+        assert outcome is not None and outcome["outcome"] == "saved" and outcome["exit_code"] == 0
         assert (final / "state.pkl").read_bytes() == b"saved"
     finally:
         child = kernel_checkpoint._STATE.get("child")

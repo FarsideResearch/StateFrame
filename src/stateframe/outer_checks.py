@@ -134,7 +134,8 @@ def run(command: str, cwd: Path, *, python: str, timeout_s: float | None = None,
         check_settings: dict[str, str] | None = None,
         required_test_ledger: bool = False,
         protected_test_hashes: dict[str, str] | None = None,
-        execution_boundary: dict[str, object] | None = None) -> dict[str, object]:
+        execution_boundary: dict[str, object] | None = None,
+        check_tool_root: str | None = None) -> dict[str, object]:
     """Copy and check with progress supervision and bounded IPC.
 
     ``timeout_s`` selects inactivity, not total lifetime. Only an explicit
@@ -170,6 +171,8 @@ def run(command: str, cwd: Path, *, python: str, timeout_s: float | None = None,
             "runner_kind": runner_kind, "capture_output": capture_output}
     if required_test_ledger:
         spec["required_test_ledger"] = True
+    if check_tool_root:
+        spec["check_tool_root"] = check_tool_root
     from .engine.kernel_safe_paths import container_active
     boundary_record = execution_boundary
     if boundary_record is None and container_active():
@@ -574,7 +577,9 @@ def _helper() -> int:
                                           env=env, timeout=None, check_watchdog=watchdog_config,
                                           cpu_seconds=spec.get("cpu_seconds"),
                                           output_limit=OUTPUT_LIMIT,
-                                          generic_check=spec["runner_kind"] == "generic")
+                                          generic_check=spec["runner_kind"] == "generic",
+                                          **({"check_tool_root": spec["check_tool_root"]}
+                                             if spec.get("check_tool_root") else {}))
             process_cleaned = process_cleaned or (result.process_group_killed and spawned is not None
                                                   and getattr(spawned, "returncode", None) is not None)
             execution_stop = validate_execution_stop(getattr(result, "execution_stop", None))

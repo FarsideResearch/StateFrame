@@ -1525,20 +1525,22 @@ def _compute_tree_revision(root_path: Path, files: Sequence[str]) -> str:
     # The revision reaches tool observations (BatchResult.to_dict), so it uses the
     # request-compatible encoding for all NUL-free regular files; nonregular
     # paths and NUL content need typed boundaries.
-    from kernel_scope_widen_guard import read as guarded_read
-    rows = []
-    for relative in files:
-        try:
-            path = root_path / relative
-            if path.is_symlink():
-                rows.append((relative, os.fsencode(os.readlink(path)), "symlink"))
-            else:
-                rows.append((relative, guarded_read(path), "file"))
-        except FileNotFoundError:
-            rows.append((relative, None, "missing"))
-        except OSError:
-            rows.append((relative, None, "unreadable"))
-    return "sha256:" + compatible_revision(TREE_DIGEST_FORMAT, rows)
+    from kernel_scope_widen_guard import read_chunks as guarded_read_chunks
+
+    def rows():
+        for relative in files:
+            try:
+                path = root_path / relative
+                if path.is_symlink():
+                    yield relative, os.fsencode(os.readlink(path)), "symlink"
+                else:
+                    yield relative, guarded_read_chunks(path), "file"
+            except FileNotFoundError:
+                yield relative, None, "missing"
+            except OSError:
+                yield relative, None, "unreadable"
+
+    return "sha256:" + compatible_revision(TREE_DIGEST_FORMAT, rows())
 
 
 def _emit(journal: object | None, event: str, **fields: object) -> None:

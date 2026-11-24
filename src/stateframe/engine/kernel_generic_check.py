@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -41,6 +42,13 @@ def _protected_state(root: Path, row: Mapping[str, object]) -> dict[str, str | N
     return state
 
 
+def _check_tool_option() -> dict[str, str]:
+    """The host-recorded install root, held outside the row so no rendering can reach it."""
+    tools = sys.modules.get("kernel_check_tool_root")
+    root = tools.recorded_root() if tools is not None else None
+    return {"check_tool_root": root} if root is not None else {}
+
+
 def check_result(root: Path, row: Mapping[str, object]) -> tuple[str, int]:
     """Execute the host-declared argv in the existing sandbox and publish its receipt."""
     raw = row.get("test_command")
@@ -59,7 +67,8 @@ def check_result(root: Path, row: Mapping[str, object]) -> tuple[str, int]:
         result = run_sandboxed(
             command, root, timeout=None, check_watchdog=check_watchdog_config(),
             cpu_seconds=check_cpu_backstop_seconds(),
-            output_limit=OUTPUT_LIMIT, generic_check=True)
+            output_limit=OUTPUT_LIMIT, generic_check=True,
+            **_check_tool_option())
     except (RuntimeError, OSError, ValueError) as error:
         detail = f"check refused: {type(error).__name__}: {error}"
         _record(runtime, binding, command, 127, detail, outcome="ENVIRONMENT")

@@ -3457,16 +3457,20 @@ class StateFrameRuntime:
         self._host_done_facts = None
         self._host_done_facts_claims: dict[str, object] = {}
         self._host_done_facts_gating_items: tuple[str, ...] = ()
+        repair_module = sys.modules.get("probes.react_repair")
+        repositories = getattr(repair_module, "REPOS", {})
+        start_snapshot = repositories.get("build") if isinstance(repositories, Mapping) else None
         if self.stateframe_host_done_facts_mode == "on":
             from kernel_host_done_facts import workspace_snapshot
-            self._host_done_facts_baseline = workspace_snapshot(Path(owner.root))
+            self._host_done_facts_baseline = workspace_snapshot(
+                Path(owner.root), start_snapshot=start_snapshot)
         self._delivery_contract_baseline: Mapping[str, object] = {}
         if self.stateframe_delivery_contract_mode == "on":
             from kernel_host_done_facts import workspace_snapshot
             self._delivery_contract_baseline = (
                 self._host_done_facts_baseline
-                if self._host_done_facts_baseline
-                else workspace_snapshot(Path(owner.root)))
+                if self.stateframe_host_done_facts_mode == "on"
+                else workspace_snapshot(Path(owner.root), start_snapshot=start_snapshot))
         from kernel_frame_continuation import (check_rendering_mode,
                                                 configuration as frame_continuation_configuration)
         self.frame_continuation = frame_continuation_configuration()
@@ -11230,6 +11234,7 @@ class StateFrameRuntime:
             unresolved_gating_items=unresolved_gating_items,
             claims=claims if claims is not None else self._host_done_facts_claims,
             pinned_baseline=_pinned_completion_enabled(),
+            journal=self.journal,
         )
         self._host_done_facts = facts
         self._host_done_facts_claims = copy.deepcopy(dict(facts.claims))

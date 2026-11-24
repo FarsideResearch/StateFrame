@@ -975,6 +975,7 @@ def _prepared(command: Sequence[object], root: Path, env: Mapping[object, object
               internal_env: Mapping[str, object] | None,
               readonly_workspace: bool, nproc: int,
               generic_check: bool = False,
+              check_tool_root: str | None = None,
               isolation_builder: Callable[..., tuple[list[str], dict[str, str]]] = isolated_command,
               read_grants_out: list[SandboxReadGrants] | None = None,
               ) -> tuple[list[str], dict[str, str], CapabilityReport]:
@@ -983,6 +984,8 @@ def _prepared(command: Sequence[object], root: Path, env: Mapping[object, object
     isolation_options = {"readonly_workspace": readonly_workspace}
     if generic_check:
         isolation_options["generic_check"] = True
+    if check_tool_root and platform.system() == "Linux":
+        isolation_options["check_tool_root"] = check_tool_root
     if platform.system() == "Linux":
         isolation_options["nproc_budget"] = int(_limit_value("nproc", nproc, maximum=256))
     if read_grants_out is not None:
@@ -1012,6 +1015,7 @@ def sandboxed_popen(command: Sequence[object], root: str | os.PathLike[str], *,
                     stderr: object = subprocess.PIPE,
                     readonly_workspace: bool = False,
                     generic_check: bool = False,
+                    check_tool_root: str | None = None,
                     pass_fds: Sequence[int] = (),
                     cgroup: Path | None = None,
                     isolation_builder: Callable[..., tuple[list[str], dict[str, str]]] = isolated_command,
@@ -1022,6 +1026,7 @@ def sandboxed_popen(command: Sequence[object], root: str | os.PathLike[str], *,
     command_line, clean, report = _prepared(
         command, contained, env, internal_env, readonly_workspace, nproc,
         generic_check=generic_check,
+        check_tool_root=check_tool_root,
         isolation_builder=isolation_builder,
         read_grants_out=read_grants_out)
     factory = popen_factory or subprocess.Popen
@@ -1537,6 +1542,7 @@ def run_sandboxed(command: Sequence[object], root: str | os.PathLike[str], *,
                   output_limit: int = MAX_OUTPUT_BYTES,
                   readonly_workspace: bool = False,
                   generic_check: bool = False,
+                  check_tool_root: str | None = None,
                   cpu_seconds: float | None | _UnselectedLimit = _UNSELECTED_LIMIT,
                   memory_bytes: int = DEFAULT_MEMORY_BYTES,
                   file_bytes: int = DEFAULT_FILE_BYTES,
@@ -1599,6 +1605,8 @@ def run_sandboxed(command: Sequence[object], root: str | os.PathLike[str], *,
         }
         if generic_check:
             spawn_options["generic_check"] = True
+        if check_tool_root:
+            spawn_options["check_tool_root"] = check_tool_root
         if pass_fds:
             spawn_options["pass_fds"] = pass_fds
         if cgroup is not None:

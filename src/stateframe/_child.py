@@ -180,6 +180,27 @@ def emit_resume_pending_check(spec: dict, resume: dict | None) -> None:
         emit("routes_resume_pending_check_skipped", **check)
 
 
+def _finish_checkpoint_writer(teardown: EngineTeardown | None) -> dict[str, object] | None:
+    """Wait for the checkpoint writer loaded by this child, if checkpointing is available."""
+    if teardown is not None:
+        teardown.finalizing_checkpoint = True
+    module = (sys.modules.get("kernel_checkpoint")
+              or sys.modules.get("engine.kernel_checkpoint")
+              or sys.modules.get("stateframe.engine.kernel_checkpoint"))
+    finish = getattr(module, "finish_background_writer", None)
+    if not callable(finish):
+        return None
+    try:
+        if teardown is None:
+            return finish()
+        return finish(stop_requested=lambda: teardown.deadline is not None)
+    except Exception:  # noqa: BLE001 - a post-reap error must preserve its known outcome
+        outcome = getattr(module, "_LAST_WRITER_OUTCOME", None)
+        if not getattr(module, "_STATE", {}).get("child") and isinstance(outcome, dict):
+            return dict(outcome)
+        raise
+
+
 def _runner_home_identity_pin() -> str | None:
     """Capture inherited authority once, before any run-spec environment is installed.
 
@@ -1401,6 +1422,7 @@ class EngineTeardown:
     def __init__(self) -> None:
         self.deadline: float | None = None
         self.lock: TextIO | None = None
+        self.finalizing_checkpoint = False
 
     def begin(self) -> None:
         if self.deadline is None:
@@ -1833,6 +1855,9 @@ def _main(argv: list[str], lifetime: ExitStack, *, teardown: EngineTeardown | No
     except Exception:  # noqa: BLE001 - repo map AST is optional; the engine falls back to its text scan
         pass
     sys.path.insert(0, str(engine))
+    if "check_tool_root" in spec:
+        from kernel_check_tool_root import record_root
+        record_root(spec["check_tool_root"])
     try:
         import kernel_checkpoint
     except ImportError:
@@ -2165,6 +2190,7 @@ def _main(argv: list[str], lifetime: ExitStack, *, teardown: EngineTeardown | No
                 except (RuntimeError, OSError) as error:
                     emit("engine_error", error="SlotLeaseCleanupFailed", detail=str(error)[:300])
                     result, status = {"result": "ENGINE_ERROR", "error": "SlotLeaseCleanupFailed"}, 1
+        _finish_checkpoint_writer(teardown)
     elapsed = time.monotonic() - started
     atomic_bytes(run / "engine-result.json", json.dumps(
         {"result": result, "seconds": round(elapsed, 3), "exit_status": status},
@@ -2183,11 +2209,20 @@ def _run_cli(argv: list[str]) -> int:
     def terminate(signum, frame):
         if teardown.deadline is None:
             teardown.begin()
-            raise KeyboardInterrupt("engine received SIGTERM")
+            if not teardown.finalizing_checkpoint:
+                raise KeyboardInterrupt("engine received SIGTERM")
 
     signal.signal(signal.SIGTERM, terminate)
-    watch_parent(teardown)
+    def interrupt(signum, frame):
+        if not teardown.finalizing_checkpoint:
+            signal.default_int_handler(signum, frame)
+        teardown.begin()
+
+    if signal.getsignal(signal.SIGINT) is signal.default_int_handler:
+        signal.signal(signal.SIGINT, interrupt)
     try:
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
+        watch_parent(teardown)
         if owns_session:
             _adopt_orphan_workers()
         status = main(argv, teardown=teardown)
