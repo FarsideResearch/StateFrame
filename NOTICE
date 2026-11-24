@@ -7,9 +7,9 @@ Names and logo: neither the AGPL-3.0 license nor the commercial license grants p
 Research or StateFrame names or the Farside logo, except as needed to describe the origin of the software.
 
 Included code:
-- src/stateframe/engine/repo_intel_core/: repository map, code graph and LSP resolve
-  helpers, written by the same author for another of his projects and included here under
-  this product's license.
+- src/stateframe/engine/repo_intel_core/: repository map, code graph and LSP resolve helpers.
+  Parts of call_graph.py and ts_extract.py are adapted from CodeGraph (MIT); two helpers in
+  ts_dispatch.py follow CPython (PSF-2.0). See THIRD_PARTY_LICENSES.md.
 
 Third-party software (full license texts and a version-by-version license check: THIRD_PARTY_LICENSES.md,
 shipped inside the installed stateframe package and in the source package):
