@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.9 (2026-11-24)
 
 - Tests: provider rate-limit tests no longer inherit a leaked parent meter from earlier tests in the same worker.
 
