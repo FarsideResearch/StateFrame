@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.9 (2026-11-24)
+
+- Tests: provider rate-limit tests no longer inherit a leaked parent meter from earlier tests in the same worker.
+
 ## 0.9.8 (2026-11-24)
 
 - Note for 0.9.7: the new tool-call reply parser no longer accepts an uppercase `NAME` attribute.

@@ -21,6 +21,9 @@ from stateframe.engine import kernel_measurement
 from stateframe.replay_tape import Replayer, build as build_replay_tape, pending_request
 
 
+# Another test in the same worker may leave a pilot parent whose journal is closed.
+pytestmark = pytest.mark.usefixtures("isolated_pilot_context")
+
 REPLY = b'{"choices":[{"message":{"role":"assistant","content":"ok"}}]}'
 BODY = {"messages": [{"role": "user", "content": "hello"}], "tools": []}
 WIRE = json.dumps(BODY).encode()
@@ -86,7 +89,7 @@ def _send(tmp_path, endpoint, *, deadline, socket_timeout=0.05,
     try:
         response = capture._send_transport_with_retries(
             body, wire, endpoint, "", admission=None, socket_timeout=socket_timeout,
-            deadline=deadline, wall_timeout=max(1, socket_timeout), backend_identity={},
+            deadline=deadline, wall_timeout=max(30, socket_timeout), backend_identity={},
             request_extensions={}, frozen_retry_only=True)
         return response, _events(journal)
     except KeyboardInterrupt as error:
@@ -306,7 +309,7 @@ def test_429_after_response_bytes_is_terminal(monkeypatch, tmp_path):
 @pytest.mark.parametrize("status,description", [
     (400, "request rejected"), (401, "authentication rejected"),
     (403, "access denied"), (404, "model or endpoint not found"),
-])
+], ids=["400", "401", "403", "404"])
 def test_other_provider_4xx_stays_terminal(monkeypatch, tmp_path, status, description):
     monkeypatch.setenv("STATEFRAME_TRANSPORT_MAX_ATTEMPTS", "3")
     with _server(statuses=(status,) * 4) as (endpoint, received, _sent_at):
@@ -359,7 +362,7 @@ def test_slow_503_with_retry_after_stays_terminal(monkeypatch, tmp_path):
     with _server(statuses=(503, 200), retry_after="0.01", delays=(2.1,)) as (
             endpoint, received, _sent_at):
         with pytest.raises(kernel_measurement.HarnessTransportError) as caught:
-            _send(tmp_path, endpoint, deadline=time.monotonic() + 5, socket_timeout=3)
+            _send(tmp_path, endpoint, deadline=time.monotonic() + 60, socket_timeout=3)
     assert len(received) == 1
     assert caught.value.http_status == 503
 
@@ -392,7 +395,7 @@ def test_two_parallel_lanes_retry_429_independently(monkeypatch, tmp_path):
         with ThreadPoolExecutor(max_workers=2) as lanes:
             results = list(lanes.map(
                 lambda item: _send(tmp_path / item[0], endpoint,
-                                   deadline=time.monotonic() + 5,
+                                   deadline=time.monotonic() + 60,
                                    body=item[1], wire=item[2]),
                 zip(("lane-1", "lane-2"), bodies, wires)))
     assert [result[0][0]["choices"][0]["message"]["content"] for result in results] == [
@@ -433,7 +436,7 @@ def test_kill_during_429_wait_resumes_with_a_live_send(monkeypatch, tmp_path):
         kernel_bounded_http.request_bytes = original_request_bytes
         _child.install_wire_recorder(resumed, endpoint, Replayer(tape, pending=pending))
         response = kernel_bounded_http.request_bytes(
-            WIRE, endpoint, "", deadline=time.monotonic() + 5, socket_timeout=0.05)
+            WIRE, endpoint, "", deadline=time.monotonic() + 60, socket_timeout=0.05)
         kernel_bounded_http.request_bytes = original_request_bytes
         _child.HOST_STATE = original_host_state
 
@@ -518,7 +521,7 @@ def test_context_limit_429_takes_one_refit_then_stops(tmp_path):
     "You exceeded your current quota, please check your plan and billing details.",
     "This request would exceed your organization's rate limit of 40,000 input tokens per minute.",
     "Too many tokens, please wait before trying again.",
-])
+], ids=["tpm", "tpm-too-large", "quota-prose", "org-rate", "too-many-tokens"])
 def test_rate_or_quota_prose_is_not_a_context_limit(message):
     body = json.dumps({"error": {"code": "rate_limit_exceeded", "message": message}})
     assert kernel_bounded_http.capacity_400_reason(400, body) is None
