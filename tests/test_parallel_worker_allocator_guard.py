@@ -17,9 +17,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import subprocess
 import sys
+import time
+import venv
 
 import pytest
 
@@ -28,7 +32,7 @@ sys.path.insert(0, str(_TEST_ROOT / "tests" / "fixtures"))
 sys.path.insert(0, str(_TEST_ROOT / "tests" / "fixtures" / "parallel"))
 
 from barrier_endpoint import BarrierEndpoint
-from e2e_support import create_engine_venv, run_cli, tool_step
+from e2e_support import install_startup_hook, start_cli, tool_step
 
 
 pytestmark = pytest.mark.host_sandbox
@@ -41,6 +45,23 @@ WINDOWS = ((1, 1000), (1001, 2000), (2001, 2100))
 # Scripted reads are cut into chunks that fit one read-tool page without a char clip (a 1,000-line
 # read clips near 11.5K chars and the continuation is then not scripted). Coverage still targets WINDOWS.
 READ_CHUNK_LINES = 500
+_WATCHDOG_SECONDS = 90
+_STARTUP_GATE_SOURCE = """from __future__ import annotations
+import os
+import time
+from pathlib import Path
+
+gate = os.environ.pop("SF_LOADWIRE_FIXTURE_GATE", None)
+if gate:
+    Path(f"{gate}.started").write_text("started", encoding="ascii")
+    deadline = time.monotonic() + 90
+    ready = Path(f"{gate}.ready")
+    while not ready.is_file():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("fixture readiness gate was not released")
+        time.sleep(min(0.01, remaining))
+"""
 
 # Wire header from the read tool (kernel_source_delivery._header). The next line is the
 # "more content" / "complete" line, then the body, whose length is exactly ``chars``.
@@ -56,7 +77,17 @@ _READ_PAGE = re.compile(
 
 @pytest.fixture(scope="session")
 def isolated_engine_python(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    return create_engine_venv(tmp_path_factory.mktemp("allocator-guard-engine") / "venv")
+    destination = tmp_path_factory.mktemp("allocator-guard-engine") / "venv"
+    venv.EnvBuilder(system_site_packages=True).create(destination)
+    python = destination / "bin" / "python"
+    installed = subprocess.run(
+        [str(python), "-I", "-m", "pip", "install", "--disable-pip-version-check",
+         "--no-index", "--no-build-isolation", "--no-deps", "--no-input", "--force-reinstall",
+         str(_TEST_ROOT)],
+        capture_output=True, text=True, timeout=180, check=False,
+    )
+    assert installed.returncode == 0, installed.stdout + installed.stderr
+    return python
 
 
 def _source() -> str:
@@ -161,33 +192,93 @@ def _digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def test_worker_under_inherited_allocator_sends_owned_page_bytes(
-        tmp_path: Path, isolated_engine_python: Path) -> None:
+def _wait_for_file(path: Path, timeout: float) -> bool:
+    """Wait for an observable fixture transition; timeout only guards a stuck child."""
+    deadline = time.monotonic() + timeout
+    while not path.is_file():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.01, remaining))
+    return True
+
+
+def _provision_source_slowly(destination: Path) -> None:
+    """Publish the complete source fixture after engine startup reaches its gate."""
+    temporary = destination.with_name(f".{destination.name}.provisioning")
+    encoded = _source().encode("utf-8")
+    with temporary.open("xb") as output:
+        for offset in range(0, len(encoded), 128):
+            output.write(encoded[offset:offset + 128])
+        output.flush()
+        os.fsync(output.fileno())
+    temporary.replace(destination)
+
+
+def _request_bodies(endpoint: BarrierEndpoint) -> dict[str, tuple[bytes, ...]]:
+    by_marker: dict[str, list[bytes]] = {}
+    for item in endpoint.requests:
+        raw = item.get("raw_request")
+        assert isinstance(raw, bytes), f"endpoint did not retain request bytes for {item['marker']}"
+        by_marker.setdefault(str(item["marker"]), []).append(raw)
+    return {marker: tuple(bodies) for marker, bodies in by_marker.items()}
+
+
+def _run_allocator_case(
+        tmp_path: Path, isolated_engine_python: Path, *, delayed_fixture: bool,
+) -> tuple[dict[str, tuple[bytes, ...]], tuple[tuple[int, int], ...]]:
+    tmp_path.mkdir(parents=True)
     repo = tmp_path / "repo"
     repo.mkdir()
-    (repo / PATH).write_text(_source(), encoding="utf-8")
-    on_disk = (repo / PATH).read_bytes()
-    disk_lines = on_disk.decode("utf-8").splitlines(keepends=True)
-    revision = "sha256:" + hashlib.sha256(on_disk).hexdigest()
+    source_path = repo / PATH
+    if not delayed_fixture:
+        source_path.write_text(_source(), encoding="utf-8")
     run_dir = tmp_path / "run"
+    extra_environment = {"STATEFRAME_WORKING_SET_ALLOCATOR": "on"}
+    if delayed_fixture:
+        gate = tmp_path / "fixture-gate"
+        install_startup_hook(isolated_engine_python, "loadwire_fixture_gate", _STARTUP_GATE_SOURCE)
+        extra_environment["SF_LOADWIRE_FIXTURE_GATE"] = str(gate)
 
     parent = [tool_step("parallel", {"subframes": [_unit()]}),
               tool_step("done", {"summary": "Owned source inspected by one subframe."})]
-    endpoint = BarrierEndpoint(parent, {UNIT: _child_steps()}, slots=2)
+    endpoint = BarrierEndpoint(
+        parent, {UNIT: _child_steps()}, slots=2,
+        hold_subframe_request={UNIT: 1}, hold_parent_request=2,
+        barrier_timeout=_WATCHDOG_SECONDS,
+    )
     with endpoint:
-        completed = run_cli(
-            isolated_engine_python, endpoint.url, repo, run_dir,
-            "Read the owned source with one subframe.", parallel="2",
-            arguments=("--parallel-min-subframes", "1",
-                       "--parallel-max-owned-bytes", "100000"),
-            # Parent-only switch: the worker must pick it up by inheritance, never by a pin.
-            extra_environment={"STATEFRAME_WORKING_SET_ALLOCATOR": "on"}, timeout=600,
-        )
-    assert completed.returncode == 0, completed.stdout + completed.stderr
+        with start_cli(
+                isolated_engine_python, endpoint.url, repo, run_dir,
+                "Read the owned source with one subframe.", parallel="2",
+                arguments=("--parallel-min-subframes", "1",
+                           "--parallel-max-owned-bytes", "100000"),
+                extra_environment=extra_environment,
+        ) as process:
+            if delayed_fixture:
+                started = Path(f"{gate}.started")
+                assert _wait_for_file(started, _WATCHDOG_SECONDS), (
+                    "engine did not reach the fixture readiness gate")
+                _provision_source_slowly(source_path)
+                Path(f"{gate}.ready").write_text("ready", encoding="ascii")
 
-    # Weak sanity only. The worker may send more requests than scripted steps (retries, cursor
-    # continuations), so the exact count is not asserted; the page checks below are the real guard.
-    worker_requests = [item["request"] for item in endpoint.requests if item["marker"] == UNIT]
+            assert endpoint.wait_for_requests(UNIT, timeout=_WATCHDOG_SECONDS), (
+                "worker never reached its first provider request")
+            endpoint.release_subframe(UNIT)
+            assert endpoint.wait_for_requests(UNIT, count=2, timeout=_WATCHDOG_SECONDS), (
+                "worker never sent the read result containing owned source bytes")
+            endpoint.release_parent_request()
+            returncode = process.wait(timeout=600)
+            output = process.stdout_text + process.stderr_text
+
+    assert returncode == 0, output
+    endpoint.assert_consumed()
+
+    on_disk = source_path.read_bytes()
+    disk_lines = on_disk.decode("utf-8").splitlines(keepends=True)
+    revision = "sha256:" + hashlib.sha256(on_disk).hexdigest()
+    worker_records = [item for item in endpoint.requests if item["marker"] == UNIT]
+    worker_requests = [item["request"] for item in worker_records]
     assert worker_requests, "worker sent no requests to the scripted endpoint"
 
     # Every receipt that reached the wire carries exactly the on-disk bytes of its span.
@@ -202,7 +293,6 @@ def test_worker_under_inherited_allocator_sends_owned_page_bytes(
             verified_spans.append((receipt["start_offset"], receipt["end_offset"]))
             receipt_labels.append(receipt["label"])
 
-    # Each owned window (1-1000, 1001-2000, 2001-2100) must be fully covered by verified wire bytes.
     missing = [window for window in WINDOWS
                if not _covered(_window_span(disk_lines, window), verified_spans)]
     assert not missing, (
@@ -211,6 +301,11 @@ def test_worker_under_inherited_allocator_sends_owned_page_bytes(
         f"sent requests={len(worker_requests)}, verified receipt labels={receipt_labels}")
     assert "".join(disk_lines) == _source()
 
+    parent_records = [item for item in endpoint.requests if item["marker"] == "parent"]
+    assert len(parent_records) >= 2, "parent did not resume after dispatching the worker"
+    assert parent_records[1]["finished"] >= worker_records[1]["started"], (
+        "parent completed its held request before the worker's owned-byte request arrived")
+
     # The recorded worker environment inherited the parent's switch unchanged (no runner pin).
     specs = list((run_dir / "parallel").glob(f"*/units/{UNIT}/spec.json"))
     assert len(specs) == 1, specs
@@ -218,3 +313,14 @@ def test_worker_under_inherited_allocator_sends_owned_page_bytes(
     assert spec["environment"].get("STATEFRAME_WORKING_SET_ALLOCATOR") == "on"
     assert spec.get("environment_sources", {}).get("STATEFRAME_WORKING_SET_ALLOCATOR") != (
         "runner:unit-allocator-pin")
+    return _request_bodies(endpoint), tuple(sorted(verified_spans))
+
+
+def test_worker_under_inherited_allocator_sends_owned_page_bytes(
+        tmp_path: Path, isolated_engine_python: Path) -> None:
+    normal = _run_allocator_case(tmp_path / "normal", isolated_engine_python,
+                                 delayed_fixture=False)
+    delayed = _run_allocator_case(tmp_path / "delayed", isolated_engine_python,
+                                  delayed_fixture=True)
+    assert normal[0] == delayed[0], "provider request bytes changed under delayed fixture readiness"
+    assert normal[1] == delayed[1], "owned page spans changed under delayed fixture readiness"

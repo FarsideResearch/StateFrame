@@ -425,7 +425,7 @@ class NativeToolBatch:
         )
         return call
 
-    def skip_inflight(self, reason: str) -> dict | None:
+    def skip_inflight(self, reason: str, *, keep_pending: bool = False) -> dict | None:
         """Close a selected call that the host skips before dispatch."""
         if self.inflight is None:
             return None
@@ -446,7 +446,8 @@ class NativeToolBatch:
             self._record_receipt(call, "NOT_RUN", reason)
         self.inflight = None
         self._queue_unexecuted_tool_results([call], reason=reason)
-        self.discard_pending(reason)
+        if not keep_pending:
+            self.discard_pending(reason)
         return call
 
     def _audit_unexecuted_reads(self, calls: list[dict], *, selected: bool = False) -> None:

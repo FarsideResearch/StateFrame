@@ -500,6 +500,292 @@ def _same_query_suppression_eligible(line: str, last_line: str | None) -> bool:
     return line == last_line and bool(parts) and parts[0] == "grep"
 
 
+from typing import Literal, NotRequired, TypedDict  # noqa: E402 - repeat-query helper types
+
+
+_RepeatMessage = Mapping[str, object]
+_RepeatTags = Mapping[int, tuple[tuple[int, int, str], ...]]
+_RepeatSide = Literal["before_repeat", "after_action"]
+_REPEAT_EXCHANGE_ROWS = frozenset({"call", "result", "text"})
+# Only built-in query routes are known read-only here. Names such as ls and
+# search can denote workspace-writing custom tools.
+_REPEAT_QUERY_TOOLS = frozenset({"grep", "read", "list_files"})
+
+
+class _RepeatBoundary(TypedDict):
+    side: _RepeatSide
+    legacy_offset: int
+    occurrence: int | None
+    edge: int | None
+    ordinal: NotRequired[int]
+
+
+class _RepeatCutPlan(TypedDict):
+    mode: Literal["legacy", "rewrite", "lost", "parity_conflict"]
+    drop: tuple[int, ...]
+    exchanges_removed: int
+
+
+def _repeat_row_map(before: Sequence[_RepeatMessage], after: Sequence[_RepeatMessage], *,
+                    retained_from: int | None) -> dict[int, int]:
+    """Verify the suffix selected by the producer, without searching for equal rows."""
+    if retained_from is None or not 0 <= retained_from < len(before):
+        return {}
+    start = len(after) - (len(before) - retained_from)
+    if start < 0 or any(before[old] != after[new] for old, new in
+                        zip(range(retained_from, len(before)), range(start, len(after)))):
+        return {}
+    return dict(zip(range(retained_from, len(before)), range(start, len(after))))
+
+
+def _repeat_summary_row_map(before: Sequence[_RepeatMessage], after: Sequence[_RepeatMessage], *,
+                            keep_turns: int) -> dict[int, int]:
+    if __package__:
+        from .history_compaction import split_turns
+    else:
+        from history_compaction import split_turns
+
+    turns = split_turns(before)
+    if not 0 <= keep_turns < len(turns):
+        return {}
+    # An applied summary emits the original two header rows, one new row,
+    # then the last keep_turns verbatim turns. At zero there is no suffix.
+    retained = sum(map(len, turns[-keep_turns:])) if keep_turns else 0
+    if len(after) != 3 + retained:
+        return {}
+    retained_from = len(before) - retained if retained else None
+    rows = _repeat_row_map(before, after, retained_from=retained_from)
+    # Both summary sites supply the original host header. Startup guidance can
+    # extend the live brief in its slot, and capacity preparation can prepend
+    # one system notice. Verify the system row at the corresponding position.
+    header_start = 0
+    if (len(before) >= 3 and before[0].get("role") == "system"
+            and before[1].get("role") == "system"):
+        header_start = 1
+    if (after[0].get("role") == "system" and before[header_start] == after[0]
+            and before[header_start + 1].get("role") == after[1].get("role") == "user"):
+        rows.update({header_start: 0, header_start + 1: 1})
+    return rows
+
+
+def _repeat_occurrence_edge(tags: _RepeatTags, occurrence: int, *, side: _RepeatSide,
+                            ordinal: int = 0) -> int | None:
+    """Find the defining side of a response in the current row coordinates."""
+    exchange = [(index, ordinal, kind) for index, row in tags.items()
+                for owner, ordinal, kind in row
+                if owner == occurrence and kind in _REPEAT_EXCHANGE_ROWS]
+    if not exchange:
+        return None
+    if side == "before_repeat":
+        starts = [index for index, call_ordinal, kind in exchange
+                  if call_ordinal == ordinal and kind in {"call", "text"}]
+        if len(starts) != 1:
+            return None
+        [index] = starts
+        if all(owner == occurrence and kind in {"call", "text"} for owner, _, kind in tags[index]):
+            return index
+        return None
+
+    index = max(row[0] for row in exchange)
+    edge_tags = tags[index]
+    if len(edge_tags) == 1 and edge_tags[0][0] == occurrence and edge_tags[0][2] == "result":
+        return index + 1
+    return None
+
+
+def _rebase_repeat_boundary(boundary: _RepeatBoundary, rows: Mapping[int, int], *,
+                            tags: _RepeatTags) -> _RepeatBoundary:
+    edge = boundary["edge"]
+    if edge is None:
+        return boundary
+    side, occurrence = boundary["side"], boundary["occurrence"]
+    if occurrence is not None:
+        edge = _repeat_occurrence_edge(tags, occurrence, side=side, ordinal=boundary.get("ordinal", 0))
+    # The initial floor is pinned by the host to the end of its initial input.
+    # An action pin uses the last result, and a streak pin uses the repeated call.
+    row_offset = 1 if side == "after_action" and edge else 0
+    position = rows.get(edge - row_offset) if edge is not None else None
+    rebased = position + row_offset if position is not None else None
+    return {**boundary, "edge": rebased}
+
+
+def _repeat_complete_query(messages: Sequence[_RepeatMessage], indices: Sequence[int], *,
+                           occurrence: int, tags: _RepeatTags) -> bool:
+    """Require local declaration/result pairs for every observed ordinal."""
+    declarations: dict[int, tuple[int, str | None]] = {}
+    deliveries: dict[int, tuple[int, str | None]] = {}
+    for index in indices:
+        message, row = messages[index], tags[index]
+        if any(owner != occurrence for owner, _, _ in row):
+            return False
+        role = message.get("role")
+        if role == "assistant" and all(kind == "call" for _, _, kind in row):
+            calls = message.get("tool_calls")
+            if not isinstance(calls, (tuple, list)) or len(calls) != len(row):
+                return False
+            for ordinal, call in zip(sorted(tag[1] for tag in row), calls):
+                if ordinal in declarations or not isinstance(call, Mapping):
+                    return False
+                function, call_id = call.get("function"), call.get("id")
+                name = function.get("name") if isinstance(function, Mapping) else None
+                if (not isinstance(name, str) or name not in _REPEAT_QUERY_TOOLS
+                        or not isinstance(call_id, str) or not call_id):
+                    return False
+                declarations[ordinal] = (index, call_id)
+        elif len(row) == 1:
+            _, ordinal, kind = row[0]
+            if kind == "text" and role == "assistant" and not message.get("tool_calls"):
+                content = message.get("content")
+                if not isinstance(content, str) or ordinal != 0 or declarations:
+                    return False
+                command = content.strip().split(maxsplit=1)
+                if (len(content.strip().splitlines()) != 1 or len(command) != 2
+                        or command[0] not in {"grep", "read"}):
+                    return False
+                declarations[0] = (index, None)
+            elif kind == "result" and role in {"tool", "user"} and ordinal not in deliveries:
+                call_id = message.get("tool_call_id")
+                if role == "tool" and (not isinstance(call_id, str) or not call_id):
+                    return False
+                deliveries[ordinal] = (index, call_id if role == "tool" else None)
+            else:
+                return False
+        else:
+            return False
+    if not declarations or declarations.keys() != deliveries.keys() or (
+            declarations.keys() != set(range(len(declarations)))):
+        return False
+    ids = {call_id for _, call_id in declarations.values()}
+    if len(ids) != len(declarations) or (None in ids and len(ids) != 1):
+        return False
+    return all(declarations[ordinal][0] < index and declarations[ordinal][1] == call_id
+               for ordinal, (index, call_id) in deliveries.items())
+
+
+def _plan_repeat_cut(messages: Sequence[_RepeatMessage], *, boundary: _RepeatBoundary,
+                     active: Mapping[str, object] | None, selected: int | None, tags: _RepeatTags,
+                     rewrite_applied: bool) -> _RepeatCutPlan:
+    """Plan one cut using host provenance, with legacy bytes on an unrevised history."""
+    if not rewrite_applied:
+        if __package__:
+            from .history_compaction import assert_tool_call_pairs
+        else:
+            from history_compaction import assert_tool_call_pairs
+
+        start = slice(boundary["legacy_offset"], None).indices(len(messages))[0]
+        try:
+            assert_tool_call_pairs(messages[:start])
+        except AssertionError:
+            # Keep the baseline cut available as a control if it was already invalid.
+            return {"mode": "parity_conflict", "drop": tuple(range(start, len(messages))),
+                    "exchanges_removed": 0}
+        return {"mode": "legacy", "drop": tuple(range(start, len(messages))), "exchanges_removed": 0}
+
+    edge = boundary["edge"]
+    pin_occurrence = boundary["occurrence"]
+    pin_ordinal = boundary.get("ordinal", 0)
+    if edge is not None and pin_occurrence is not None:
+        edge = _repeat_occurrence_edge(tags, pin_occurrence, side=boundary["side"], ordinal=pin_ordinal)
+    if edge is None or not 0 <= edge <= len(messages):
+        return {"mode": "lost", "drop": (), "exchanges_removed": 0}
+
+    cut: _RepeatCutPlan = {"mode": "rewrite", "drop": (), "exchanges_removed": 0}
+    if active is None or selected is None or selected != active["selected"]:
+        return cut
+    occurrence = active["occurrence"]
+    calls = active["calls"]
+    if type(occurrence) is not int or not isinstance(calls, list) or not 0 <= selected < max(1, len(calls)):
+        return cut
+    selected_kind = "call" if calls else "text"
+    groups: dict[int, list[int]] = {}
+    active_starts = []
+    selected_live = False
+    suppressed = set()
+    for index, row in sorted(tags.items()):
+        if not 0 <= index < len(messages):
+            return cut
+        for owner, ordinal, kind in row:
+            if kind == "note":
+                suppressed.add(owner)
+            if owner == occurrence:
+                active_starts.append(index)
+                if ordinal == selected and kind == selected_kind:
+                    selected_live = True
+            elif owner < occurrence and kind in _REPEAT_EXCHANGE_ROWS:
+                indices = groups.setdefault(owner, [])
+                if not indices or indices[-1] != index:
+                    indices.append(index)
+    if not selected_live:
+        return cut
+    stop = min(active_starts)
+    drop = []
+    removed = 0
+    for owner, indices in groups.items():
+        # The suppression note protects any surviving fragments of its response.
+        if owner in suppressed or not edge <= indices[0] <= indices[-1] < stop:
+            continue
+        # A grouped declaration can share the pin row with calls before the streak.
+        if owner == pin_occurrence and boundary["side"] == "before_repeat" and pin_ordinal > 0:
+            continue
+        # Host advisories can occur between siblings. Other dialogue within
+        # the interval makes the exchange ambiguous, even if its IDs match.
+        group = set(indices)
+        interleaved = range(indices[0] + 1, indices[-1])
+        if any(messages[index].get("role") in {"assistant", "tool"}
+               or any(kind in _REPEAT_EXCHANGE_ROWS for _, _, kind in tags.get(index, ()))
+               for index in interleaved if index not in group):
+            continue
+        if _repeat_complete_query(messages, indices, occurrence=owner, tags=tags):
+            drop.extend(indices)
+            removed += 1
+    return {"mode": "rewrite", "drop": tuple(sorted(drop)), "exchanges_removed": removed}
+
+
+def _unclassify_legacy_repeat_fragments(
+        tags: dict[int, tuple[tuple[int, int, str], ...]], drop: tuple[int, ...], *,
+        active_occurrence: int | None) -> None:
+    """Keep a clipped historical response from looking like a complete exchange."""
+    # The stage helper still needs the active occurrence's tags for its overlay.
+    clipped_occurrences = {
+        owner for index in drop for owner, _, kind in tags.get(index, ())
+        if owner != active_occurrence and (kind in _REPEAT_EXCHANGE_ROWS or kind == "note")
+    }
+    if not clipped_occurrences:
+        return
+    for index, row in list(tags.items()):
+        if index >= drop[0]:
+            continue
+        surviving = tuple(tag for tag in row if tag[0] not in clipped_occurrences
+                          or tag[2] not in _REPEAT_EXCHANGE_ROWS)
+        if surviving:
+            tags[index] = surviving
+        else:
+            del tags[index]
+
+
+def _apply_repeat_suppression(messages, *, boundary, active, tags, rewrite_applied, native_batch,
+                              note_start, legacy_history, note_end) -> str:
+    selected = active["selected"] if active is not None else None
+    cut = _plan_repeat_cut(messages, boundary=boundary, active=active, selected=selected,
+                           tags=tags, rewrite_applied=rewrite_applied)
+    if cut["mode"] in {"legacy", "parity_conflict"}:
+        history = legacy_history
+        _unclassify_legacy_repeat_fragments(
+            tags, cut["drop"], active_occurrence=active["occurrence"] if active is not None else None)
+    elif cut["mode"] == "lost":
+        history = ". The saved history boundary is no longer available, so earlier history was retained."
+    elif cut["exchanges_removed"]:
+        count = cut["exchanges_removed"]
+        unit = "exchange" if count == 1 else "exchanges"
+        history = f". Removed {count} earlier complete query {unit} from the conversation."
+    else:
+        history = ". Earlier history was retained because no complete query exchanges could be removed."
+    note = note_start + history + note_end
+    _stage_repeat_suppression(messages, active=active, selected=selected, tags=tags, cut=cut,
+                              note=note, native_batch=native_batch)
+    return note
+
+
 def _append_structure_fact_observation(measurement, bolt, observation: str,
                                        kind: str) -> str:
     """Expose the already-attached typed facts in a history tool result."""
@@ -7127,12 +7413,783 @@ def _initial_task_content(brief: str, orientation: str, intake_orientation: str)
     return content + "\nBegin."
 
 
+def _record_repeat_selection(
+        active: dict | None, *, occurrence: int,
+        origin: tuple[str | None, str | None], ordinal: int,
+        text: str | None, calls: Sequence[dict],
+) -> dict:
+    if ordinal == 0:
+        records = []
+        for index, call in enumerate(calls):
+            function = call.get("function") or {}
+            records.append({
+                "ordinal": index,
+                "host_id": call["id"],
+                "provider_id": call.get("provider_call_id", call.get("id")),
+                "declaration": {
+                    "id": call["id"], "type": "function",
+                    "function": {"name": function.get("name") or "",
+                                 "arguments": function.get("arguments") or "{}"},
+                },
+                "delivery": None,
+                "archive": (False, False),
+            })
+        active = {
+            "occurrence": occurrence, "origin": origin, "text": text,
+            "calls": records, "selected": ordinal, "advisories": [],
+            "suppressed": None, "note": None, "wire_ids": {},
+        }
+    else:
+        # The native queue freezes the whole lineup at its first selection.
+        assert active is not None and active["occurrence"] == occurrence
+        assert active["origin"] == origin and active["calls"][ordinal]["host_id"] == calls[0]["id"]
+        active["selected"] = ordinal
+    return active
+
+
+def _record_repeat_delivery(active: dict, *, ordinal: int, message: dict) -> None:
+    call = active["calls"][ordinal]
+    if message.get("role") == "tool" and message.get("tool_call_id") == call["host_id"]:
+        call["delivery"] = {
+            "message": copy.deepcopy(dict(message)),
+            "marker": copy.deepcopy(getattr(message, "_stateframe_tool_reply_receipt", None)),
+        }
+
+
+def _rebase_repeat_rows(tags: dict, rows: dict[int, int]) -> dict:
+    return {rows[index]: row_tags for index, row_tags in tags.items() if index in rows}
+
+
+def _record_repeat_archive(active: dict | None, row_tags: tuple) -> None:
+    if active is None:
+        return
+    for occurrence, ordinal, kind in row_tags:
+        if occurrence == active["occurrence"] and kind in {"call", "result"} and active["calls"]:
+            call = active["calls"][ordinal]
+            declaration, result = call["archive"]
+            call["archive"] = (declaration or kind == "call", result or kind == "result")
+
+
+def _record_repeat_advisories(messages: list, tags: dict, active: dict | None,
+                              start: int, stop: int) -> None:
+    if active is None or active["selected"] + 1 >= len(active["calls"]):
+        return
+    for index in range(start, stop):
+        message = messages[index]
+        if index not in tags and message.get("role") == "user":
+            tags[index] = ((active["occurrence"], len(active["advisories"]), "advisory"),)
+            active["advisories"].append(copy.deepcopy(dict(message)))
+
+
+def _record_repeat_stall_advisory(messages: list, tags: dict, active: dict | None,
+                                  observation: str) -> None:
+    # The observer enriches the last tool row in place. Record its added
+    # advisory separately so the projected result keeps the delivered bytes.
+    if active is None:
+        return
+    index = next((index for index in range(len(messages) - 1, -1, -1)
+                  if messages[index].get("role") == "tool"), None)
+    if index is None:
+        return
+    for occurrence, ordinal, kind in tags.get(index, ()):
+        if occurrence == active["occurrence"] and kind == "result":
+            call = active["calls"][ordinal]
+            delivery = call["delivery"]
+            if delivery is not None and messages[index].get("tool_call_id") == call["host_id"]:
+                advisories = active["advisories"]
+                # The observer adds its text to the result, ahead of any
+                # standalone advisories that follow that row.
+                following = {
+                    row_index: row[0][1] for row_index, row in tags.items()
+                    if row_index > index and len(row) == 1
+                    and row[0][0] == occurrence and row[0][2] == "advisory"
+                }
+                position = min(following.values(), default=len(advisories))
+                advisories.insert(position, {"role": "user", "content": observation})
+                for row_index, advisory_ordinal in following.items():
+                    tags[row_index] = ((occurrence, advisory_ordinal + 1, "advisory"),)
+            return
+
+
+def _finish_repeat_delivery(messages: list, tags: dict, active: dict, start: int) -> None:
+    """Settle early-continue replies only within this selection's append interval."""
+    stop = next((index for index in range(start, len(messages))
+                 if messages[index].get("role") == "assistant"), len(messages))
+    if active["calls"]:
+        ordinal = active["selected"]
+        call = active["calls"][ordinal]
+        if call["delivery"] is None:
+            matches = [index for index in range(start, stop)
+                       if index not in tags and messages[index].get("role") == "tool"
+                       and messages[index].get("tool_call_id") == call["host_id"]]
+            if len(matches) == 1:
+                index = matches[0]
+                _record_repeat_delivery(active, ordinal=ordinal, message=messages[index])
+                tags[index] = ((active["occurrence"], ordinal, "result"),)
+    _record_repeat_advisories(messages, tags, active, start, stop)
+
+
+def _insert_repeat_rows(messages: list, tags: dict, index: int,
+                        new_rows: list[dict], new_tags: dict) -> None:
+    shifted = {(pos if pos < index else pos + len(new_rows)): row
+               for pos, row in tags.items()}
+    shifted.update({index + offset: row for offset, row in new_tags.items()})
+    messages[index:index] = new_rows
+    tags.clear()
+    tags.update(shifted)
+
+
+def _repeat_repair_pending(active: dict | None, rewrite_applied: bool) -> bool:
+    return rewrite_applied and active is not None and active["suppressed"] is not None
+
+
+def _close_repeat_inflight(active: dict, native_batch) -> None:
+    if native_batch is None or not active["calls"]:
+        return
+    if active["origin"] == (native_batch.origin, native_batch.origin_response_event_id):
+        selected = active["calls"][active["suppressed"]]
+        if native_batch.inflight is not None and native_batch.inflight["id"] == selected["host_id"]:
+            native_batch.skip_inflight("repeat_query_suppressed", keep_pending=True)
+
+
+def _stage_repeat_suppression(
+        messages: list[dict], *, active: dict | None, selected: int | None,
+        tags: dict, cut: dict, note: str, native_batch,
+) -> None:
+    if cut["drop"]:
+        drop = set(cut["drop"])
+        kept = [index for index in range(len(messages)) if index not in drop]
+        messages[:] = [messages[index] for index in kept]
+        rebased = _rebase_repeat_rows(tags, {old: new for new, old in enumerate(kept)})
+        tags.clear()
+        tags.update(rebased)
+    if active is not None and selected is not None:
+        active["suppressed"] = selected
+        active["note"] = note
+        occurrence = active["occurrence"]
+        if active["calls"]:
+            from kernel_tool_reply import tool_reply
+
+            call = active["calls"][selected]
+            refused = tool_reply(
+                call["host_id"], call["declaration"]["function"]["name"],
+                _ToolReplyOutcome.REFUSED, "NOT EXECUTED: repeat-query suppression stopped this call.",
+                receipt={"code": "repeat_query_suppressed"},
+            )
+            _record_repeat_delivery(active, ordinal=selected, message=refused)
+            if cut["mode"] in {"rewrite", "lost"}:
+                _close_repeat_inflight(active, native_batch)
+                declaration = next((index for index, row in tags.items()
+                                    if (occurrence, selected, "call") in row), None)
+                if declaration is not None and not any(call["archive"]):
+                    index = declaration + 1
+                    while index < len(messages) and messages[index].get("role") == "tool":
+                        index += 1
+                    _insert_repeat_rows(messages, tags, index, [refused],
+                                        {0: ((occurrence, selected, "result"),)})
+        tags[len(messages)] = ((occurrence, 0, "note"),)
+    messages.append({"role": "user", "content": note})
+
+
+def _drain_repeat_results(messages: list, tags: dict, active: dict | None,
+                          native_batch, *, repair: bool) -> None:
+    """Keep queue settlements occurrence-scoped while maintaining the canonical transcript."""
+    if active is None or not active["calls"] or active["origin"] != (
+            native_batch.origin, native_batch.origin_response_event_id):
+        active = None
+    if active is not None and repair:
+        _close_repeat_inflight(active, native_batch)
+        queued: list[dict] = []
+        native_batch.append_unexecuted_tool_results(queued)
+        if not queued:
+            return
+        occurrence = active["occurrence"]
+        ordinals = {call["host_id"]: call["ordinal"] for call in active["calls"]}
+        new_ids = {call["host_id"] for call in active["calls"]
+                   if call["delivery"] is None and not any(call["archive"])}
+        # The selected refusal already has an explicit delivery. Later siblings
+        # get their declarations and actual queue-generated results.
+        new_rows = []
+        new_tags = {}
+        for message in queued:
+            if message.get("role") == "assistant":
+                calls = [call for call in message["tool_calls"]
+                         if call["id"] not in ordinals or call["id"] in new_ids]
+                if not calls:
+                    continue
+                message = {**message, "tool_calls": calls}
+                row_tags = tuple((occurrence, ordinals[call["id"]], "call") for call in calls
+                                 if call["id"] in ordinals)
+            else:
+                ordinal = ordinals.get(message.get("tool_call_id"))
+                row_tags = ()
+                if ordinal is not None:
+                    call = active["calls"][ordinal]
+                    if call["delivery"] is not None:
+                        continue
+                    _record_repeat_delivery(active, ordinal=ordinal, message=message)
+                    if call["host_id"] not in new_ids:
+                        continue
+                    row_tags = ((occurrence, ordinal, "result"),)
+            if row_tags:
+                new_tags[len(new_rows)] = row_tags
+            new_rows.append(message)
+        if new_rows:
+            note_index = next((index for index, row in tags.items()
+                               if (occurrence, 0, "note") in row), len(messages))
+            _insert_repeat_rows(messages, tags, note_index, new_rows, new_tags)
+        return
+
+    if not tags and active is None:
+        native_batch.append_unexecuted_tool_results(messages)
+        return
+    before = list(messages)
+    if not native_batch.append_unexecuted_tool_results(messages):
+        return
+    # Only the synchronous queue drain is involved here. It inserts new rows
+    # without copying or relocating the preceding row objects.
+    rows = {}
+    old_index = 0
+    for index, message in enumerate(messages):
+        if old_index < len(before) and message is before[old_index]:
+            rows[old_index] = index
+            old_index += 1
+    rebased = _rebase_repeat_rows(tags, rows)
+    if active is not None:
+        occurrence = active["occurrence"]
+        ordinals = {call["host_id"]: call["ordinal"] for call in active["calls"]}
+        kept = set(rows.values())
+        for index, message in enumerate(messages):
+            if index in kept:
+                continue
+            if message.get("role") == "assistant":
+                row_tags = tuple((occurrence, ordinals[call["id"]], "call")
+                                 for call in message.get("tool_calls", ()) if call["id"] in ordinals)
+                if row_tags:
+                    rebased[index] = row_tags
+            elif message.get("role") == "tool":
+                ordinal = ordinals.get(message.get("tool_call_id"))
+                if ordinal is not None:
+                    if active["calls"][ordinal]["delivery"] is None:
+                        _record_repeat_delivery(active, ordinal=ordinal, message=message)
+                    rebased[index] = ((occurrence, ordinal, "result"),)
+    tags.clear()
+    tags.update(rebased)
+
+
+def _remember_repeat_wires(active: dict | None, messages: list, tags: dict,
+                           retained: dict) -> None:
+    """Release the response payload but keep the projection of its surviving rows."""
+    if active is None or not active["wire_ids"]:
+        return
+    occurrence = active["occurrence"]
+    for index, row_tags in tags.items():
+        for owner, ordinal, kind in row_tags:
+            if owner != occurrence or kind not in {"call", "result"}:
+                continue
+            key = (occurrence, ordinal)
+            wire_id = active["wire_ids"][ordinal]
+            if kind == "call":
+                retained.setdefault(key, (wire_id, None))
+            else:
+                delivery = active["calls"][ordinal]["delivery"]
+                marker = (delivery["marker"] if messages[index] == delivery["message"]
+                          else getattr(messages[index], "_stateframe_tool_reply_receipt", None))
+                retained[key] = (wire_id, marker)
+
+
+def _repeat_message_ids(message: dict) -> tuple:
+    if message.get("role") == "tool":
+        return (message.get("tool_call_id"),)
+    calls = message.get("tool_calls")
+    if isinstance(calls, (list, tuple)):
+        return tuple(call.get("id") if isinstance(call, Mapping) else None for call in calls)
+    return ()
+
+
+def _project_retained_repeat_wires(views: tuple[list, list], view_tags: tuple[dict, dict], *,
+                                   retained: dict, removed_occurrence: int | None) -> tuple[list, list]:
+    """Project settled IDs in both views and move any newer tagged collision."""
+    tagged_rows = ({}, {})
+    visible = {}
+    occupied: set[str] = set()
+    untagged: set[str] = set()
+    for view, tags, tagged in zip(views, view_tags, tagged_rows):
+        for index, message in enumerate(view):
+            row_tags = tags.get(index, ())
+            if removed_occurrence is not None and any(tag[0] == removed_occurrence for tag in row_tags):
+                continue
+            ids = _repeat_message_ids(message)
+            occupied.update(call_id for call_id in ids if isinstance(call_id, str))
+            kind = "result" if message.get("role") == "tool" else "call"
+            keys = tuple((owner, ordinal) for owner, ordinal, tag in row_tags if tag == kind)
+            if keys and len(keys) == len(ids) and all(isinstance(call_id, str) for call_id in ids):
+                tagged[index] = keys
+                for key, call_id in zip(keys, ids):
+                    visible[key] = call_id
+            else:
+                untagged.update(call_id for call_id in ids if isinstance(call_id, str))
+
+    for key in retained.keys() - visible.keys():
+        del retained[key]
+    affected_hosts = {visible[key] for key in retained}
+    reserved = {wire_id for wire_id, _ in retained.values()}
+    occupied.update(reserved)
+    reserved.update(untagged & affected_hosts)
+    for key, host_id in sorted(visible.items()):
+        if key in retained:
+            continue
+        if host_id in reserved:
+            wire_id = _repeat_wire_id(
+                occurrence=key[0], ordinal=key[1], host_id=host_id, occupied=occupied, previous=None,
+            )
+            retained[key] = (wire_id, None)
+            occupied.add(wire_id)
+        elif host_id in affected_hosts:
+            reserved.add(host_id)
+
+    def project(view: list, tagged: dict) -> list:
+        changes = {}
+        for index, keys in tagged.items():
+            if not any(key in retained for key in keys):
+                continue
+            message = view[index]
+            if message.get("role") == "tool":
+                wire_id, marker = retained[keys[0]]
+                current_marker = getattr(message, "_stateframe_tool_reply_receipt", None)
+                if marker is None and current_marker is not None:
+                    retained[keys[0]] = (wire_id, copy.deepcopy(current_marker))
+                changes[index] = _repeat_wire_result(
+                    {"message": message, "marker": current_marker or marker}, wire_id=wire_id,
+                )
+            else:
+                calls = [dict(call, id=retained[key][0]) if key in retained else call
+                         for key, call in zip(keys, message["tool_calls"])]
+                changes[index] = {**message, "tool_calls": calls}
+        return [changes.get(index, message) for index, message in enumerate(view)] if changes else view
+
+    return project(views[0], tagged_rows[0]), project(views[1], tagged_rows[1])
+
+
+def _repeat_request_views(
+        messages: list[dict], uncapped: list[dict], *, capped_tags: dict,
+        uncapped_tags: dict, active: dict | None, rewrite_applied: bool,
+        provider_request: bool, suffix_count: int = 0, retained_wires: dict | None = None,
+) -> tuple[list[dict], list[dict]]:
+    if not provider_request:
+        return messages, uncapped
+    repair_pending = _repeat_repair_pending(active, rewrite_applied)
+    if retained_wires:
+        removed_occurrence = active["occurrence"] if repair_pending else None
+        messages, uncapped = _project_retained_repeat_wires(
+            (messages, uncapped), (capped_tags, uncapped_tags),
+            retained=retained_wires, removed_occurrence=removed_occurrence,
+        )
+    if not repair_pending:
+        return messages, uncapped
+    assert active is not None
+    occurrence = active["occurrence"]
+
+    def fragments(tags: dict) -> set[int]:
+        return {index for index, row in tags.items()
+                if any(tag[0] == occurrence for tag in row)}
+
+    view_fragments = (fragments(capped_tags), fragments(uncapped_tags))
+    occupied: set[str] = set()
+    for view, remove in zip((messages, uncapped), view_fragments):
+        for index, message in enumerate(view):
+            if index in remove:
+                continue
+            occupied.update(call_id for call_id in _repeat_message_ids(message)
+                            if isinstance(call_id, str))
+
+    assistant: dict[str, object] = {"role": "assistant", "content": active["text"]}
+    exchange = [assistant]
+    if active["calls"]:
+        declarations = []
+        for call in active["calls"]:
+            ordinal = call["ordinal"]
+            delivery = call["delivery"]
+            if delivery is None:
+                raise RuntimeError("suppressed response is missing a proven tool result")
+            wire_id = _repeat_wire_id(
+                occurrence=occurrence, ordinal=ordinal, host_id=call["host_id"],
+                occupied=occupied, previous=active["wire_ids"].get(ordinal),
+            )
+            active["wire_ids"][ordinal] = wire_id
+            occupied.add(wire_id)
+            declaration = copy.deepcopy(call["declaration"])
+            declaration["id"] = wire_id
+            declarations.append(declaration)
+            exchange.append(_repeat_wire_result(delivery, wire_id=wire_id))
+        assistant["tool_calls"] = declarations
+    exchange.extend(copy.deepcopy(active["advisories"]))
+    exchange.append({"role": "user", "content": active["note"]})
+
+    def render(view: list[dict], remove: set[int]) -> list[dict]:
+        # A preserved route proposal belongs to the user suffix after the action.
+        slot = min(remove, default=len(view) - suffix_count)
+        return (view[:slot] + copy.deepcopy(exchange)
+                + [message for index, message in enumerate(view[slot:], slot) if index not in remove])
+
+    return render(messages, view_fragments[0]), render(uncapped, view_fragments[1])
+
+
+def _repeat_host_prepend(before: list, after: list) -> dict[int, int]:
+    """Verify the host preparer's positional prepend before transferring row tags."""
+    offset = len(after) - len(before)
+    if offset in (0, 1) and (offset == 0 or after[0].get("role") == "system"):
+        if before is after or all(old == new for old, new in zip(before, after[offset:])):
+            return {index: index + offset for index in range(len(before))}
+    return {}
+
+
+def _rerender_repeat_views(messages: list, uncapped: list, *, capped_tags: dict,
+                           uncapped_tags: dict, active: dict | None, prepare_host_inputs,
+                           suffix: list, retained_wires: dict | None = None) -> tuple[list, list]:
+    """Rebuild an affected leg after a retry or route change."""
+    if callable(prepare_host_inputs):
+        prepared = prepare_host_inputs(messages)
+        full_prepared = prepare_host_inputs(uncapped)
+        if prepared is not messages:
+            capped_tags = _rebase_repeat_rows(capped_tags, _repeat_host_prepend(messages, prepared))
+        if full_prepared is not uncapped:
+            uncapped_tags = _rebase_repeat_rows(
+                uncapped_tags, _repeat_host_prepend(uncapped, full_prepared),
+            )
+        messages, uncapped = prepared, full_prepared
+    return _repeat_request_views(
+        messages + suffix, uncapped + suffix, capped_tags=capped_tags,
+        uncapped_tags=uncapped_tags, active=active, rewrite_applied=True, provider_request=True,
+        suffix_count=len(suffix), retained_wires=retained_wires,
+    )
+
+
+def _reattach_repeat_prepared_replies(prepared, capped: list, uncapped: list):
+    """Preserve proven typed deliveries across preparation's plain-dict copies."""
+    from dataclasses import replace
+    from kernel_tool_reply import ToolReplyMessage
+
+    markers = {}
+    ambiguous = set()
+    for view in (capped, uncapped):
+        for message in view:
+            if isinstance(message, ToolReplyMessage):
+                key = (message.get("tool_call_id"), message.get("content"))
+                marker = message._stateframe_tool_reply_receipt
+                if key in markers and markers[key] != marker:
+                    ambiguous.add(key)
+                markers[key] = marker
+    if not markers:
+        return prepared
+
+    messages = list(prepared.messages)
+    restored = False
+    for index, message in enumerate(messages):
+        if message.get("role") != "tool" or isinstance(message, ToolReplyMessage):
+            continue
+        wire_id, content = message.get("tool_call_id"), message.get("content")
+        if not isinstance(wire_id, str) or not isinstance(content, str):
+            continue
+        key = (wire_id, content)
+        if key in markers and key not in ambiguous:
+            messages[index] = _repeat_wire_result(
+                {"message": message, "marker": markers[key]}, wire_id=wire_id,
+            )
+            restored = True
+    return replace(prepared, messages=tuple(messages)) if restored else prepared
+
+
 def _preserved_request_inputs(measurement: Any, messages: list, uncapped: list) -> tuple[list, list]:
     """MR-5 v2: append withheld proposals to the next provider request (consumed once). Identity otherwise."""
     if not _frame_routes.has_preserved_proposals():
         return messages, uncapped
     suffix = _frame_routes.take_preserved_messages(measurement.binding().get("artifact"))
     return list(messages) + suffix, list(uncapped) + suffix
+
+
+def _repeat_wire_id(*, occurrence: int, ordinal: int, host_id: str,
+                    occupied: Collection[str], previous: str | None) -> str:
+    """Allocate an ID for this projected call without changing its host identity."""
+    stem = f"{host_id}__a4_{occurrence}_{ordinal}"
+    if previous is not None and previous not in occupied:
+        if previous in (host_id, stem) or (
+            previous.startswith(stem + "_")
+            and re.fullmatch(r"[1-9][0-9]*", previous[len(stem) + 1:])
+        ):
+            return previous
+    if host_id not in occupied:
+        return host_id
+    candidate = stem
+    suffix = 1
+    while candidate in occupied:
+        candidate = f"{stem}_{suffix}"
+        suffix += 1
+    return candidate
+
+
+def _repeat_wire_result(delivery: Mapping[str, object], *, wire_id: str) -> dict[str, object]:
+    """Project a saved result with its original rendered content and host receipt."""
+    from kernel_tool_reply import ToolReplyMessage
+
+    message, marker = delivery["message"], delivery["marker"]
+    if not isinstance(message, Mapping):
+        raise TypeError("saved repeat-query result must be a message mapping")
+    payload = {**message, "tool_call_id": wire_id}
+    if marker is None:
+        return payload
+    if not isinstance(marker, Mapping):
+        raise TypeError("saved repeat-query receipt must be a mapping")
+    receipt = copy.deepcopy(dict(marker))
+    receipt["tool_call_id"] = wire_id
+    return ToolReplyMessage(payload, receipt)
+
+
+def _repeat_restore_delivery_ready(delivery: object, call_id: str, *, suppressed: bool) -> bool:
+    from kernel_tool_reply import Outcome, enabled
+
+    if not isinstance(delivery, dict) or "marker" not in delivery:
+        return False
+    message, marker = delivery.get("message"), delivery["marker"]
+    if (not isinstance(message, dict) or message.get("role") != "tool"
+            or message.get("tool_call_id") != call_id):
+        return False
+    content = message.get("content")
+    if not isinstance(content, str) or (suppressed and "NOT EXECUTED" not in content):
+        return False
+    if marker is None:
+        return not enabled()
+    if (not isinstance(marker, dict) or marker.get("tool_call_id") != call_id
+            or not isinstance(marker.get("tool"), str)
+            or ("cause" in marker and not isinstance(marker["cause"], str))):
+        return False
+    outcome = marker.get("outcome")
+    if not isinstance(outcome, dict) or outcome.get("kind") not in tuple(Outcome):
+        return False
+    return not suppressed or (
+        outcome["kind"] == Outcome.REFUSED and outcome.get("code") == "repeat_query_suppressed"
+    )
+
+
+def _repeat_restore_ready(*, version: int | None, serial: int,
+                          active: dict[str, object] | None,
+                          tags: dict[int, tuple[tuple[int, int, str], ...]],
+                          action: dict[str, object], streak: dict[str, object] | None,
+                          rewrite_applied: bool) -> bool:
+    """Check that a saved worker boundary has the evidence needed to rebuild its view."""
+    from kernel_native_tools import MAX_BATCH_CALLS
+
+    if (type(version) is not int or version != 1 or type(serial) is not int or serial < 0
+            or type(rewrite_applied) is not bool or not isinstance(tags, dict)):
+        return False
+
+    def valid_occurrence(value: object) -> bool:
+        return type(value) is int and 0 < value <= serial
+
+    def valid_ordinal(value: object, count: int) -> bool:
+        return type(value) is int and 0 <= value < count
+
+    def valid_pin(pin: object, side: str) -> bool:
+        if not isinstance(pin, dict) or not {"occurrence", "edge"} <= pin.keys():
+            return False
+        offset, occurrence, edge = pin.get("legacy_offset"), pin["occurrence"], pin["edge"]
+        return (
+            pin.get("side") == side and type(offset) is int and offset >= 0
+            and (valid_occurrence(occurrence) or (occurrence is None and side == "after_action"))
+            and (edge is None or (type(edge) is int and edge >= 0))
+            and (side != "before_repeat" or valid_ordinal(pin.get("ordinal"), MAX_BATCH_CALLS))
+        )
+
+    if not valid_pin(action, "after_action") or (
+        streak is not None and not valid_pin(streak, "before_repeat")
+    ):
+        return False
+
+    calls = []
+    advisories = []
+    if active is not None:
+        if not isinstance(active, dict) or not {
+            "occurrence", "origin", "text", "calls", "selected", "advisories",
+            "suppressed", "note", "wire_ids",
+        } <= active.keys():
+            return False
+        occurrence, origin, text = active["occurrence"], active["origin"], active["text"]
+        calls, advisories = active["calls"], active["advisories"]
+        selected, suppressed, note = active["selected"], active["suppressed"], active["note"]
+        wire_ids = active["wire_ids"]
+        if (not valid_occurrence(occurrence) or occurrence != serial
+                or not isinstance(origin, tuple) or len(origin) != 2
+                or any(part is not None and not isinstance(part, str) for part in origin)
+                or (text is not None and not isinstance(text, str))
+                or not isinstance(calls, list) or len(calls) > MAX_BATCH_CALLS
+                or not isinstance(advisories, list)
+                or any(not isinstance(message, dict) for message in advisories)
+                or not isinstance(wire_ids, dict)):
+            return False
+        if selected is not None and not valid_ordinal(selected, max(1, len(calls))):
+            return False
+        if suppressed is not None:
+            # With legacy parity, the queue can deliver further siblings after
+            # suppression. Both ordinals belong to the same accepted response.
+            if (not valid_ordinal(suppressed, max(1, len(calls))) or selected is None
+                    or suppressed > selected or not isinstance(note, str)):
+                return False
+        elif note is not None or wire_ids:
+            return False
+
+        saved_ids: set[str] = set()
+        for ordinal, call in enumerate(calls):
+            if not isinstance(call, dict) or not {
+                "ordinal", "host_id", "provider_id", "declaration", "delivery", "archive",
+            } <= call.keys():
+                return False
+            host_id, provider_id = call["host_id"], call["provider_id"]
+            declaration, delivery, archive = call["declaration"], call["delivery"], call["archive"]
+            if (type(call["ordinal"]) is not int or call["ordinal"] != ordinal
+                    or not isinstance(host_id, str) or not host_id
+                    or (provider_id is not None and not isinstance(provider_id, str))
+                    or not isinstance(declaration, dict) or declaration.get("id") != host_id
+                    or declaration.get("type") != "function"
+                    or not isinstance(archive, tuple) or len(archive) != 2
+                    or any(type(archived) is not bool for archived in archive)):
+                return False
+            function = declaration.get("function")
+            if (not isinstance(function, dict) or not isinstance(function.get("name"), str)
+                    or not isinstance(function.get("arguments"), str)):
+                return False
+            # The checkpoint precedes the queue drain, which settles later siblings.
+            if delivery is None:
+                if suppressed is not None and ordinal <= selected:
+                    return False
+            elif not _repeat_restore_delivery_ready(delivery, host_id, suppressed=ordinal == suppressed):
+                return False
+
+        for ordinal, wire_id in wire_ids.items():
+            if (not valid_ordinal(ordinal, len(calls)) or not isinstance(wire_id, str)
+                    or wire_id in saved_ids or wire_id != _repeat_wire_id(
+                        occurrence=serial, ordinal=ordinal, host_id=calls[ordinal]["host_id"],
+                        occupied=(), previous=wire_id)):
+                return False
+            saved_ids.add(wire_id)
+
+    for row, row_tags in tags.items():
+        if type(row) is not int or row < 0 or not isinstance(row_tags, tuple) or not row_tags:
+            return False
+        for tag in row_tags:
+            if not isinstance(tag, tuple) or len(tag) != 3:
+                return False
+            occurrence, ordinal, kind = tag
+            if not valid_occurrence(occurrence) or type(ordinal) is not int or ordinal < 0:
+                return False
+            is_active = active is not None and occurrence == serial
+            if kind in ("call", "result"):
+                count = max(1, len(calls)) if is_active else MAX_BATCH_CALLS
+                if ordinal >= count:
+                    return False
+            elif kind == "advisory":
+                if is_active and ordinal >= len(advisories):
+                    return False
+            elif kind not in ("text", "note") or ordinal != 0:
+                return False
+            elif kind == "note" and is_active and active["suppressed"] is None:
+                return False
+    return True
+
+
+def _repeat_restored_setup_ready(messages: Sequence[Mapping[str, object]],
+                                 state: Mapping[str, object]) -> bool:
+    """Validate the saved record and its surviving canonical fragments before a send."""
+    version, serial = state.get("_repeat_state_version"), state.get("_repeat_response_serial")
+    active, tags = state.get("_repeat_active"), state.get("_repeat_live_tags")
+    action, streak = state.get("_repeat_action_boundary"), state.get("_repeat_streak_boundary")
+    rewrite_applied = state.get("_repeat_rewrite_applied")
+    if (not isinstance(version, int) or not isinstance(serial, int)
+            or (active is not None and not isinstance(active, dict)) or not isinstance(tags, dict)
+            or not isinstance(action, dict) or (streak is not None and not isinstance(streak, dict))
+            or not isinstance(rewrite_applied, bool)):
+        return False
+    if not _repeat_restore_ready(
+        version=version, serial=serial, active=active, tags=tags,
+        action=action, streak=streak, rewrite_applied=rewrite_applied,
+    ):
+        return False
+    if any(index >= len(messages) for index in tags):
+        return False
+    if active is None:
+        latest_note = max((index for index, row_tags in tags.items()
+                           if (serial, 0, "note") in row_tags), default=-1)
+        if latest_note < 0:
+            return True
+        # A rejected native decision can follow the note without advancing
+        # the serial. The worker appends its prose, or a truncated reply as-is.
+        from kernel_response_truncation import is_truncated
+
+        reply = state.get("reply")
+        truncated_reply = is_truncated(reply)
+        for index in range(latest_note + 1, len(messages)):
+            message = messages[index]
+            if index in tags or not isinstance(message, Mapping):
+                continue
+            role = message.get("role")
+            if role == "assistant" and not message.get("tool_calls"):
+                return True
+            if role == "user" and truncated_reply and message.get("content") == reply:
+                return True
+        return False
+    if active["suppressed"] is None:
+        return True
+
+    occurrence = active["occurrence"]
+    ordinals = {call["host_id"]: call["ordinal"] for call in active["calls"]}
+    tagged_results: set[int] = set()
+    user_rows = [((occurrence, ordinal, "advisory"), advisory)
+                 for ordinal, advisory in enumerate(active["advisories"])]
+    user_rows.append(((occurrence, 0, "note"), {"role": "user", "content": active["note"]}))
+    # Only occurrence tags identify active fragments. Untagged history can
+    # reuse the same provider IDs as the active response.
+    for index, row_tags in tags.items():
+        if all(tag[0] != occurrence for tag in row_tags):
+            continue
+        message = messages[index]
+        if not isinstance(message, Mapping):
+            return False
+        role = message.get("role")
+        matches = set()
+        if role == "assistant":
+            declarations = message.get("tool_calls")
+            if isinstance(declarations, (list, tuple)):
+                matches.update((occurrence, ordinals[call_id], "call") for call in declarations
+                               if isinstance(call, Mapping)
+                               and isinstance(call_id := call.get("id"), str)
+                               and call_id in ordinals)
+            if not ordinals and not declarations and message.get("content") == active["text"]:
+                matches.add((occurrence, 0, "text"))
+        elif role == "tool":
+            call_id = message.get("tool_call_id")
+            if isinstance(call_id, str) and call_id in ordinals:
+                ordinal = ordinals[call_id]
+                matches.add((occurrence, ordinal, "result"))
+                tagged_results.add(ordinal)
+        elif role == "user":
+            matches.update(tag for tag, row in user_rows if row == message)
+            if len(row_tags) != 1 or row_tags[0] not in matches:
+                return False
+            continue
+        if set(row_tags) != matches:
+            return False
+
+    unlocated_results = {call["host_id"]: call["delivery"]["message"] for call in active["calls"]
+                         if call["delivery"] is not None and call["ordinal"] not in tagged_results}
+    if unlocated_results:
+        # A rewrite can remove a result. An exact surviving copy with no tag
+        # leaves its ownership ambiguous and could be retained beside the overlay.
+        for index, message in enumerate(messages):
+            if index in tags or not isinstance(message, Mapping) or message.get("role") != "tool":
+                continue
+            call_id = message.get("tool_call_id")
+            if isinstance(call_id, str) and message == unlocated_results.get(call_id):
+                return False
+    return True
 
 
 def work(d, *, resume=None):
@@ -8010,6 +9067,12 @@ def work(d, *, resume=None):
         # Model-visible widening notes, delivered with the action's observation.
         _scope_widen_notes: list[str] = []
         action_anchor = len(msgs)     # conversation index just after the last real ACTION
+        _repeat_action_boundary: _RepeatBoundary = {
+            "side": "after_action", "legacy_offset": action_anchor,
+            "occurrence": None, "edge": action_anchor,
+        }
+        _repeat_streak_boundary: _RepeatBoundary | None = None
+        _repeat_rewrite_applied = False
         last_surgery_step = -99       # cooldown so back-to-back surgeries cannot thrash
         # KERNEL BOLT-ON. The agent DRIVES; these cylinders only answer deterministically,
         # remember what it cannot hold, or refuse a provably premature exit. None of them
@@ -9182,17 +10245,38 @@ def work(d, *, resume=None):
                 context_limit=context_limit, capacity=capacity,
                 request_id=getattr(refusal, "request_id", None), reroutable=False)
 
+        def _rebase_repeat_pins(rows: Mapping[int, int], previous_tags: _RepeatTags, *,
+                                rewrite_applied: bool) -> None:
+            nonlocal _repeat_action_boundary, _repeat_streak_boundary, _repeat_rewrite_applied
+            _repeat_action_boundary = _rebase_repeat_boundary(
+                _repeat_action_boundary, rows, tags=previous_tags)
+            if _repeat_streak_boundary is not None:
+                _repeat_streak_boundary = _rebase_repeat_boundary(
+                    _repeat_streak_boundary, rows, tags=previous_tags)
+            _repeat_rewrite_applied = _repeat_rewrite_applied or rewrite_applied
+
         def _force_capacity_reroute() -> str | None:
             """Force the active presentation mechanism once after exact refusal."""
             nonlocal _request_tools, _action_known_refs, _uncapped_messages
+            nonlocal _repeat_live_tags, _repeat_uncapped_tags
             if history_compactor is not None:
                 forced = history_compactor.maybe_compact(
                     msgs, tools=_request_tools,
                     original_prefix=baseline_messages[:2], turn_index=step, force=True)
                 if forced.applied:
+                    _repeat_rows = _repeat_summary_row_map(
+                        msgs, forced.messages, keep_turns=history_compactor.keep_turns)
                     msgs[:] = [copy.deepcopy(dict(message))
                                for message in forced.messages]
+                    _rebase_repeat_pins(_repeat_rows, _repeat_live_tags, rewrite_applied=True)
+                    _repeat_live_tags = _rebase_repeat_rows(_repeat_live_tags, _repeat_rows)
+                    if native_batch is not None and _repeat_repair_pending(
+                            _repeat_active, _repeat_rewrite_applied):
+                        _drain_repeat_results(
+                            msgs, _repeat_live_tags, _repeat_active, native_batch, repair=True,
+                        )
                     _uncapped_messages = copy.deepcopy(msgs)
+                    _repeat_uncapped_tags = dict(_repeat_live_tags)
                     _request_tools = (measurement.tool_menu(
                         tool_surface, _uncapped_messages) if toolcall_mode else None)
                     if (native_batch is not None and _request_tools is not None
@@ -9582,10 +10666,23 @@ def work(d, *, resume=None):
 
         _pending_hook_action = None
         _forced_parallel_dispatched = False
+        _repeat_response_serial = 0
+        _repeat_active = None
+        _repeat_live_tags = {}
+        _repeat_uncapped_tags = {}
+        _repeat_retained_wires = {}
+        _repeat_append_from = None
 
         # True save/load resume (kernel_checkpoint): restore before the loop, snapshot at each boundary.
         import kernel_checkpoint as _kernel_checkpoint
+        _repeat_state_version: int | None = None
         _checkpoint_restored = _kernel_checkpoint.restore_point(sys._getframe(), POC)
+        if not _checkpoint_restored:
+            _repeat_state_version = 1
+        elif not _repeat_restored_setup_ready(msgs, locals()):
+            _kernel_checkpoint.refuse_restored_setup(
+                POC.parent, _kernel_checkpoint.CheckpointError(
+                    "checkpoint lacks consistent repeat-query repair state"))
         if _checkpoint_restored:
             try:
                 from kernel_host_done_facts import rebind_workspace_snapshots
@@ -9625,13 +10722,20 @@ def work(d, *, resume=None):
                         measurement, bolt, created_this_run,
                         outcome=_hook_outcome)
                 _pending_hook_action = None
+            if _repeat_active is not None and _repeat_append_from is not None:
+                _finish_repeat_delivery(msgs, _repeat_live_tags, _repeat_active, _repeat_append_from)
+            _repeat_append_from = None
             _kernel_checkpoint.save_point(sys._getframe(), step, POC)
             _kernel_checkpoint.freeze_warm_heap(step)
             if (_progress_watch is not None
                     and stop_unbounded_no_progress(measurement, _progress_watch, boundary=step)):
                 break
             if native_batch is not None:
-                native_batch.append_unexecuted_tool_results(msgs)
+                _drain_repeat_results(
+                    msgs, _repeat_live_tags, _repeat_active, native_batch,
+                    repair=_repeat_repair_pending(_repeat_active, _repeat_rewrite_applied),
+                )
+            _repeat_advisory_from = len(msgs)
             from unit_planner_v2 import consume_coalesce_escalation
             if consume_coalesce_escalation(bolt):
                 finish_native_batch_transcript(msgs)
@@ -9754,10 +10858,18 @@ def work(d, *, resume=None):
             _decisive_factor_advisory = ""
             _args = {}                   # text mode has no native argument payload
             tool_call_id = None           # set -> observation goes back as role=tool
-            observe_stall_in_place(
-                measurement, msgs, str(brief or ""), enabled=not _lean_on,
-            )
+            if native_batch is not None and native_batch.pending:
+                _record_repeat_advisories(msgs, _repeat_live_tags, _repeat_active,
+                                          _repeat_advisory_from, len(msgs))
+            _stall = observe_stall_in_place(measurement, msgs, str(brief or ""), enabled=not _lean_on)
+            if _stall:
+                _record_repeat_stall_advisory(
+                    msgs, _repeat_live_tags, _repeat_active, _stall["observation"],
+                )
+            del _stall
+            # Stall copies rows in place, so both snapshots keep their coordinates.
             _uncapped_messages = copy.deepcopy(msgs)
+            _repeat_uncapped_tags = dict(_repeat_live_tags)
             # E298 graft #3 — HISTORY TRIM for small context windows. 4bA died
             # ERR:HTTPError at s139 (31 edits in context): the local llama-server rejects
             # oversized prompts, an error Flash's 128k window never surfaces. Keep the
@@ -9774,20 +10886,6 @@ def work(d, *, resume=None):
                         break
                 if _keep_from and _keep_from > 2:
                     dropped = _keep_from - 2
-                    # E316 (StateFrame shadow, writer half): the trim is the ONLY lossy
-                    # point in the transcript — persist the dropped exchanges append-only
-                    # so the offline projector can reconstruct the FULL run. Never read
-                    # back into the loop, never shown to the model.
-                    try:
-                        _edir = _results_dir() / ("react_events"
-                                                   + os.environ.get("REACT_TAG", ""))
-                        _edir.mkdir(parents=True, exist_ok=True)
-                        with (_edir / f"{fn}.jsonl").open("a") as _ef:
-                            for _dm in msgs[2:_keep_from]:
-                                _ef.write(json.dumps({"kind": "trimmed", "step": step,
-                                                      "msg": _dm}) + "\n")
-                    except OSError:
-                        pass  # shadow persistence must never break the live loop
                     # E407 consumer: the trim message carries the world-cache digest —
                     # what the model OBSERVED (test lists, signatures) survives the trim
                     # without re-reading files. Fresh-only, bounded (attention law E394).
@@ -9817,11 +10915,33 @@ def work(d, *, resume=None):
                     _trim_progress = _progress_facts()
                     trim_summary = (f"{bolt.plan_summary(_trim_progress.edits, _trim_progress.checks)}){_up_line}{_wk_digest}"
                                     if interventions else "history omitted)")
-                    msgs[:] = msgs[:2] + [
+                    # E316: archive precisely the canonical prefix being cut.
+                    try:
+                        _edir = _results_dir() / ("react_events" + os.environ.get("REACT_TAG", ""))
+                        _edir.mkdir(parents=True, exist_ok=True)
+                        with (_edir / f"{fn}.jsonl").open("a") as _ef:
+                            for _index in range(2, _keep_from):
+                                _ef.write(json.dumps({"kind": "trimmed", "step": step,
+                                                      "msg": msgs[_index]}) + "\n")
+                                _record_repeat_archive(_repeat_active, _repeat_live_tags.get(_index, ()))
+                    except OSError:
+                        pass  # shadow persistence must never break the live loop
+                    _trimmed_messages = msgs[:2] + [
                         {"role": "user", "content":
                          f"[kernel] ({dropped} earlier exchanges trimmed to fit context. "
                          f"{trim_summary}"}
                     ] + msgs[_keep_from:]
+                    _repeat_rows = _repeat_row_map(msgs, _trimmed_messages, retained_from=_keep_from)
+                    _repeat_rows.update({0: 0, 1: 1})  # the slice copies these header slots directly
+                    msgs[:] = _trimmed_messages
+                    del _trimmed_messages
+                    _rebase_repeat_pins(_repeat_rows, _repeat_live_tags, rewrite_applied=True)
+                    _repeat_live_tags = _rebase_repeat_rows(_repeat_live_tags, _repeat_rows)
+                    if native_batch is not None and _repeat_repair_pending(
+                            _repeat_active, _repeat_rewrite_applied):
+                        _drain_repeat_results(
+                            msgs, _repeat_live_tags, _repeat_active, native_batch, repair=True,
+                        )
             _request_tools = measurement.tool_menu(tool_surface, _uncapped_messages) if toolcall_mode else None
             if (native_batch is not None and _request_tools is not None
                     and os.environ.get("STATEFRAME_EMPIRICAL_FIXES", "off") == "on"):
@@ -9832,8 +10952,16 @@ def work(d, *, resume=None):
                 _turtle_context = measurement.turtle_pre_request(endpoint=API, key=KEY)
                 if _turtle_context:
                     _turtle_message = {"role": "user", "content": _turtle_context}
+                    _turtle_live_index = len(msgs)
                     msgs.append(_turtle_message)
                     _uncapped_messages.append(copy.deepcopy(_turtle_message))
+                    if native_batch is not None and native_batch.pending:
+                        _record_repeat_advisories(msgs, _repeat_live_tags, _repeat_active,
+                                                  _turtle_live_index, len(msgs))
+                        if _turtle_live_index in _repeat_live_tags:
+                            _repeat_uncapped_tags[len(_uncapped_messages) - 1] = (
+                                _repeat_live_tags[_turtle_live_index]
+                            )
             if history_compactor is not None:
                 _compaction = history_compactor.maybe_compact(
                     msgs,
@@ -9842,8 +10970,17 @@ def work(d, *, resume=None):
                     turn_index=step,
                 )
                 if _compaction.applied:
+                    _repeat_rows = _repeat_summary_row_map(
+                        msgs, _compaction.messages, keep_turns=history_compactor.keep_turns)
                     msgs[:] = [copy.deepcopy(dict(message))
                                for message in _compaction.messages]
+                    _rebase_repeat_pins(_repeat_rows, _repeat_live_tags, rewrite_applied=True)
+                    _repeat_live_tags = _rebase_repeat_rows(_repeat_live_tags, _repeat_rows)
+                    if native_batch is not None and _repeat_repair_pending(
+                            _repeat_active, _repeat_rewrite_applied):
+                        _drain_repeat_results(
+                            msgs, _repeat_live_tags, _repeat_active, native_batch, repair=True,
+                        )
                     measurement.history_summary_ordinal += 1
                     if getattr(measurement, "long_horizon_depth_tracker", None) is not None:
                         measurement.long_horizon_depth_tracker.rebase(msgs)
@@ -9851,6 +10988,7 @@ def work(d, *, resume=None):
                     # model-authored summary, or prepare() would reintroduce the
                     # dropped turns on the next request.
                     _uncapped_messages = copy.deepcopy(msgs)
+                    _repeat_uncapped_tags = dict(_repeat_live_tags)
                     _request_tools = (measurement.tool_menu(
                         tool_surface, _uncapped_messages) if toolcall_mode else None)
                     if (native_batch is not None and _request_tools is not None
@@ -9946,6 +11084,7 @@ def work(d, *, resume=None):
                 else:
                     # A pre-dispatch hook already appended its refusal reply.
                     _uncapped_messages = copy.deepcopy(msgs)
+                    _repeat_uncapped_tags = dict(_repeat_live_tags)
             if getattr(measurement, "long_horizon_depth_tracker", None) is not None:
                 measurement.long_horizon_depth_tracker.observe(msgs)
             if measurement.restart_enabled:
@@ -9999,10 +11138,27 @@ def work(d, *, resume=None):
             if not callable(_request_host_text_preparer):
                 _request_host_text_preparer = None
             if _provider_request and callable(_prepare_host_inputs):
-                msgs = _prepare_host_inputs(msgs)
-                _uncapped_messages = _prepare_host_inputs(_uncapped_messages)
+                _host_msgs = _prepare_host_inputs(msgs)
+                if _host_msgs is not msgs:
+                    _host_rows = _repeat_host_prepend(msgs, _host_msgs)
+                    _rebase_repeat_pins(_host_rows, _repeat_live_tags, rewrite_applied=False)
+                    _repeat_live_tags = _rebase_repeat_rows(_repeat_live_tags, _host_rows)
+                msgs = _host_msgs
+                _host_uncapped = _prepare_host_inputs(_uncapped_messages)
+                if _host_uncapped is not _uncapped_messages:
+                    _repeat_uncapped_tags = _rebase_repeat_rows(
+                        _repeat_uncapped_tags, _repeat_host_prepend(_uncapped_messages, _host_uncapped),
+                    )
+                _uncapped_messages = _host_uncapped
             _leg_msgs, _leg_uncapped = (_preserved_request_inputs(measurement, msgs, _uncapped_messages)
                                         if _provider_request else (msgs, _uncapped_messages))
+            _leg_suffix = _leg_msgs[len(msgs):]
+            _leg_msgs, _leg_uncapped = _repeat_request_views(
+                _leg_msgs, _leg_uncapped, capped_tags=_repeat_live_tags,
+                uncapped_tags=_repeat_uncapped_tags, active=_repeat_active,
+                rewrite_applied=_repeat_rewrite_applied, provider_request=_provider_request,
+                suffix_count=len(_leg_suffix), retained_wires=_repeat_retained_wires,
+            )
             if not _provider_request:
                 _prepared = measurement.prepare_queued_native_action(
                     msgs, uncapped=_uncapped_messages, tools=_request_tools)
@@ -10017,6 +11173,10 @@ def work(d, *, resume=None):
                     _leg_msgs, uncapped=_leg_uncapped,
                     tools=_request_tools, provider_request=_provider_request,
                 )
+            if _provider_request and (_repeat_retained_wires or _repeat_repair_pending(
+                    _repeat_active, _repeat_rewrite_applied)):
+                _prepared = _reattach_repeat_prepared_replies(_prepared, _leg_msgs, _leg_uncapped)
+                _leg_msgs, _leg_uncapped = msgs, _uncapped_messages
             # Validate the exact final contract that was prepared for this
             # request.  Owner/menu projections may narrow a fresh list during
             # prepare; reusing the pre-prepare list was the museum L71 bug,
@@ -10230,18 +11390,32 @@ def work(d, *, resume=None):
                         # A rerouted escalated leg keeps its forced role and frozen frame.
                         _reroute_options = (_frame_routes.forced_leg_options(_prepared.capture)
                                             if _frame_routes.ROUTES_ACTIVE else {})
+                        _retry_msgs, _retry_uncapped = msgs, _uncapped_messages
+                        if _provider_request and (_repeat_retained_wires or _repeat_repair_pending(
+                                _repeat_active, _repeat_rewrite_applied)):
+                            _retry_msgs, _retry_uncapped = _rerender_repeat_views(
+                                msgs, _uncapped_messages, capped_tags=_repeat_live_tags,
+                                uncapped_tags=_repeat_uncapped_tags, active=_repeat_active,
+                                prepare_host_inputs=_prepare_host_inputs, suffix=_leg_suffix,
+                                retained_wires=_repeat_retained_wires,
+                            )
                         if _provider_request and _request_host_text_preparer is not None:
                             _prepared = measurement.prepare(
-                                msgs, uncapped=_uncapped_messages,
+                                _retry_msgs, uncapped=_retry_uncapped,
                                 tools=_request_tools, provider_request=True,
                                 request_host_text_preparer=_request_host_text_preparer,
                                 **_reroute_options,
                             )
                         else:
                             _prepared = measurement.prepare(
-                                msgs, uncapped=_uncapped_messages,
+                                _retry_msgs, uncapped=_retry_uncapped,
                                 tools=_request_tools, provider_request=_provider_request,
                                 **_reroute_options,
+                            )
+                        if _provider_request and (_repeat_retained_wires or _repeat_repair_pending(
+                                _repeat_active, _repeat_rewrite_applied)):
+                            _prepared = _reattach_repeat_prepared_replies(
+                                _prepared, _retry_msgs, _retry_uncapped,
                             )
                         _audit_system_prompt(_prepared.messages)
                         if not provider_dispatch_allowed(_prepared):
@@ -10327,6 +11501,21 @@ def work(d, *, resume=None):
                             _regen_msgs, _regen_uncapped = (
                                 _preserved_request_inputs(measurement, msgs, _uncapped_messages)
                                 if _provider_request else (msgs, _uncapped_messages))
+                            _route_leg_suffix = _regen_msgs[len(msgs):]
+                            if _provider_request and _repeat_repair_pending(
+                                    _repeat_active, _repeat_rewrite_applied):
+                                _regen_msgs, _regen_uncapped = _rerender_repeat_views(
+                                    msgs, _uncapped_messages, capped_tags=_repeat_live_tags,
+                                    uncapped_tags=_repeat_uncapped_tags, active=_repeat_active,
+                                    prepare_host_inputs=_prepare_host_inputs, suffix=_route_leg_suffix,
+                                    retained_wires=_repeat_retained_wires,
+                                )
+                            elif _provider_request and _repeat_retained_wires:
+                                _regen_msgs, _regen_uncapped = _project_retained_repeat_wires(
+                                    (_regen_msgs, _regen_uncapped),
+                                    (_repeat_live_tags, _repeat_uncapped_tags),
+                                    retained=_repeat_retained_wires, removed_occurrence=None,
+                                )
                             if _provider_request and _request_host_text_preparer is not None:
                                 _prepared = measurement.prepare(
                                     _regen_msgs, uncapped=_regen_uncapped, tools=_request_tools,
@@ -10338,6 +11527,12 @@ def work(d, *, resume=None):
                                     _regen_msgs, uncapped=_regen_uncapped, tools=_request_tools,
                                     provider_request=_provider_request,
                                     forced_route=_route_target, frozen_route_capture=first_capture)
+                            if _provider_request and (_repeat_retained_wires or _repeat_repair_pending(
+                                    _repeat_active, _repeat_rewrite_applied)):
+                                _prepared = _reattach_repeat_prepared_replies(
+                                    _prepared, _regen_msgs, _regen_uncapped,
+                                )
+                                _regen_msgs, _regen_uncapped = msgs, _uncapped_messages
                             if not provider_dispatch_allowed(_prepared):
                                 _route_stopped = True
                                 measurement.system_outcome = "response_budget_exhausted"
@@ -10364,6 +11559,11 @@ def work(d, *, resume=None):
                         if getattr(_prepared.capture, "frame_route", None) is not None:
                             from kernel_frame_routes import note_response
                             note_response(discarded=False)
+                    if _provider_request:
+                        _remember_repeat_wires(
+                            _repeat_active, msgs, _repeat_live_tags, _repeat_retained_wires,
+                        )
+                        _repeat_active = None
                     _remember_edit_nturn_model_plan(content)
                     if _edit_nturn_session is not None and _edit_nturn_session.pending:
                         _edit_nturn_session.request_started()
@@ -10455,6 +11655,24 @@ def work(d, *, resume=None):
                                 content=content, action={"tool": _name,
                                                          "arguments": _args}, step=step)
                         tool_call_id = c0.get("id") or f"call_{step}"
+                        if native_batch is not None:
+                            _repeat_ordinal = native_batch.index - 1
+                            _repeat_origin = (native_batch.origin, native_batch.origin_response_event_id)
+                            _repeat_lineup = ([native_batch.inflight, *native_batch.pending]
+                                              if _repeat_ordinal == 0 else [c0])
+                        else:
+                            _repeat_ordinal = 0
+                            _repeat_origin = (_prepared.capture.request_id,
+                                              getattr(_prepared.capture, "selected_response_event_id", None))
+                            _repeat_lineup = [{**c0, "id": tool_call_id,
+                                               "provider_call_id": c0.get("id")}]
+                        if _repeat_ordinal == 0:
+                            _repeat_response_serial += 1
+                        _repeat_active = _record_repeat_selection(
+                            _repeat_active, occurrence=_repeat_response_serial, origin=_repeat_origin,
+                            ordinal=_repeat_ordinal, text=content or None, calls=_repeat_lineup,
+                        )
+                        del _repeat_lineup
                         if _hook_wiring_for_run is not None and _name != "done":
                             _pending_hook_action = (_name, _args, tool_call_id, True)
                         measurement.current_tool_call_id = tool_call_id
@@ -10521,6 +11739,8 @@ def work(d, *, resume=None):
                                                            "name": _name,
                                                            "arguments": _fn.get("arguments")
                                                            or "{}"}}]})
+                        _repeat_live_tags[len(msgs) - 1] = ((_repeat_response_serial, _repeat_ordinal, "call"),)
+                        _repeat_append_from = len(msgs)
                         if os.environ.get("STATEFRAME_MUTATIONS", "off") in {"prebuilt", "authored"}:
                             from kernel_mutate_runtime import service as mutation_service
                             _mutations = mutation_service()
@@ -11650,8 +12870,23 @@ def work(d, *, resume=None):
                             if _edit_nturn_request_active:
                                 _finish_edit_nturn()
                             continue
+                        _repeat_response_serial += 1
+                        _repeat_active = _record_repeat_selection(
+                            None, occurrence=_repeat_response_serial,
+                            origin=(_prepared.capture.request_id,
+                                    getattr(_prepared.capture, "selected_response_event_id", None)),
+                            ordinal=0, text=reply, calls=(),
+                        )
+                        _repeat_live_tags[len(msgs) - 1] = ((_repeat_response_serial, 0, "text"),)
                 else:
                     reply = _provider_request_once()
+                    _repeat_response_serial += 1
+                    _repeat_active = _record_repeat_selection(
+                        None, occurrence=_repeat_response_serial,
+                        origin=(_prepared.capture.request_id,
+                                getattr(_prepared.capture, "selected_response_event_id", None)),
+                        ordinal=0, text=reply, calls=(),
+                    )
                     _remember_edit_nturn_model_plan(reply)
                     if _edit_nturn_session is not None and _edit_nturn_session.pending:
                         _edit_nturn_session.request_started()
@@ -11659,6 +12894,7 @@ def work(d, *, resume=None):
                     if (_edit_nturn_request_active
                             and is_edit_nturn_no_change_reply(reply)):
                         msgs.append({"role": "assistant", "content": reply})
+                        _repeat_live_tags[len(msgs) - 1] = ((_repeat_response_serial, 0, "text"),)
                         _edit_nturn_after_action(None, reply, step)
                         continue
                     if getattr(measurement, "stateframe_completion_owner_mode", "off") == "on":
@@ -11666,6 +12902,7 @@ def work(d, *, resume=None):
                         note_model_action(measurement, "")
                     measurement.start_action("text", {})
                     msgs.append({"role": "assistant", "content": reply})
+                    _repeat_live_tags[len(msgs) - 1] = ((_repeat_response_serial, 0, "text"),)
             except WorkingSetSuspended:
                 # Orderly typed stop: durable working_set_blocked already journaled.
                 # The outer worker handler finishes it as BLOCKED, never ERR:<type>.
@@ -12022,25 +13259,41 @@ def work(d, *, resume=None):
             if _repeat_query_surgery_eligible(
                     line, interventions=interventions, worst_repeat=_worst_repeat,
                     step=step, last_surgery_step=last_surgery_step):
-                del msgs[action_anchor:]
-                msgs.append({"role": "user", "content":
-                             f"[kernel] You have been cycling the same queries (one re-issued "
-                             f"{_worst_repeat} times); those exchanges were removed from the "
-                             f"conversation. Their answers will not change until you edit "
-                             f"something. State: {_progress_facts().edits} edit(s), "
-                             f"{_progress_facts().checks} test run(s). Take a "
-                             f"DIFFERENT action — `edit` `{d['rel']}` or `test`."})
+                _repeat_note = _apply_repeat_suppression(
+                    msgs, boundary=_repeat_action_boundary, active=_repeat_active,
+                    tags=_repeat_live_tags, rewrite_applied=_repeat_rewrite_applied,
+                    native_batch=native_batch,
+                    note_start=(f"[kernel] You have been cycling the same queries (one re-issued "
+                                f"{_worst_repeat} times)"),
+                    legacy_history="; those exchanges were removed from the conversation.",
+                    note_end=(" Their answers will not change until you edit "
+                              f"something. State: {_progress_facts().edits} edit(s), "
+                              f"{_progress_facts().checks} test run(s). Take a "
+                              f"DIFFERENT action — `edit` `{d['rel']}` or `test`."),
+                )
                 bolt._repeat_counts.clear()
                 last_surgery_step = step
                 same_streak, last_line = 0, None
+                _repeat_streak_boundary = None
                 if measurement.projector_kind == 'rich':
                     bolt.receipt(line.split()[0], line, line, 'REPEAT_SUPPRESSED',
-                                 detail=msgs[-1]['content'])
-                    measurement.observe(line, msgs[-1]['content'])
+                                 detail=_repeat_note)
+                    measurement.observe(line, _repeat_note)
+                del _repeat_note
                 continue
             if _same_query_suppression_eligible(line, last_line):
                 if same_streak == 0:
                     streak_anchor = len(msgs) - 1   # before this repeat's assistant msg
+                    _repeat_occurrence = (_repeat_active["occurrence"]
+                                          if _repeat_active is not None else None)
+                    _repeat_pin_ordinal = _repeat_active["selected"] if _repeat_active is not None else 0
+                    _repeat_streak_boundary = {
+                        "side": "before_repeat", "legacy_offset": streak_anchor,
+                        "occurrence": _repeat_occurrence, "ordinal": _repeat_pin_ordinal,
+                        "edge": (_repeat_occurrence_edge(_repeat_live_tags, _repeat_occurrence,
+                                                         side="before_repeat", ordinal=_repeat_pin_ordinal)
+                                 if _repeat_occurrence is not None else None),
+                    }
                 same_streak += 1
                 from kernel_pilot import POLICY
                 if interventions:
@@ -12054,23 +13307,29 @@ def work(d, *, resume=None):
                 # them with one stateful reframe. The model keeps everything it learned
                 # BEFORE the loop; the loop itself never happened, context-wise.
                 if interventions and same_streak >= 8:
-                    del msgs[streak_anchor:]
-                    msgs.append({"role": "user", "content":
-                                 f"[kernel] You repeated `{line}` {same_streak} times; those "
-                                 f"exchanges have been removed from the conversation. The "
-                                 f"answer has not changed and will not change until you edit "
-                                 f"something. State so far: {_progress_facts().edits} edit(s), "
-                                 f"{_progress_facts().checks} test run(s). Take a DIFFERENT action now — `read` an unread "
-                                 f"file, `edit` `{d['rel']}`, or `test`."})
+                    _repeat_note = _apply_repeat_suppression(
+                        msgs, boundary=_repeat_streak_boundary, active=_repeat_active,
+                        tags=_repeat_live_tags, rewrite_applied=_repeat_rewrite_applied,
+                        native_batch=native_batch,
+                        note_start=f"[kernel] You repeated `{line}` {same_streak} times",
+                        legacy_history="; those exchanges have been removed from the conversation.",
+                        note_end=(" The answer has not changed and will not change until you edit "
+                                  f"something. State so far: {_progress_facts().edits} edit(s), "
+                                  f"{_progress_facts().checks} test run(s). Take a DIFFERENT action now — `read` an unread "
+                                  f"file, `edit` `{d['rel']}`, or `test`."),
+                    )
                     same_streak = 0
                     last_line = None
+                    _repeat_streak_boundary = None
                     if measurement.projector_kind == 'rich':
                         bolt.receipt(line.split()[0], line, line, 'REPEAT_SUPPRESSED',
-                                     detail=msgs[-1]['content'])
-                        measurement.observe(line, msgs[-1]['content'])
+                                     detail=_repeat_note)
+                        measurement.observe(line, _repeat_note)
+                    del _repeat_note
                     continue
             else:
                 same_streak = 0
+                _repeat_streak_boundary = None
             last_line = line
 
             # DEFECT #43 — MASHED VERBS. v20: `test read routers/helm_human_work.py` repeated
@@ -15665,12 +16924,22 @@ def work(d, *, resume=None):
             msgs.append(_tool_reply_for_call(msgs, tool_call_id, delivered_obs,
                                              outcome=_outcome, receipt=_receipt) if tool_call_id
                         else {"role": "user", "content": delivered_obs})
+            if _repeat_active is not None:
+                _repeat_ordinal = _repeat_active["selected"]
+                if tool_call_id:
+                    _record_repeat_delivery(_repeat_active, ordinal=_repeat_ordinal, message=msgs[-1])
+                _repeat_live_tags[len(msgs) - 1] = ((_repeat_active["occurrence"], _repeat_ordinal, "result"),)
             _postgreen_advisory = locals().get("_pending_postgreen_nudge")
             if isinstance(_postgreen_advisory, str) and _postgreen_advisory:
                 msgs.append({"role": "user", "content": _postgreen_advisory})
                 _pending_postgreen_nudge = None
             if line.split()[0] in ("edit", "test"):
                 action_anchor = len(msgs)
+                _repeat_action_boundary = {
+                    "side": "after_action", "legacy_offset": action_anchor,
+                    "occurrence": _repeat_active["occurrence"] if _repeat_active is not None else None,
+                    "edge": action_anchor if _repeat_active is not None else None,
+                }
             # E307 completion_evidence input: distinguish PRODUCT edits from test edits so
             # the done-gate can refuse "changed only tests" completion claims.
             _product_edit_applied = (

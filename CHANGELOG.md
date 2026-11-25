@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Tests: the parallel-off parity check now compares result structure instead of wall-clock seconds, and load-sensitive worker and replay fixtures wait for observed readiness instead of fixed delays.
+- Fix: when a repeated search is suppressed after history was trimmed or summarized, the engine now cuts only at whole tool exchanges. The next request keeps every executed sibling result and an explicit refusal for the suppressed call, instead of declaring calls with no results.
+
 ## 0.9.9 (2026-11-24)
 
 - Tests: provider rate-limit tests no longer inherit a leaked parent meter from earlier tests in the same worker.

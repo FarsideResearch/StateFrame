@@ -4,8 +4,10 @@ import hashlib
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -32,8 +34,11 @@ FULL_FIRST_SEND_TOOLS = {
     "str_replace", "where_defined", "who_calls", "work",
 }
 REQUEST_BUDGET = 8
+_FIXTURE_GATE_WATCHDOG = 90
 TEST_PATH = "tests/test_pricing.py"
 DRIVER = """
+import os
+import socket
 import sys
 from pathlib import Path
 
@@ -57,6 +62,12 @@ def instrument(command, *args, **kwargs):
     return popen(command, *args, **kwargs)
 
 runner.subprocess.Popen = instrument
+readiness_address = os.environ.pop("SF_LOADWIRE_FIXTURE_GATE", None)
+if readiness_address:
+    readiness_host, readiness_port = readiness_address.rsplit(":", 1)
+    with socket.create_connection((readiness_host, int(readiness_port)), timeout=90) as readiness:
+        readiness.sendall(b"ready")
+        assert readiness.recv(1) == b"R", "fixture provisioner did not release runner startup"
 raise SystemExit(cli.main(sys.argv[2:]))
 """
 
@@ -86,6 +97,7 @@ def wait_until(ready, seconds):
     while not ready() and time.monotonic() < deadline:
         time.sleep(0.01)
     return ready()
+
 block = config["fallback"]
 
 class GraphProbe:
@@ -256,10 +268,39 @@ if stop_at or hold_until or hold_analysis:
 """
 
 
+def _provision_fixture_after_readiness(
+        listener: socket.socket, fixtures: tuple[tuple[Path, bytes], ...], errors: list[str]) -> None:
+    try:
+        connection, _ = listener.accept()
+        with connection:
+            connection.settimeout(_FIXTURE_GATE_WATCHDOG)
+            if connection.recv(16) != b"ready":
+                raise AssertionError("engine sent an invalid fixture readiness message")
+            for path, content in fixtures:
+                if path.exists():
+                    if path.read_bytes() != content:
+                        raise AssertionError(f"ready fixture changed: {path.name}")
+                    continue
+                with path.open("xb") as output:
+                    for offset in range(0, len(content), 512):
+                        output.write(content[offset:offset + 512])
+                    output.flush()
+                    os.fsync(output.fileno())
+                if path.read_bytes() != content:
+                    raise AssertionError(f"provisioned fixture bytes changed: {path.name}")
+            connection.sendall(b"R")
+    except TimeoutError:
+        errors.append("fixture readiness handshake timed out")
+    except Exception as error:
+        errors.append(f"{type(error).__name__}: {error}")
+    finally:
+        listener.close()
+
+
 def _run(tree, work, *, minimal="off", indexed=None, hold=False, fallback=False,
          sends=None, resume=False, gate_seconds=None, analysis=None, analysis_resume=False,
          parity_fixture=False, disable_analysis_features=False, unshown_note=None, constant_menu=None,
-         background_analysis=None):
+         background_analysis=None, slow_fixture=False):
     work.mkdir()
     repo = work / "repo"
     run = work / "run"
@@ -295,6 +336,13 @@ def _run(tree, work, *, minimal="off", indexed=None, hold=False, fallback=False,
         steps = [{"tool": "read", "required": True, "arguments": {"path": path}}
                  for path in ("shop/pricing.py", TEST_PATH, "shop/elsewhere.py", "shop/__init__.py")]
         sends = len(steps)
+    fixture_files: tuple[tuple[Path, bytes], ...] = ()
+    if slow_fixture:
+        fixture_path = repo / "shop" / "unrelated.py"
+        assert fixture_path.is_file(), "slow fixture run is missing its census source fixture"
+        fixture_files = ((fixture_path, fixture_path.read_bytes()),)
+        for path, _ in fixture_files:
+            path.unlink()
     switches = profiles.load(profiles.DEFAULT)
     switches.update({MINIMAL: minimal, "STATEFRAME_TURN_REPO_INTEL": "off",
                      "STATEFRAME_PER_REQUEST_TIMEOUT_S": str(REQUEST_BUDGET)})
@@ -326,12 +374,46 @@ def _run(tree, work, *, minimal="off", indexed=None, hold=False, fallback=False,
     # The hold, provider timeout and requested send count are the proof's
     # bounds. Leave extra time for setup when the build host is busy.
     run_timeout = 300
+    launch_number = 0
 
     def launch(arguments):
-        probe.write_text(f"config = {config!r}\n" + PROBE, encoding="utf-8")
-        return subprocess.run([sys.executable, "-B", "-c", DRIVER, str(probe), *arguments],
-                              cwd=tree, env=env, capture_output=True, text=True, check=False,
-                              timeout=scaled(run_timeout + 60))
+        nonlocal launch_number
+        listener = None
+        gate_thread = None
+        gate_errors: list[str] = []
+        if slow_fixture:
+            launch_number += 1
+            # An ephemeral loopback port avoids AF_UNIX pathname limits under long TMPDIR roots.
+            listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(1)
+            listener.settimeout(_FIXTURE_GATE_WATCHDOG)
+            gate_thread = threading.Thread(
+                target=_provision_fixture_after_readiness,
+                args=(listener, fixture_files, gate_errors), daemon=True,
+            )
+            gate_thread.start()
+            launch_environment = dict(env)
+            address = listener.getsockname()
+            launch_environment["SF_LOADWIRE_FIXTURE_GATE"] = f"{address[0]}:{address[1]}"
+        else:
+            launch_environment = env
+        try:
+            probe.write_text(f"config = {config!r}\n" + PROBE, encoding="utf-8")
+            result = subprocess.run([sys.executable, "-B", "-c", DRIVER, str(probe), *arguments],
+                                    cwd=tree, env=launch_environment, capture_output=True,
+                                    text=True, check=False,
+                                    timeout=scaled(run_timeout + 60))
+        finally:
+            if gate_thread is not None:
+                gate_thread.join(timeout=_FIXTURE_GATE_WATCHDOG + 5)
+                if gate_thread.is_alive():
+                    if listener is not None:
+                        listener.close()
+                    gate_thread.join(timeout=5)
+                assert not gate_thread.is_alive(), "fixture provisioner did not stop"
+                assert not gate_errors, "; ".join(gate_errors)
+        return result
 
     def diagnostic(result):
         log = run / "engine.log"
@@ -396,9 +478,16 @@ def test_following_send_preserves_needed_facts_with_a_held_analysis(
 
 @pytest.mark.host_sandbox
 def test_replay_keeps_the_cold_census_with_a_ready_worker(tmp_path):
-    trace, _, run, _ = _run(ROOT, tmp_path / "replayed", analysis="census", fallback=True,
-                           gate_seconds=25, analysis_resume=True, minimal="on", indexed="on",
-                           background_analysis="on")
+    options = {"analysis": "census", "fallback": True, "gate_seconds": 25,
+               "analysis_resume": True, "minimal": "on", "indexed": "on",
+               "background_analysis": "on"}
+    normal_trace, normal_events, _, _ = _run(ROOT, tmp_path / "normal", **options)
+    trace, delayed_events, run, _ = _run(
+        ROOT, tmp_path / "delayed", slow_fixture=True, **options)
+    assert [body for _, body in normal_trace.requests] == [body for _, body in trace.requests], (
+        "startup replay provider requests changed after delayed fixture provisioning")
+    assert [row[0] for row in normal_events] == [row[0] for row in delayed_events], (
+        "startup replay event ordering changed after delayed fixture provisioning")
     for send, (_, request) in enumerate(trace.requests[:2], 1):
         assert (run / "wire" / f"{send:04d}.request.json").read_bytes() == request
     metadata = Path("wire/0002.repository-analysis.json")
@@ -464,7 +553,8 @@ def test_following_send_uses_scoped_dependencies_while_full_graph_waits(
 
 @pytest.mark.host_sandbox
 def test_first_provider_request_matches_wave_one(tmp_path, tmp_path_factory):
-    base = pinned_tree("dc52265bc", tmp_path_factory)
+    # The 0.8.18 request shape predates this 0.9.9 replay baseline.
+    base = pinned_tree("29765b39", tmp_path_factory)
     baseline, _, _, _ = _run(base, tmp_path / "baseline", sends=1)
     current, _, run, _ = _run(ROOT, tmp_path / "current", sends=1)
 
@@ -493,6 +583,17 @@ def test_background_analysis_off_preserves_release_requests(
     print(f"Release request bytes: {[len(body) for body in release_bodies]}")
     print(f"Branch OFF request bytes: {[len(body) for body in current_bodies]}")
     assert current_bodies == release_bodies
+    if background_analysis is None:
+        # Keep this path deep so a filesystem-based readiness socket would exceed sun_path.
+        delayed_work = tmp_path / ("delayed-current-" + "x" * 104)
+        delayed, delayed_events, delayed_run, _ = _run(
+            ROOT, delayed_work, background_analysis=background_analysis,
+            slow_fixture=True, **options)
+        delayed_bodies = [body for _, body in delayed.requests]
+        assert delayed_bodies == current_bodies == release_bodies
+        assert delayed_events == current_events == []
+        for send, body in enumerate(delayed_bodies, 1):
+            assert (delayed_run / "wire" / f"{send:04d}.request.json").read_bytes() == body
     assert not list((run / "wire").glob("*.repository-analysis.json"))
     assert not list((run / "wire").glob("*.repo-dependencies.json"))
     assert current_events == baseline_events == []
