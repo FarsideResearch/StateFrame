@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.10.0 (2026-11-25)
 
 - Tests: the parallel-off parity check now compares result structure instead of wall-clock seconds, and load-sensitive worker and replay fixtures wait for observed readiness instead of fixed delays.
 - Fix: when a repeated search is suppressed after history was trimmed or summarized, the engine now cuts only at whole tool exchanges. The next request keeps every executed sibling result and an explicit refusal for the suppressed call, instead of declaring calls with no results.
