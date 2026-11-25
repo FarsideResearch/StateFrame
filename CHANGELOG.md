@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.10.1 (2026-11-25)
 
 - Fix: a subframe workspace run directory created under a 0002 umask is no longer left group- or world-writable. StateFrame now refuses to prepare a worker in a run directory it does not own or cannot open without following symlinks.
 - Tests: the readiness fixtures read the full ready line even when it arrives in fragments, and keep socket paths short enough for the AF_UNIX limit.
