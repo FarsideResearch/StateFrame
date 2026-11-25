@@ -1,11 +1,12 @@
 """The shipped profile must continue to dispatch provider requests to child frames."""
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 import json
 import os
 from pathlib import Path
 import subprocess
+import tempfile
 import time
 
 import pytest
@@ -18,6 +19,7 @@ from tests.fixtures.parallel.e2e_support import install_startup_hook
 ROOT = Path(__file__).resolve().parents[1]
 PROFILE = ROOT / "src" / "stateframe" / "profiles" / "r2hc3.json"
 _WATCHDOG_SECONDS = 90
+_AF_UNIX_PATH_MAX = 104  # Conservative sun_path size; includes the terminating NUL.
 _STARTUP_GATE_SOURCE = """from __future__ import annotations
 import os
 import time
@@ -34,6 +36,29 @@ if gate:
             raise TimeoutError("fixture readiness gate was not released")
         time.sleep(min(0.01, remaining))
 """
+
+
+def _short_socket_directory() -> tempfile.TemporaryDirectory[str]:
+    """Make a temp root where a short AF_UNIX socket path fits on Linux and macOS."""
+    candidates = (Path(tempfile.gettempdir()), Path("/tmp"))
+    for parent in dict.fromkeys(candidates):
+        probe = parent / "sf-lw-12345678" / "fixture.sock"
+        if not parent.is_dir() or len(os.fsencode(probe)) >= _AF_UNIX_PATH_MAX:
+            continue
+        directory = tempfile.TemporaryDirectory(prefix="sf-lw-", dir=parent)
+        if len(os.fsencode(Path(directory.name) / "fixture.sock")) < _AF_UNIX_PATH_MAX:
+            return directory
+        directory.cleanup()
+    raise AssertionError("no temporary directory can hold a short AF_UNIX fixture socket")
+
+
+@pytest.fixture
+def short_loadwire_tmpdir(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    with _short_socket_directory() as directory:
+        path = Path(directory)
+        assert len(os.fsencode(path / "fixture.sock")) < _AF_UNIX_PATH_MAX
+        monkeypatch.setenv("TMPDIR", str(path))
+        yield path
 
 
 def _wait_for_file(path: Path, timeout: float) -> bool:
@@ -108,7 +133,8 @@ def _run_with_delayed_fixture(
     for path in fixture_paths:
         path.unlink()
 
-    gate = run_dir.parent / "fixture-gate"
+    gate = Path(env["TMPDIR"]) / f"fixture-gate-{run_dir.parent.name}"
+    assert len(os.fsencode(gate.parent / "fixture.sock")) < _AF_UNIX_PATH_MAX
     child_environment = dict(env)
     child_environment["SF_LOADWIRE_FIXTURE_GATE"] = str(gate)
     install_startup_hook(Path(command[0]), "loadwire_fixture_gate", _STARTUP_GATE_SOURCE)
@@ -197,7 +223,8 @@ def _subframe_evidence(root: Path) -> tuple[tuple[object, ...], ...]:
 
 @pytest.mark.host_sandbox
 def test_shipped_profile_forced_subframes_send_child_requests(
-        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        short_loadwire_tmpdir: Path) -> None:
     old_umask = os.umask(0o077)
     try:
         normal_root = tmp_path / "normal"

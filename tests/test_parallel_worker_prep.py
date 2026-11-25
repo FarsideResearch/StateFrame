@@ -600,6 +600,8 @@ def test_prepare_worker_inherits_working_set_allocator_for_subframes(
 
 def test_prepare_worker_binds_workspace_store_when_enabled(tmp_path, monkeypatch):
     snapshot, run_dir, spec_path, spec, parent_spec, _parent_run = _unit_fixture(tmp_path)
+    # A 0002 umask makes a default 0777 directory group-writable; binding must secure it first.
+    run_dir.chmod(0o775)
     stateframe_home = tmp_path / "stateframe-home"
     stateframe_home.mkdir(mode=0o700)
     monkeypatch.setenv("STATEFRAME_HOME", str(stateframe_home))
@@ -618,6 +620,9 @@ def test_prepare_worker_binds_workspace_store_when_enabled(tmp_path, monkeypatch
 
         store = open_run_store(run_dir)
     assert store._path.is_dir()
+    assert stat.S_IMODE(run_dir.stat().st_mode) == 0o755
+    assert stat.S_IMODE((run_dir / ".workspace-objects.json").stat().st_mode) == 0o600
+    assert stat.S_IMODE(store._path.stat().st_mode) == 0o700
     binding = (run_dir / ".workspace-objects.json").read_bytes()
     prepare_worker(spec, spec_path, run_dir, snapshot, parent_spec=parent_spec)
     assert (run_dir / ".workspace-objects.json").read_bytes() == binding

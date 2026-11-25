@@ -15,6 +15,7 @@ The allocator is enabled on the PARENT only; nothing pins or patches the worker'
 """
 from __future__ import annotations
 
+from collections.abc import Iterator
 import hashlib
 import json
 import os
@@ -22,6 +23,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import venv
 
@@ -46,6 +48,7 @@ WINDOWS = ((1, 1000), (1001, 2000), (2001, 2100))
 # read clips near 11.5K chars and the continuation is then not scripted). Coverage still targets WINDOWS.
 READ_CHUNK_LINES = 500
 _WATCHDOG_SECONDS = 90
+_AF_UNIX_PATH_MAX = 104  # Conservative sun_path size; includes the terminating NUL.
 _STARTUP_GATE_SOURCE = """from __future__ import annotations
 import os
 import time
@@ -62,6 +65,30 @@ if gate:
             raise TimeoutError("fixture readiness gate was not released")
         time.sleep(min(0.01, remaining))
 """
+
+
+def _short_socket_directory() -> tempfile.TemporaryDirectory[str]:
+    """Make a temp root where a short AF_UNIX socket path fits on Linux and macOS."""
+    candidates = (Path(tempfile.gettempdir()), Path("/tmp"))
+    for parent in dict.fromkeys(candidates):
+        probe = parent / "sf-lw-12345678" / "fixture.sock"
+        if not parent.is_dir() or len(os.fsencode(probe)) >= _AF_UNIX_PATH_MAX:
+            continue
+        directory = tempfile.TemporaryDirectory(prefix="sf-lw-", dir=parent)
+        if len(os.fsencode(Path(directory.name) / "fixture.sock")) < _AF_UNIX_PATH_MAX:
+            return directory
+        directory.cleanup()
+    raise AssertionError("no temporary directory can hold a short AF_UNIX fixture socket")
+
+
+@pytest.fixture
+def short_loadwire_tmpdir(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    with _short_socket_directory() as directory:
+        path = Path(directory)
+        assert len(os.fsencode(path / "fixture.sock")) < _AF_UNIX_PATH_MAX
+        monkeypatch.setenv("TMPDIR", str(path))
+        yield path
+
 
 # Wire header from the read tool (kernel_source_delivery._header). The next line is the
 # "more content" / "complete" line, then the body, whose length is exactly ``chars``.
@@ -225,7 +252,8 @@ def _request_bodies(endpoint: BarrierEndpoint) -> dict[str, tuple[bytes, ...]]:
 
 
 def _run_allocator_case(
-        tmp_path: Path, isolated_engine_python: Path, *, delayed_fixture: bool,
+        tmp_path: Path, isolated_engine_python: Path, short_tmp_dir: Path, *,
+        delayed_fixture: bool,
 ) -> tuple[dict[str, tuple[bytes, ...]], tuple[tuple[int, int], ...]]:
     tmp_path.mkdir(parents=True)
     repo = tmp_path / "repo"
@@ -234,9 +262,12 @@ def _run_allocator_case(
     if not delayed_fixture:
         source_path.write_text(_source(), encoding="utf-8")
     run_dir = tmp_path / "run"
-    extra_environment = {"STATEFRAME_WORKING_SET_ALLOCATOR": "on"}
+    extra_environment = {
+        "STATEFRAME_WORKING_SET_ALLOCATOR": "on",
+        "TMPDIR": str(short_tmp_dir),
+    }
     if delayed_fixture:
-        gate = tmp_path / "fixture-gate"
+        gate = short_tmp_dir / f"{tmp_path.name}-fixture-gate"
         install_startup_hook(isolated_engine_python, "loadwire_fixture_gate", _STARTUP_GATE_SOURCE)
         extra_environment["SF_LOADWIRE_FIXTURE_GATE"] = str(gate)
 
@@ -317,10 +348,10 @@ def _run_allocator_case(
 
 
 def test_worker_under_inherited_allocator_sends_owned_page_bytes(
-        tmp_path: Path, isolated_engine_python: Path) -> None:
-    normal = _run_allocator_case(tmp_path / "normal", isolated_engine_python,
-                                 delayed_fixture=False)
-    delayed = _run_allocator_case(tmp_path / "delayed", isolated_engine_python,
-                                  delayed_fixture=True)
+        tmp_path: Path, isolated_engine_python: Path, short_loadwire_tmpdir: Path) -> None:
+    normal = _run_allocator_case(
+        tmp_path / "normal", isolated_engine_python, short_loadwire_tmpdir, delayed_fixture=False)
+    delayed = _run_allocator_case(
+        tmp_path / "delayed", isolated_engine_python, short_loadwire_tmpdir, delayed_fixture=True)
     assert normal[0] == delayed[0], "provider request bytes changed under delayed fixture readiness"
     assert normal[1] == delayed[1], "owned page spans changed under delayed fixture readiness"
