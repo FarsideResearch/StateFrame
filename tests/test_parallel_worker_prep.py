@@ -1,5 +1,6 @@
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -326,14 +327,56 @@ def _assert_default_off_spec_parity(released: dict, candidate: dict,
         f"default-off run spec values differ at {_first_wire_component(released, candidate)}")
 
 
+def _assert_default_off_timed_mapping_parity(released: dict, candidate: dict,
+                                             seconds_key: str, label: str, *,
+                                             candidate_only_keys: dict[str, str] | None = None) -> None:
+    allowed_candidate_keys = set(candidate_only_keys or ())
+    released_keys = set(released)
+    candidate_keys = set(candidate)
+    assert not released_keys - candidate_keys, f"default-off {label} removed reference keys"
+    unexpected_candidate_keys = candidate_keys - released_keys - allowed_candidate_keys
+    assert not unexpected_candidate_keys, f"default-off {label} added unexpected keys"
+
+    assert seconds_key in released and seconds_key in candidate
+    shared_candidate = {key: value for key, value in candidate.items() if key in released_keys}
+    assert {key: type(value) for key, value in released.items()} == {
+        key: type(value) for key, value in shared_candidate.items()}
+    released_seconds = released[seconds_key]
+    candidate_seconds = shared_candidate[seconds_key]
+    assert type(released_seconds) is type(candidate_seconds) is float
+    assert math.isfinite(released_seconds) and released_seconds >= 0.0
+    assert math.isfinite(candidate_seconds) and candidate_seconds >= 0.0
+    released_without_seconds = {key: value for key, value in released.items() if key != seconds_key}
+    candidate_without_seconds = {key: value for key, value in shared_candidate.items() if key != seconds_key}
+    assert canonical_json(released_without_seconds) == canonical_json(candidate_without_seconds), (
+        f"default-off {label} differ at "
+        f"{_first_wire_component(released_without_seconds, candidate_without_seconds)}")
+
+
+# These intentional default-off summary fields postdate the 0.8.5 parity reference.
+_DEFAULT_OFF_CANDIDATE_ONLY_SUMMARY_KEYS = {
+    "no_change": "StateFrame 0.9.6 FALSE-SUCCESS",
+    "start_files_skipped": "StateFrame 0.9.4 START",
+    "start_files_skipped_total": "StateFrame 0.9.4 START",
+}
+
+
+def _assert_default_off_result_bytes_parity(released: bytes, candidate: bytes) -> None:
+    seconds_value = rb"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?"
+    seconds_field = re.compile(rb'("seconds"\s*:\s*)' + seconds_value)
+    released_without_seconds, released_seconds_count = seconds_field.subn(rb"\1<seconds>", released)
+    candidate_without_seconds, candidate_seconds_count = seconds_field.subn(rb"\1<seconds>", candidate)
+    assert released_seconds_count == candidate_seconds_count == 1
+    assert released_without_seconds == candidate_without_seconds
+
+
 def _assert_default_off_result_parity(released: dict, candidate: dict,
                                      _released_run: Path, _released_endpoint: str,
                                      _candidate_run: Path, _candidate_endpoint: str) -> None:
     from kernel_delivery_manifest import _digest
 
+    _assert_default_off_timed_mapping_parity(released, candidate, "seconds", "engine results")
     assert type(released.get("exit_status")) is type(candidate.get("exit_status")) is int
-    assert canonical_json(released) == canonical_json(candidate), (
-        f"default-off engine results differ at {_first_wire_component(released, candidate)}")
     manifest = candidate["result"].get("delivery_manifest")
     if manifest is not None:
         body = dict(manifest)
@@ -345,12 +388,50 @@ def test_default_off_result_parity_checks_the_published_exit_status(tmp_path):
     arguments = (tmp_path / "released", "http://127.0.0.1:30001/v1",
                  tmp_path / "candidate", "http://127.0.0.1:30002/v1")
     _assert_default_off_result_parity(released, released, *arguments)
+    _assert_default_off_result_parity(released, {**released, "seconds": 1.25}, *arguments)
 
     for changed in ({"result": released["result"]}, {**released, "exit_status": 1},
                     {**released, "exit_status": False}, {**released, "result": {"result": "DRAFT"}},
-                    {**released, "unexpected": "field"}):
+                    {**released, "unexpected": "field"}, {**released, "seconds": "0.0"},
+                    {**released, "seconds": -0.1}, {**released, "seconds": float("nan")},
+                    {**released, "seconds": float("inf")}):
         with pytest.raises(AssertionError):
             _assert_default_off_result_parity(released, changed, *arguments)
+
+
+def test_default_off_summary_parity_allows_only_released_candidate_keys():
+    released = {"result": "SUBMITTED", "wall_seconds": 0.0, "exit_code": 0}
+    candidate = {
+        **released,
+        "wall_seconds": 1.25,
+        "no_change": False,
+        "start_files_skipped": [],
+        "start_files_skipped_total": 0,
+    }
+    _assert_default_off_timed_mapping_parity(
+        released, candidate, "wall_seconds", "summaries",
+        candidate_only_keys=_DEFAULT_OFF_CANDIDATE_ONLY_SUMMARY_KEYS)
+
+    with pytest.raises(AssertionError, match="added unexpected keys"):
+        _assert_default_off_timed_mapping_parity(
+            released, {**candidate, "planted_unexpected_key": True}, "wall_seconds", "summaries",
+            candidate_only_keys=_DEFAULT_OFF_CANDIDATE_ONLY_SUMMARY_KEYS)
+
+    for invalid_wall_seconds in (0, "0.0", -0.1, float("nan"), float("inf")):
+        with pytest.raises(AssertionError):
+            _assert_default_off_timed_mapping_parity(
+                released, {**released, "wall_seconds": invalid_wall_seconds},
+                "wall_seconds", "summaries")
+
+
+def test_default_off_result_bytes_parity_ignores_only_seconds_value():
+    released = b'{"result":"SUBMITTED","seconds":0.0,"exit_status":0}'
+    candidate = b'{"result":"SUBMITTED","seconds":1.25,"exit_status":0}'
+    _assert_default_off_result_bytes_parity(released, candidate)
+
+    with pytest.raises(AssertionError):
+        _assert_default_off_result_bytes_parity(
+            released, b'{"result":"DRAFT","seconds":1.25,"exit_status":0}')
 
 
 def test_off_cache_profile_uses_omitted_defaults_without_explicit_cache_switches(tmp_path):
@@ -1627,16 +1708,21 @@ def test_default_parallel_off_wire_and_public_artifacts_match_merged_main(tmp_pa
     new_summary = json.loads((new_run / "summary.json").read_bytes())
     assert "parallel" not in old_summary_a and "parallel" not in old_summary_b
     assert "parallel" not in new_summary
-    assert canonical_json(old_summary_a) == canonical_json(old_summary_b)
+    _assert_default_off_timed_mapping_parity(
+        old_summary_a, old_summary_b, "wall_seconds", "reference summaries")
     assert old_summary_a["engine_source_hash"] == released_build["source_hash"]
     assert old_summary_a["engine_shipped_hash"] == released_build["shipped_hash"]
     expected_summary = {**old_summary_a, "engine_source_hash": candidate_build["source_hash"],
                         "engine_shipped_hash": candidate_build["shipped_hash"]}
-    assert canonical_json(expected_summary) == canonical_json(new_summary)
+    _assert_default_off_timed_mapping_parity(
+        expected_summary, new_summary, "wall_seconds", "summaries",
+        candidate_only_keys=_DEFAULT_OFF_CANDIDATE_ONLY_SUMMARY_KEYS)
 
     for released_run, released_endpoint in ((old_a, endpoint_a), (old_b, endpoint_b)):
-        released_result = json.loads((released_run / "engine-result.json").read_bytes())
-        candidate_result = json.loads((new_run / "engine-result.json").read_bytes())
+        released_result_bytes = (released_run / "engine-result.json").read_bytes()
+        candidate_result_bytes = (new_run / "engine-result.json").read_bytes()
+        released_result = json.loads(released_result_bytes)
+        candidate_result = json.loads(candidate_result_bytes)
         _assert_default_off_result_parity(released_result, candidate_result, released_run, released_endpoint,
                                           new_run, new_endpoint)
-        assert (released_run / "engine-result.json").read_bytes() == (new_run / "engine-result.json").read_bytes()
+        _assert_default_off_result_bytes_parity(released_result_bytes, candidate_result_bytes)

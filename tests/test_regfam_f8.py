@@ -40,7 +40,7 @@ PENDING_RELEASE_SELECTION: dict[str, int] = {
     "tests/test_fu070_offparity_gates.py": 6,  # pending release-owner selection
     "tests/test_hook_wiring_parity.py": 1,  # test_no_hooks_real_shaped_llama_keeps_automatic_pin_and_release_bytes
     "tests/test_ledger_pin_delivery.py": 1,  # pending release-owner selection
-    "tests/test_parallel_worker_prep.py": 1,  # merged-main wire/artifact comparison awaits selection
+    "tests/test_parallel_worker_prep.py": 3,  # merged-main comparison + summary/result-bytes parity guards await selection
     "tests/test_working_set_off_parity_base.py": 1,  # test_off_provider_bytes_match_cutover_base, both bases
     "tests/test_working_set_render_off_parity.py": 1,  # test_off_wire_bytes_match_1de34aa4, both bases
     # always skip in a gate run
