@@ -7,8 +7,10 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 from pathlib import Path
+from typing import Protocol
 
 import pytest
 from _journal import measurement_events
@@ -35,6 +37,7 @@ FULL_FIRST_SEND_TOOLS = {
 }
 REQUEST_BUDGET = 8
 _FIXTURE_GATE_WATCHDOG = 90
+_AF_UNIX_PATH_MAX = 104  # Conservative sun_path size; includes the terminating NUL.
 TEST_PATH = "tests/test_pricing.py"
 DRIVER = """
 import os
@@ -64,12 +67,70 @@ def instrument(command, *args, **kwargs):
 runner.subprocess.Popen = instrument
 readiness_address = os.environ.pop("SF_LOADWIRE_FIXTURE_GATE", None)
 if readiness_address:
-    readiness_host, readiness_port = readiness_address.rsplit(":", 1)
-    with socket.create_connection((readiness_host, int(readiness_port)), timeout=90) as readiness:
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as readiness:
+        readiness.settimeout(90)
+        readiness.connect(readiness_address)
         readiness.sendall(b"ready")
         assert readiness.recv(1) == b"R", "fixture provisioner did not release runner startup"
 raise SystemExit(cli.main(sys.argv[2:]))
 """
+
+
+class _SocketReader(Protocol):
+    def recv(self, size: int, /) -> bytes: ...
+
+
+def _short_socket_directory() -> tempfile.TemporaryDirectory[str]:
+    """Make a temp root where a short AF_UNIX socket path fits on Linux and macOS."""
+    candidates = (Path(tempfile.gettempdir()), Path("/tmp"))
+    for parent in dict.fromkeys(candidates):
+        probe = parent / "sf-lw-12345678" / "fixture.sock"
+        if not parent.is_dir() or len(os.fsencode(probe)) >= _AF_UNIX_PATH_MAX:
+            continue
+        directory = tempfile.TemporaryDirectory(prefix="sf-lw-", dir=parent)
+        if len(os.fsencode(Path(directory.name) / "fixture.sock")) < _AF_UNIX_PATH_MAX:
+            return directory
+        directory.cleanup()
+    raise AssertionError("no temporary directory can hold a short AF_UNIX fixture socket")
+
+
+def _read_fixture_readiness(connection: _SocketReader) -> None:
+    """Read the complete fixed readiness token even when recv returns fragments."""
+    token = b"ready"
+    received = bytearray()
+    while len(received) < len(token):
+        chunk = connection.recv(len(token) - len(received))
+        if not chunk:
+            raise AssertionError("fixture readiness message ended before the ready token arrived")
+        received.extend(chunk)
+    if bytes(received) != token:
+        raise AssertionError("engine sent an invalid fixture readiness message")
+
+
+def test_fixture_readiness_accepts_fragmented_ready_token() -> None:
+    class FragmentedConnection:
+        def __init__(self) -> None:
+            self.chunks = iter((b"re", b"a", b"dy"))
+
+        def recv(self, size: int) -> bytes:
+            chunk = next(self.chunks)
+            assert len(chunk) <= size
+            return chunk
+
+    _read_fixture_readiness(FragmentedConnection())
+
+
+def test_fixture_readiness_fails_when_peer_closes_without_progress() -> None:
+    class ClosedConnection:
+        def __init__(self) -> None:
+            self.chunks = iter((b"rea", b""))
+
+        def recv(self, size: int) -> bytes:
+            return next(self.chunks)
+
+    with pytest.raises(AssertionError, match="ended before the ready token"):
+        _read_fixture_readiness(ClosedConnection())
+
 
 PROBE = """
 import ast
@@ -274,8 +335,7 @@ def _provision_fixture_after_readiness(
         connection, _ = listener.accept()
         with connection:
             connection.settimeout(_FIXTURE_GATE_WATCHDOG)
-            if connection.recv(16) != b"ready":
-                raise AssertionError("engine sent an invalid fixture readiness message")
+            _read_fixture_readiness(connection)
             for path, content in fixtures:
                 if path.exists():
                     if path.read_bytes() != content:
@@ -379,40 +439,53 @@ def _run(tree, work, *, minimal="off", indexed=None, hold=False, fallback=False,
     def launch(arguments):
         nonlocal launch_number
         listener = None
+        socket_directory = None
+        socket_path = None
         gate_thread = None
         gate_errors: list[str] = []
-        if slow_fixture:
-            launch_number += 1
-            # An ephemeral loopback port avoids AF_UNIX pathname limits under long TMPDIR roots.
-            listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            listener.bind(("127.0.0.1", 0))
-            listener.listen(1)
-            listener.settimeout(_FIXTURE_GATE_WATCHDOG)
-            gate_thread = threading.Thread(
-                target=_provision_fixture_after_readiness,
-                args=(listener, fixture_files, gate_errors), daemon=True,
-            )
-            gate_thread.start()
-            launch_environment = dict(env)
-            address = listener.getsockname()
-            launch_environment["SF_LOADWIRE_FIXTURE_GATE"] = f"{address[0]}:{address[1]}"
-        else:
-            launch_environment = env
         try:
+            if slow_fixture:
+                launch_number += 1
+                socket_directory = _short_socket_directory()
+                socket_path = Path(socket_directory.name) / "fixture.sock"
+                assert len(os.fsencode(socket_path)) < _AF_UNIX_PATH_MAX, (
+                    f"AF_UNIX fixture socket path is too long: {socket_path}")
+                listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                listener.bind(str(socket_path))
+                listener.listen(1)
+                listener.settimeout(_FIXTURE_GATE_WATCHDOG)
+                gate_thread = threading.Thread(
+                    target=_provision_fixture_after_readiness,
+                    args=(listener, fixture_files, gate_errors), daemon=True,
+                )
+                gate_thread.start()
+                launch_environment = dict(env)
+                launch_environment["TMPDIR"] = socket_directory.name
+                launch_environment["SF_LOADWIRE_FIXTURE_GATE"] = str(socket_path)
+            else:
+                launch_environment = env
             probe.write_text(f"config = {config!r}\n" + PROBE, encoding="utf-8")
             result = subprocess.run([sys.executable, "-B", "-c", DRIVER, str(probe), *arguments],
                                     cwd=tree, env=launch_environment, capture_output=True,
                                     text=True, check=False,
                                     timeout=scaled(run_timeout + 60))
         finally:
-            if gate_thread is not None:
-                gate_thread.join(timeout=_FIXTURE_GATE_WATCHDOG + 5)
-                if gate_thread.is_alive():
-                    if listener is not None:
-                        listener.close()
-                    gate_thread.join(timeout=5)
-                assert not gate_thread.is_alive(), "fixture provisioner did not stop"
-                assert not gate_errors, "; ".join(gate_errors)
+            try:
+                if gate_thread is not None:
+                    gate_thread.join(timeout=_FIXTURE_GATE_WATCHDOG + 5)
+                    if gate_thread.is_alive():
+                        if listener is not None:
+                            listener.close()
+                        gate_thread.join(timeout=5)
+                    assert not gate_thread.is_alive(), "fixture provisioner did not stop"
+                    assert not gate_errors, "; ".join(gate_errors)
+            finally:
+                if listener is not None:
+                    listener.close()
+                if socket_path is not None:
+                    socket_path.unlink(missing_ok=True)
+                if socket_directory is not None:
+                    socket_directory.cleanup()
         return result
 
     def diagnostic(result):
@@ -584,7 +657,7 @@ def test_background_analysis_off_preserves_release_requests(
     print(f"Branch OFF request bytes: {[len(body) for body in current_bodies]}")
     assert current_bodies == release_bodies
     if background_analysis is None:
-        # Keep this path deep so a filesystem-based readiness socket would exceed sun_path.
+        # Keep the work path deep while its readiness socket uses the short TMPDIR root.
         delayed_work = tmp_path / ("delayed-current-" + "x" * 104)
         delayed, delayed_events, delayed_run, _ = _run(
             ROOT, delayed_work, background_analysis=background_analysis,

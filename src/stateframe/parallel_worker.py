@@ -491,6 +491,44 @@ def _prepare_hook_bundle(parent_run: Path, run_dir: Path, hooks: object, *, reus
         raise WorkerPreparationError(f"subframe hook bundle cannot be verified: {error}") from error
 
 
+def _open_directory_nofollow(path: Path) -> int:
+    path = path.absolute()
+    if ".." in path.parts:
+        raise ValueError("parent components are not allowed in workspace run paths")
+    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+    directory = os.open(path.anchor, flags)
+    try:
+        for component in path.parts[1:]:
+            child = os.open(component, flags, dir_fd=directory)
+            os.close(directory)
+            directory = child
+        return directory
+    except BaseException:
+        os.close(directory)
+        raise
+
+
+def _secure_unbound_workspace_run_dir(run_dir: Path) -> None:
+    try:
+        directory = _open_directory_nofollow(run_dir)
+    except (OSError, ValueError) as error:
+        raise WorkerPreparationError("subframe workspace run directory cannot be secured") from error
+    try:
+        info = os.fstat(directory)
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+            raise WorkerPreparationError("subframe workspace run directory must be host-controlled")
+        try:
+            os.stat(".workspace-objects.json", dir_fd=directory, follow_symlinks=False)
+        except FileNotFoundError:
+            mode = stat.S_IMODE(info.st_mode)
+            if mode & 0o022:
+                os.fchmod(directory, mode & ~0o022)
+    except OSError as error:
+        raise WorkerPreparationError("subframe workspace run directory cannot be secured") from error
+    finally:
+        os.close(directory)
+
+
 def _bind_workspace_store(run_dir: Path, spec: UnitSpec, parent_spec: Mapping[str, object]) -> None:
     environment = parent_spec.get("environment")
     if not isinstance(environment, Mapping) or environment.get("STATEFRAME_WORKSPACE_OBJECTS") != "on":
@@ -498,6 +536,9 @@ def _bind_workspace_store(run_dir: Path, spec: UnitSpec, parent_spec: Mapping[st
     engine_dir = parent_spec.get("engine_dir")
     if not isinstance(engine_dir, str) or not Path(engine_dir).is_dir():
         raise WorkerPreparationError("workspace object storage lacks its engine directory")
+
+    # A 0002 umask can leave a new run directory group-writable; tighten it before signing its identity.
+    _secure_unbound_workspace_run_dir(run_dir)
 
     # Stable identities make retries idempotent while keeping each worker in its own store.
     namespace = hashlib.sha256(
