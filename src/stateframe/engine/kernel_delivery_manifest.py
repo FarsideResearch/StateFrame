@@ -517,6 +517,7 @@ class DeliveryManifestTracker:
         self._pending_workspace_snapshot: tuple[
             object, tuple[object, ...], Mapping[str, bytes]
         ] | None = None
+        self._snapshot_epoch = 0
         self.claims: object = None
         # STATEFRAME_PROMPT_DIET (off by default): last *confirmed-rendered*
         # substantive-content digest and the request it was rendered for.
@@ -531,26 +532,32 @@ class DeliveryManifestTracker:
     def remember_claims(self, claims: object) -> None:
         self.claims = copy.deepcopy(_safe(claims))
 
+    def __getstate__(self) -> dict[str, object]:
+        # The handoff is valid only within the request preparation that made it.
+        return {**self.__dict__, "_pending_workspace_snapshot": None}
+
     def _workspace_identity(self) -> tuple[object, ...]:
         try:
             root = self.root.resolve()
         except (OSError, RuntimeError):
             root = self.root.absolute()
+        epoch = getattr(self, "_snapshot_epoch", 0)
         try:
             identity = root.stat()
         except OSError:
-            return (str(root), None, None)
-        return (str(root), identity.st_dev, identity.st_ino)
+            return (str(root), None, None, epoch)
+        return (str(root), identity.st_dev, identity.st_ino, epoch)
 
     def _capture_workspace_snapshot(self) -> Mapping[str, bytes] | None:
         try:
-            from kernel_host_done_facts import workspace_snapshot
-            return workspace_snapshot(self.root, live=True)
+            from kernel_host_done_facts import current_workspace_snapshot
+            return current_workspace_snapshot(self.root, self.baseline)
         except (ImportError, OSError, TypeError, ValueError):
             return None
 
     def invalidate_workspace_snapshot(self) -> None:
         """Drop the prepare/note handoff after a write or abandoned request."""
+        self._snapshot_epoch = getattr(self, "_snapshot_epoch", 0) + 1
         self._pending_workspace_snapshot = None
 
     def _consume_workspace_snapshot(self, request_id: object) -> object:

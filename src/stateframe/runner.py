@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from io import IncrementalNewlineDecoder
 from itertools import chain
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Mapping, TextIO
+from typing import TYPE_CHECKING, Callable, Mapping, Protocol, Sequence, TextIO
 
 from . import (_STARTUP_SPEC_KEY, _STARTUP_SWITCH, _startup_optimization_enabled,
                cache_metrics, outer_checks, outcomes, preflight, profiles, routes,
@@ -43,7 +43,8 @@ from .engine.kernel_custom_tools import CustomToolError, load_tool_files
 from .engine.kernel_mcp_tools import load_mcp_files, discover as discover_mcp
 from .engine.kernel_tool_settings import ToolSettings
 from . import instructions as project_instructions
-from .skills import SkillError, measured_skills_digest, resolve_skills, skills_digest, verify_records
+from .skills import (Skill, SkillError, bundled_comparison_caption_selection, measured_skills_digest, resolve_skills,
+                     skills_digest, verify_records)
 from .state_dirs import private_directory
 from .request_records import RequestRecordsError, list_request_records
 from .storage_gc import _fsync_directory, _write_json_atomic
@@ -69,6 +70,7 @@ PASS_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "USER", "LOG
 USER_ENV = ("LLAMA_CPP_TOKENIZE_URL",)
 # The engine child's test interpreter (absolute path); the engine's test_python() helper reads exactly this key.
 TEST_PYTHON_ENV = "STATEFRAME_TEST_PYTHON"
+SCHEDULE_WITNESS_ENV = "STATEFRAME_SCHEDULE_WITNESS"
 REQUIRED_TEST_LEDGER_ENV = "STATEFRAME_REQUIRED_TEST_LEDGER"
 RUNNER_HOME_IDENTITY_ENV = "STATEFRAME_RUNNER_HOME_IDENTITY"
 _STARTUP_HOME_IDENTITY_UNSET = object()
@@ -77,6 +79,34 @@ _DEFAULT_PROVIDER_EPOCH = object()
 CHECKPOINT_ENV = {"STATEFRAME_CHECKPOINT": "save", "STATEFRAME_CHECKPOINT_EVERY": "1",
                   "STATEFRAME_CHECKPOINT_KEEP": "2",
                   "STATEFRAME_CHECKPOINT_MIN_FREE_BYTES": ""}
+
+
+class _SkillAdmissionMeter(Protocol):
+    def measure(self, body: Mapping[str, object]) -> tuple[int, str]: ...
+
+
+def _admit_skill_settings(
+        selected: Sequence[Skill], records: list[dict[str, object]], endpoint: str | None,
+        meter: _SkillAdmissionMeter, *, write_figures_sentence: bool,
+        auth_key: str | None = None, generation_endpoint: str | None = None,
+) -> tuple[dict[str, object], bool]:
+    """Drop only optional F094 catalog guidance when it would exceed skill admission."""
+    from .engine.kernel_skills import MAX_CATALOG_TOKENS, SkillRuntime, measure_admission
+
+    effective = write_figures_sentence
+    measurements = measure_admission(selected, records, meter,
+                                     write_figures_sentence=effective)
+    catalog = measurements["catalog"]
+    if (effective and isinstance(catalog, Mapping)
+            and type(catalog.get("tokens")) is int
+            and catalog["tokens"] > MAX_CATALOG_TOKENS):
+        effective = False
+        measurements = measure_admission(selected, records, meter, write_figures_sentence=False)
+    digest = measured_skills_digest(records, measurements)
+    SkillRuntime(records, digest, endpoint, measurements,
+                 auth_key=auth_key, generation_endpoint=generation_endpoint,
+                 write_figures_sentence=effective)
+    return measurements, effective
 
 
 def checkpoint_env(profile_env=None):
@@ -1016,6 +1046,7 @@ PROMPT_BUDGET_ENV = "STATEFRAME_PROMPT_BUDGET"
 CONTEXT_ENV_NAMES = (CONTEXT_TOKENS_ENV, PROMPT_BUDGET_ENV)
 DEFAULT_CONTEXT_TOKENS = 65_536
 DEFAULT_PROMPT_BUDGET = 33_344
+WRITE_FIGURES_SENTENCE_SWITCH = "STATEFRAME_R200_F094_WRITE_FIGURES_SENTENCE"
 
 
 # Engine switches a user may set in the shell: exactly these names and values,
@@ -1027,6 +1058,8 @@ OPT_IN_SWITCHES = {
     "STATEFRAME_PROMPT_CACHE_UNPINNED": ("off", "on"),  # let llama.cpp choose a slot; default off
     "STATEFRAME_EXACT_TOKEN_COUNT_CACHE": ("off", "on"),
     "STATEFRAME_EXCEPTION_CAUSE_EXCERPT": ("off", "on"),
+    SCHEDULE_WITNESS_ENV: ("off", "on"),
+    "STATEFRAME_EXAMPLE_SLOTS": ("off", "on"),
     "STATEFRAME_TURN_REPO_INTEL": ("off", "on"),
     "STATEFRAME_TURN_TIMING": ("off", "on"),
     "STATEFRAME_TURN_ATOMIC_PUBLICATION": ("off", "on"),
@@ -1042,6 +1075,7 @@ OPT_IN_SWITCHES = {
     "STATEFRAME_SEND_INDEX_HEADER": ("off", "on"),  # label each chat POST with its send and attempt number
     "STATEFRAME_DATA_WORKSPACE": ("off", "on"),  # data workspace evidence packets; off is byte-identical
     "STATEFRAME_REPORT_DENOMINATORS": ("off", "on"),
+    WRITE_FIGURES_SENTENCE_SWITCH: ("off", "on"),  # draft source-bound comparison captions before renderer choice
     "STATEFRAME_ENV_SEED": ("auto", "copy"),  # host-side run environment creation policy
     "STATEFRAME_ENV_SEED_MAX_GB": (),  # non-negative decimal GB; 0 disables seed eviction
     "STATEFRAME_KEEP_RUN_ENV": ("on", "off"),  # host-side finished-run retention policy
@@ -1051,8 +1085,10 @@ OPT_IN_SWITCHES = {
     "STATEFRAME_EVICTFIX": ("on", "legacy"),
     "STATEFRAME_MICROGRAPH": ("on", "off"),  # experimental; the engine defaults to off
     "STATEFRAME_STABLE_TOOL_HEAD": ("on", "off"),  # append-only tool list per run; on by default
+    "STATEFRAME_COMPACT_BATCH_CHECK_RECEIPTS": ("off", "on"),
     "STATEFRAME_SHELL_STATE": ("on", "off"),  # shell cwd and exported variables persist between calls
     "STATEFRAME_SHELL_ENV_IDENTITY_EPOCH": ("on", "off"),  # reuse unchanged shell environment identities
+    "STATEFRAME_SCAN_STAT_MEMO": ("off", "on"),  # memoize scan stat results within one snapshot epoch; default off
     "STATEFRAME_GIT_COMMIT": ("on", "off"),  # git_commit/git_branch tools; patch series per branch after the run
     "STATEFRAME_EDIT_SCOPE_WIDEN": ("on", "off"),  # scoped runs admit an edited product file outside the scope
     "STATEFRAME_REQUIREMENT_RECHECK": ("on", "off"),  # first done answered once with the task's requirement checklist
@@ -1150,13 +1186,18 @@ OPT_IN_ALIASES = {
     "STATEFRAME_REPORT_CHRONOLOGY": {"false": "off", "0": "off", "no": "off"},
     "STATEFRAME_REPORT_DENOMINATORS": {"false": "off", "0": "off"},
     "STATEFRAME_R200_F060_READ_ONLY_VIEW": {"false": "off"},
+    WRITE_FIGURES_SENTENCE_SWITCH: {"false": "off"},
 }
-# These settings are read by the host before the engine child starts; they must not enter the engine spec.
-# Parallel and launch inputs cross the child boundary as typed spec records.
-HOST_ONLY_SWITCHES = (frozenset({"STATEFRAME_ENV_SEED", "STATEFRAME_KEEP_RUN_ENV",
-                                 "STATEFRAME_REQUIRED_TEST_LEDGER",
-                                 "STATEFRAME_PARALLEL_SLOTS", "STATEFRAME_TURN_MINIMAL_LAUNCH"})
-                      | PARALLEL_LIMIT_SHELL_SWITCHES)
+# The host can consume these settings without an engine reader. Parallel and launch inputs
+# cross the child boundary as typed spec records. Schedule witness can also have an engine reader.
+HOST_ONLY_SWITCHES = frozenset({
+    SCHEDULE_WITNESS_ENV,
+    "STATEFRAME_ENV_SEED",
+    "STATEFRAME_KEEP_RUN_ENV",
+    "STATEFRAME_REQUIRED_TEST_LEDGER",
+    "STATEFRAME_PARALLEL_SLOTS",
+    "STATEFRAME_TURN_MINIMAL_LAUNCH",
+}) | PARALLEL_LIMIT_SHELL_SWITCHES
 # Legacy unless the user opts in, on every engine that reads the switch (read eviction fix: slower on long runs
 # in this release, and no measured edit gain). Applied by the runner so the default never depends on the engine's own.
 OPT_IN_RUNNER_DEFAULTS = {"STATEFRAME_EVICTFIX": "legacy"}
@@ -1195,7 +1236,7 @@ def _resolve_optional_source_settings(environment: dict[str, str]) -> list[tuple
 
 def resolve_opt_in_switches(engine_dir: Path = ENGINE_DIR, *,
                             parallel_enabled: bool = True) -> dict[str, str]:
-    """The shell switches set by the user, validated and forwarded in the engine spec."""
+    """Validate shell switches for the run and check required engine readers."""
     chosen = {}
     for name in CHECK_SETTINGS:
         if name in os.environ:
@@ -1205,7 +1246,11 @@ def resolve_opt_in_switches(engine_dir: Path = ENGINE_DIR, *,
     for name in OPT_IN_SWITCHES:
         if not parallel_enabled and name.startswith("STATEFRAME_PARALLEL_"):
             continue
-        raw = os.environ.get(name, "").strip()
+        ambient = os.environ.get(name)
+        if (name == "STATEFRAME_SCAN_STAT_MEMO" and ambient is not None
+                and ambient not in OPT_IN_SWITCHES[name]):
+            raise RunError(f"{name} must be on or off")
+        raw = (ambient or "").strip()
         if not raw:
             default = OPT_IN_RUNNER_DEFAULTS.get(name)
             if default is not None and name in engine_switches(engine_dir):
@@ -1286,6 +1331,8 @@ def resolve_opt_in_switches(engine_dir: Path = ENGINE_DIR, *,
             value = "off"
         value = OPT_IN_ALIASES.get(name, {}).get(value, value)
         allowed = OPT_IN_SWITCHES[name]
+        if name == WRITE_FIGURES_SENTENCE_SWITCH and raw.lower() == "false":
+            continue
         if name in PARALLEL_LIMIT_SHELL_SWITCHES:
             if not value.isascii() or not value.isdecimal() or int(value) <= 0:
                 raise RunError(f"{name}={raw!r} must be a positive integer")
@@ -1302,6 +1349,8 @@ def resolve_opt_in_switches(engine_dir: Path = ENGINE_DIR, *,
         if value not in allowed:
             raise RunError(f"{name}={raw!r} must be {' or '.join(allowed)}; unset it to keep the default")
         if name in HOST_ONLY_SWITCHES:
+            if name == SCHEDULE_WITNESS_ENV:
+                chosen[name] = value
             continue
         if name not in engine_switches(engine_dir):
             raise RunError(f"{name} is set, but this engine does not support it; unset it to run")
@@ -1960,6 +2009,10 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
     environment = profiles.load(options.profile)
     _apply_operator_reasoning_effort(environment)
     opt_in = resolve_opt_in_switches(parallel_enabled=mode != "off")
+    if (WRITE_FIGURES_SENTENCE_SWITCH in os.environ
+            and WRITE_FIGURES_SENTENCE_SWITCH not in opt_in):
+        # Explicit false/off from the shell still overrides a profile's opt-in.
+        environment.pop(WRITE_FIGURES_SENTENCE_SWITCH, None)
     parallel_slots = None
     parallel_limits = None
     unit_cap_explicit = False
@@ -2016,14 +2069,18 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
         raise RunError("engine directory missing from the package; reinstall stateframe")
     from . import hook_host, powerups
     from .powerup_prepare import prepare_run_inputs
+
+    figure_sentence_setting = options.extra_env.get(
+        WRITE_FIGURES_SENTENCE_SWITCH,
+        opt_in.get(WRITE_FIGURES_SENTENCE_SWITCH, environment.get(WRITE_FIGURES_SENTENCE_SWITCH, "off")),
+    )
+    requested_write_figures_sentence = figure_sentence_setting.strip().lower() == "on"
     user_tool_count = len(options.tool_settings.tools_files)
     try:
-        powerup_selection = prepare_run_inputs(options, environment, printer)
+        with bundled_comparison_caption_selection(requested_write_figures_sentence):
+            powerup_selection = prepare_run_inputs(options, environment, printer)
+            selected_skills = resolve_skills(options.skills, trusted=options.trust_skill_tools)
     except (powerups.PowerupError, SkillError, CustomToolError, OSError, ValueError) as error:
-        raise RunError(str(error)) from error
-    try:
-        selected_skills = resolve_skills(options.skills, trusted=options.trust_skill_tools)
-    except SkillError as error:
         raise RunError(str(error)) from error
     if selected_skills and str(options.extra_env.get("STATEFRAME_AGENT_LOOP", environment.get("STATEFRAME_AGENT_LOOP", "full"))).lower() == "plain":
         raise RunError("--skill requires the composed loop; plain loop does not support skills")
@@ -2031,21 +2088,22 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
         raise RunError("--skill requires the composed loop; lean mode does not support skills")
     records = [skill.record(trusted=options.trust_skill_tools) for skill in selected_skills]
     measurements = None
+    skill_catalog_guidance_omitted = False
     if selected_skills:
         # Admission is host-owned and recorded before the child builds its first request.
         sys.path.insert(0, str(ENGINE_DIR))
         try:
             from .engine.kernel_request_diet import RequestTokenMeter
-            from .engine.kernel_skills import SkillRuntime, measure_admission
             meter = RequestTokenMeter(
                 endpoint=options.endpoint.chat_url, template_overhead_tokens=0,
                 auth_key=options.endpoint.api_key(), generation_endpoint=options.endpoint.chat_url,
             )
-            measurements = measure_admission(selected_skills, records, meter)
-            digest = measured_skills_digest(records, measurements)
-            SkillRuntime(records, digest, options.endpoint.chat_url, measurements,
-                         auth_key=options.endpoint.api_key(),
-                         generation_endpoint=options.endpoint.chat_url)
+            measurements, write_figures_sentence = _admit_skill_settings(
+                selected_skills, records, options.endpoint.chat_url, meter,
+                write_figures_sentence=requested_write_figures_sentence,
+                auth_key=options.endpoint.api_key(), generation_endpoint=options.endpoint.chat_url,
+            )
+            skill_catalog_guidance_omitted = requested_write_figures_sentence and not write_figures_sentence
         except SkillError as error:
             raise RunError(str(error)) from error
         finally:
@@ -2222,6 +2280,10 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
     environment.update(opt_in)
     environment.update(options.extra_env)
     environment.pop(_STARTUP_SWITCH, None)
+    # Promotion uses the recorded setting even on engines without a schedule-witness reader.
+    host_schedule_witness = None
+    if SCHEDULE_WITNESS_ENV in environment and SCHEDULE_WITNESS_ENV not in engine_switches():
+        host_schedule_witness = environment.pop(SCHEDULE_WITNESS_ENV)
     launch_switch = "STATEFRAME_TURN_MINIMAL_LAUNCH"
     configured_launch = environment.pop(launch_switch, None)
     ambient_launch = os.environ.get(launch_switch, "").strip()
@@ -2321,6 +2383,9 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
         environment_sources["REACT_SLOT_ID"] = "runner:" + (options._cache_slot_selection or "explicit")
     for name, _value in optional_recoveries:
         environment_sources[name] = "runner:optional-setting-recovery"
+    if skill_catalog_guidance_omitted:
+        environment[WRITE_FIGURES_SENTENCE_SWITCH] = "off"
+        environment_sources[WRITE_FIGURES_SENTENCE_SWITCH] = "runner:skill-catalog-admission"
     provider_records = _provider_preflight_records(options)
     spec = {
         "schema": "stateframe-run/1",
@@ -2350,6 +2415,7 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
         **({"skills_measurements": measurements} if measurements is not None else {}),
         "environment": environment,
         "environment_sources": environment_sources,
+        **({"schedule_witness": host_schedule_witness} if host_schedule_witness is not None else {}),
         "prompt_cache_slot": {
             "slot": selected_slot,
             "selection": (options._cache_slot_selection or
@@ -4444,6 +4510,19 @@ def candidate_digest(root: Path, *, file_digests: dict[str, str] | None = None) 
     return hashlib.sha256(json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+def _promotion_changes_for_summary(
+        baseline: Mapping[str, str],
+        candidate_file_digests: Mapping[str, str],
+        *, schedule_witness_enabled: bool = False) -> dict[str, str]:
+    """Keep scratch omitted from a witness candidate out of in-place deletions."""
+    if schedule_witness_enabled:
+        baseline = {
+            path: digest for path, digest in baseline.items()
+            if not (path.startswith(".test-tmp/") and path not in candidate_file_digests)
+        }
+    return workcopy.changes_from_digests(baseline, candidate_file_digests)
+
+
 def _time_limit_line(options: RunOptions) -> str:
     if options.timeout_s is None:
         return "time limit: none (stop any time with Ctrl-C)"
@@ -5534,12 +5613,17 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
         raise
     except (RunError, workcopy.WorkCopyError, OSError, ValueError) as error:
         candidate_error = str(error)
+    environment = spec.get("environment")
+    schedule_witness_enabled = spec.get("schedule_witness") == "on" or (
+        isinstance(environment, Mapping) and environment.get(SCHEDULE_WITNESS_ENV) == "on")
     candidate_file_digests: dict[str, str] | None = {} if options.in_place or task_scope else None
     digest = (candidate_digest(work.copy, file_digests=candidate_file_digests)
               if candidate is not None and not candidate_error else None)
     promotion_changes = None
     if digest and candidate_file_digests is not None:
-        promotion_changes = workcopy.changes_from_digests(work.baseline, candidate_file_digests)
+        promotion_changes = _promotion_changes_for_summary(
+            work.baseline, candidate_file_digests,
+            schedule_witness_enabled=schedule_witness_enabled)
     after = {"command": test_cmd, "exit_code": None, "passed": None, "tail": "checks not run"}
     if (digest and not cancelled and test_cmd is not None
             and terminal.get("result") != "TEST_REPORTED_WRONG"):
@@ -5568,7 +5652,9 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
                     and (post_check_digests is None or post_check_digests == candidate_file_digests)):
                 after["candidate_sha256"] = digest
                 if candidate_file_digests is not None:
-                    promotion_changes = workcopy.changes_from_digests(work.baseline, candidate_file_digests)
+                    promotion_changes = _promotion_changes_for_summary(
+                        work.baseline, candidate_file_digests,
+                        schedule_witness_enabled=schedule_witness_enabled)
             elif not candidate_error:
                 candidate_error = CANDIDATE_CHECKS_STALE_ERROR
         except KeyboardInterrupt:

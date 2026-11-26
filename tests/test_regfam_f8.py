@@ -69,6 +69,8 @@ PENDING_RELEASE_SELECTION: dict[str, int] = {
     "tests/test_unit_policy_visible_asserts.py": 1,  # legacy OFF diagnostic byte match remains unselected
     "tests/test_wave4_readiness.py": 1,  # readiness frame/menu/journal parity remains unselected
     "tests/test_workspace_consumer_parity.py": 6,  # workspace provider/cache/shell consumer cases have no approved cells
+    "tests/test_ws_scan_digest_memo.py": 1,  # mixed manifest parity has no approved release-matrix cell
+    "tests/test_ws_start_bytes_reuse.py": 1,  # start-copy snapshot parity has no approved release-matrix cell
 }
 
 # Reviewed shell-lint findings: (path, rule, statement text) -> why it is not a false pass.

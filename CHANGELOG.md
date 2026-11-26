@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.10.5 (2026-11-26)
+
+- Workspace effect scans can opt into reusing verified digests for stable files; the switch is off by default.
+- Completion and delivery reuse verified start-workspace bytes to avoid duplicate reads while retaining live-file checks.
+- Optional figure comparison guidance adds a bundled caption skill that writes a source-backed comparison sentence before renderer choice; it remains off by default.
+- Suppressing a repeated file listing now lets the run continue and reports the refusal to post-tool hooks exactly once.
+- With `STATEFRAME_SCHEDULE_WITNESS=on`, `--in-place` preserves pre-existing files under `.test-tmp/` when the verified candidate omits them.
+- `STATEFRAME_EXAMPLE_SLOTS=on` can show one annotated copy of a task example when the brief explicitly identifies a runtime input occurrence and the request has room.
+- Tests: the parallel-off parity check now compares result structure instead of wall-clock seconds, and load-sensitive worker and replay fixtures wait for observed readiness instead of fixed delays.
+- Fix: when a repeated search is suppressed after history was trimmed or summarized, the engine now cuts only at whole tool exchanges. The next request keeps every executed sibling result and an explicit refusal for the suppressed call, instead of declaring calls with no results.
+- With `STATEFRAME_COMPACT_BATCH_CHECK_RECEIPTS=on`, native batch receipts shorten repeated test failure output to leave room for the tool menu in the next request.
+
 ## 0.10.4 (2026-11-26)
 
 - Set `STATEFRAME_EXCEPTION_CAUSE_EXCERPT=on` to recover hidden Python direct causes and their repository locations in failed whole-command replies within the existing output budget.

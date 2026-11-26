@@ -7543,6 +7543,17 @@ def _insert_repeat_rows(messages: list, tags: dict, index: int,
     tags.update(shifted)
 
 
+def _native_hook_reply(messages: list[dict], call_id: str, active: dict | None) -> str | None:
+    # A repeat cut can remove the reply from history. Use the selected call's
+    # stored refusal even if an earlier exchange reused its provider ID.
+    if active and active["calls"] and active["suppressed"] == active["selected"]:
+        call = active["calls"][active["selected"]]
+        if call["host_id"] == call_id:
+            return call["delivery"]["message"]["content"]
+    return next((str(message.get("content") or "") for message in reversed(messages)
+                 if message.get("role") == "tool" and message.get("tool_call_id") == call_id), None)
+
+
 def _repeat_repair_pending(active: dict | None, rewrite_applied: bool) -> bool:
     return rewrite_applied and active is not None and active["suppressed"] is not None
 
@@ -7902,6 +7913,223 @@ def _reattach_repeat_prepared_replies(prepared, capped: list, uncapped: list):
             )
             restored = True
     return replace(prepared, messages=tuple(messages)) if restored else prepared
+
+
+_EXAMPLE_SLOT_ORDINALS = {"first": 1, "second": 2, "third": 3, "fourth": 4}
+_EXAMPLE_SLOT_PREFIX = "Annotated example (⟦…⟧ marks a runtime input): "
+_EXAMPLE_LINE = re.compile(r"(?:For example,[ \t]*|Example:[ \t]*)`([^`\r\n]+)`(.*)", re.I)
+_EXAMPLE_BINDING = re.compile(
+    r"(?:in this example,[ \t]*)?(?:the[ \t]+)?"
+    r"(?:(first|second|third|fourth)[ \t]+)?`([^`]+)`[ \t]+"
+    r"(?:is (?:the |a )?(?:(?:caller|user)[ -]supplied"
+    r"(?: (?:team|user|customer|account|tenant|workspace|organization|project|repo|repository|issue|record|resource|"
+    r"path|route|endpoint|identifier|id|name|key|slug|number|string|value|parameter|input))*|runtime input)"
+    r"|is supplied by the (?:caller|user)"
+    r"|comes from (?:the )?(?:caller|user|runtime input))[ \t]*\.?",
+    re.I,
+)
+
+
+def _strip_html_comments(line: str, in_comment: bool) -> tuple[str, bool]:
+    """Strip HTML comments outside inline code while tracking multiline comments."""
+    def is_escaped_backtick(position: int) -> bool:
+        backslashes = 0
+        position -= 1
+        while position >= 0 and line[position] == "\\":
+            backslashes += 1
+            position -= 1
+        return backslashes % 2 == 1
+
+    visible = []
+    cursor = 0
+    while cursor < len(line):
+        if in_comment:
+            close = line.find("-->", cursor)
+            if close < 0:
+                return "".join(visible), True
+            cursor = close + 3
+            in_comment = False
+            continue
+        if line[cursor] == "`" and not is_escaped_backtick(cursor):
+            delimiter_end = cursor
+            while delimiter_end < len(line) and line[delimiter_end] == "`":
+                delimiter_end += 1
+            delimiter_size = delimiter_end - cursor
+            candidate = line.find("`", delimiter_end)
+            code_end = None
+            while candidate >= 0:
+                run_end = candidate
+                while run_end < len(line) and line[run_end] == "`":
+                    run_end += 1
+                if run_end - candidate == delimiter_size:
+                    code_end = run_end
+                    break
+                candidate = line.find("`", run_end)
+            if code_end is not None:
+                visible.append(line[cursor:code_end])
+                cursor = code_end
+                continue
+            visible.append(line[cursor:delimiter_end])
+            cursor = delimiter_end
+            continue
+
+        comment_start = line.find("<!--", cursor)
+        code_start = line.find("`", cursor)
+        while code_start >= 0 and is_escaped_backtick(code_start):
+            code_start = line.find("`", code_start + 1)
+        if code_start >= 0 and (comment_start < 0 or code_start < comment_start):
+            visible.append(line[cursor:code_start])
+            cursor = code_start
+            continue
+        if comment_start < 0:
+            visible.append(line[cursor:])
+            break
+        visible.append(line[cursor:comment_start])
+        cursor = comment_start + 4
+        in_comment = True
+    return "".join(visible), in_comment
+
+
+def _render_example_slots(brief: str) -> str | None:
+    """Copy one inline example with an explicit, occurrence-specific binding."""
+    if "⟦" in brief or "⟧" in brief:
+        return None
+    lines = brief.splitlines()
+    examples = []
+    fence = ""
+    in_html_comment = False
+    for index, line in enumerate(lines):
+        stripped = line.lstrip(" ")
+        if fence:
+            if stripped.startswith(fence) and not stripped[len(fence):].strip(fence[0] + " \t"):
+                fence = ""
+            continue
+        indentation = len(line) - len(stripped)
+        if indentation > 3:
+            if in_html_comment:
+                _, in_html_comment = _strip_html_comments(line, in_html_comment)
+            continue
+        line, in_html_comment = _strip_html_comments(line, in_html_comment)
+        stripped = line.lstrip(" ")
+        if len(line) - len(stripped) > 3:
+            continue
+        if match := re.match(r"`{3,}|~{3,}", stripped):
+            fence = match[0]
+        elif match := _EXAMPLE_LINE.fullmatch(stripped):
+            examples.append((index, match[1], match[2].strip()))
+            if len(examples) > 1:
+                return None
+    if not examples or fence:
+        return None
+    index, example, suffix = examples[0]
+    # A bracketed host marker in a copied literal could be parsed by wire layout.
+    if (not example.isprintable() or len(example.encode("utf-8")) > 256
+            or re.search(r"\[[A-Z][A-Z _/|-]{3,}", example)):
+        return None
+    bindings = []
+    if suffix in {"", "."}:
+        for line_number, line in enumerate(lines[index + 1:], start=index + 1):
+            if not line.strip():
+                continue
+            stripped = line.lstrip(" ")
+            if len(line) - len(stripped) > 3:
+                break
+            match = _EXAMPLE_BINDING.fullmatch(stripped)
+            if match is None:
+                break
+            # An unpunctuated binding at the end of a wrapped line is only a
+            # prefix of the Markdown sentence. Do not bind it while ignoring
+            # continuation text that may narrow its scope (for example,
+            # "in v1 only").
+            if (not stripped.endswith(".") and line_number + 1 < len(lines)
+                    and lines[line_number + 1].strip()):
+                break
+            bindings.append(match)
+    elif match := re.fullmatch(r"(?:,[ \t]*where[ \t]+|\.[ \t]+)(.+)", suffix, re.I):
+        if binding := _EXAMPLE_BINDING.fullmatch(match[1]):
+            # Inline prose can wrap after an unpunctuated binding; the next
+            # line may narrow its scope (for example, "in v1 only").
+            if (match[1].rstrip().endswith(".")
+                    or not any(line.strip() for line in lines[index + 1:])):
+                bindings.append(binding)
+    if not bindings:
+        return None
+    offsets = []
+    for ordinal, literal in (binding.groups() for binding in bindings):
+        # Count complete occurrences of the exact spelling, including fixed components.
+        pattern = r"(?<![\w-])(?=(" + re.escape(literal) + r")(?![\w-]))"
+        spans = [match.span(1) for match in re.finditer(pattern, example)]
+        occurrence = _EXAMPLE_SLOT_ORDINALS[ordinal.lower()] if ordinal else 1
+        if occurrence > len(spans) or (ordinal is None and len(spans) != 1):
+            return None
+        offsets.append(spans[occurrence - 1])
+    parts = []
+    cursor = 0
+    for start, end in sorted(set(offsets)):
+        if start < cursor:
+            return None
+        parts.extend((example[cursor:start], "⟦", example[start:end], "⟧"))
+        cursor = end
+    parts.append(example[cursor:])
+    annotation = _EXAMPLE_SLOT_PREFIX + "`" + "".join(parts) + "`"
+    return annotation if len(annotation.encode("utf-8")) <= 384 else None
+
+
+def _example_slots_preparer(preparer, brief: str, annotation: str):
+    """Place the optional copy in the wire tail without changing task identity."""
+    from kernel_stateframe_framefit5 import VOLATILE_TAIL_MARKER
+
+    def prepare(messages, *, runtime, tools, frame_request_allocation=None,
+                framefit5_inputs=None):
+        rows, receipt = preparer(
+            messages, runtime=runtime, tools=tools,
+            frame_request_allocation=frame_request_allocation, framefit5_inputs=framefit5_inputs,
+        )
+        if frame_request_allocation is not None or not isinstance(framefit5_inputs, Mapping):
+            return rows, receipt
+        task = framefit5_inputs.get("task_message")
+        sources = framefit5_inputs.get("sources")
+        if (not isinstance(task, Mapping) or not isinstance(sources, dict)
+                or not isinstance(framefit5_inputs.get("source_messages"), (list, tuple))):
+            return rows, receipt
+        contents = task.get("content")
+        if not isinstance(contents, str):
+            return rows, receipt
+        if not any(contents.startswith(label + brief + "\n")
+                   for label in ("Task: ", "Bug report: ")):
+            return rows, receipt
+        if not any(row.get("role") == "user" and row.get("content") == contents for row in rows):
+            return rows, receipt
+        tail = rows[-1] if rows else {}
+        text = tail.get("content")
+        if (tail.get("role") != "user" or not isinstance(text, str)
+                or not text.startswith(VOLATILE_TAIL_MARKER) or annotation in text.splitlines()):
+            return rows, receipt
+        display = [*rows[:-1], {**tail, "content": (
+            VOLATILE_TAIL_MARKER + "\n\n" + annotation + text[len(VOLATILE_TAIL_MARKER):]
+        )}]
+        if not _example_slots_have_room(runtime, display, tools, framefit5_inputs):
+            return rows, receipt
+        return display, receipt
+
+    return prepare
+
+
+def _example_slots_have_room(runtime, messages, tools, frame_inputs: Mapping) -> bool:
+    from kernel_context import token_estimate
+    from kernel_request_budget import ENDPOINT_PROMPT_TOKEN_BUDGET, HARD_MAX_REQUEST_BYTES
+
+    frame_ceiling = getattr(runtime, "frame_ceiling", None)
+    if type(frame_ceiling) is not int or frame_ceiling <= 0:
+        return False
+    # Charge the full frozen sources and the unprojected exchange even if the
+    # draft already carries excerpts. Leave a quarter of each ceiling for late
+    # wire facts, layout overhead, and differences from the local token estimate.
+    draft = {"messages": messages, "tools": tools,
+             "sources": frame_inputs["sources"], "history": frame_inputs["source_messages"]}
+    return (len(json.dumps(draft).encode()) <= HARD_MAX_REQUEST_BYTES * 3 // 4
+            and token_estimate(draft) <= min(frame_ceiling,
+                                            ENDPOINT_PROMPT_TOKEN_BUDGET) * 3 // 4)
 
 
 def _preserved_request_inputs(measurement: Any, messages: list, uncapped: list) -> tuple[list, list]:
@@ -8858,6 +9086,13 @@ def work(d, *, resume=None):
         except (ImportError, OSError, TypeError, ValueError) as _error:
             _intake_orientation = ""
             _record_intake_orientation_failure(_error, _intake_step, _wiring_journal)
+        _annotated_example = (
+            _render_example_slots(_entry_ticket_text)
+            if (os.environ.get("STATEFRAME_EXAMPLE_SLOTS", "off") == "on"
+                and not _grading_row.get("staged_phases") and not _lean_on
+                and brief == _entry_ticket_text)
+            else None
+        )
         msgs = [{"role": "system", "content": _system},
                 {"role": "user", "content": _initial_task_content(
                     brief, _orientation, _intake_orientation)}]
@@ -10717,10 +10952,7 @@ def work(d, *, resume=None):
             if _hook_wiring_for_run is not None and _pending_hook_action is not None:
                 _hook_name, _hook_args, _hook_call_id, _hook_toolcall = _pending_hook_action
                 if _hook_toolcall:
-                    _hook_reply = next((str(message.get("content") or "")
-                                        for message in reversed(msgs)
-                                        if message.get("role") == "tool"
-                                        and message.get("tool_call_id") == _hook_call_id), None)
+                    _hook_reply = _native_hook_reply(msgs, _hook_call_id, _repeat_active)
                 else:
                     _hook_reply = str(msgs[-1].get("content") or "") if msgs else None
                 if _hook_reply is not None:
@@ -11148,6 +11380,9 @@ def work(d, *, resume=None):
             )
             if not callable(_request_host_text_preparer):
                 _request_host_text_preparer = None
+            elif _annotated_example is not None:
+                _request_host_text_preparer = _example_slots_preparer(
+                    _request_host_text_preparer, _entry_ticket_text, _annotated_example)
             if _provider_request and callable(_prepare_host_inputs):
                 _host_msgs = _prepare_host_inputs(msgs)
                 if _host_msgs is not msgs:
@@ -17070,9 +17305,7 @@ def work(d, *, resume=None):
 
         if _hook_wiring_for_run is not None and _pending_hook_action is not None:
             _hook_name, _hook_args, _hook_call_id, _hook_toolcall = _pending_hook_action
-            _hook_reply = (next((str(message.get("content") or "") for message in reversed(msgs)
-                                 if message.get("role") == "tool"
-                                 and message.get("tool_call_id") == _hook_call_id), None)
+            _hook_reply = (_native_hook_reply(msgs, _hook_call_id, _repeat_active)
                            if _hook_toolcall else
                            str(msgs[-1].get("content") or "") if msgs else None)
             if _hook_reply is not None:

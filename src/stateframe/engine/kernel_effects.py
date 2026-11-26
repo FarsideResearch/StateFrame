@@ -7,11 +7,15 @@ import fcntl
 import hashlib
 import json
 import os
+import signal
 import stat
 import tempfile
+import time
+from collections import OrderedDict
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
+from threading import Lock
 from typing import BinaryIO, Callable, Iterable, Iterator, Literal, Mapping, Protocol, TextIO
 
 
@@ -387,11 +391,131 @@ def _validate_manifest_limits(manifest: Manifest) -> None:
         raise EffectError("workspace file has an invalid size")
 
 
-def scan(workspace: Path, *, exclude: Callable[[str], bool]) -> Manifest:
-    """Hash every regular file; classify hardlinks as unsupported special entries."""
+SCAN_STAT_MEMO_ENV = "STATEFRAME_SCAN_STAT_MEMO"
+_SCAN_RACY_WINDOW_NS = 2_000_000_000
+_SCAN_MEMO_LIMIT = 131_072
+_ScanRoot = tuple[Path, int, int]
+_ScanFileIdentity = tuple[int, int, int, int, int, int]
+_ScanMemoKey = tuple[_ScanRoot, _ScanFileIdentity]
+# One LRU bounds file versions and roots together. It is outside run and checkpoint state.
+_scan_memo: OrderedDict[_ScanMemoKey, str] = OrderedDict()
+_scan_memo_lock = Lock()
+
+
+def _reset_scan_memo_lock() -> None:
+    global _scan_memo_lock
+    _scan_memo_lock = Lock()
+
+
+os.register_at_fork(after_in_child=_reset_scan_memo_lock)
+
+
+def _scan_file_identity(info: os.stat_result) -> _ScanFileIdentity:
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
+            info.st_ctime_ns, info.st_mode)
+
+
+def _lookup_scan_digest(fd: int, relative: str, key: _ScanMemoKey) -> tuple[bool, str | None]:
+    """Return whether this descriptor can be memoized and any verified hit."""
+    # A writable shared mapping can retain a dirty page without changing any stat
+    # fields on subsequent stores. Linux refuses a read lease while a writable
+    # file description exists, including when only the mapping still holds it.
+    try:
+        fcntl.fcntl(fd, fcntl.F_SETSIG, signal.SIGURG)
+        fcntl.fcntl(fd, fcntl.F_SETLEASE, fcntl.F_RDLCK)
+    except OSError:
+        with _scan_memo_lock:
+            _scan_memo.pop(key, None)
+        return False, None
+    try:
+        with _scan_memo_lock:
+            cached = _scan_memo.get(key)
+            if cached is not None:
+                _scan_memo.move_to_end(key)
+        if cached is None:
+            return True, None
+        final = os.fstat(fd)
+        if final.st_nlink != 1 or _scan_file_identity(final) != key[1]:
+            raise EffectError(f"workspace changed while scanning {relative}")
+        if fcntl.fcntl(fd, fcntl.F_GETLEASE) == fcntl.F_RDLCK:
+            return True, cached
+        with _scan_memo_lock:
+            _scan_memo.pop(key, None)
+        return False, None
+    finally:
+        # Keep leases brief. A newly opened mapping must fault before it can
+        # write, so the final stat check protects cacheable misses.
+        try:
+            fcntl.fcntl(fd, fcntl.F_SETLEASE, fcntl.F_UNLCK)
+        except OSError as error:
+            if error.errno != errno.EAGAIN:  # A forced lease break already released it.
+                raise
+
+
+def _scan_file_digest(
+    path: str, relative: str, info: os.stat_result, scope: _ScanRoot | None, cutoff: int,
+) -> str:
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(fd)
+        opened_identity = _file_identity(opened)
+        if opened_identity != _file_identity(info):
+            raise EffectError(f"workspace changed while scanning {relative}")
+
+        key = None
+        if (scope is not None and max(info.st_mtime_ns, info.st_ctime_ns) < cutoff
+                and opened.st_nlink == 1):
+            identity = _scan_file_identity(info)
+            if _scan_file_identity(opened) == identity:
+                candidate_key = (scope, identity)
+                cacheable, cached = _lookup_scan_digest(fd, relative, candidate_key)
+                if cached is not None:
+                    return cached
+                if cacheable:
+                    key = candidate_key
+
+        digest = hashlib.sha256()
+        consumed = 0
+        while block := os.read(fd, 1 << 20):
+            consumed += len(block)
+            if consumed > info.st_size:
+                raise EffectError(f"workspace grew while scanning {relative}")
+            digest.update(block)
+        if consumed != info.st_size:
+            raise EffectError(f"workspace changed while scanning {relative}")
+        final = os.fstat(fd)
+        if _file_identity(final) != opened_identity:
+            raise EffectError(f"workspace changed while scanning {relative}")
+        result = digest.hexdigest()
+        if key is not None and final.st_nlink == 1 and _scan_file_identity(final) == key[1]:
+            with _scan_memo_lock:
+                _scan_memo[key] = result
+                _scan_memo.move_to_end(key)
+                if len(_scan_memo) > _SCAN_MEMO_LIMIT:
+                    _scan_memo.popitem(last=False)
+        return result
+    finally:
+        os.close(fd)
+
+
+def scan(
+    workspace: Path, *, exclude: Callable[[str], bool], memo_mode: str | None = None,
+) -> Manifest:
+    """Scan file and link digests, classifying hardlinks as unsupported special entries."""
+    if memo_mode is None:
+        memo_mode = os.environ.get(SCAN_STAT_MEMO_ENV, "off")
+    if memo_mode not in ("on", "off"):
+        raise ValueError(f"{SCAN_STAT_MEMO_ENV} must be on or off")
     root = Path(workspace)
-    if not stat.S_ISDIR(os.lstat(root).st_mode):
+    root_info = os.lstat(root)
+    if not stat.S_ISDIR(root_info.st_mode):
         raise EffectError(f"workspace is not a directory: {root}")
+    scope = None
+    # Lease breaks use SIGURG, whose default action is to ignore the signal.
+    if (memo_mode == "on" and hasattr(fcntl, "F_SETLEASE") and hasattr(fcntl, "F_SETSIG")
+            and signal.getsignal(signal.SIGURG) in (signal.SIG_DFL, signal.SIG_IGN)):
+        scope = (root.absolute(), root_info.st_dev, root_info.st_ino)
+    cutoff = time.time_ns() - _SCAN_RACY_WINDOW_NS if scope is not None else 0
     result: dict[str, Entry] = {}
 
     def visit(directory: Path) -> None:
@@ -413,30 +537,8 @@ def scan(workspace: Path, *, exclude: Callable[[str], bool]) -> Manifest:
                         "symlink", mode, hashlib.sha256(link).hexdigest(), len(link)
                     )
                 elif stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
-                    digest = hashlib.sha256()
-                    fd = os.open(child.path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-                    try:
-                        opened = os.fstat(fd)
-                        if _file_identity(opened) != _file_identity(info):
-                            raise EffectError(
-                                f"workspace changed while scanning {relative}"
-                            )
-                        consumed = 0
-                        while block := os.read(fd, 1 << 20):
-                            consumed += len(block)
-                            if consumed > info.st_size:
-                                raise EffectError(f"workspace grew while scanning {relative}")
-                            digest.update(block)
-                        if (consumed != info.st_size
-                                or _file_identity(os.fstat(fd)) != _file_identity(opened)):
-                            raise EffectError(
-                                f"workspace changed while scanning {relative}"
-                            )
-                    finally:
-                        os.close(fd)
-                    result[relative] = Entry(
-                        "file", mode, digest.hexdigest(), opened.st_size
-                    )
+                    digest = _scan_file_digest(child.path, relative, info, scope, cutoff)
+                    result[relative] = Entry("file", mode, digest, info.st_size)
                 else:
                     result[relative] = Entry("other", mode, None, info.st_size)
 

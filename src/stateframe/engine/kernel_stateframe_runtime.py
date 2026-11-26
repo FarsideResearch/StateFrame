@@ -3470,7 +3470,7 @@ class StateFrameRuntime:
         if planned_artifacts_mode not in {"off", "on"}:
             raise ValueError("STATEFRAME_PLANNED_ARTIFACTS must be off or on")
         self.stateframe_planned_artifacts_mode = planned_artifacts_mode
-        from kernel_host_done_facts import host_done_facts_mode
+        from kernel_host_done_facts import WorkspaceBaseline, host_done_facts_mode
         self.stateframe_host_done_facts_mode = host_done_facts_mode()
         from kernel_delivery_manifest import delivery_contract_mode
         self.stateframe_delivery_contract_mode = delivery_contract_mode()
@@ -3485,17 +3485,14 @@ class StateFrameRuntime:
         repair_module = sys.modules.get("probes.react_repair")
         repositories = getattr(repair_module, "REPOS", {})
         start_snapshot = repositories.get("build") if isinstance(repositories, Mapping) else None
-        if self.stateframe_host_done_facts_mode == "on":
-            from kernel_host_done_facts import workspace_snapshot
-            self._host_done_facts_baseline = workspace_snapshot(
-                Path(owner.root), start_snapshot=start_snapshot)
         self._delivery_contract_baseline: Mapping[str, object] = {}
-        if self.stateframe_delivery_contract_mode == "on":
-            from kernel_host_done_facts import workspace_snapshot
-            self._delivery_contract_baseline = (
-                self._host_done_facts_baseline
-                if self.stateframe_host_done_facts_mode == "on"
-                else workspace_snapshot(Path(owner.root), start_snapshot=start_snapshot))
+        if (self.stateframe_host_done_facts_mode == "on"
+                or self.stateframe_delivery_contract_mode == "on"):
+            baseline = WorkspaceBaseline.capture(owner.root, start_snapshot=start_snapshot)
+            if self.stateframe_host_done_facts_mode == "on":
+                self._host_done_facts_baseline = baseline
+            if self.stateframe_delivery_contract_mode == "on":
+                self._delivery_contract_baseline = baseline
         from kernel_frame_continuation import (check_rendering_mode,
                                                 configuration as frame_continuation_configuration)
         self.frame_continuation = frame_continuation_configuration()
