@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+from collections.abc import Sequence
 from dataclasses import asdict
 import fcntl
 import hashlib
@@ -22,7 +23,7 @@ import weakref
 # -I deliberately ignores ambient PYTHONPATH and the working directory.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from kernel_exec_capability import capability_from_dict
-from kernel_exec_tracker import Descendants, ProcessTable, process_cmdline_digest
+from kernel_exec_tracker import Descendants, ProcessIdentity, ProcessTable, process_cmdline_digest
 from kernel_execution_policy import (
     FULL_PROCESS_SCAN_INTERVAL_SECONDS,
     _remove_command_cgroup,
@@ -34,7 +35,49 @@ from sf_launch import (
     _cgroup_leaf_pattern_status,
     _cgroup_memory_limit_configured,
     _command_cgroup,
+    _read_cgroup_pids,
 )
+
+
+PROBE_REAP_SAMPLE_SECONDS = 0.02
+PROBE_REAP_STALLED_SAMPLES = 100
+
+
+class _ProbeReap:
+    """Bound consecutive stagnant observations, even when the supervisor is descheduled."""
+
+    def __init__(self):
+        self.next_sample = 0.0
+        self.stagnant = 0
+        self.best: tuple[int, int, int] | None = None
+
+    def stalled(self, pending: Sequence[ProcessIdentity] | None, now: float) -> bool:
+        if now < self.next_sample:
+            return False
+        self.next_sample = now + PROBE_REAP_SAMPLE_SECONDS
+        # The low-water mark prevents a surviving process from renewing the wait
+        # by continually creating children that exit and reparent to the supervisor.
+        if pending is None:
+            self.stagnant += 1
+            return self.stagnant >= PROBE_REAP_STALLED_SAMPLES
+        current = (len(pending), sum(not row.zombie for row in pending),
+                   sum(not row.zombie and not row.exiting for row in pending))
+        if self.best is None or current < self.best:
+            self.best = current
+            self.stagnant = 0
+        else:
+            self.stagnant += 1
+        return self.stagnant >= PROBE_REAP_STALLED_SAMPLES
+
+
+def _namespace_has_children() -> bool:
+    # PID 1 inherits every orphan in its namespace. A procfs sweep can miss a
+    # reparenting between reads. Only ECHILD proves there are no children left.
+    try:
+        os.waitid(os.P_ALL, 0, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+    except ChildProcessError:
+        return False
+    return True
 
 
 def _read_memory_join_result(fd: int, *, timeout: float = 10.0) -> bytes:
@@ -78,6 +121,8 @@ class ManagedProcess:
         self.cgroup = cgroup
         self.memory_limit_mechanism = memory_limit_mechanism
         self.output_overflow = False
+        self.probe_reap = _ProbeReap() if getattr(cap, "purpose", None) == "probe" else None
+        self.orphan_reap: _ProbeReap | None = None
 
     def remove_cgroup(self) -> bool:
         if self.cgroup is None:
@@ -92,7 +137,7 @@ class ManagedProcess:
             self.stop_at = time.monotonic()
             self.kill_at = self.stop_at + grace
 
-    def tick(self, rows):
+    def tick(self, rows, *, check_orphans=None):
         if self.cleanup is not None:
             self.remove_cgroup()
             return
@@ -128,6 +173,11 @@ class ManagedProcess:
             self.timed_out = True
             self.timeout_at = now
             self.stop(0.1)
+        if check_orphans is not None:
+            # Capture any still-verifiable ownership before signaling. The
+            # cgroup entry or ancestry can disappear as the task exits.
+            rows = self._reconcile_probe_orphans(rows, check_orphans)
+            live = self.family.update(rows)
         if self.stop_at is not None:
             fresh = [p for p in live if p.pid not in self.term_sent]
             if fresh:
@@ -139,17 +189,25 @@ class ManagedProcess:
                 self.killed |= self.family.signal(live, signal.SIGKILL)
             try:
                 # Signalling and reaping can change liveness within this tick.
-                live = self.family.update(self.family.table.snapshot())
+                observed = self.family.table.snapshot()
+                orphans = check_orphans(observed, defer=True) if check_orphans is not None else []
+                live = self.family.update(observed)
                 if getattr(self, "post_exit_scan_pending", False):
                     self.post_exit_scan_pending = False
                     self.post_exit_scan_complete = True
             except (OSError, RuntimeError, ValueError):
-                if now > self.kill_at + 2:
+                if self._reap_stalled(None, now):
                     self.complete(False, tuple(sorted(p.pid for p in live)),
                                   "descendant liveness unverified after signaling")
                 return
-            if (not live and self.process.poll() is not None
+            zombies = self._probe_zombies(observed) if check_orphans is not None else []
+            pending = live + orphans + zombies
+            if (not pending and self.process.poll() is not None
                     and self.post_exit_scan_complete):
+                if check_orphans is not None and os.getpid() == 1 and _namespace_has_children():
+                    if self._reap_stalled(None, now):
+                        self.complete(False, (), "namespace descendant liveness unverified after signaling")
+                    return
                 # No producers remain. Drain the finite pipe fully before publishing exit.
                 while not self.eof:
                     before = self.collector.total_bytes
@@ -158,9 +216,18 @@ class ManagedProcess:
                         break
                 if self.eof:
                     self.complete(True, ())
-                elif now > self.kill_at + 2:
+                elif self._reap_stalled(None, now):
                     self.complete(False, (), "output pipe held by untracked descendant")
-            elif now > self.kill_at + 2:
+            elif self._reap_stalled(pending, now):
+                if orphans:
+                    remaining = check_orphans(self.family.table.snapshot())
+                    if remaining:
+                        self.complete(False, tuple(row.pid for row in remaining))
+                    return  # Recheck if a candidate exited or gained attribution.
+                if not live and zombies:
+                    self.complete(False, tuple(row.pid for row in zombies),
+                                  "descendant reaping made no progress after SIGKILL")
+                    return
                 details = []
                 for row in live[:8]:
                     try:
@@ -177,6 +244,36 @@ class ManagedProcess:
                           measured=len(live), elapsed_s=now - self.started, level="ERROR",
                           cause_key="supervisor:survived_sigkill")
                 self.complete(False, tuple(p.pid for p in live), detail[:600])
+
+    def _reconcile_probe_orphans(self, rows, check_orphans):
+        if self.orphan_reap is not None and self.stop_at is None:
+            # Between full sweeps the regular sampler only refreshes known
+            # families. An orphan missing from that view can still be alive.
+            rows = self.family.table.snapshot()
+        pending = check_orphans(rows, defer=True)
+        if self.stop_at is not None:
+            self.orphan_reap = None  # post-signal observations track all remaining tasks
+        elif not pending:
+            self.orphan_reap = None
+        else:
+            # Wrapper teardown can reparent children before poll() reaps the
+            # leader. Recheck the orphan without stopping the still-running probe.
+            if self.orphan_reap is None:
+                self.orphan_reap = _ProbeReap()
+            if self.orphan_reap.stalled(pending, time.monotonic()):
+                check_orphans(self.family.table.snapshot())
+        return rows
+
+    def _reap_stalled(self, pending, now):
+        if self.probe_reap is None:
+            return now > self.kill_at + 2
+        return now >= self.kill_at and self.probe_reap.stalled(pending, time.monotonic())
+
+    def _probe_zombies(self, rows):
+        own_pid = os.getpid()
+        return [row for row in rows.values() if row.zombie and (
+            row.ppid == own_pid or self.family.members.get(row.pid) is not None
+            and row.start == self.family.members[row.pid].start)]
 
     def _log_stop(self, signal_name: str, now: float) -> None:
         """Log-only: why this job's group is being signalled. Never raises or changes flow."""
@@ -631,10 +728,28 @@ class Supervisor:
             if job.cleanup is not None:
                 continue
             members = job.family.members
-            if row.pid in members:
-                return True
+            previous = members.get(row.pid)
+            if previous is not None:
+                if row.start is not None and row.start == previous.start:
+                    return True
+                continue
+            if row.start is None:
+                continue
+            cgroup = getattr(job, "cgroup", None)
+            if cgroup is not None:
+                try:
+                    grouped = row.pid in _read_cgroup_pids(cgroup)
+                except (OSError, ValueError):
+                    grouped = False
+                # Only the supervisor can move tasks to its private command cgroup.
+                # Check the birth again before retaining that ownership after reparenting.
+                if grouped:
+                    current = self.table.identity(row.pid)
+                    if current is not None and current.start == row.start:
+                        members[row.pid] = current
+                        return True
             leader = members.get(job.family.leader)
-            if leader is None or row.start is None or row.start < leader.start:
+            if leader is None or row.start < leader.start:
                 continue
             for member in members.values():
                 if member.pid == row.pid:
@@ -646,46 +761,69 @@ class Supervisor:
                     return True
         return False
 
+    def _check_orphans(self, rows, *, defer=False):
+        """Reap direct zombies and resolve ownership before reporting a live escape."""
+        leaders = {job.process.pid for job in self.jobs.values() if not job.leader_reaped}
+        active = [job for job in self.jobs.values() if job.cleanup is None]
+        for job in active:
+            job.family.update(rows)
+        recorded = {(member.pid, member.start) for job in active
+                    for member in job.family.members.values()}
+        orphans = []
+        for row in list(rows.values()):
+            if row.ppid != os.getpid() or row.pid in leaders:
+                continue
+            if row.zombie:
+                try:
+                    reaped, _ = os.waitpid(row.pid, os.WNOHANG)
+                except ChildProcessError:
+                    continue
+                if reaped == row.pid:
+                    rows.pop(row.pid, None)
+            elif (row.pid, row.start) not in recorded:
+                orphans.append(row)
+        unattributed = self._unattributed(orphans)
+        if defer:
+            return unattributed
+        escaped = []
+        for row in unattributed:
+            current = self.table.identity(row.pid) if row.start is not None else None
+            if row.start is not None and (current is None or current.start != row.start):
+                continue
+            if current is not None:
+                if current.zombie or current.ppid != os.getpid():
+                    continue
+                # Only this supervisor reaps the direct child, so its PID is reserved.
+                emit_kill("supervisor", target="unattributed namespace descendant",
+                          pid=row.pid, why="unattributed namespace descendant; session stopped",
+                          level="ERROR", cause_key="supervisor:unattributed_descendant")
+                os.kill(row.pid, signal.SIGKILL)
+            escaped.append(row)
+        if escaped:
+            for job in active:
+                job.containment_failed = True
+                job.limit_detail = "unattributed namespace descendant; session stopped"
+                job.stop(0)
+        return escaped
+
     def serve(self):
         connected = True
         try:
             while True:
                 rows = self._sample_rows()
+                probe = None
                 if self.namespace_network != "host":
-                    leaders = {j.process.pid for j in self.jobs.values()}
-                    for job in self.jobs.values():
-                        if job.cleanup is None:
-                            job.family.update(rows)
-                    recorded = {pid for j in self.jobs.values() for pid in j.family.members}
-                    orphans = []
-                    for row in rows.values():
-                        if row.ppid != os.getpid() or row.pid in leaders:
-                            continue
-                        if row.zombie:
-                            try:
-                                os.waitpid(row.pid, os.WNOHANG)
-                            except ChildProcessError:
-                                pass
-                        elif row.pid not in recorded:
-                            orphans.append(row)
-                    for row in self._unattributed(orphans):
-                        # A double-fork between sweeps cannot be attributed to
-                        # one command. Stop the entire session, fail closed.
-                        current = self.table.identity(row.pid) if row.start is not None else None
-                        if current is not None and current.start == row.start:
-                            # serve() alone reaps this direct child; its PID stays
-                            # reserved until that waitpid, including after exit.
-                            emit_kill("supervisor", target="unattributed namespace descendant",
-                                      pid=row.pid, why="unattributed namespace descendant; session stopped",
-                                      level="ERROR", cause_key="supervisor:unattributed_descendant")
-                            os.kill(row.pid, signal.SIGKILL)
-                        for job in self.jobs.values():
-                            if job.cleanup is None:
-                                job.containment_failed = True
-                                job.limit_detail = "unattributed namespace descendant; session stopped"
-                                job.stop(0)
+                    if len(self.jobs) == 1:
+                        job = next(iter(self.jobs.values()))
+                        if job.probe_reap is not None and job.cleanup is None:
+                            probe = job
+                    if probe is None:
+                        self._check_orphans(rows)
                 for job in self.jobs.values():
-                    job.tick(rows)
+                    if job is probe:
+                        job.tick(rows, check_orphans=self._check_orphans)
+                    else:
+                        job.tick(rows)
                 if self.closing and all(j.cleanup is not None for j in self.jobs.values()) and not self.outgoing:
                     break
                 events = self.selector.select(0.02)

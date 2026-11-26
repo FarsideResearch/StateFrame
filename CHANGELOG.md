@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.10.3 (2026-11-25)
+
+- Fixed automatic probe cleanup under host load. The supervisor waits for SIGKILL and reaping to make progress, rechecks ownership after reparenting, and still fails when a descendant survives or cannot be attributed.
+
 ## 0.10.2 (2026-11-25)
 
 - Fix: resuming after a recovery no longer loses action-result progress or the record of trimmed history, so a recovered run keeps counting work it already did.
