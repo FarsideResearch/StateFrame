@@ -82,6 +82,24 @@ def test_partial_recovery_progress_survives_resume_without_changing_render() -> 
     assert len([row for row in resumed.history if row["kind"] == "action_dispatched"]) == 2
 
 
+def test_fork_preserves_every_persistence_marker_field() -> None:
+    authority = _start_recovery()
+    authority.record_action_result({"action": "edit", "status": "PARTIAL"})
+    authority._history_dropped = 3
+
+    clone = authority.fork()
+
+    marker_fields = (
+        "_state_version",
+        "_last_action_result_progress",
+        "_last_action_result_progress_by_reason",
+        "_history_dropped",
+    )
+    for field in marker_fields:
+        assert getattr(clone, field) == getattr(authority, field)
+    assert clone.persistence_marker == authority.persistence_marker
+
+
 def test_200_identical_no_change_observations_prove_no_progress_once() -> None:
     authority = _start_recovery()
     authority.record_action_result({"action": "edit", "status": "PARTIAL"})

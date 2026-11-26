@@ -1780,8 +1780,10 @@ class CompletionAuthority:
         clone._recovery_progress_delta = {
             key: set(values) for key, values in self._recovery_progress_delta.items()
         }
+        clone._last_action_result_progress = self._last_action_result_progress
         clone._last_action_result_progress_by_reason = dict(self._last_action_result_progress_by_reason)
         clone._history = copy.deepcopy(self._history)
+        clone._history_dropped = self._history_dropped
         return clone
 
     def render(self) -> dict[str, object]:
@@ -1815,6 +1817,7 @@ class CompletionAuthority:
             self._state_version,
             self._last_action_result_progress,
             tuple(sorted(self._last_action_result_progress_by_reason.items())),
+            self._history_dropped,
         )
 
     def snapshot(self, *, include_recovery_progress_seen: bool = True) -> dict[str, object]:

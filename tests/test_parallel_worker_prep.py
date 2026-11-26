@@ -111,7 +111,7 @@ def _unit_fixture(root: Path, *, include_symlink: bool = False,
                     ("pkg/a.py", "pkg/new.py", "tests/test_a.py"), (), "failed assertion", 4, 4,
                     manifest, "unit-policy", ParallelLimits())
     run_dir = call_root / "units" / "a"
-    run_dir.mkdir(parents=True)
+    run_dir.mkdir(mode=0o700, parents=True)
     spec_path = run_dir / "unit-spec.json"
     spec_path.write_bytes(canonical_json(spec.to_json()) + b"\n")
     parent_spec = {
@@ -362,25 +362,104 @@ _DEFAULT_OFF_CANDIDATE_ONLY_SUMMARY_KEYS = {
 
 
 def _assert_default_off_result_bytes_parity(released: bytes, candidate: bytes) -> None:
+    released_value = json.loads(released)
+    candidate_value = json.loads(candidate)
+    _assert_default_off_delivery_manifest_digest(released_value)
+    _assert_default_off_delivery_manifest_digest(candidate_value)
+    released_structure = _default_off_result_parity_view(released_value)
+    candidate_structure = _default_off_result_parity_view(candidate_value)
+    for structure in (released_structure, candidate_structure):
+        if isinstance(structure, dict) and "seconds" in structure:
+            structure["seconds"] = "<seconds>"
+    assert canonical_json(released_structure) == canonical_json(candidate_structure), (
+        "default-off result structure differs at "
+        f"{_first_wire_component(released_structure, candidate_structure)}")
+
     seconds_value = rb"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?"
     seconds_field = re.compile(rb'("seconds"\s*:\s*)' + seconds_value)
-    released_without_seconds, released_seconds_count = seconds_field.subn(rb"\1<seconds>", released)
-    candidate_without_seconds, candidate_seconds_count = seconds_field.subn(rb"\1<seconds>", candidate)
+    released_without_seconds, released_seconds_count = seconds_field.subn(
+        rb"\1<seconds>", released)
+    candidate_without_seconds, candidate_seconds_count = seconds_field.subn(
+        rb"\1<seconds>", candidate)
     assert released_seconds_count == candidate_seconds_count == 1
-    assert released_without_seconds == candidate_without_seconds
+
+    released_without_manifest_ids = _omit_manifest_id_fields_from_bytes_after_validation(
+        released_without_seconds)
+    candidate_without_manifest_ids = _omit_manifest_id_fields_from_bytes_after_validation(
+        candidate_without_seconds)
+    event_id_field = re.compile(
+        rb'("(?:(?:[A-Za-z0-9_]+_)?event_id)"\s*:\s*)"(?:\\.|[^"\\])*"')
+    released_normalized, released_event_id_count = event_id_field.subn(
+        rb'\1"<run-specific-id>"', released_without_manifest_ids)
+    candidate_normalized, candidate_event_id_count = event_id_field.subn(
+        rb'\1"<run-specific-id>"', candidate_without_manifest_ids)
+    assert released_event_id_count == candidate_event_id_count
+    assert released_normalized == candidate_normalized
+
+
+def _normalize_default_off_run_specific_ids(value: object, *,
+                                            is_delivery_manifest: bool = False) -> object:
+    if isinstance(value, dict):
+        normalized = {}
+        for key, item in value.items():
+            is_run_specific_event_id = key == "event_id" or key.endswith("_event_id")
+            is_run_specific_manifest_id = key == "manifest_id" and not is_delivery_manifest
+            if is_run_specific_event_id or is_run_specific_manifest_id:
+                assert item is None or type(item) is str, f"{key} must be a string or null"
+                normalized[key] = "<run-specific-id>" if item is not None else None
+            else:
+                normalized[key] = _normalize_default_off_run_specific_ids(
+                    item, is_delivery_manifest=key == "delivery_manifest")
+        return normalized
+    if isinstance(value, list):
+        return [_normalize_default_off_run_specific_ids(item) for item in value]
+    return value
+
+
+def _default_off_result_parity_view(value: object) -> object:
+    normalized = _normalize_default_off_run_specific_ids(value)
+    if isinstance(normalized, dict):
+        result = normalized.get("result")
+        if isinstance(result, dict):
+            manifest = result.get("delivery_manifest")
+            if isinstance(manifest, dict):
+                # The digest is validated against each unnormalized manifest below. It is
+                # derived from run-scoped IDs, so it does not participate in cross-run parity.
+                manifest.pop("manifest_id", None)
+    return normalized
+
+
+def _assert_default_off_delivery_manifest_digest(result_value: object) -> None:
+    from kernel_delivery_manifest import _digest
+
+    if not isinstance(result_value, dict):
+        return
+    result = result_value.get("result")
+    if not isinstance(result, dict):
+        return
+    manifest = result.get("delivery_manifest")
+    if manifest is None:
+        return
+    assert isinstance(manifest, dict), "delivery manifest must be an object"
+    body = dict(manifest)
+    assert body.pop("manifest_id") == _digest(body), "invalid delivery manifest digest"
+
+
+def _omit_manifest_id_fields_from_bytes_after_validation(raw: bytes) -> bytes:
+    # Structured parity checks ID-field shape; callers validate delivery digests before this.
+    return re.sub(rb'"manifest_id"\s*:\s*"(?:\\.|[^"\\])*"', b"", raw)
 
 
 def _assert_default_off_result_parity(released: dict, candidate: dict,
                                      _released_run: Path, _released_endpoint: str,
                                      _candidate_run: Path, _candidate_endpoint: str) -> None:
-    from kernel_delivery_manifest import _digest
-
-    _assert_default_off_timed_mapping_parity(released, candidate, "seconds", "engine results")
+    _assert_default_off_delivery_manifest_digest(released)
+    _assert_default_off_delivery_manifest_digest(candidate)
+    released_structure = _default_off_result_parity_view(released)
+    candidate_structure = _default_off_result_parity_view(candidate)
+    _assert_default_off_timed_mapping_parity(
+        released_structure, candidate_structure, "seconds", "engine results")
     assert type(released.get("exit_status")) is type(candidate.get("exit_status")) is int
-    manifest = candidate["result"].get("delivery_manifest")
-    if manifest is not None:
-        body = dict(manifest)
-        assert body.pop("manifest_id") == _digest(body), "invalid delivery manifest digest"
 
 
 def test_default_off_result_parity_checks_the_published_exit_status(tmp_path):
@@ -397,6 +476,8 @@ def test_default_off_result_parity_checks_the_published_exit_status(tmp_path):
                     {**released, "seconds": float("inf")}):
         with pytest.raises(AssertionError):
             _assert_default_off_result_parity(released, changed, *arguments)
+
+    _assert_default_off_result_event_id_values(tmp_path)
 
 
 def test_default_off_summary_parity_allows_only_released_candidate_keys():
@@ -432,6 +513,104 @@ def test_default_off_result_bytes_parity_ignores_only_seconds_value():
     with pytest.raises(AssertionError):
         _assert_default_off_result_bytes_parity(
             released, b'{"result":"DRAFT","seconds":1.25,"exit_status":0}')
+
+
+def _assert_default_off_result_event_id_values(tmp_path):
+    from kernel_delivery_manifest import _digest
+
+    released_manifest = {"payload": {"prepared_event_id": "release-run:12"}}
+    released_manifest["manifest_id"] = _digest(released_manifest)
+    candidate_manifest = {"payload": {"prepared_event_id": "candidate-run:17"}}
+    candidate_manifest["manifest_id"] = _digest(candidate_manifest)
+    released = {
+        "result": {"receipt": {
+            "prepared_event_id": "release-run:12",
+            "exposure": {"records": [{"event_id": "release-run:12"}],
+                         "response_event_id": "release-run:13"},
+            "status": "READY",
+        }, "delivery_manifest": released_manifest},
+        "seconds": 0.0,
+        "exit_status": 0,
+    }
+    candidate = {
+        "result": {"receipt": {
+            "prepared_event_id": "candidate-run:17",
+            "exposure": {"records": [{"event_id": "candidate-run:17"}],
+                         "response_event_id": "candidate-run:18"},
+            "status": "READY",
+        }, "delivery_manifest": candidate_manifest},
+        "seconds": 1.25,
+        "exit_status": 0,
+    }
+    arguments = (tmp_path / "released", "http://127.0.0.1:30001/v1",
+                 tmp_path / "candidate", "http://127.0.0.1:30002/v1")
+
+    _assert_default_off_result_parity(released, candidate, *arguments)
+    _assert_default_off_result_bytes_parity(
+        json.dumps(released, separators=(",", ":")).encode(),
+        json.dumps(candidate, separators=(",", ":")).encode(),
+    )
+
+    for changed in (
+        {**candidate, "result": {**candidate["result"], "receipt": {"status": "READY"}}},
+        {**candidate, "result": {**candidate["result"], "receipt": {
+            **candidate["result"]["receipt"],
+            "exposure": {**candidate["result"]["receipt"]["exposure"], "records": [{}]},
+        }}},
+        {**candidate, "result": {**candidate["result"], "receipt": {
+            "prepared_event_id": 17,
+            "exposure": {"records": [{"event_id": "candidate-run:17"}],
+                         "response_event_id": "candidate-run:18"},
+            "status": "READY",
+        }}},
+        {**candidate, "result": {**candidate["result"], "receipt": {
+            **candidate["result"]["receipt"], "status": "CHANGED",
+        }}},
+    ):
+        with pytest.raises(AssertionError):
+            _assert_default_off_result_parity(released, changed, *arguments)
+        with pytest.raises(AssertionError):
+            _assert_default_off_result_bytes_parity(
+                json.dumps(released, separators=(",", ":")).encode(),
+                json.dumps(changed, separators=(",", ":")).encode(),
+            )
+
+
+def test_run_specific_result_ids_normalize_without_changing_shape():
+    from kernel_delivery_manifest import _digest
+
+    delivery_manifest = {"payload": {"prepared_event_id": "release-run:12"}}
+    delivery_manifest["manifest_id"] = _digest(delivery_manifest)
+    delivery_manifest_id = delivery_manifest["manifest_id"]
+    value = {
+        "result": {"receipt": {
+            "prepared_event_id": "release-run:12",
+            "exposure": {"records": [{"event_id": "release-run:12"}],
+                         "response_event_id": "release-run:13"},
+            "manifest_id": "release-manifest:1",
+        }, "delivery_manifest": {
+            **delivery_manifest,
+        }},
+        "seconds": 0.0,
+        "exit_status": 0,
+    }
+    assert _normalize_default_off_run_specific_ids(value) == {
+        "result": {"receipt": {
+            "prepared_event_id": "<run-specific-id>",
+            "exposure": {"records": [{"event_id": "<run-specific-id>"}],
+                         "response_event_id": "<run-specific-id>"},
+            "manifest_id": "<run-specific-id>",
+        }, "delivery_manifest": {
+            "payload": {"prepared_event_id": "<run-specific-id>"},
+            "manifest_id": delivery_manifest_id,
+        }},
+        "seconds": 0.0,
+        "exit_status": 0,
+    }
+
+    for invalid_id in (17, False):
+        with pytest.raises(AssertionError, match="prepared_event_id must be a string or null"):
+            _normalize_default_off_run_specific_ids({"prepared_event_id": invalid_id})
 
 
 def test_off_cache_profile_uses_omitted_defaults_without_explicit_cache_switches(tmp_path):

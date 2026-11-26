@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.10.2 (2026-11-25)
+
+- Fix: resuming after a recovery no longer loses action-result progress or the record of trimmed history, so a recovered run keeps counting work it already did.
+- Tests: the parallel-off parity check now normalizes run-specific event and manifest ids, so it passes, while integrity digests are still compared exactly.
+
 ## 0.10.1 (2026-11-25)
 
 - Fix: a subframe workspace run directory created under a 0002 umask is no longer left group- or world-writable. StateFrame now refuses to prepare a worker in a run directory it does not own or cannot open without following symlinks.
