@@ -15,18 +15,22 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     if __package__:
-        from .kernel_working_set_snapshot import PreparationSnapshot, SourceSlot
+        from .kernel_working_set_snapshot import SourceSlot
+        from .kernel_working_set_windows import EnclosingGuard
     else:
-        from kernel_working_set_snapshot import PreparationSnapshot, SourceSlot
+        from kernel_working_set_snapshot import SourceSlot
+        from kernel_working_set_windows import EnclosingGuard
 
 if __package__:
     from . import kernel_working_set_allocator as core
     from .kernel_working_set_cache import frozen, source_frozen, trial_render, wire_bytes
     from .kernel_read_receipts import ReceiptIdentity, line_digests_with_numbers
+    from .kernel_working_set_snapshot import PreparationSnapshot
 else:
     import kernel_working_set_allocator as core
     from kernel_working_set_cache import frozen, source_frozen, trial_render, wire_bytes
     from kernel_read_receipts import ReceiptIdentity, line_digests_with_numbers
+    from kernel_working_set_snapshot import PreparationSnapshot
 
 
 def digest(value: bytes) -> str:
@@ -108,6 +112,54 @@ class RenderedCandidate:
     wire: bytes
     certificate: AssignmentCertificate
     section_breakdown: tuple[tuple[str, int], ...]
+
+
+@dataclass(frozen=True)
+class _GuardedSnapshot(PreparationSnapshot):
+    # Exists only for the optional post-selection render. The allocator's
+    # ordinary snapshot representation and digest stay identical.
+    enclosing_guard: EnclosingGuard | None = None
+
+
+def render_enclosing_guard(control: RenderedCandidate, guards, delivered_ranges) -> RenderedCandidate | None:
+    """Render at most one guard, preserving the chosen assignment and layout."""
+    from dataclasses import fields
+    from kernel_cache_layout_view import semantic_messages
+
+    certificate = control.certificate
+    snapshot = certificate.snapshot
+    by_name = {mode.name: mode for mode in core.DEFAULT_MODES}
+    modes = {key: by_name[mode] for key, mode in certificate.assignment}
+    full = [slot.identity for slot in snapshot.sources if modes[slot.key] == core.FULL]
+    for guard in guards:
+        if modes.get(guard.slot_key) != core.FULL:
+            continue
+        if any(identity.path == guard.path and identity.revision == guard.revision
+               and identity.first_line <= header.last_line and header.first_line <= identity.last_line
+               for identity in full for header in guard.headers):
+            continue
+        # Fixed carriers can deliver source outside the allocator's FULL slots.
+        # Identify those headers by verified source coordinates as well.
+        if any(first <= header.last_line and header.first_line <= last
+               for first, last in delivered_ranges.get((guard.path, guard.revision), ())
+               for header in guard.headers):
+            continue
+        guarded = _GuardedSnapshot(
+            **{field.name: getattr(snapshot, field.name) for field in fields(PreparationSnapshot)},
+            enclosing_guard=guard)
+        candidate = render_assignment(guarded, modes, certificate.layout)
+        messages = json.loads(candidate.wire)["messages"]
+        note = guard.message()
+        if messages.count(note) != 1:
+            return None
+        # Independently check that layout/normalization retained all of the
+        # control messages, including reasoning and opaque tool results.
+        semantic = semantic_messages(messages)
+        if ([row for row in semantic if row != note]
+                != semantic_messages(json.loads(control.wire)["messages"])):
+            return None
+        return candidate
+    return None
 
 
 @dataclass
@@ -605,6 +657,13 @@ def _render_assignment(snapshot: PreparationSnapshot,
             f"revision {s.identity.revision}" for s in current)
         categories[len(generated)] = "host_facts"
         generated.append({"role": "user", "content": facts})
+        guard = getattr(snapshot, "enclosing_guard", None)
+        if guard is not None and any(
+                (s.key, s.identity.path, s.identity.revision, s.identity.first_line, s.identity.last_line)
+                == (guard.slot_key, guard.path, guard.revision, guard.first_line, guard.last_line)
+                for s in current):
+            categories[len(generated)] = "host_facts"
+            generated.append(guard.message())
     source_map = _current_source_map(current, locations)
     if source_map is not None:
         # Index of the spans this request's own windows carry; the verifier

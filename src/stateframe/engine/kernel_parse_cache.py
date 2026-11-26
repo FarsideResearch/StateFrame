@@ -22,13 +22,17 @@ with :data:`MAX_TREES` as a count backstop; derived maps have
 from __future__ import annotations
 
 import ast
+from bisect import bisect_right
 import contextlib
 import gc
 import hashlib
+import io
 import sys
 import threading
+import tokenize
 from collections import OrderedDict
 from collections.abc import Callable, Hashable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeVar
 
@@ -228,6 +232,120 @@ def derived_source(kind: Hashable, source: str, filename: str,
         _STATS["derived_misses"] += 1
         _remember(_DERIVED, key, value, MAX_DERIVED)
     return value
+
+
+@dataclass(frozen=True)
+class PythonBranchHeader:
+    first_line: int
+    last_line: int
+    text: str
+
+
+@dataclass(frozen=True)
+class PythonBranchArm:
+    first_line: int
+    last_line: int
+    kind: str
+    header: PythonBranchHeader
+
+
+def _branch_headers(source, lines, branches):
+    """Index block headers by the first token of each logical line."""
+    headers = {}
+    test_ends = {node.lineno: (node.test.end_lineno, node.test.end_col_offset)
+                 for node in branches}
+    first = None
+    ignored = {tokenize.NL, tokenize.COMMENT, tokenize.INDENT, tokenize.DEDENT}
+    for token in tokenize.generate_tokens(io.StringIO(source, newline=None).readline):
+        if token.type == tokenize.NEWLINE:
+            first = None
+        elif first is None and token.type not in ignored:
+            first = token
+        elif first and first.string in {"if", "elif", "else"} and token.type == tokenize.OP and token.string == ":":
+            start, column = first.start
+            if start in headers:
+                continue
+            line, offset = token.start
+            # AST columns count UTF-8 bytes. Skip colons inside the test,
+            # including lambda syntax and multiline dictionaries.
+            position = line, len(lines[line - 1][:offset].encode())
+            if first.string != "else" and (start not in test_ends or position < test_ends[start]):
+                continue
+            end, stop = token.end
+            exact = "".join(lines[start - 1:end - 1]) + lines[end - 1][:stop]
+            headers[start] = (first.string, column, PythonBranchHeader(start, end, exact))
+    return headers
+
+
+def _suite_start(body):
+    first = body[0]
+    return min([first.lineno, *(d.lineno for d in getattr(first, "decorator_list", ()))])
+
+
+def _python_branch_chains(tree, source):
+    lines = source.splitlines(keepends=True)
+    if lines != io.StringIO(source, newline="").readlines():
+        return ()
+    branches = [node for node in ast.walk(tree) if isinstance(node, ast.If)]
+    headers = _branch_headers(source, lines, branches)
+    else_lines = sorted(line for line, header in headers.items() if header[0] == "else")
+    chains, continuations = [], set()
+    for node in branches:
+        if node in continuations:
+            continue
+        chain, kind = [], "if"
+        while True:
+            header = headers.get(node.lineno)
+            if header is None or header[:2] != (kind, node.col_offset):
+                break
+            chain.append(PythonBranchArm(_suite_start(node.body), node.body[-1].end_lineno, kind, header[2]))
+            if not node.orelse:
+                chains.append(tuple(chain))
+                break
+            alternate = node.orelse[0]
+            header = headers.get(alternate.lineno)
+            if (isinstance(alternate, ast.If) and header is not None
+                    and header[:2] == ("elif", node.col_offset)):
+                continuations.add(alternate)
+                node, kind = alternate, "elif"
+                continue
+            first = _suite_start(node.orelse)
+            index = bisect_right(else_lines, first) - 1
+            if index >= 0:
+                line = else_lines[index]
+                _, column, header = headers[line]
+                if line > node.body[-1].end_lineno and column == node.col_offset:
+                    chain.append(PythonBranchArm(first, node.end_lineno, "else", header))
+                    chains.append(tuple(chain))
+            break
+    return tuple(chains)
+
+
+def python_branch_chains(source: str, path: str) -> tuple[tuple[PythonBranchArm, ...], ...]:
+    """Read-only AST ownership with exact token boundaries for Python if chains."""
+    try:
+        return derived("enclosing_guard", source, path,
+                       lambda tree: _python_branch_chains(tree, source))
+    except (SyntaxError, tokenize.TokenError, ValueError, UnicodeError, RecursionError):
+        return ()
+
+
+def enclosing_python_arm(chains, first: int, last: int) -> tuple[str, tuple[PythonBranchHeader, ...]] | None:
+    """Pick the innermost whole arm and refuse ranges crossing sibling arms."""
+    enclosing = None
+    for chain in chains:
+        hits = [index for index, arm in enumerate(chain)
+                if arm.header.first_line <= last and first <= arm.last_line]
+        if len(hits) > 1:
+            return None
+        if hits:
+            index = hits[0]
+            arm = chain[index]
+            if (arm.header.last_line < first and arm.first_line <= first <= last <= arm.last_line
+                    and (enclosing is None
+                         or arm.header.first_line > enclosing[1][-1].first_line)):
+                enclosing = arm.kind, tuple(item.header for item in chain[:index + 1])
+    return enclosing
 
 
 def parse_file(path: str | Path, *, encoding: str = "utf-8") -> tuple[str, ast.Module]:

@@ -318,10 +318,17 @@ def _saved_checkpoint(run_dir: Path, sends: int) -> tuple[Path, dict[str, object
 
 def _engine_child_pid(parent_pid: int) -> int:
     result = subprocess.run(
-        ["ps", "-o", "pid=", "--ppid", str(parent_pid)],
+        ["ps", "-A", "-o", "pid=", "-o", "ppid="],
         capture_output=True, text=True, check=True,
     )
-    children = [int(value) for value in result.stdout.split() if value.isdigit()]
+    children = []
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if len(fields) != 2 or not all(value.isdigit() for value in fields):
+            continue
+        pid, ppid = (int(value) for value in fields)
+        if ppid == parent_pid:
+            children.append(pid)
     assert len(children) == 1, f"expected one owned engine child for PID {parent_pid}, got {children}"
     return children[0]
 

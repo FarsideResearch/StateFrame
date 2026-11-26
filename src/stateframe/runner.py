@@ -1054,6 +1054,8 @@ WRITE_FIGURES_SENTENCE_SWITCH = "STATEFRAME_R200_F094_WRITE_FIGURES_SENTENCE"
 OPT_IN_SWITCHES = {
     "STATEFRAME_REPORT_CHRONOLOGY": ("off", "on"),
     "STATEFRAME_R200_F060_READ_ONLY_VIEW": ("off", "on"),
+    "STATEFRAME_ARITHMETIC_UNITS": ("off", "on"),
+    "STATEFRAME_API_ATTRIBUTE_ROWS": ("off", "on"),
     "STATEFRAME_WORKSPACE_OBJECTS": ("on", "off"),  # object-backed workspace snapshots
     "STATEFRAME_PROMPT_CACHE_UNPINNED": ("off", "on"),  # let llama.cpp choose a slot; default off
     "STATEFRAME_EXACT_TOKEN_COUNT_CACHE": ("off", "on"),
@@ -1082,6 +1084,7 @@ OPT_IN_SWITCHES = {
     "STATEFRAME_MUTATIONS": ("off", "prebuilt", "authored"),
     "STATEFRAME_CACHE_LAYOUT": ("on", "off"),
     "STATEFRAME_WORKING_SET_ALLOCATOR": ("on", "off"),  # certified working-set allocation and read-time admission
+    "STATEFRAME_ENCLOSING_GUARD": ("off", "on"),  # off-screen Python if headers
     "STATEFRAME_EVICTFIX": ("on", "legacy"),
     "STATEFRAME_MICROGRAPH": ("on", "off"),  # experimental; the engine defaults to off
     "STATEFRAME_STABLE_TOOL_HEAD": ("on", "off"),  # append-only tool list per run; on by default
@@ -1187,6 +1190,9 @@ OPT_IN_ALIASES = {
     "STATEFRAME_REPORT_DENOMINATORS": {"false": "off", "0": "off"},
     "STATEFRAME_R200_F060_READ_ONLY_VIEW": {"false": "off"},
     WRITE_FIGURES_SENTENCE_SWITCH: {"false": "off"},
+    "STATEFRAME_ARITHMETIC_UNITS": {"false": "off", "true": "on"},
+    "STATEFRAME_API_ATTRIBUTE_ROWS": {"false": "off"},
+    "STATEFRAME_ENCLOSING_GUARD": {"false": "off"},
 }
 # The host can consume these settings without an engine reader. Parallel and launch inputs
 # cross the child boundary as typed spec records. Schedule witness can also have an engine reader.
