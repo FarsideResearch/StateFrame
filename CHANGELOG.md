@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.10.3 (2026-11-25)
 
 - Fixed automatic probe cleanup under host load. The supervisor waits for SIGKILL and reaping to make progress, rechecks ownership after reparenting, and still fails when a descendant survives or cannot be attributed.
 
