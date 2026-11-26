@@ -1021,9 +1021,12 @@ DEFAULT_PROMPT_BUDGET = 33_344
 # Engine switches a user may set in the shell: exactly these names and values,
 # ambient over the profile. Never a blanket STATEFRAME_* passthrough.
 OPT_IN_SWITCHES = {
+    "STATEFRAME_REPORT_CHRONOLOGY": ("off", "on"),
+    "STATEFRAME_R200_F060_READ_ONLY_VIEW": ("off", "on"),
     "STATEFRAME_WORKSPACE_OBJECTS": ("on", "off"),  # object-backed workspace snapshots
     "STATEFRAME_PROMPT_CACHE_UNPINNED": ("off", "on"),  # let llama.cpp choose a slot; default off
     "STATEFRAME_EXACT_TOKEN_COUNT_CACHE": ("off", "on"),
+    "STATEFRAME_EXCEPTION_CAUSE_EXCERPT": ("off", "on"),
     "STATEFRAME_TURN_REPO_INTEL": ("off", "on"),
     "STATEFRAME_TURN_TIMING": ("off", "on"),
     "STATEFRAME_TURN_ATOMIC_PUBLICATION": ("off", "on"),
@@ -1038,6 +1041,7 @@ OPT_IN_SWITCHES = {
     "STATEFRAME_UNIT_POLICY_VISIBLE_ASSERTS": ("off", "on"),
     "STATEFRAME_SEND_INDEX_HEADER": ("off", "on"),  # label each chat POST with its send and attempt number
     "STATEFRAME_DATA_WORKSPACE": ("off", "on"),  # data workspace evidence packets; off is byte-identical
+    "STATEFRAME_REPORT_DENOMINATORS": ("off", "on"),
     "STATEFRAME_ENV_SEED": ("auto", "copy"),  # host-side run environment creation policy
     "STATEFRAME_ENV_SEED_MAX_GB": (),  # non-negative decimal GB; 0 disables seed eviction
     "STATEFRAME_KEEP_RUN_ENV": ("on", "off"),  # host-side finished-run retention policy
@@ -1140,7 +1144,13 @@ INTERNAL_BENCHMARK_SWITCHES = {
     },
 }
 # Accepted aliases -> the engine's own value (EVICTFIX "off" is sent as "legacy").
-OPT_IN_ALIASES = {"STATEFRAME_EVICTFIX": {"off": "legacy"}}
+OPT_IN_ALIASES = {
+    "STATEFRAME_EVICTFIX": {"off": "legacy"},
+    "STATEFRAME_EXCEPTION_CAUSE_EXCERPT": {"false": "off"},
+    "STATEFRAME_REPORT_CHRONOLOGY": {"false": "off", "0": "off", "no": "off"},
+    "STATEFRAME_REPORT_DENOMINATORS": {"false": "off", "0": "off"},
+    "STATEFRAME_R200_F060_READ_ONLY_VIEW": {"false": "off"},
+}
 # These settings are read by the host before the engine child starts; they must not enter the engine spec.
 # Parallel and launch inputs cross the child boundary as typed spec records.
 HOST_ONLY_SWITCHES = (frozenset({"STATEFRAME_ENV_SEED", "STATEFRAME_KEEP_RUN_ENV",

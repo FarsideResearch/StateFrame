@@ -13,6 +13,7 @@ import hashlib
 import json
 import re
 import stat
+import unicodedata
 from functools import lru_cache
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -41,6 +42,31 @@ DEPENDENCY_DIGEST_FORMAT = "stateframe.dependency_revision/2"
 TICKET_SCHEMA = "stateframe-authorized-ticket/1"
 TICKET_HEADER = "[AUTHORIZED TICKET"
 CLOSURE_HEADER = "[SOURCE CLOSURE RECEIPT"
+REPORT_CHRONOLOGY_HEADER = "[REPORT CHRONOLOGY]"
+_REPORT_LIMIT = 4096
+_CHRONOLOGY_LIMIT = 1536
+_REPORT_SENTENCE = re.compile(r"[^.!?\n]+[.!](?=\s|$)")
+_REPORT_RELATIVE = re.compile(r"(?P<cue>before|after) that,\s+(?P<right>.+)", re.I)
+_REPORT_PREFIX = re.compile(r"(?P<cue>before|after)\s+(?P<left>[^,]+),\s+(?P<right>.+)", re.I)
+_REPORT_INFIX = re.compile(r"(?P<left>.+?)\s+(?P<cue>before|after)\s+(?P<right>.+)", re.I)
+_REPORT_QUOTE_CLOSERS = {
+    "'": "'", '"': '"', "‘": "’", "“": "”", "«": "»", "‹": "›", "「": "」", "『": "』",
+}
+_REPORT_QUOTE_MARKS = frozenset(_REPORT_QUOTE_CLOSERS) | frozenset(_REPORT_QUOTE_CLOSERS.values())
+_REPORT_QUOTED_BOUNDARY = re.compile(r"\b(?:before|after)\b|[,!.?](?=\s)|\n", re.I)
+_REPORT_UNCERTAIN = re.compile(
+    r"\b(?:again|another|attempts|both|claims?|could|either|every|expected|first|formerly|"
+    r"if|later|maybe|might|never|next|no|nor|not|once|only|or|previously|"
+    r"perhaps|probably|report(?:ed|s)|retr(?:y|ied)|said|second|separately|should|sometimes|"
+    r"than|then|third|though|told|twice|unless|until|usually|when|while|would)\b|n['’]t\b",
+    re.I,
+)
+_REPORT_EVENT = re.compile(
+    r"(?:I|we|it|(?:the|my|our)\s+[^\W_][\w’'-]*(?:\s+[^\W_][\w’'-]*){0,3})\s+"
+    r"(?:[\w’'-]+ed|began|broke|came|crashed|did|froze|gave|got|had|hung|kept|"
+    r"left|lost|put|ran|read|saw|sent|set|shut|showed|stood|stuck|took|was|went|were|wrote)"
+    r"(?:\s+[^,;:!?\[\]<>]+)?", re.I,
+)
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _QUOTED = re.compile(r"(['\"`])([^'\"`\n]{3,96})\1")
 _SLASH_DIGIT = re.compile(
@@ -168,6 +194,144 @@ def ticket_identity_from_row(row: Mapping[str, object]) -> TicketIdentity | None
         return None
     task_id = row.get("task_id") or row.get("sha") or "task:anonymous"
     return TicketIdentity(str(task_id), text)
+
+
+@dataclass(frozen=True)
+class ReportChronology:
+    ticket: TicketIdentity
+    panel: str
+
+
+def _report_quote_boundaries_are_clear(prose: str) -> bool:
+    """Reject quoted order cues and quotations that could obscure a clause boundary."""
+    closer = None
+    start = 0
+    for index, mark in enumerate(prose):
+        if mark not in _REPORT_QUOTE_MARKS:
+            if not mark.isascii() and (unicodedata.category(mark) in {"Pi", "Pf"}
+                                       or "QUOTATION MARK" in unicodedata.name(mark, "")):
+                return False  # An unsupported delimiter leaves the quoted span ambiguous.
+            continue
+        after_word = index > 0 and prose[index - 1].isalnum()
+        before_word = index + 1 < len(prose) and prose[index + 1].isalnum()
+        if mark in {"'", "’"} and after_word and before_word:
+            continue  # A word-internal apostrophe does not open or close a quotation.
+        if (closer is not None and closer != mark and mark in {"'", "’"}
+                and after_word and prose[index - 1] in "sS"):
+            # A trailing possessive like “the users’ session” stays inside the
+            # enclosing quotation. Its actual closer still takes precedence.
+            continue
+        if closer is None:
+            closer = _REPORT_QUOTE_CLOSERS.get(mark)
+            if closer is None or after_word:
+                return False
+            start = index + 1
+        elif mark != closer or before_word or _REPORT_QUOTED_BOUNDARY.search(prose, start, index):
+            return False
+        else:
+            closer = None
+    return closer is None
+
+
+def report_chronology(row: Mapping[str, object], brief: str) -> ReportChronology | None:
+    """Extract only explicitly ordered, single-account event clauses from a public brief."""
+    text = _row_ticket_text(row)
+    if (not isinstance(brief, str) or not text or len(text) > _REPORT_LIMIT
+            or not (brief == text or brief.startswith(text + "\n\n"))
+            or any(ord(char) < 32 and char != "\n" for char in text)):
+        return None
+    try:
+        report_size = len(text.encode("utf-8"))
+    except UnicodeEncodeError:
+        return None
+    if report_size > _REPORT_LIMIT or REPORT_CHRONOLOGY_HEADER in text:
+        return None
+    # live_adapter appends a Focus locator outside the reporter's symptom.
+    prose = text.partition("\n\nFocus: ")[0]
+    if _REPORT_UNCERTAIN.search(prose) or re.search(r"[\[\]<>`{}]", prose):
+        return None
+    if not _report_quote_boundaries_are_clear(prose):
+        return None
+
+    events: dict[str, tuple[int, int]] = {}
+    edges: dict[tuple[str, str], tuple[int, int]] = {}
+
+    def event(start: int, end: int) -> str | None:
+        quote = prose[start:end]
+        if (not _REPORT_EVENT.fullmatch(quote)
+                or re.search(r"\b(?:before|after|and|but|because|since|that)\b", quote, re.I)):
+            return None
+        key = quote.casefold()
+        if key in events:
+            # Reusing one textual event to join separate clauses can merge
+            # independent attempts (for example, two browser-specific Saves).
+            return None
+        events[key] = (start, end)
+        return key
+
+    previous = None
+    cursor = 0
+    for sentence in _REPORT_SENTENCE.finditer(prose):
+        start, end = sentence.span()
+        if prose[cursor:start].strip():
+            return None
+        cursor = end
+        clause = prose[start:end - 1].lstrip()
+        start = end - 1 - len(clause)
+        relative = _REPORT_RELATIVE.fullmatch(clause)
+        prefix = _REPORT_PREFIX.fullmatch(clause)
+        infix = _REPORT_INFIX.fullmatch(clause)
+        relation = relative or prefix or infix
+        if relation is None:
+            # A following "before/after that" may anchor a single event.
+            previous = event(start, end - 1)
+            if previous is None:
+                return None
+            continue
+
+        right = event(start + relation.start("right"), start + relation.end("right"))
+        left = (previous if relative else
+                event(start + relation.start("left"), start + relation.end("left")))
+        if left is None or right is None or left == right:
+            return None
+        # Infix: "A before B". Leading: "Before A, B" or "Before that, B".
+        left_first = relation["cue"].lower() == ("after" if prefix or relative else "before")
+        earlier, later = (left, right) if left_first else (right, left)
+        # The referent of "that" must be the sole event in the preceding sentence.
+        previous = right if relative else None
+        cue_start = start + relation.start("cue")
+        cue_end = start + (relative.start("right") if relative else relation.end("cue"))
+        edges.setdefault((earlier, later), (cue_start, cue_end))
+
+    if prose[cursor:].strip() or not edges:
+        return None
+    remaining = set(events)
+    ordered: list[str] = []
+    while remaining:
+        ready = remaining - {later for earlier, later in edges if earlier in remaining}
+        if len(ready) != 1:
+            return None
+        current = ready.pop()
+        ordered.append(current)
+        remaining.remove(current)
+    if all(events[earlier][0] < events[later][0] for earlier, later in zip(ordered, ordered[1:])):
+        return None
+
+    def excerpt(span: tuple[int, int]) -> str:
+        start, end = span
+        lo, hi = len(text[:start].encode("utf-8")), len(text[:end].encode("utf-8"))
+        return f"bytes [{lo}, {hi}) {json.dumps(text[start:end], ensure_ascii=False)}"
+
+    ticket = ticket_identity_from_row(row)
+    lines = [REPORT_CHRONOLOGY_HEADER,
+             f"Ticket {ticket.sha256}. Offsets are UTF-8 bytes in the original report."]
+    for index, key in enumerate(ordered):
+        if index:
+            lines.append(f"  Order cue {excerpt(edges[ordered[index - 1], key])}. "
+                         "Intervening transition unknown.")
+        lines.append(f"{index + 1}. {excerpt(events[key])}")
+    panel = "\n".join(lines)
+    return ReportChronology(ticket, panel) if len(panel.encode("utf-8")) <= _CHRONOLOGY_LIMIT else None
 
 
 def ticket_identity_for_runtime(runtime: object) -> TicketIdentity | None:

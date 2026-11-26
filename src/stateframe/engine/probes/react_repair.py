@@ -5931,13 +5931,14 @@ def _host_refusal_observation(runtime, refusal: "_HostExecutionRefused", *, sele
 
 @capture_incomplete_gate_observation
 def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
-                    rel_hint: str | None = None, row=None) -> str:
+                    rel_hint: str | None = None, row=None, *, cause_excerpt=None) -> str:
     """rel_hint is the file under repair — used to tell OUR import failures from the agent's."""
     _unit_module = sys.modules.get("kernel_unit_policy")
     _unit = _unit_module.active() if _unit_module is not None else None
     if _unit is None and isinstance(row, Mapping) and row.get("runner_kind") == "generic":
         from kernel_generic_check import check_result
-        return check_result(root, row)[0]
+        check_options = {"cause_excerpt": cause_excerpt} if cause_excerpt is not None else {}
+        return check_result(root, row, **check_options)[0]
     _profile = None
     if os.environ.get("STATEFRAME_TEST_RUN_SPANS", "off").strip().lower() in {"shadow", "on"}:
         from kernel_test_run_spans import current_profile
@@ -6733,7 +6734,7 @@ def _fresh_unit_check_binding(runtime, unit, root: pathlib.Path, binding: Mappin
 
 
 def run_tests(root: pathlib.Path, fn: str, explicit: str | None,
-              rel_hint: str | None = None, row=None) -> str:
+              rel_hint: str | None = None, row=None, *, cause_excerpt=None) -> str:
     """Keep test profiling advisory and attach one scope to each host invocation."""
     _unit_module = sys.modules.get("kernel_unit_policy")
     _unit = _unit_module.active() if _unit_module is not None else None
@@ -6812,15 +6813,16 @@ def run_tests(root: pathlib.Path, fn: str, explicit: str | None,
         if _receipt.status == "NOT_RUN":
             return "pytest exit 4 — NOT_RUN"
         return _receipt.projected_observation
+    check_options = {"cause_excerpt": cause_excerpt} if cause_excerpt is not None else {}
     if os.environ.get("STATEFRAME_TEST_RUN_SPANS", "off").strip().lower() not in {"shadow", "on"}:
-        return _run_tests_impl(root, fn, explicit, rel_hint, row=row)
+        return _run_tests_impl(root, fn, explicit, rel_hint, row=row, **check_options)
     from kernel_test_run_spans import profile_scope
     with profile_scope() as profile:
         if profile is None:
-            return _run_tests_impl(root, fn, explicit, rel_hint, row=row)
+            return _run_tests_impl(root, fn, explicit, rel_hint, row=row, **check_options)
         profile.mark("run_tests_entered")
         with profile.span("run_tests_body"):
-            return _run_tests_impl(root, fn, explicit, rel_hint, row=row)
+            return _run_tests_impl(root, fn, explicit, rel_hint, row=row, **check_options)
 
 
 def _selector_exit_code(observation: str) -> int | None:
@@ -7118,7 +7120,8 @@ def _render_scoped_delivery(observation: str, truth_line: str) -> str:
 
 
 def run_tests_for_selectors(root: pathlib.Path, fn: str, selectors: Sequence[str],
-                            rel_hint: str | None = None, row=None) -> tuple[str, tuple[int, ...]]:
+                            rel_hint: str | None = None, row=None, *,
+                            cause_excerpt=None) -> tuple[str, tuple[int, ...]]:
     """Run every logical oracle selector while preserving the legacy run_tests API."""
     from unit_planner_v2 import coalesce_combined_observation, coalesce_observation
     _unit_module = sys.modules.get("kernel_unit_policy")
@@ -7128,7 +7131,8 @@ def run_tests_for_selectors(root: pathlib.Path, fn: str, selectors: Sequence[str
         return observation, (code if code is not None else -1,)
     if isinstance(row, Mapping) and row.get("runner_kind") == "generic":
         from kernel_generic_check import check_result
-        observation, code = check_result(root, row)
+        check_options = {"cause_excerpt": cause_excerpt} if cause_excerpt is not None else {}
+        observation, code = check_result(root, row, **check_options)
         return coalesce_observation(observation, "", code, complete=False), (code,)
     observations: list[str] = []
     gate_observations: list[str] = []
@@ -8882,6 +8886,10 @@ def work(d, *, resume=None):
         if d.get("scope_source") == "discovery":
             from kernel_edit_affordance import DISCOVERY_SCOPE_INSTRUCTION
             msgs[1]["content"] += "\n\n" + DISCOVERY_SCOPE_INSTRUCTION
+        _report_chronology = None
+        if not _lean_on and os.environ.get("STATEFRAME_REPORT_CHRONOLOGY", "off").strip().lower() == "on":
+            from kernel_request_evidence_closure import report_chronology
+            _report_chronology = report_chronology(d, brief)
         if _lean_on:
             from kernel_lean import BoundedToolMessages
             msgs = BoundedToolMessages(msgs)
@@ -9614,6 +9622,8 @@ def work(d, *, resume=None):
             step_limit=_budget.tool_attempt_limit,
             multi_file=multifile, edit_contract=_edit_contract, workspace=continuation_workspace, resume=resume,
             startup_schema_budget=_agent_tools.startup_schema_budget if _agent_tools is not None else None)
+        if _report_chronology is not None:
+            bolt._report_chronology = _report_chronology
         if _minimal_launch:
             measurement._minimal_launch = True
         measurement.run_limitations = run_limitations
@@ -10760,6 +10770,7 @@ def work(d, *, resume=None):
                 _finish_edit_nturn()
             _edit_nturn_request_active = False
             plain_observation = None
+            _check_causes = []
             if d.get("_bridge_capture") and not (_minimal_launch and step == 0):
                 from kernel_bridge_evidence import capture_candidate
                 capture_candidate(d["_bridge_capture"], root, d, step)
@@ -15244,14 +15255,30 @@ def work(d, *, resume=None):
                     # and fresh reads close the same native continuation effect.
                     from kernel_read_exec import dispatch_live_read
                     from kernel_model_policy import resolve_model_policy
-                    (_read_result, obs, _read_bytes,
-                     _read_delivery) = dispatch_live_read(
-                        root, p, raw, parts[0], start, args=_args,
-                        measurement=measurement, step=step, bolt=bolt,
-                        policy=resolve_model_policy(MODEL),
-                        resolved_path=resolved_path, visible_messages=msgs,
-                        page_line_limit=_lean_read_page_line_limit,
-                        page_byte_limit=_lean_read_page_byte_limit)
+                    _read_visible_messages = msgs
+                    _read_admission_restore = None
+                    if getattr(bolt, "_report_chronology", None) is not None:
+                        from kernel_stateframe_framefit5 import (
+                            prepare_report_chronology_read_admission,
+                            restore_report_chronology_read_admission,
+                        )
+                        (_read_visible_messages,
+                         _read_admission_restore) = prepare_report_chronology_read_admission(
+                            measurement, msgs)
+                    try:
+                        (_read_result, obs, _read_bytes,
+                         _read_delivery) = dispatch_live_read(
+                            root, p, raw, parts[0], start, args=_args,
+                            measurement=measurement, step=step, bolt=bolt,
+                            policy=resolve_model_policy(MODEL),
+                            resolved_path=resolved_path,
+                            visible_messages=_read_visible_messages,
+                            page_line_limit=_lean_read_page_line_limit,
+                            page_byte_limit=_lean_read_page_byte_limit)
+                    finally:
+                        if _read_admission_restore is not None:
+                            restore_report_chronology_read_admission(
+                                measurement, _read_admission_restore)
                     if _read_result == "OK":
                         try:
                             _pointer_read_path = p.resolve().relative_to(root.resolve()).as_posix()
@@ -16000,11 +16027,16 @@ def work(d, *, resume=None):
                 from kernel_public_evidence import requested_check_targets
                 _test_selectors = (tuple(requested_check_targets(root, rest)) if rest else
                                    tuple(getattr(bolt, "f2p_ids", ())))
+                _check_options = {}
+                if d.get("runner_kind") == "generic":
+                    from kernel_generic_check import cause_excerpt_enabled
+                    if cause_excerpt_enabled():
+                        _check_options["cause_excerpt"] = _check_causes
                 if multifile and _test_selectors:
                     obs, _test_codes = run_tests_for_selectors(
-                        root, fn, _test_selectors, d["rel"], row=d)
+                        root, fn, _test_selectors, d["rel"], row=d, **_check_options)
                 else:
-                    obs = run_tests(root, fn, rest or None, d["rel"], row=d)
+                    obs = run_tests(root, fn, rest or None, d["rel"], row=d, **_check_options)
                     _test_codes = None
                 _unit_gate_observation = obs  # retain host-only raw evidence through string decoration
                 plain_observation = obs
@@ -16905,13 +16937,26 @@ def work(d, *, resume=None):
                     _scope_line = None
                 from unit_planner_v2 import coalesce_notice_observation
                 delivered_obs = coalesce_notice_observation(bolt, delivered_obs)
+                _trailer = ("\n" + _scope_line) if _scope_line else ""
+                _full_delivery = delivered_obs + _trailer if _check_causes else ""
                 if has_framefit5_state(msgs):
                     from kernel_frame_tool_result_budget import bound_frame_tool_result
                     delivered_obs = bound_frame_tool_result(
-                        delivered_obs, msgs, kind="test",
-                        trailer=("\n" + _scope_line) if _scope_line else "")
+                        delivered_obs, msgs, kind="test", trailer=_trailer)
                 elif _scope_line:
-                    delivered_obs = delivered_obs + "\n" + _scope_line
+                    delivered_obs += _trailer
+                if _check_causes:
+                    _cause = _check_causes.pop()
+                    _check_receipt = measurement.test_receipts[-1]
+                    if (_check_receipt.get("canonical_check_execution_ids") == [_cause.execution_id]
+                            and _check_receipt["after_binding"].get("product_revision") == _cause.revision):
+                        from kernel_frame_tool_result_budget import fit_check_cause_excerpt
+                        _cause_observation = public_wire_text(_cause.observation, measurement.journal)
+                        if _cause_observation.count("\n") == _cause.observation.count("\n"):
+                            delivered_obs = fit_check_cause_excerpt(
+                                delivered_obs, _full_delivery, _cause_observation, _cause.frames,
+                                source_line_ends=_cause.source_line_ends,
+                                diagnostic_starts_midline=_cause.diagnostic_starts_midline)
                 _scope_truth_line = None
             _read_result = locals().get("_read_result")
             _withheld_read = (line.startswith("read ") and _read_result in {"BINARY", "NON_REGULAR_FILE"})
