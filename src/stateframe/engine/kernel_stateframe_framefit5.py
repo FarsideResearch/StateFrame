@@ -28,6 +28,11 @@ MAX_CONTEXT_BYTES = 32 * 1024
 MAX_OPAQUE_RECEIPT_BYTES = 4 * 1024
 MAX_PRODUCT_BYTES = 2 * 1024 * 1024
 MAX_SOURCE_REFRESH_ATTEMPTS = 3
+_REPORT_DECLARATION = "Report denominators: "
+_REPORT_PANEL = (
+    "\n\nReport denominators (task-declared CSV, eligible means confirmed by the rule, "
+    "null means unknown): "
+)
 
 
 class FrameFit5Error(RuntimeError):
@@ -1576,6 +1581,135 @@ def _scoped_ratio(runtime: object, checks: Sequence[Mapping[str, object]]) -> tu
     return scoped_pass_ratio(declared, ran) if ran else None
 
 
+def _report_denominators_enabled() -> bool:
+    return os.environ.get("STATEFRAME_REPORT_DENOMINATORS", "off") == "on"
+
+
+def _report_source(root: Path, path: str) -> bytes:
+    from kernel_expert_gap_sidecars import _open_root, _read_root_file
+    from kernel_public_localization import public_path
+    from kernel_read_pointer import _inline_path_allowed
+    from kernel_secret_paths import is_secret_file
+
+    if (public_path(path) != path or not _inline_path_allowed(path)
+            or not path.endswith(".csv") or is_secret_file(PurePosixPath(path).name)
+            or any(char in path for char in ("\n", "\r"))):
+        raise ValueError("report source must be an exact public workspace CSV")
+    opened = _open_root(root)
+    if opened is None:
+        raise ValueError("report workspace is unavailable")
+    _, descriptor = opened
+    try:
+        raw = _read_root_file(descriptor, path, byte_limit=MAX_SITE_BYTES)
+    finally:
+        os.close(descriptor)
+    if raw is None:
+        raise ValueError("bounded report source is unavailable")
+    return raw
+
+
+def _report_rule(value: object) -> tuple[str, str] | None:
+    if value is None:
+        return None
+    if (not isinstance(value, dict) or value.keys() != {"field", "equals"}
+            or not isinstance(value["field"], str) or not value["field"]
+            or not isinstance(value["equals"], str)):
+        raise ValueError("report rules require a field and exact equality value")
+    return value["field"], value["equals"]
+
+
+def _report_denominator_rows(task_text: str, root: Path) -> list[dict[str, object]]:
+    import csv
+    import io
+
+    declarations = [line[len(_REPORT_DECLARATION):]
+                    for line in task_text.splitlines()
+                    if line.startswith(_REPORT_DECLARATION)]
+    if len(declarations) != 1 or len(declarations[0]) > MAX_CONTEXT_BYTES:
+        return []
+    try:
+        def unique_fields(pairs):
+            fields = dict(pairs)
+            if len(fields) != len(pairs):
+                raise ValueError("duplicate report declaration field")
+            return fields
+
+        spec = json.loads(declarations[0], object_pairs_hook=unique_fields)
+        if not isinstance(spec, dict) or spec.keys() - {
+                "path", "unit_key", "cohort_field", "eligibility", "outcome", "missing_values"}:
+            return []
+        path, unit, cohort = (spec.get(key) for key in ("path", "unit_key", "cohort_field"))
+        if not isinstance(path, str) or any(
+                value is not None and (not isinstance(value, str) or not value)
+                for value in (unit, cohort)):
+            return []
+        eligible = _report_rule(spec.get("eligibility"))
+        outcome = _report_rule(spec.get("outcome"))
+        missing = spec.get("missing_values")
+        if missing is not None and (not isinstance(missing, list)
+                                    or any(not isinstance(value, str) for value in missing)):
+            return []
+        missing_values = set(missing or ())
+        if any(rule is not None and rule[1] in missing_values for rule in (eligible, outcome)):
+            return []
+        raw = _report_source(root, path)
+        reader = csv.reader(io.StringIO(raw.decode("utf-8-sig"), newline=""), strict=True)
+        header = next(reader, [])
+        columns = {name: index for index, name in enumerate(header)}
+        declared = (unit, cohort, eligible[0] if eligible else None, outcome[0] if outcome else None)
+        if not header or len(columns) != len(header) or "" in columns or any(
+                field is not None and field not in columns for field in declared):
+            return []
+        revision = "sha256:" + _sha256(raw)
+        seen: set[str] = set()
+        rows: dict[str | None, dict[str, object]] = {}
+        for cells in reader:
+            if len(cells) != len(header):
+                return []
+            if unit is not None:
+                key = cells[columns[unit]]
+                if not key or key in missing_values or key in seen:
+                    return []  # Ambiguous unit identity prevents an exact count.
+                seen.add(key)
+            label = cells[columns[cohort]] if cohort is not None and missing is not None else None
+            if label in missing_values:
+                label = None
+            if label not in rows:
+                can_count = unit is not None and label is not None and eligible is not None
+                rows[label] = {
+                    "source": path, "source_revision": revision, "cohort": label,
+                    "eligible_population": 0 if can_count else None,
+                    "observed_denominator": 0 if can_count and outcome is not None else None,
+                    "numerator": 0 if can_count and outcome is not None else None,
+                    "exclusions": (
+                        {"ineligible": 0, "eligibility_missing": 0,
+                         "outcome_missing": 0 if outcome is not None else None}
+                        if can_count else None
+                    ),
+                }
+            row = rows[label]
+            exclusions = row["exclusions"]
+            if not isinstance(exclusions, dict):
+                continue
+            eligibility_value = cells[columns[eligible[0]]]
+            if eligibility_value in missing_values:
+                exclusions["eligibility_missing"] += 1
+            elif eligibility_value != eligible[1]:
+                exclusions["ineligible"] += 1
+            else:
+                row["eligible_population"] += 1
+                if outcome is not None:
+                    outcome_value = cells[columns[outcome[0]]]
+                    if outcome_value in missing_values:
+                        exclusions["outcome_missing"] += 1
+                    else:
+                        row["observed_denominator"] += 1
+                        row["numerator"] += outcome_value == outcome[1]
+        return list(rows.values())
+    except (OSError, RuntimeError, ValueError, csv.Error):
+        return []
+
+
 def build_typed_state(
         messages: Sequence[Mapping[str, object]], action_context: Mapping[str, object],
         runtime: object,
@@ -1748,6 +1882,11 @@ def build_typed_state(
     serialized = _json_text(state)
     if len(serialized.encode("utf-8")) > MAX_PRODUCT_BYTES:
         raise FrameFit5Error("typed frame exceeds its product byte limit")
+    if (_report_denominators_enabled() and _active_unit_spec() is None
+            and getattr(runtime, "_unit_policy", None) is None):
+        brief = task_row.get("msg")
+        if isinstance(brief, str) and (rows := _report_denominator_rows(brief, owner_root)):
+            state["report_denominators"] = rows
     return state
 
 
@@ -1757,6 +1896,10 @@ def attach_typed_state(
     """Attach FrameFit5 data and select the inventory's next site as F4's open site."""
     result = copy.deepcopy(dict(action_context))
     result["framefit5"] = copy.deepcopy(dict(typed_state))
+    report_rows = result["framefit5"].pop("report_denominators", None)
+    if report_rows:
+        # Optional derived data goes to the volatile tail after evidence fitting.
+        result["report_denominators"] = report_rows
     result.pop("open_edit_site", None)
     site = typed_state.get("next_site")
     if isinstance(site, Mapping):
@@ -2290,6 +2433,176 @@ def _require_owned_source_rendered(
             raise FrameFit5Error(f"owned source for {path} was not rendered into the request")
 
 
+def _add_report_chronology(
+        messages: list[dict[str, object]], runtime: object,
+        sources: Mapping[str, str] | None,
+) -> None:
+    chronology = getattr(getattr(runtime, "owner", None), "_report_chronology", None)
+    if chronology is None:
+        return
+    from kernel_request_budget import (
+        ENDPOINT_PROMPT_TOKEN_BUDGET, ENDPOINT_SAFETY_HEADROOM_TOKENS, HARD_MAX_REQUEST_BYTES,
+        _request_token_meter,
+    )
+    from kernel_request_evidence_closure import ticket_identity_for_runtime
+
+    task_index = next(i for i, row in enumerate(messages) if row.get("role") != "system")
+    task = messages[task_index].get("content")
+    ticket = chronology.ticket
+    if (ticket_identity_for_runtime(runtime) != ticket or not isinstance(task, str)
+            or not (task == f"Task: {ticket.text}"
+                    or task.startswith(f"Task: {ticket.text}\n\n"))):
+        return
+    capture = getattr(runtime, "_active_capture", None)
+    if getattr(capture, "_capacity_retry_limits", None) is not None:
+        return  # Resend capacity belongs to the existing evidence.
+    surface = getattr(capture, "final_tool_surface", None) or {}
+    tools = surface.get("tools", getattr(runtime, "_lean_base_tools", None))
+    panel = {"role": "user", "content": chronology.panel}
+    # A prior send can leave its panel in the prepared transcript. Evaluate it
+    # as optional on this request so it cannot reduce the next source read.
+    had_panel = False
+    without_panel: list[dict[str, object]] = []
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, str) and chronology.panel in content:
+            had_panel = True
+            retained_content = content.replace(chronology.panel, "")
+            if not retained_content.strip() and message.get("role") == "user":
+                continue
+            retained_message = copy.deepcopy(dict(message))
+            retained_message["content"] = retained_content
+            without_panel.append(retained_message)
+        else:
+            without_panel.append(message)
+    task_index = next(i for i, row in enumerate(without_panel) if row.get("role") != "system")
+    # Reserve the complete source snapshot on top of the prepared messages.
+    # Qualification can still render source windows and final host facts.
+    if not isinstance(sources, Mapping):
+        return
+    projected = without_panel[:task_index + 2] + [panel] + without_panel[task_index + 2:]
+    body = {"messages": projected, "tools": tools}
+    wire_bytes = len(json.dumps(body).encode("utf-8"))
+    reserve = ENDPOINT_SAFETY_HEADROOM_TOKENS + sum(
+        1024 + len(json.dumps(value)) for value in sources.values())
+    ceiling = min(getattr(runtime, "frame_ceiling", 0), ENDPOINT_PROMPT_TOKEN_BUDGET)
+    retained = getattr(runtime, "working_set_state", None)
+    if retained is not None:
+        from kernel_measurement import _read_journal_blob
+
+        ledger = getattr(runtime, "read_capture_ledger", None)
+        captures = {item.capture_id: item for item in ledger.all()} if ledger is not None else {}
+        for obligation in retained.active_obligations():
+            item = captures.get(obligation.capture_ids[-1]) if obligation.capture_ids else None
+            if item is None or reserve >= ceiling:
+                return
+            try:
+                reserve += 1024 + len(_read_journal_blob(runtime.journal.path, item.original_page_blob_ref))
+            except (OSError, ValueError):
+                return
+    if reserve >= ceiling or wire_bytes + reserve > HARD_MAX_REQUEST_BYTES:
+        if len(without_panel) != len(messages) or had_panel:
+            messages[:] = without_panel
+        return
+    tokens, method = _request_token_meter(runtime, capture).measure(body)
+    if method not in {"tokenize", "verified_byte_bound"}:
+        tokens = max(tokens, wire_bytes)
+    if tokens + reserve <= ceiling:
+        messages[:] = projected
+    elif had_panel:
+        messages[:] = without_panel
+
+
+def prepare_report_chronology_read_admission(
+        runtime: object, visible_messages: Sequence[Mapping[str, object]] | None,
+):
+    """Install a panel-free view while admission prices the next source read.
+
+    Final assembly still fits the panel alongside delivered source and omits it
+    when that source needs the room.
+
+    Return the sanitized visible messages and a restoration record. The caller
+    restores that record immediately after read dispatch; keeping this explicit
+    avoids a generator frame in checkpoint state while the read is in flight.
+    """
+    chronology = getattr(getattr(runtime, "owner", None), "_report_chronology", None)
+    if chronology is None:
+        return visible_messages, None
+
+    from kernel_cache_layout_view import FINAL_LAYOUT_NAME
+    from kernel_stable_wire import is_stable_wire_projection
+    from kernel_working_set_snapshot_compat import snapshot_semantic_messages
+
+    panel = chronology.panel
+
+    def without_panel(messages):
+        if not isinstance(messages, Sequence) or isinstance(messages, (str, bytes, bytearray)):
+            return messages
+        if not any(isinstance(message, Mapping) and isinstance(message.get("content"), str)
+                   and panel in message["content"] for message in messages):
+            return messages
+        if (is_stable_wire_projection(messages) or
+                (isinstance(messages[-1], Mapping) and messages[-1].get("name") == FINAL_LAYOUT_NAME)):
+            # Decode while all physical rows still bind. Admission will render
+            # and verify a fresh layout from the canonical panel-free request.
+            try:
+                messages = snapshot_semantic_messages(messages)
+            except (ValueError, TypeError, KeyError, IndexError, RuntimeError):
+                return messages  # Preserve malformed input for admission to refuse.
+        result = []
+        for message in messages:
+            if not isinstance(message, Mapping):
+                result.append(message)
+                continue
+            content = message.get("content")
+            if isinstance(content, str) and panel in content:
+                retained = content.replace(panel, "")
+                if not retained.strip() and message.get("role") == "user":
+                    continue
+                updated = copy.deepcopy(dict(message))
+                updated["content"] = retained
+                result.append(updated)
+            else:
+                result.append(copy.deepcopy(dict(message)))
+        return result
+
+    had_body = hasattr(runtime, "_read_admission_provider_body")
+    old_body = getattr(runtime, "_read_admission_provider_body", None)
+    capture = getattr(runtime, "_active_capture", None)
+    old_qualified = getattr(capture, "qualified_request", None)
+    installed_qualified = False
+    if isinstance(old_body, Mapping):
+        body = copy.deepcopy(dict(old_body))
+        body["messages"] = without_panel(body.get("messages", ()))
+        runtime._read_admission_provider_body = body
+    if old_qualified is not None:
+        from types import SimpleNamespace
+
+        body = copy.deepcopy(old_qualified.body)
+        body["messages"] = without_panel(body.get("messages", ()))
+        capture.qualified_request = SimpleNamespace(body=body)
+        installed_qualified = True
+    restore = (had_body, old_body, old_qualified, installed_qualified)
+    return without_panel(visible_messages), restore
+
+
+def restore_report_chronology_read_admission(runtime: object, restore: object) -> None:
+    """Restore the sealed provider and qualified request after source admission."""
+    if not isinstance(restore, tuple) or len(restore) != 4:
+        return
+    had_body, old_body, old_qualified, installed_qualified = restore
+    capture = getattr(runtime, "_active_capture", None)
+    if installed_qualified and capture is not None:
+        capture.qualified_request = old_qualified
+    if had_body:
+        runtime._read_admission_provider_body = old_body
+    else:
+        try:
+            del runtime._read_admission_provider_body
+        except AttributeError:
+            pass
+
+
 def assemble_framefit5_request(
         prepared: Sequence[Mapping[str, object]],
         source_messages: Sequence[Mapping[str, object]],
@@ -2491,6 +2804,14 @@ def assemble_framefit5_request(
         state_message["content"] = _serialize_state_message(payload)
     if projection_audit is not None:
         projection_audit["projected_count"] = projected_count
+    if unallocated:
+        # Allocated reassembly already owns the exact prefix, including any
+        # chronology admitted before capture. Leave its task and facts intact.
+        _add_report_chronology(result, runtime, sources)
+    if _report_denominators_enabled():
+        _attach_report_denominators(
+            result, runtime, source_plan, qualified_surface=owner_presentation is not None,
+        )
     return result
 
 
@@ -2503,6 +2824,35 @@ def _split_marker_string(content: str) -> object | None:
         return prefix + GREENFACT_TEXT
     tail = tail.lstrip("\r\n")
     return tail or None
+
+
+def _strip_report_denominators_panel(content: str) -> str:
+    """Remove only a complete host-generated report panel from a volatile tail."""
+    green = GREENFACT_TEXT if content.endswith(GREENFACT_TEXT) else ""
+    without_green = content.removesuffix(green)
+    prefix, marker, rest = without_green.partition(_REPORT_PANEL)
+    if not marker:
+        marker_text = _REPORT_PANEL.lstrip("\r\n")
+        if not without_green.startswith(marker_text):
+            return content
+        prefix = ""
+        rest = without_green[len(marker_text):]
+    encoded_rows, newline, suffix = rest.partition("\n")
+    if len(encoded_rows) > MAX_CONTEXT_BYTES or not encoded_rows.isascii():
+        return content
+    try:
+        rows = json.loads(encoded_rows)
+    except (TypeError, ValueError, RecursionError):
+        return content
+    row_fields = {
+        "source", "source_revision", "cohort", "numerator", "observed_denominator",
+        "eligible_population", "exclusions",
+    }
+    if (not isinstance(rows, list) or not rows
+            or any(not isinstance(row, dict) or set(row) != row_fields for row in rows)):
+        return content
+    stripped = prefix + newline + suffix
+    return stripped.lstrip("\r\n") + green if not prefix else stripped + green
 
 
 def _split_volatile_tail_content(content: object) -> object | None:
@@ -2609,6 +2959,173 @@ def _volatile_tail_content(
     return content_parts
 
 
+def _attach_report_denominators(
+        messages: list[dict[str, object]], runtime: object, source_plan: object,
+        *, qualified_surface: bool,
+) -> None:
+    tail = messages[-1]
+    content = tail.get("content")
+    if not (_is_volatile_tail_message(tail) and isinstance(content, str)):
+        return
+    # The assembler can preserve an earlier host tail during requalification.
+    # Remove only our single-line block before checking the current source and fit.
+    prefix, marker, rest = content.partition(_REPORT_PANEL)
+    if marker:
+        _, newline, suffix = rest.partition("\n")
+        content = prefix + newline + suffix
+        tail["content"] = content
+    context = getattr(runtime, "_framefit_action_context", None)
+    rows = context.get("report_denominators") if isinstance(context, Mapping) else None
+    capture = getattr(runtime, "_active_capture", None)
+    original = getattr(capture, "_capacity_retry_original_body", None)
+    surface = getattr(capture, "final_tool_surface", None)
+    if (not qualified_surface or not rows
+            or getattr(runtime, "current_request_id", None) != getattr(capture, "request_id", None)
+            or not isinstance(original, dict) or not isinstance(surface, Mapping)
+            or surface.get("request_id") != getattr(capture, "request_id", None)
+            or not isinstance(surface.get("tools"), list)
+            or not isinstance(source_plan, Mapping)
+            or _active_unit_spec() is not None or getattr(runtime, "_unit_policy", None) is not None):
+        return
+    try:
+        path = rows[0]["source"]
+        if "sha256:" + _sha256(_report_source(_workspace_root(runtime), path)) != rows[0]["source_revision"]:
+            return
+        # Escape source labels as data even when they quote a host control marker.
+        encoded_rows: list[str] = []
+        remaining = MAX_CONTEXT_BYTES - 2
+        for row in rows:
+            encoded = json.dumps(row, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+            encoded = encoded.replace("[", r"\u005b").replace("]", r"\u005d")
+            encoded = encoded.replace("STATEFRAME_FRAMEFIT_KEEP_K", r"\u0053TATEFRAME_FRAMEFIT_KEEP_K")
+            remaining -= len(encoded) + 1
+            if remaining < 0:
+                return
+            encoded_rows.append(encoded)
+        green = GREENFACT_TEXT if content.endswith(GREENFACT_TEXT) else ""
+        enriched = content.removesuffix(green) + _REPORT_PANEL + "[" + ",".join(encoded_rows) + "]" + green
+        body = {**original, "tools": surface["tools"],
+                "messages": [*messages[:-1], {**tail, "content": enriched}]}
+        if (_report_denominators_fit(body, runtime, capture, source_plan)
+                and "sha256:" + _sha256(_report_source(_workspace_root(runtime), path))
+                == rows[0]["source_revision"]):
+            tail["content"] = enriched
+    except (OSError, RuntimeError, ValueError):
+        # Optional evidence cannot make the ordinary source path fail.
+        return
+
+
+def _report_denominator_preview_meter(live_meter: object, capture: object):
+    from kernel_request_diet import RequestTokenMeter
+
+    meter = RequestTokenMeter(
+        tokenizer=live_meter._tokenizer,
+        endpoint=live_meter.endpoint,
+        template_overhead_tokens=live_meter.template_overhead_tokens,
+        route_allow_remote=live_meter.route_allow_remote,
+        disabled=live_meter._disabled,
+        usage_feedback_enabled=live_meter.usage_feedback_enabled,
+        auth_key=live_meter._tokenizer_auth_key,
+        generation_endpoint=live_meter._generation_endpoint,
+    )
+    meter.provider_identity = live_meter.provider_identity
+    persistent_identity = getattr(live_meter, "_persistent_provider_identity", None)
+    if isinstance(persistent_identity, str):
+        meter._persistent_provider_identity = persistent_identity
+    meter._namespace = getattr(live_meter, "_namespace", None)
+    meter._minimum_bytes_per_token = live_meter._minimum_bytes_per_token
+    meter._calibration_samples = live_meter._calibration_samples
+    request_id = getattr(capture, "request_id", None)
+    logical_request_id = (
+        getattr(capture, "_tokenize_logical_request_id", None)
+        or getattr(capture, "_replacement_lineage", None)
+        or request_id
+    )
+    if isinstance(request_id, str) and isinstance(logical_request_id, str):
+        meter.bind_request(
+            request_id, logical_request_id,
+            deadline=getattr(capture, "_tokenize_deadline", None),
+        )
+    # bind_request can reset a meter for its new logical request. Restore the
+    # live exact-tokenizer status so an outage uses byte calibration directly.
+    meter._availability = live_meter._availability
+    return meter
+
+
+def _report_denominators_fit(
+        body: dict[str, object], runtime: object, capture: object, source_plan: Mapping[str, object],
+) -> bool:
+    """Price the unabridged frame and richest permitted source assignment."""
+    from dataclasses import replace
+    from kernel_cache_layout_candidate import (
+        FinalCacheLayoutProjectionError, compose_stable_guidance, final_layout_mode,
+    )
+    from kernel_context import token_estimate
+    from kernel_launch_identity_cost import reasoning_profile
+    from kernel_provider_dialect import RUN_CAPABILITY_CACHE, capabilities_for
+    from kernel_request_budget import (
+        ENDPOINT_CONTEXT_TOKENS, ENDPOINT_PROMPT_TOKEN_BUDGET,
+        ENDPOINT_SAFETY_HEADROOM_TOKENS, ENDPOINT_THINKING_BUDGET_TOKENS,
+        FREE_STAGE, HARD_MAX_REQUEST_BYTES, _lean_request_limits, _request_token_meter,
+    )
+    from kernel_request_diet import request_tokenizer_credentials
+    from kernel_working_set_live import _source_plan_with_deferred_omissions
+    from kernel_working_set_prepare import Measurement, _violations
+    from kernel_working_set_render import domain, preview_assignment
+    from kernel_working_set_snapshot import freeze_preparation
+
+    byte_limit, prompt_limit = _lean_request_limits(body, FREE_STAGE)
+    byte_limit = min(byte_limit, HARD_MAX_REQUEST_BYTES)
+    prompt_limit = min(prompt_limit, ENDPOINT_PROMPT_TOKEN_BUDGET)
+    limits = getattr(capture, "_capacity_retry_limits", None)
+    if limits is not None:
+        byte_limit = min(byte_limit, limits.max_request_bytes)
+        prompt_limit = min(prompt_limit, limits.max_prompt_tokens)
+    body = compose_stable_guidance(capture, body)
+    # Include the green fact in the price even when it has yet to be rendered.
+    tail = body["messages"][-1]
+    if not isinstance(tail.get("content"), str):
+        return False
+    if not tail["content"].endswith(GREENFACT_TEXT):
+        tail["content"] += GREENFACT_TEXT
+    key, endpoint = request_tokenizer_credentials(capture)
+    endpoint = endpoint or getattr(capture, "_tokenize_endpoint", None)
+    if endpoint is None:
+        return False
+    dialect = capabilities_for(endpoint, key or "", cache=RUN_CAPABILITY_CACHE).dialect
+    scoped = copy.copy(runtime)
+    scoped._request_source_closure = _source_plan_with_deferred_omissions(copy.deepcopy(source_plan))
+    snapshot = freeze_preparation(
+        body, scoped, request_id=capture.request_id, byte_cap=byte_limit,
+        prompt_limit=prompt_limit, frame_limit=runtime.frame_ceiling, dialect=dialect,
+        reasoning_mode=reasoning_profile(manifest=capture.journal.manifest).mode,
+    )
+    snapshot = replace(
+        snapshot, context_limit=ENDPOINT_CONTEXT_TOKENS,
+        output_reserve=ENDPOINT_THINKING_BUDGET_TOKENS,
+        safety_reserve=ENDPOINT_SAFETY_HEADROOM_TOKENS,
+    )
+    modes = {slot.key: max(domain(snapshot, slot), key=lambda mode: mode.rank)
+             for slot in snapshot.sources}
+    live_meter = _request_token_meter(runtime, capture)
+    # An optional preview is not a provider request. Keep its tokenizer errors
+    # and fallback state out of the meter that qualifies the ordinary request.
+    meter = _report_denominator_preview_meter(live_meter, capture)
+    layouts = ("plain", "final_cache", "stable_first") if final_layout_mode() == "on" else ("plain",)
+    for layout in layouts:
+        try:
+            preview = preview_assignment(replace(snapshot, layouts=(layout,)), modes, layout)
+        except FinalCacheLayoutProjectionError:
+            continue  # The allocator can only select renderable layouts.
+        if len(preview.wire) > byte_limit:
+            return False
+        projected = json.loads(preview.wire)
+        tokens, method = meter.measure(projected)
+        if _violations(snapshot, preview, Measurement(tokens, token_estimate(projected), method)):
+            return False
+    return True
+
+
 def _is_micrograph_projection(line: str) -> bool:
     prefix = "micrograph: "
     if not line.startswith(prefix):
@@ -2698,6 +3215,10 @@ def finalize_frame_only_wire_order(
     marker_index = marker_indexes[0]
     marker_message = copy.deepcopy(result[marker_index])
     marker_payload = _split_volatile_tail_content(marker_message.get("content"))
+    if isinstance(marker_payload, str):
+        # A prior report projection is optional input to the next request. Drop
+        # it before the allocator prices the next source assignment.
+        marker_payload = _strip_report_denominators_panel(marker_payload)
     marker_payload, greenfact_count = _split_host_greenfact(marker_payload)
     if micrograph_fact is not None:
         marker_payload = _strip_prior_micrograph_fact(marker_payload)

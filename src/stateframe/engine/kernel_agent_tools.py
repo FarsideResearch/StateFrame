@@ -5,6 +5,8 @@ import copy
 import hashlib
 import json
 import os
+import re
+import stat
 import tempfile
 import time
 from dataclasses import replace
@@ -19,6 +21,7 @@ from kernel_agent_schemas import (
     SchemaMeteringTimeout,
     builtin_schema_snapshot,
     prepare_schema_measurement,
+    schema,
 )
 from kernel_exec_session import ExecSessionError
 from kernel_shell_tool import ShellCleanupFailed, ShellReply, workspace_identity
@@ -29,6 +32,363 @@ from kernel_tool_tape import (
     tape_for_run,
     verify_intent,
 )
+
+_SECTION_OPENERS = "section_openers"
+_OPENER_PATH_LIMIT = 512
+_OPENER_INPUT_LIMIT = 128 * 1024
+_OPENER_OUTPUT_LIMIT = 4096
+_OPENER_BYTE_RESERVE = 8192
+_OPENER_TOKEN_RESERVE = 2048
+_OPENER_SCHEMA = schema(
+    _SECTION_OPENERS,
+    "Review a finished Markdown memo before completion. Supply its workspace-relative path. "
+    "Returns section-opening sentences in document order, with coverage, "
+    "line ranges and a source digest. Use only intact JSON and use native read for edit anchors.",
+    {"path": {"type": "string", "maxLength": _OPENER_PATH_LIMIT}}, ["path"],
+)
+_ATX_HEADING = re.compile(r" {0,3}(#{1,6})(?:[ \t]+(.*)|$)")
+_FENCE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
+_INDENTED_FENCE = re.compile(r"( *)(`{3,}|~{3,})(.*)")
+_LIST_FENCE = re.compile(r" {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]+(`{3,}|~{3,})(.*)")
+_UNSUPPORTED_BLOCK = re.compile(r"^(?: {4}|\t| {0,3}(?:[>|<]|\[|[-+*]\s|\d{1,9}[.)]\s))")
+_SETEXT = re.compile(r" {0,3}(?:=+|-+)[ \t]*$")
+_THEMATIC_BREAK = re.compile(r" {0,3}(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})$")
+_TABLE_CELL_DELIMITER = re.compile(r":?-{3,}:?")
+_SENTENCE_END = re.compile(r"""(?<![.!?])([.!?]+)["'”’)]*(?=\s|$)""")
+_ABBREVIATION = re.compile(
+    r"(?i)(?:[A-Z]|Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|vs|etc|cf|Inc|Ltd|No|Fig|Dept|(?:[A-Z]\.)+[A-Z])",
+)
+_MONTH_ABBREVIATION = re.compile(r"(?i)(?:Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)")
+_MONTH_ACRONYM_CONTINUATION = re.compile(
+    r"[A-Z]{2,}(?:-[A-Za-z0-9]+)*(?:['’]s)?\s+(?P<noun>[a-z]+)\b",
+)
+_MONTH_NOUN_DETERMINER = re.compile(r"(?i)\b(?:the|a|an)$")
+_MONTH_TIME_PREPOSITION = re.compile(r"(?i)\b(?:in|during|since|until|through|by|before|after)$")
+_MONTH_DATE_COMPLEMENT = re.compile(
+    r"(?i)(?:(?:the|a|an|our|your|their|its)\s+)?"
+    r"(?:(?!to\s)[a-z]+(?:-[a-z]+)*\s+)?(?:deadline|cutoff|date|month)\s+(?:is|was|are|were)",
+)
+_MONTH_MODAL_CLAUSE = re.compile(r"(?:can|could|may|might|must|shall|should|will|would) [a-z]+\b")
+_APPLICATION_TIME_MODIFIER = re.compile(
+    r"""(?:filed|received|submitted) (?:after|before|by) (?:a|an|the) [a-z]+(?=[.!?]["'”’)]*(?: |$))""",
+)
+_MONTH_CLAUSE_PREDICATES = frozenset({
+    "am", "are", "became", "become", "began", "begin", "begins", "can", "could",
+    "did", "do", "does", "fell", "go", "goes", "grew", "grow", "has", "have", "had",
+    "is", "led", "made", "may", "might", "must", "put", "ran", "rose", "saw", "said",
+    "set", "should", "took", "was", "were", "went", "will", "would",
+})
+
+
+class _SectionOpenerTool:
+    """Native observation using the per-run custom schema and hook admission contract."""
+
+    writes = "none"
+
+    @staticmethod
+    def build_argv(args):
+        from kernel_custom_tools import CustomToolError
+
+        if not isinstance(args.get("path"), str) or set(args) != {"path"}:
+            raise CustomToolError("expected one Markdown path")
+        return ()
+
+    @staticmethod
+    def verify_executable():
+        # The released engine implements the tool directly.
+        return None
+
+
+def _memo_bytes(root: Path, path: str) -> bytes:
+    """Read only the named file, including when a path component is replaced."""
+    from kernel_git_view import excluded_path
+
+    parts = path.split("/")
+    if (any(part in {"", ".", ".."} for part in parts)
+            or any(char in path for char in "\\:")
+            or not path.isprintable() or excluded_path(path)):
+        raise ValueError("expected an admitted workspace-relative Markdown path")
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    parent = os.open(root, directory_flags)
+    try:
+        for part in parts[:-1]:
+            child = os.open(part, directory_flags, dir_fd=parent)
+            os.close(parent)
+            parent = child
+        fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        with os.fdopen(fd, "rb") as stream:
+            before = os.fstat(fd)
+            if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+                raise ValueError("expected a regular file with one link")
+            if before.st_size > _OPENER_INPUT_LIMIT:
+                raise ValueError("memo exceeds the input byte limit")
+            raw = stream.read(_OPENER_INPUT_LIMIT + 1)
+            after = os.fstat(fd)
+            if (len(raw) != before.st_size or before.st_size != after.st_size
+                    or before.st_mtime_ns != after.st_mtime_ns
+                    or before.st_ctime_ns != after.st_ctime_ns or after.st_nlink != 1):
+                raise ValueError("memo changed during the read")
+            return raw
+    finally:
+        os.close(parent)
+
+
+def _opening_sentence(paragraph: list[str], start: int) -> dict:
+    if not paragraph:
+        return {"status": "empty"}
+    prose = "\n".join(paragraph)
+    for boundary in _SENTENCE_END.finditer(prose):
+        quote = prose[:boundary.end()]
+        words = prose[:boundary.start()].rsplit(maxsplit=1)
+        last_word = words[-1].lstrip("\"'“‘(") if words else ""
+        if boundary[1] == "." and _MONTH_ABBREVIATION.fullmatch(last_word):
+            following = " ".join(prose[boundary.end():].split())
+            if following and (following[0].islower() or following[0].isdigit()):
+                continue
+            acronym_continuation = _MONTH_ACRONYM_CONTINUATION.match(following)
+            if acronym_continuation:
+                before_month = prose[:boundary.start() - len(last_word)].rstrip()
+                if _MONTH_NOUN_DETERMINER.search(before_month):
+                    continue
+                tail = following[acronym_continuation.end():].lstrip()
+                temporal_month = bool(_MONTH_TIME_PREPOSITION.search(before_month))
+                # An application is the object of submission. A simple time
+                # qualifier can complete that noun phrase as a reduced relative.
+                application_modifier = (
+                    acronym_continuation["noun"] in {"application", "applications"}
+                    and _APPLICATION_TIME_MODIFIER.match(tail) is not None
+                )
+                if application_modifier and not temporal_month:
+                    continue
+                predicate_match = re.match(r"[A-Za-z]+", tail)
+                predicate = predicate_match[0].casefold() if predicate_match else ""
+                temporal_boundary = (temporal_month and not application_modifier
+                                     and (predicate.endswith("ed") or predicate in _MONTH_CLAUSE_PREDICATES))
+                # Match the whole calendar subject, including a compound like
+                # "application deadline", so "to date" cannot supply it.
+                copular_boundary = (_MONTH_DATE_COMPLEMENT.fullmatch(before_month) is not None
+                                    and _MONTH_MODAL_CLAUSE.match(tail) is not None)
+                if not (temporal_boundary or copular_boundary):
+                    # A possible predicate alone cannot distinguish a new
+                    # sentence from a modifier in the opening claim.
+                    return {"status": "ambiguous"}
+        # Other abbreviations, ellipses and inline markup stay ambiguous in
+        # this conservative subset rather than being guessed through.
+        if (boundary[1] in {".", "!", "?"}
+                and (boundary[1] != "." or not _ABBREVIATION.fullmatch(last_word))
+                and not any(char in quote for char in "`[]<>\\")
+                and any(char.isalpha() for char in quote)):
+            return {"status": "quoted", "sentence": " ".join(quote.split()),
+                    "source_lines": [start, start + quote.count("\n")]}
+        return {"status": "ambiguous"}
+    return {"status": "ambiguous"}
+
+
+def _markdown_table_cells(line: str) -> list[str]:
+    """Split the simple pipe or two-space table rows supported by the review parser."""
+    stripped = line.strip()
+    if "|" in stripped:
+        cells = stripped.strip("|").split("|")
+    elif re.search(r"[ \t]{2,}", stripped):
+        cells = re.split(r"[ \t]{2,}", stripped)
+    else:
+        return []
+    return [cell.strip() for cell in cells]
+
+
+def _table_delimiter(line: str, header: list[str]) -> list[str] | None:
+    cells = _markdown_table_cells(line)
+    if (len(cells) < 2 or len(cells) != len(header)
+            or not all(_TABLE_CELL_DELIMITER.fullmatch(cell) for cell in cells)):
+        return None
+    return cells
+
+
+def _memo_sections(source: str) -> tuple[list[dict], bool]:
+    """Top-level ATX headings and each heading's first plain-prose paragraph."""
+    lines = source.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    rows = []
+    fence = None
+    fence_indent = None
+    row = None
+    paragraph: list[str] = []
+    start = 0
+    paragraph_done = False
+    unsupported = False
+    previous_prose = False
+    table_columns = 0
+    for number, line in enumerate(lines, 1):
+        fence_match = _FENCE.fullmatch(line)
+        list_fence_match = _LIST_FENCE.fullmatch(line)
+        if fence is not None:
+            closing_marker = fence_match[1] if fence_match else None
+            closing_info = fence_match[2] if fence_match else None
+            if fence_match is None and fence_indent is not None:
+                indented_match = _INDENTED_FENCE.fullmatch(line)
+                if indented_match:
+                    indent = len(indented_match[1])
+                    if fence_indent <= indent <= fence_indent + 3:
+                        closing_marker = indented_match[2]
+                        closing_info = indented_match[3]
+            if (closing_marker and closing_marker[0] == fence[0]
+                    and len(closing_marker) >= len(fence) and not closing_info.strip()):
+                fence = None
+                fence_indent = None
+            continue
+        list_fence_indent = None
+        if list_fence_match:
+            fence_match = list_fence_match
+            list_fence_indent = list_fence_match.start(1)
+            unsupported = True
+        if fence_match and (fence_match[1][0] == "~" or "`" not in fence_match[2]):
+            fence = fence_match[1]
+            fence_indent = list_fence_indent
+            paragraph_done |= bool(paragraph)
+            previous_prose = False
+            continue
+        heading = _ATX_HEADING.fullmatch(line)
+        if table_columns:
+            cells = _markdown_table_cells(line)
+            if heading or not line.strip():
+                table_columns = 0
+                paragraph_done = False
+                previous_prose = False
+                if not heading:
+                    continue
+            elif len(cells) == table_columns:
+                previous_prose = False
+                continue
+            else:
+                table_columns = 0
+                paragraph_done = False
+        if heading:
+            if row is not None:
+                row["section_end_line"] = number - 1
+                row.update(_opening_sentence(paragraph, start))
+            title = (heading[2] or "").strip(" \t")
+            before_hashes = title.rstrip("#")
+            if not before_hashes or before_hashes.endswith((" ", "\t")):
+                title = before_hashes.rstrip(" \t")
+            row = {"heading": title, "level": len(heading[1]), "heading_line": number}
+            rows.append(row)
+            paragraph = []
+            paragraph_done = False
+            previous_prose = False
+            continue
+        if row is not None and paragraph:
+            table_header = _markdown_table_cells(paragraph[-1])
+            if _table_delimiter(line, table_header) is not None:
+                # A Markdown table is not an opener. Ignore its rows, then look
+                # for the first prose paragraph that follows it.
+                unsupported = True
+                paragraph.pop()
+                paragraph_done = True
+                previous_prose = False
+                table_columns = len(table_header)
+                continue
+        if (previous_prose and _SETEXT.fullmatch(line)) or line.lstrip().startswith("<"):
+            unsupported = True
+        if _THEMATIC_BREAK.fullmatch(line):
+            paragraph_done |= bool(paragraph)
+            previous_prose = False
+            continue
+        previous_prose = bool(line.strip()) and not _UNSUPPORTED_BLOCK.match(line)
+        if not line.strip():
+            paragraph_done |= bool(paragraph)
+        elif row is not None and not paragraph_done:
+            if not paragraph:
+                start = number
+            paragraph.append(line.strip() if previous_prose else "<unsupported>")
+            if not previous_prose:
+                paragraph_done = True
+        elif row is None:
+            unsupported = True
+    if row is not None:
+        row["section_end_line"] = len(lines)
+        row.update(_opening_sentence(paragraph, start))
+    return rows, unsupported or fence is not None
+
+
+def _section_opener_view(root: Path, path: object, limit: int) -> str:
+    if limit <= 0:
+        return "REFUSED MEMO_VIEW_CAPACITY: use native read to review the memo"
+    if not isinstance(path, str) or not 1 <= len(path) <= _OPENER_PATH_LIMIT:
+        return "REFUSED BAD_ARGUMENT: supply one workspace-relative Markdown path"
+    try:
+        raw = _memo_bytes(root, path)
+        source = raw.decode("utf-8-sig")
+    except UnicodeError:
+        return "REFUSED MEMO_SOURCE: expected UTF-8 Markdown"
+    except ValueError as error:
+        return f"REFUSED MEMO_SOURCE: {error}"
+    except OSError:
+        return "REFUSED MEMO_SOURCE: unable to open the workspace Markdown file safely"
+    if any(not char.isprintable() and char not in "\t\r\n" for char in source):
+        return "REFUSED MEMO_SOURCE: unsupported control characters in Markdown"
+
+    rows, unsupported = _memo_sections(source)
+    coverage = {"complete": False, "sections": len(rows), "shown": 0, "omitted": len(rows),
+                "empty": sum(row["status"] == "empty" for row in rows),
+                "ambiguous": sum(row["status"] == "ambiguous" for row in rows),
+                "unsupported_structure": unsupported}
+    incomplete = "Incomplete view. Use native read to resolve missing evidence before identifying the first transition."
+    complete_review = (
+        "Compare adjacent openers in document order for changes in population, criterion or "
+        "conclusion. Use native read on the cited sections and relevant premises, starting with "
+        "the earliest suspect transition. Verify whether its conclusion really lacks support "
+        "or the outline omitted the premise. Repair only the first verified gap with a native "
+        "edit and reread the changed passage."
+    )
+    eligible = bool(rows) and not (unsupported or coverage["empty"] or coverage["ambiguous"])
+    document = {"path": path, "sha256": hashlib.sha256(raw).hexdigest(),
+                "coverage": coverage, "sections": [],
+                "review": (complete_review if eligible and len(rows) > 1 else
+                           "At least two sections are needed to review a transition."
+                           if eligible else incomplete)}
+
+    def encode(value):
+        return json.dumps(value, ensure_ascii=True, separators=(",", ":"))
+
+    for index, row in enumerate(rows, 1):
+        document["sections"].append(row)
+        coverage.update(shown=index, omitted=len(rows) - index)
+        if len(encode(document)) + 1 > limit:
+            document["sections"].pop()
+            coverage.update(shown=index - 1, omitted=len(rows) - index + 1)
+            break
+    complete = eligible and not coverage["omitted"]
+    coverage["complete"] = complete
+    if not complete:
+        document["review"] = incomplete
+    result = encode(document)
+    if len(result) + 1 <= limit:
+        # The execution fitter can withhold this body as an opaque observation.
+        # A clipped body is invalid JSON and carries no coverage claim.
+        return "\n" + result
+    # Never deliver a clipped digest, row, or review instruction.
+    return "REFUSED MEMO_VIEW_CAPACITY: use native read to review the memo"
+
+
+def _section_opener_limit(spec) -> int:
+    """Use spare request capacity without asking the engine to evict evidence."""
+    if not spec.get("chat_url"):
+        return _OPENER_OUTPUT_LIMIT
+    from kernel_pilot import ACTIVE_RUNTIME
+
+    runtime = ACTIVE_RUNTIME.get()
+    capture = getattr(runtime, "_active_capture", None)
+    qualified = getattr(capture, "qualified_request", None)
+    measured = (qualified.measurement if qualified is not None
+                else getattr(capture, "_request_measurement", None))
+    if measured is None or measured.prompt_tokens is None:
+        return 0
+    byte_room = measured.max_request_bytes - measured.request_bytes - _OPENER_BYTE_RESERVE
+    token_ceiling = min(measured.max_prompt_tokens, runtime.frame_ceiling)
+    token_room = token_ceiling - measured.prompt_tokens - _OPENER_TOKEN_RESERVE
+    # The view is ASCII JSON embedded inside another JSON string.
+    return max(0, min(_OPENER_OUTPUT_LIMIT, byte_room // 2, token_room // 2))
 
 
 def _tokenizer_auth(spec):
@@ -76,6 +436,11 @@ def _replayed_schema_budget(spec):
 class AgentTools:
     def __init__(self, shell, custom, mcp_servers=(), *, resume_active=False,
                  defer_schema_budget=False):
+        self._section_openers = os.environ.get("STATEFRAME_R200_F060_READ_ONLY_VIEW", "off") == "on"
+        if self._section_openers and any(tool.name == _SECTION_OPENERS for tool in custom.tools):
+            from kernel_custom_tools import CustomToolError
+
+            raise CustomToolError(f"custom tools duplicate built-in capabilities: {_SECTION_OPENERS}")
         self._pilot_schema_budget = shell.spec.get("send1_wave4") is True and not resume_active
         registration = None
         if self._pilot_schema_budget:
@@ -138,6 +503,11 @@ class AgentTools:
             registration.builtin_schema_snapshot if registration is not None
             else builtin_schema_snapshot() if self._pilot_schema_budget else None
         )
+        if self._section_openers:
+            base_schemas = self._builtin_schema_snapshot or builtin_schema_snapshot()
+            self._builtin_schema_snapshot = (*base_schemas, copy.deepcopy(_OPENER_SCHEMA))
+            if not self.mcp_servers:
+                self._register_section_openers()
         self._pending_schema_budget = None
         self.startup_schema_budget = None
         self._defer_schema_budget = defer_schema_budget and bool(shell.spec.get("chat_url"))
@@ -152,7 +522,10 @@ class AgentTools:
 
     def _prepare_schema_budget(self, *, deadline=None):
         auth_key, endpoint = _tokenizer_auth(self.shell.spec)
-        return prepare_schema_measurement(self.custom_schemas, endpoint=endpoint,
+        custom_schemas = self.custom_schemas
+        if self._section_openers:
+            custom_schemas = [s for s in custom_schemas if s["function"]["name"] != _SECTION_OPENERS]
+        return prepare_schema_measurement(custom_schemas, endpoint=endpoint,
                                           auth_key=auth_key, generation_endpoint=endpoint,
                                           deadline=deadline,
                                           builtin_schemas=self._builtin_schema_snapshot,
@@ -224,8 +597,9 @@ class AgentTools:
 
     def bind(self):
         if self.mcp_servers:
-            from kernel_mcp_tools import discover
             from kernel_custom_tools import CustomToolError
+            from kernel_mcp_tools import discover
+
             if self.resume_active and not self.shell.settings.replay_external:
                 external = [server.name for server in self.mcp_servers if server.replay == "external"]
                 if external:
@@ -242,8 +616,12 @@ class AgentTools:
                     or [t.name for t in found.tools] != self.shell.spec.get("mcp_tools")
                     or list(found.omitted) != self.shell.spec.get("mcp_omitted")):
                 raise CustomToolError("MCP tool list or schema changed since host validation")
+            if self._section_openers and any(tool.name == _SECTION_OPENERS for tool in found.tools):
+                raise CustomToolError(f"MCP tools duplicate built-in capabilities: {_SECTION_OPENERS}")
             self.custom.update({tool.name: tool for tool in found.tools})
             self.custom_schemas.extend(copy.deepcopy(found.schemas()))
+            if self._section_openers:
+                self._register_section_openers()
             self.names = OBSERVATION_NAMES | self.commit_names | self.custom.keys()
             if self.startup_schema_budget is None:
                 if self._defer_schema_budget:
@@ -268,6 +646,11 @@ class AgentTools:
         if name in kernel_git_commit.TOOL_NAMES:
             return name in self.commit_names
         return name in self.custom
+
+    def _register_section_openers(self):
+        self.custom[_SECTION_OPENERS] = _SectionOpenerTool()
+        self.custom_schemas.append(copy.deepcopy(_OPENER_SCHEMA))
+        self.names = self.names | {_SECTION_OPENERS}
 
     def schemas(self):
         self._finish_schema_budget()
@@ -380,6 +763,16 @@ class AgentTools:
             return ShellReply(str(error), fatal=True)
 
     def _execute(self, name, args, call_id):
+        if self._section_openers and name == _SECTION_OPENERS:
+            capability = replace(self.shell.capability, purpose="job", workspace_writable=False,
+                                 network="none", write_roots=())
+            result = self.observation(
+                name, args, call_id,
+                lambda: _section_opener_view(self.shell.root, args.get("path"),
+                                             _section_opener_limit(self.shell.spec)),
+                definition="section-openers/1", capability=capability,
+            )
+            return ShellReply(result)
         if name == "skill_load":
             from kernel_skills import service as skills_service
             skills = skills_service()

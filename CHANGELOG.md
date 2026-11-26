@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.4 (2026-11-26)
+
+- Set `STATEFRAME_EXCEPTION_CAUSE_EXCERPT=on` to recover hidden Python direct causes and their repository locations in failed whole-command replies within the existing output budget.
+- Opt in with `STATEFRAME_REPORT_CHRONOLOGY=on` to show an out-of-order bug report alongside a chronology of exact quotes, with unsupported transitions marked unknown. Temporal cues inside quoted logs, including guillemets, cannot establish report order. Source reads take precedence over the panel under tight request budgets.
+- Opt-in `STATEFRAME_REPORT_DENOMINATORS=on` gives report writers source-bound CSV counts with the numerator, observed denominator, eligible population, and exclusion reasons together. Declare one line in the task, for example `Report denominators: {"path":"input/tickets.csv","unit_key":"id","cohort_field":"team","eligibility":{"field":"scope","equals":"eligible"},"outcome":{"field":"status","equals":"open"},"missing_values":["","unreviewed"]}`. Comparisons use exact CSV strings. Missing definitions leave dependent counts unknown.
+- Add opt-in `STATEFRAME_R200_F060_READ_ONLY_VIEW=on` for a read-only Markdown opener view with source lines and a file digest; handle month abbreviations and tables conservatively, and report capped omissions.
+
 ## 0.10.3 (2026-11-25)
 
 - Fixed automatic probe cleanup under host load. The supervisor waits for SIGKILL and reaping to make progress, rechecks ownership after reparenting, and still fails when a descendant survives or cannot be attributed.

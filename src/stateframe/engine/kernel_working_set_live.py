@@ -390,7 +390,14 @@ def read_admission_snapshot(runtime, visible_messages, *, byte_cap):
     separately against its exact minimum completion, never raw payload lengths.
     """
     from kernel_cache_layout_candidate import final_layout_mode
+    from kernel_stateframe_framefit5 import (
+        _REPORT_PANEL,
+        _is_volatile_tail_message,
+        _report_denominators_enabled,
+        _strip_report_denominators_panel,
+    )
     from kernel_working_set_shadow import SnapshotFailure, freeze_shadow
+    from kernel_working_set_snapshot_compat import snapshot_semantic_messages
 
     body = getattr(runtime, "_read_admission_provider_body", None)
     capture = getattr(runtime, "_active_capture", None)
@@ -410,12 +417,22 @@ def read_admission_snapshot(runtime, visible_messages, *, byte_cap):
         # from owner-visible history can discard mandatory menus/facts and
         # manufacture fresh allowance. Decode overlays losslessly before
         # replacing the exchange, while their physical references still bind.
-        from kernel_working_set_snapshot_compat import snapshot_semantic_messages
         body["messages"] = snapshot_semantic_messages(body["messages"])
     elif capture is not None and getattr(capture, "owner_presentation", None) is not None:
         from kernel_request_candidate import detached_context, render_candidate
         candidate, context = detached_context(capture, runtime)
         body = render_candidate(candidate, context, body)
+    if _report_denominators_enabled():
+        tail = body["messages"][-1]
+        content = tail.get("content")
+        if (isinstance(content, str) and _REPORT_PANEL in content
+                and _is_volatile_tail_message(tail)):
+            # The next request fits this optional panel after reserving its reads.
+            # Decode any retained cache overlay before changing its tail offsets.
+            if qualified is None:
+                body["messages"] = snapshot_semantic_messages(body["messages"])
+                tail = body["messages"][-1]
+            tail["content"] = _strip_report_denominators_panel(tail["content"])
     # The next exchange replaces the previous one. Retained capture obligations
     # are independently hydrated by freeze_shadow and cannot disappear here.
     body["messages"] = [m for m in body["messages"] if m.get("role") not in {"assistant", "tool"}]
