@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.10.2 (2026-11-25)
 
 - Fix: resuming after a recovery no longer loses action-result progress or the record of trimmed history, so a recovered run keeps counting work it already did.
 - Tests: the parallel-off parity check now normalizes run-specific event and manifest ids, so it passes, while integrity digests are still compared exactly.
