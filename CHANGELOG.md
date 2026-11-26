@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.10.4 (2026-11-26)
 
 - Set `STATEFRAME_EXCEPTION_CAUSE_EXCERPT=on` to recover hidden Python direct causes and their repository locations in failed whole-command replies within the existing output budget.
 - Opt in with `STATEFRAME_REPORT_CHRONOLOGY=on` to show an out-of-order bug report alongside a chronology of exact quotes, with unsupported transitions marked unknown. Temporal cues inside quoted logs, including guillemets, cannot establish report order. Source reads take precedence over the panel under tight request budgets.
