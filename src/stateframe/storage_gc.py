@@ -411,6 +411,69 @@ def _logical_tree_bytes(root: Path) -> int:
     return total
 
 
+def _regular_file_stats(fd, names):
+    for name in names:
+        info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        if stat.S_ISREG(info.st_mode):
+            yield info
+
+
+def _allocation_directories(root: Path):
+    """Yield each directory's bucket and regular files, including empty directories."""
+    def fail(error: OSError):
+        raise error
+
+    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for directory, dirs, names, fd in os.fwalk(".", dir_fd=root_fd, onerror=fail):
+            dirs.sort()
+            parts = Path(directory).parts
+            bucket = parts[0] if parts else "."
+            yield bucket, _regular_file_stats(fd, names)
+    finally:
+        os.close(root_fd)
+
+
+def run_allocation(run_dir: str | os.PathLike[str], *, seed_root: Path | None = None) -> dict:
+    """Measure regular files in quiescent trees. Charge shared inodes to the seed first.
+
+    Logical bytes count every name. Allocated bytes count each (device, inode) once per
+    root. The run's attributable bytes exclude inodes already charged to the seed.
+    Separate reflink inodes each contribute their reported blocks.
+    """
+    seed = {"logical_bytes": 0, "allocated_bytes": 0}
+    seed_inodes = set()
+    if seed_root is not None:
+        for _, files in _allocation_directories(seed_root):
+            for info in files:
+                seed["logical_bytes"] += info.st_size
+                key = info.st_dev, info.st_ino
+                if key not in seed_inodes:
+                    seed_inodes.add(key)
+                    seed["allocated_bytes"] += info.st_blocks * 512
+
+    buckets = {}
+    run_inodes = set()
+    for bucket, files in _allocation_directories(Path(run_dir)):
+        if bucket not in buckets:
+            buckets[bucket] = {"logical_bytes": 0, "allocated_bytes": 0, "attributable_bytes": 0}
+        row = buckets[bucket]
+        for info in files:
+            row["logical_bytes"] += info.st_size
+            key = info.st_dev, info.st_ino
+            if key not in run_inodes:
+                run_inodes.add(key)
+                allocated = info.st_blocks * 512
+                row["allocated_bytes"] += allocated
+                if key not in seed_inodes:
+                    row["attributable_bytes"] += allocated
+
+    run = {key: sum(row[key] for row in buckets.values())
+           for key in ("logical_bytes", "allocated_bytes", "attributable_bytes")}
+    return {"run": run, "buckets": buckets, "seed": seed,
+            "combined_allocated_bytes": seed["allocated_bytes"] + run["attributable_bytes"]}
+
+
 def _allocated_bytes(path: Path) -> int:
     try:
         info = path.stat()

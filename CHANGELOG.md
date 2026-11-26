@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.6 (2026-11-26)
+
+- Optional repository signals are skipped when Git metadata or object storage becomes unavailable. The run can continue.
+- Measure per-run disk allocation with `stateframe.storage_gc.run_allocation`, including the separate cost of shared environment seeds.
+- Added chat acceptance coverage for session history, interrupted input, and first-request byte parity without a session flag.
+- Edits are refused when a file has changed since the model last read it. Reading the file again allows the model to edit the current revision.
+
 ## 0.10.5 (2026-11-26)
 
 - Workspace effect scans can opt into reusing verified digests for stable files; the switch is off by default.

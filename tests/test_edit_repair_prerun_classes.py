@@ -7,6 +7,7 @@ test_edit_repair_hook.py, test_legacy_safe_edit.py and test_legacy_safe_routing.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import pathlib
 from types import SimpleNamespace
@@ -21,6 +22,7 @@ from kernel_edit_repair_hook import (
 from kernel_edit_repair_request import BLOCKED_AT, EscalationLevel
 from kernel_edit_source_tool import EditProtocolRunState, execute_edit_source
 from probes import react_repair as rr
+from stateframe.engine import kernel_checkpoint
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 GOLDEN = json.loads((ROOT / "tests/fixtures/legacy_safe_observations.json").read_text("utf-8"))["observations"]
@@ -197,12 +199,22 @@ def test_t5_empty_file_repair_has_no_handles_and_says_so():
     assert "The file is empty" in rep.render()
 
 
+@pytest.mark.parametrize("values", [None, {PATH: "sha256:" + "a" * 64}])
+def test_lazy_model_read_revision_ledger_checkpoint_round_trip(values):
+    ledger = rr._LazyModelReadRevisionLedger(values)
+    context = {name: {} for name in ("hostfns", "participants", "framecells", "framefuncs", "cvars")}
+    payload = kernel_checkpoint.dumps({"ledger": ledger}, context)
+    restored = kernel_checkpoint._Unpickler(
+        io.BytesIO(payload), {"framecells": {}, "framefuncs": {}}).load()["ledger"]
+    assert restored.snapshot() == (values or {})
+
+
 def test_t5_non_utf8_file_raises_value_error_for_the_branch_to_journal():
     with pytest.raises(ValueError):
         build_repair(runtime=SimpleNamespace(), refusals=[_refusal()], current_bytes=b"\xff\xfe\x00",
                      path=PATH, proposal=_proposal(), request_ordinal=1)
     src = (ROOT / "src/stateframe/engine/probes/react_repair.py").read_text(encoding="utf-8")
-    branch = src[src.index("_ep_tool in PROTOCOL_EDIT_TOOL_NAMES and _edit_source_refused is not None"):]
+    branch = src[src.index("if (_ep_tool in PROTOCOL_EDIT_TOOL_NAMES"):]
     branch = branch[:branch.index("place_repair_message(msgs, _edit_repair_text)")]
     assert "except ValueError as _repair_error:" in branch and '"edit_repair_request_failed"' in branch
 

@@ -125,8 +125,29 @@ def _valid_worker_state_fields(value: object) -> bool:
     extra = set(value) - base
     if not extra:
         return set(value) == base
-    optional = {_HOST_PROGRESS_ADVISORY_FIELD, _HOST_PROGRESS_READS_FIELD}
-    if _HOST_PROGRESS_WORKER_FIELD not in extra or not extra <= optional | {_HOST_PROGRESS_WORKER_FIELD} or not base <= set(value):
+    optional = {
+        _HOST_PROGRESS_WORKER_FIELD, _HOST_PROGRESS_ADVISORY_FIELD,
+        _HOST_PROGRESS_READS_FIELD, "model_read_revisions",
+    }
+    if not extra <= optional or not base <= set(value):
+        return False
+    if "model_read_revisions" in extra:
+        from kernel_model_read_revisions import ModelReadRevisionLedger
+        revisions = value["model_read_revisions"]
+        if not isinstance(revisions, Mapping):
+            return False
+        try:
+            if ModelReadRevisionLedger(revisions).snapshot() != dict(revisions):
+                return False
+        except (TypeError, ValueError):
+            return False
+    host_progress_fields = extra & {
+        _HOST_PROGRESS_WORKER_FIELD, _HOST_PROGRESS_ADVISORY_FIELD,
+        _HOST_PROGRESS_READS_FIELD,
+    }
+    if not host_progress_fields:
+        return True
+    if _HOST_PROGRESS_WORKER_FIELD not in host_progress_fields:
         return False
     from kernel_progress_facts import host_truth_progress_enabled
     if not host_truth_progress_enabled():

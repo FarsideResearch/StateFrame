@@ -23863,7 +23863,8 @@ class StateFrameRuntime:
             prepared = append_unified_block(
                 prepared, unified_frame, provider_request=True, lifecycle=self.unified_lifecycle)
         if (provider_request and not f4_on and not terminal_render
-                and self.stateframe_repo_signals_mode == "on"):
+                and self.stateframe_repo_signals_mode == "on"
+                and self.repo_signals_w0 is not None):
             from kernel_repo_signals import append_repo_signals, compute_repo_signals
             repo_signal_frame = frame
             last_action = frame.get("last_action") if isinstance(frame, Mapping) else None

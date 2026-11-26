@@ -44,6 +44,48 @@ Environment seeds are shared by every run, including runs kept outside `~/.state
 
 The dry-run table estimates reclaimed bytes per run for environments, checkpoints, measurement journals, blobs and preflight requests. These are storage estimates; hard-linked or copy-on-write files can make physical disk savings differ.
 
+## Measure one run
+
+Use `run_allocation` on a finished run or at a barrier where the engine and checkpoint writer have finished writing. Supply the seed directory recorded in `env-seed.json` if it still exists. For a cold-start experiment with a dedicated, initially empty seed store, pass the whole store to include its sidecar files. Omit `seed_root` when there is no seed.
+
+```python
+import json
+from pathlib import Path
+from stateframe.storage_gc import run_allocation
+
+report = run_allocation(Path("/path/to/run"), seed_root=Path("/path/to/seed"))
+print(json.dumps(report, indent=2))
+```
+
+Each top-level directory has a bucket, including a zero-byte entry when its tree contains no regular files. The `.` bucket contains regular files directly under the run root, including the spec, summary and packed preflight records. Logical bytes count every regular-file name. Allocated bytes use `st_blocks × 512`, counting each device and inode once per root. The root files are visited first, then directories in name order, so a hard link spanning two buckets is allocated to the first. Symlinks, directory metadata and sparse holes carry no file allocation in this metric. Distinct reflink inodes each contribute their filesystem-reported blocks, which can include shared extents.
+
+`run.attributable_bytes` is the warm cost of the run after subtracting inodes shared with the seed. `seed.allocated_bytes` gives the separate cold seed charge. Their sum, `combined_allocated_bytes`, counts all regular-file allocations across both roots once. A seed on another device can require private copies, increasing the run's attributable bytes. User-kept environments and checkpoints are charged for as long as they remain. Interrupted runs retain their recovery state.
+
+The five-send storage regression gates the library fixture at **100,000,000 attributable bytes**. It checks the prepared run, each of four published checkpoints during the next provider request, and the finished run. An overage fails the regression. Run execution, retention and resume follow their usual policies.
+
+### Five-send reference measurements
+
+Both fixtures use the bundled pricing edit and the same five scripted calls over loopback (read the test, read the implementation, edit, run the tests, finish). The library fixture adds all 17 Python source files from the bundled `packaging` 26.0 wheel, for 20 materialized source and test files totaling 260,886 bytes. The lookup-table fixture adds 128 generated Python modules with 512 fixed-width rows each, for 131 files totaling 8,456,570 bytes. Both have a project `.venv` built with the host interpreter's bundled pip and the repository's pytest, pluggy, iniconfig, packaging and Pygments wheels.
+
+The reference host ran Linux x86-64 with bubblewrap, ext4 and Python 3.14.4. The private-copy experiment disabled workspace reflinks and refused both reflinks and hard links from the seed. It simulates the copy path on a single device. APFS, Linux reflink filesystems and an actual cross-device mount were outside this measurement.
+
+| Attributable allocation (decimal MB) | Prepared | Send 2 | Send 3 | Send 4 | Send 5 | Retained | Cold seed separately |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Library, default | 8.1 | 36.4 | 42.2 | 45.4 | 49.0 | 6.4 | 20.5 |
+| Library, private copy | 21.2 | 49.2 | 55.0 | 58.2 | 61.8 | 6.4 | 20.5 |
+| Lookup tables, default | 33.6 | 200.1 | 279.9 | 316.3 | 393.0 | 168.8 | 20.5 |
+| Lookup tables, private copy | 46.7 | 213.2 | 293.0 | 329.4 | 406.1 | 168.8 | 20.5 |
+
+The lookup-table fixture is a separate stress experiment. It exceeds the target on the reference host. Its default fifth send holds 261.2 MB in checkpoints, 97.3 MB in the worker tree and 8.9 MB in the immutable parent. After normal cleanup the worker tree retains 141.8 MB, including 67.8 MB of candidate captures.
+
+Run `python -m pytest -s tests/test_everyday_run_disk.py` to see the library measurements by bucket. To reproduce the lookup-table overage in both copy modes, run the command below. It applies the same limit at every barrier and exits with a budget assertion when the fixture exceeds it.
+
+```bash
+SF_TEST_DISK_LOOKUP_TABLES=1 python -m pytest -s tests/test_everyday_run_disk.py -k tables
+```
+
+In a separate interruption of the library fixture, the engine restored the first checkpoint and reissued the same 63,637 request bytes at send two. Stopping there left 67.9 MB attributable to the run, including its recovery state.
+
 ## Rebuild a removed environment
 
 Use the saved manifest to rebuild `env/`:

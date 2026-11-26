@@ -57,7 +57,8 @@ def _menus(protocol: str | None, monkeypatch) -> list[str]:
 
 
 def _drive(tmp_path: Path, monkeypatch, *, protocol: str | None, steps: list[dict], stop_at: int,
-           target: str = RULES_PATH, handle_kind: SpanKind | None = None):
+           target: str = RULES_PATH, handle_kind: SpanKind | None = None,
+           after_model_response=None):
     """Run the real worker against a scripted endpoint; capture each request's messages and tools."""
     import kernel_edit_request_map
     from kernel_measurement import ACTIVE_REQUEST
@@ -123,6 +124,8 @@ def _drive(tmp_path: Path, monkeypatch, *, protocol: str | None, steps: list[dic
             binding.state.set_request(mint_handles(1, [
                 DeliveredSpan.from_source(target, source, kind=handle_kind),
             ]))
+        if after_model_response is not None:
+            after_model_response(len(sends) - 1)
         return response
 
     capture._wiring_original = original_ask
