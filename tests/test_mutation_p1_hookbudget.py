@@ -227,6 +227,7 @@ def test_supervisor_timeout_uses_armed_wall_clock(monkeypatch):
     monkeypatch.setattr(supervisor, "time", SimpleNamespace(monotonic=lambda: 101.1))
     job = object.__new__(supervisor.ManagedProcess)
     job.cleanup = None
+    job.probe_reap = None
     job.eof = True
     job.cap = SimpleNamespace(limits=SimpleNamespace(kill_on_output=False))
     job.family = SimpleNamespace(update=lambda _rows: [], leader_reaped=lambda: None,

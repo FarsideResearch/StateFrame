@@ -38,6 +38,10 @@ class ProcessIdentity:
     zombie: bool
     uid: int | None = None
     short_info_denied: bool = False
+    exiting: bool = False
+
+
+_LINUX_PF_EXITING = 0x00000004  # include/linux/sched.h, exposed in /proc/<pid>/stat flags
 
 
 @dataclass(frozen=True)
@@ -481,7 +485,8 @@ class ProcessTable:
                 raise RuntimeError("incomplete process stat during authoritative scan")
             return None
         return ProcessIdentity(pid, int(fields[1]), int(fields[2]), int(fields[3]),
-                               (int(fields[19]), 0), fields[0] in {b"Z", b"X", b"x"})
+                               (int(fields[19]), 0), fields[0] in {b"Z", b"X", b"x"},
+                               exiting=bool(int(fields[6]) & _LINUX_PF_EXITING))
 
     def cpu_ticks(self, row: ProcessIdentity) -> int | None:
         """User plus system clock ticks of a live Linux process; None when gone or unknown."""

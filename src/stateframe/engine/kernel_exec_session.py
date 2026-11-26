@@ -341,7 +341,8 @@ class JobHandle:
     def stop(self, grace_seconds=2.0) -> CleanupReport:
         self._session._rpc({"op": "stop", "id": self.id, "grace": _grace(grace_seconds)})
         deadline = time.monotonic() + grace_seconds + 4
-        while time.monotonic() < deadline:
+        probe = getattr(self._session, "_probe_family", None) is not None
+        while probe or time.monotonic() < deadline:
             status = self._status()
             if status["finished"]:
                 return _cleanup(status["cleanup"])
@@ -696,7 +697,10 @@ class ExecSession:
             return CleanupReport(True, 0, (), "")
         self._rpc({"op": "stop_all", "grace": grace_seconds})
         deadline = time.monotonic() + grace_seconds + 4
-        while time.monotonic() < deadline:
+        # Probe cleanup bounds stagnant supervisor samples, including while the
+        # caller is closing. Each status RPC still has a transport timeout.
+        probe = getattr(self, "_probe_family", None) is not None
+        while probe or time.monotonic() < deadline:
             statuses = self._rpc({"op": "all"})["jobs"].values()
             if all(status["finished"] for status in statuses):
                 reports = [_cleanup(status["cleanup"]) for status in statuses]
