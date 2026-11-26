@@ -52,6 +52,7 @@ def _safe_rev(value: object) -> str:
 
 
 def _git_metadata(repo: Path) -> tuple[Path, Path]:
+    """Resolve per-worktree metadata and Git's --git-common-dir without loading repo config."""
     dot = repo / ".git"
     if dot.is_dir() and not dot.is_symlink():
         gitdir = dot.resolve()
@@ -442,7 +443,8 @@ def handle_git_call(view: GitView | None, session_runner: Callable, arguments: M
         return f"git object unavailable: {exc}", {"ok": False, "refusal": "object_unavailable", "detail": str(exc)}
 
 
-def legacy_git_query(repository: Path, args: list[str], *, timeout: float = 10) -> str | None:
+def legacy_git_query(repository: Path, args: list[str], *, timeout: float = 10,
+                     search_parents: bool = True) -> str | None:
     """Repo-intel queries use the same private config and offline process boundary.
 
     Remote-config cache keys deliberately become unavailable: a sanitized view
@@ -454,7 +456,7 @@ def legacy_git_query(repository: Path, args: list[str], *, timeout: float = 10) 
 
     repository = Path(repository).resolve()
     while not (repository / ".git").exists():
-        if repository == repository.parent:
+        if not search_parents or repository == repository.parent:
             return None
         repository = repository.parent
     executable = shutil.which("git", path=os.defpath)

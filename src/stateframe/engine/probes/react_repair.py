@@ -91,6 +91,47 @@ def _results_dir() -> pathlib.Path:
 logger = logging.getLogger(__name__)
 
 
+class _LazyModelReadRevisionLedger:
+    """Load the read-revision tracker only when a run first reads or edits a path."""
+
+    def __init__(self, values: Mapping[str, str] | None = None) -> None:
+        self._values = values
+        self._ledger = None
+
+    def restore(self, values: Mapping[str, str] | None) -> None:
+        self._values = values
+        self._ledger = None
+
+    def _get(self):
+        state = object.__getattribute__(self, "__dict__")
+        ledger = state.get("_ledger")
+        if ledger is None:
+            from kernel_model_read_revisions import ModelReadRevisionLedger
+
+            ledger = ModelReadRevisionLedger(state.get("_values"))
+            state["_ledger"] = ledger
+            state["_values"] = None
+        return ledger
+
+    def __getstate__(self):
+        state = object.__getattribute__(self, "__dict__")
+        ledger = state.get("_ledger")
+        values = ledger.snapshot() if ledger is not None else state.get("_values")
+        return {"_values": values, "_ledger": None}
+
+    def __setstate__(self, state):
+        restored = object.__getattribute__(self, "__dict__")
+        restored.clear()
+        restored.update(state)
+        restored.setdefault("_values", None)
+        restored["_ledger"] = None
+
+    def __getattr__(self, name: str):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(self._get(), name)
+
+
 def _record_intake_orientation_failure(
     error: BaseException, step: str, journal: object,
 ) -> None:
@@ -1412,7 +1453,8 @@ def _capture_done_candidate_after_exception(
 def _apply_revision_bound_insertion(
         path: pathlib.Path, new_str: str, target_ref: object, *,
         root: pathlib.Path, protected_paths: Sequence[object] = (),
-        check_refs: Sequence[object] = (), public_brief: object = None) -> str:
+        check_refs: Sequence[object] = (), public_brief: object = None,
+        model_read_revisions=None) -> str:
     """Apply one host-issued module-boundary insertion without fuzzy matching."""
     if not isinstance(new_str, str) or not new_str.strip():
         return "insert_before REJECTED: new_str must contain authored source"
@@ -1427,6 +1469,11 @@ def _apply_revision_bound_insertion(
         relative = path.resolve().relative_to(root.resolve()).as_posix()
         from kernel_scope_widen_guard import read as guarded_read
         current = guarded_read(path)
+        if model_read_revisions is not None:
+            stale = model_read_revisions.refusal(
+                root, path, operation="insert_before", current_source=current)
+            if stale is not None:
+                return stale
         authority_ref = str(target_ref.get("authority_ref") or "").strip()
         file_revision = str(target_ref.get("file_revision") or "").strip()
         if not authority_ref or not file_revision:
@@ -2808,10 +2855,16 @@ def _top_level_definitions_lost(old_source: str, new_source: str) -> list[str]:
 
 
 def _replace_file(path: pathlib.Path, new_source: str, *, root: pathlib.Path | None = None,
-                  public_brief: object = None, journal: object = None) -> str:
+                  public_brief: object = None, journal: object = None,
+                  model_read_revisions=None) -> str:
     """Replace one complete declared file when no function entry was supplied."""
     from kernel_edit_guard import edit_guard_mode
     edit_guard_mode()
+    if model_read_revisions is not None:
+        stale = model_read_revisions.refusal(
+            root or path.parent, path, operation="edit")
+        if stale is not None:
+            return stale
     if not path.exists():
         if _workspace_truth.enabled():
             fact = _workspace_truth.exists(root, str(path), journal=journal)
@@ -4857,13 +4910,19 @@ def _publish_nonpy_candidate(path: pathlib.Path, candidate: bytes, *, operation:
 
 def _str_replace_nonpy_edit(path: pathlib.Path, old_str: str, new_str: str, *,
                             root: pathlib.Path | None = None,
-                            public_brief: object = None) -> str:
+                            public_brief: object = None,
+                            model_read_revisions=None) -> str:
     """Perform v21 exact-byte replacement plus the enabled file-type gate."""
     from kernel_tokenlab_nonpy_edits import emit, validate
     try:
         source = path.read_bytes()
     except OSError as error:
         return f"str_replace REJECTED: could not read {path.name}: {type(error).__name__}."
+    if model_read_revisions is not None:
+        stale = model_read_revisions.refusal(
+            root or path.parent, path, operation="str_replace", current_source=source)
+        if stale is not None:
+            return stale
     old_bytes = old_str.encode("utf-8")
     new_bytes = new_str.encode("utf-8")
     count = source.count(old_bytes)
@@ -4929,9 +4988,15 @@ def _legacy_safe_validator_route(root: pathlib.Path | None) -> bool:
     return edit_protocol_mode() == LEGACY_SAFE
 
 
+def _str_replace_was_applied(observation: object) -> bool:
+    """Recognize the operation's status prefix, never a filename containing "applied."."""
+    return isinstance(observation, str) and observation.startswith("str_replace applied.")
+
+
 def str_replace_edit(path: pathlib.Path, old_str: str, new_str: str, *,
                      target_ref: object = None, root: pathlib.Path | None = None,
-                     public_brief: object = None, journal: object = None) -> str:
+                     public_brief: object = None, journal: object = None,
+                     model_read_revisions=None) -> str:
     """sample project coding.py's _code_str_replace contract, transplanted:
     exactly-one match required; whole-file syntax check; revert on breakage."""
     from kernel_edit_guard import edit_guard_mode
@@ -4964,6 +5029,13 @@ def str_replace_edit(path: pathlib.Path, old_str: str, new_str: str, *,
             source, refusal = _read_edit_source(path, "str_replace")
             if refusal is not None:
                 return refusal
+        if model_read_revisions is not None:
+            current_source = source if isinstance(source, bytes) else source.encode("utf-8")
+            stale = model_read_revisions.refusal(
+                root or path.parent, path, operation="str_replace",
+                current_source=current_source)
+            if stale is not None:
+                return stale
         rejection = omission_anchor_rejection(old_str, source=source)
         if rejection is not None:
             return "str_replace REJECTED: " + rejection
@@ -4978,12 +5050,19 @@ def str_replace_edit(path: pathlib.Path, old_str: str, new_str: str, *,
     if _nonpy_edit_applies(path):
         return _str_replace_nonpy_edit(
             path, old_str, new_str, root=root, public_brief=public_brief,
+            model_read_revisions=model_read_revisions,
         )
     # bug investigation earlier run #1: strict read_text() raised UnicodeDecodeError out of the tool
     # handler and ended the run. Decode explicitly and return a typed rejection.
     src, decode_refusal = _read_edit_source(path, "str_replace")
     if decode_refusal is not None:
         return decode_refusal
+    if model_read_revisions is not None:
+        stale = model_read_revisions.refusal(
+            root or path.parent, path, operation="str_replace",
+            current_source=src.encode("utf-8"))
+        if stale is not None:
+            return stale
     if _legacy_safe_validator_route(root):
         from kernel_legacy_safe_edit import single_edit
         from kernel_revision_bound_edit import EditPlanError
@@ -5099,7 +5178,7 @@ def replace_module(path: pathlib.Path, expected_revision: str, source: str | Non
 def replace_fn(path: pathlib.Path, name: str, new_src: str,
                *, multi_file: bool | None = None, target_ref: object = None,
                root: pathlib.Path | None = None, public_brief: object = None,
-               journal: object = None) -> str:
+               journal: object = None, model_read_revisions=None) -> str:
     """Swap one top-level function or class's source in place."""
     from kernel_edit_guard import edit_guard_mode
     edit_guard_mode()
@@ -5115,10 +5194,16 @@ def replace_fn(path: pathlib.Path, name: str, new_src: str,
         return f"edit REJECTED: {path.name} is a directory, not a file."
     if _nonpy_edit_applies(path):
         return _replace_file(path, new_src, root=root, public_brief=public_brief,
-                             journal=journal)
+                             journal=journal, model_read_revisions=model_read_revisions)
     try:
         from kernel_scope_widen_guard import read as guarded_read
-        txt = guarded_read(path).decode("utf-8")
+        current_source = guarded_read(path)
+        if model_read_revisions is not None:
+            stale = model_read_revisions.refusal(
+                root or path.parent, path, operation="edit", current_source=current_source)
+            if stale is not None:
+                return stale
+        txt = current_source.decode("utf-8")
         tree = ast.parse(txt)
     except Exception as e:                                      # noqa: BLE001
         return f"edit failed: cannot parse {path.name}: {type(e).__name__}"
@@ -9128,6 +9213,7 @@ def work(d, *, resume=None):
         if _lean_on:
             from kernel_lean import BoundedToolMessages
             msgs = BoundedToolMessages(msgs)
+        model_read_revisions = _LazyModelReadRevisionLedger()
         baseline_messages = [dict(message) for message in msgs]
         edits = tests = 0
         pending_edit_path = None      # file awaiting a code block (two-message edit form)
@@ -10385,6 +10471,10 @@ def work(d, *, resume=None):
             restore_batch(measurement)
         if resume is not None:
             _restored = measurement.resume_worker_state
+            if isinstance(_restored, Mapping):
+                model_read_revisions.restore(
+                    _restored.get("model_read_revisions")
+                    if isinstance(_restored.get("model_read_revisions"), Mapping) else None)
             edits, tests = _restored["edits"], _restored["tests"]
             unparsed_streak, harness_suspect = _restored["unparsed_streak"], _restored["harness_suspect"]
             last_line, same_streak, run_temp = (_restored[key] for key in ("last_line", "same_streak", "run_temp"))
@@ -11334,6 +11424,7 @@ def work(d, *, resume=None):
                 from kernel_continuation_restart import bounded_read_counts, checkpoint
                 _checkpoint_state = {
                     "edits": edits, "tests": tests, "unparsed_streak": unparsed_streak,
+                    "model_read_revisions": model_read_revisions.snapshot(),
                     "harness_suspect": harness_suspect, "last_line": last_line,
                     "same_streak": same_streak, "run_temp": run_temp,
                     "edits_since_test": edits_since_test, "baseline_tests": baseline_tests,
@@ -13398,22 +13489,31 @@ def work(d, *, resume=None):
                                                   blocks[-1].strip(), multi_file=True,
                                                   target_ref=tool_target_ref, root=root,
                                                   public_brief=_task_public_brief(d),
-                                                  journal=measurement.journal)
+                                                  journal=measurement.journal,
+                                                  model_read_revisions=model_read_revisions)
                         else:
                             obs = _replace_file(
                                 pending_edit_path, blocks[-1].strip(), root=root,
                                 public_brief=_task_public_brief(d),
-                                journal=measurement.journal)
+                                journal=measurement.journal,
+                                model_read_revisions=model_read_revisions)
                     else:
                         obs = replace_fn(pending_edit_path, fn, blocks[-1].strip(),
                                          target_ref=tool_target_ref, root=root,
                                          public_brief=_task_public_brief(d),
-                                         journal=measurement.journal)
+                                         journal=measurement.journal,
+                                         model_read_revisions=model_read_revisions)
                     obs = _normalize_edit_rejection(
                         obs, pending_edit_path, root=root,
                         symbol=(fileset.entry_fn if multifile and fileset.entry_fn else fn))
                     if first_edit_step is None and "applied." in obs:
                         first_edit_step = step
+                    if "applied." in obs:
+                        try:
+                            model_read_revisions.observe_applied(
+                                root, pending_edit_path, pending_edit_path.read_bytes())
+                        except OSError:
+                            pass
                     edits += 1
                     pending_edit_path = None
                     if multifile:
@@ -15514,6 +15614,13 @@ def work(d, *, resume=None):
                         if _read_admission_restore is not None:
                             restore_report_chronology_read_admission(
                                 measurement, _read_admission_restore)
+                    if isinstance(_read_delivery, Mapping) and (
+                            _read_result == "OK"
+                            or (_read_result == "OUT_OF_RANGE"
+                                and type(_read_delivery.get("total_lines")) is int
+                                and _read_delivery.get("total_lines") == 0)):
+                        model_read_revisions.observe_read(
+                            root, p, _read_delivery.get("revision"))
                     if _read_result == "OK":
                         try:
                             _pointer_read_path = p.resolve().relative_to(root.resolve()).as_posix()
@@ -15577,6 +15684,15 @@ def work(d, *, resume=None):
                 from kernel_scope_widen_guard import read as _ep_read
                 _ep_tool, _ep_args = tool_edit_protocol_args
 
+                def _ep_revision_refusal(path: pathlib.Path) -> str | None:
+                    # Handle executors own revision reconciliation in collab-drift
+                    # mode. Keep strict drift enforcement in that executor too.
+                    from kernel_edit_drift import collab_drift_enabled
+                    if collab_drift_enabled():
+                        return None
+                    return model_read_revisions.refusal(
+                        root, path, operation=_ep_tool)
+
                 def _ep_not_editable(relative: str) -> str | None:
                     _ep_path = root / relative
                     # Same hook-file guard as the legacy edit tools (_hook_gate): hook definitions and
@@ -15593,9 +15709,15 @@ def work(d, *, resume=None):
                                 or (str(_scope_rejection(relative))
                                     if d.get("scope_source") == "discovery"
                                     else "NOT_EDITABLE: path is outside editable_paths"))
+                    stale = _ep_revision_refusal(_ep_path)
+                    if stale is not None:
+                        return stale
                     return None
 
                 def _ep_write(path: pathlib.Path, data: bytes) -> tuple[bool, str | None]:
+                    stale = _ep_revision_refusal(path)
+                    if stale is not None:
+                        return False, stale
                     # Same collection guard as legacy edits: the composed candidate is the `after` bytes.
                     _ep_refusal = _collection_refusal(
                         path, after=data.decode("utf-8", errors="replace"))
@@ -15616,7 +15738,9 @@ def work(d, *, resume=None):
                 # repair request (fresh handles + the file's current bytes) becomes the next user message.
                 _edit_source_refused = (_ep_out if _ep_out.status == _EP_REJECTED and _ep_out.refusals
                                         and _ep_out.path is not None else None)
-                if _ep_tool in PROTOCOL_EDIT_TOOL_NAMES and _edit_source_refused is not None:
+                if (_ep_tool in PROTOCOL_EDIT_TOOL_NAMES
+                        and _edit_source_refused is not None
+                        and "changed since your last read" not in _ep_out.detail):
                     from kernel_edit_repair_hook import build_repair, journal_fields, trip_loop_breaker_if_blocked
                     try:
                         _edit_source_bytes = _ep_read(root / _edit_source_refused.path)
@@ -15675,6 +15799,11 @@ def work(d, *, resume=None):
                     from kernel_green_lock import note_applied_product_edit
                     for _ep_rel in _ep_out.changed_paths:
                         note_applied_product_edit(root / _ep_rel)
+                        try:
+                            model_read_revisions.observe_applied(
+                                root, root / _ep_rel, (root / _ep_rel).read_bytes())
+                        except OSError:
+                            pass
                 continue
             elif line == "str_replace" and tool_batch_args is not None:
                 from kernel_coordinated_change_ledger import (
@@ -15697,8 +15826,11 @@ def work(d, *, resume=None):
                                     if _edit_scope_widen_enabled() else
                                     "protected public test paths are immutable")
                             else:
-                                _batch_reason = _bound_edit_refusal(
-                                    root, _batch_path, _batch_edit.get("target_ref"))
+                                _batch_reason = model_read_revisions.refusal(
+                                    root, _batch_path, operation="str_replace")
+                                if _batch_reason is None:
+                                    _batch_reason = _bound_edit_refusal(
+                                        root, _batch_path, _batch_edit.get("target_ref"))
                                 if _batch_reason is None:
                                     _batch_relative = _batch_path.relative_to(root).as_posix()
                                     if multifile:
@@ -15715,6 +15847,7 @@ def work(d, *, resume=None):
                             _batch_guard_failure = BatchFailure(
                                 _batch_index, _batch_raw_path,
                                 "NOT_EDITABLE" if str(_batch_reason).startswith("NOT_EDITABLE")
+                                else "STALE_REVISION" if "changed since your last read" in str(_batch_reason)
                                 else "BOUND_REFUSAL",
                                 str(_batch_reason))
                             break
@@ -15764,6 +15897,13 @@ def work(d, *, resume=None):
                             pass
                     measurement.amend_receipt(_batch_receipt)
                 if _batch_status == "APPLIED":
+                    for _batch_relative in _batch_result.changed_paths:
+                        try:
+                            model_read_revisions.observe_applied(
+                                root, root / _batch_relative,
+                                (root / _batch_relative).read_bytes())
+                        except OSError:
+                            pass
                     if _hook_wiring_for_run is not None:
                         _hook_wiring_for_run.note_applied(
                             tool_call_id, _batch_result.changed_paths,
@@ -15799,6 +15939,9 @@ def work(d, *, resume=None):
                         _scope_widen(resolved_path)
                     if _outside_edit_scope(resolved_path):
                         obs = _scope_rejection(resolved_path)
+                    elif (obs := model_read_revisions.refusal(
+                            root, p, operation="edit")) is not None:
+                        pass
                     elif _hook_gate_route("replace_module", {"path": str(p)}):
                         continue
                     else:
@@ -15821,6 +15964,10 @@ def work(d, *, resume=None):
                         after=_source_snapshot(root, fileset.paths),
                         selectors=tuple(getattr(bolt, "f2p_ids", ())), failure_tail=obs)
                 if " applied." in obs:
+                    try:
+                        model_read_revisions.observe_applied(root, p, p.read_bytes())
+                    except OSError:
+                        pass
                     if _hook_wiring_for_run is not None:
                         _hook_wiring_for_run.note_applied(tool_call_id, (str(p),))
                     if first_edit_step is None:
@@ -15864,7 +16011,8 @@ def work(d, *, resume=None):
                                 tool_insert_args.get("target_ref"), root=root,
                                 protected_paths=baseline_tests,
                                 check_refs=tool_insert_args.get("check_refs", ()),
-                                public_brief=_task_public_brief(d))
+                                public_brief=_task_public_brief(d),
+                                model_read_revisions=model_read_revisions)
                     from kernel_action_identity import canonical_edit
                     _insert_attempt = canonical_edit(
                         bolt, p, dialect="insert_before", old="",
@@ -15893,6 +16041,10 @@ def work(d, *, resume=None):
                         })
                         measurement.amend_receipt(_insert_receipt)
                     if " applied." in obs:
+                        try:
+                            model_read_revisions.observe_applied(root, p, p.read_bytes())
+                        except OSError:
+                            pass
                         if _hook_wiring_for_run is not None:
                             _hook_wiring_for_run.note_applied(tool_call_id, (str(p),))
                         if first_edit_step is None:
@@ -15922,6 +16074,7 @@ def work(d, *, resume=None):
                     tool_str_args = None
                     continue
                 # E310: pre-existing test files are read-only (see baseline_tests rationale)
+                _str_replace_applied = False
                 if protected_test_path(p, baseline_tests):
                     obs = _typed_edit_rejection(
                         "NOT_EDITABLE", p, root=root,
@@ -15959,8 +16112,12 @@ def work(d, *, resume=None):
                             _predispatch_blocked = True
                     _edit_before = (_source_snapshot(root, fileset.paths)
                                     if multifile else {})
+                    _stale_reason = model_read_revisions.refusal(
+                        root, p, operation="str_replace")
                     if _outside_edit_scope(resolved_path):
                         obs = _scope_rejection(resolved_path)
+                    elif _stale_reason is not None:
+                        obs = _stale_reason
                     elif _bound_reason is not None:
                         pass
                     elif _predispatch_blocked:
@@ -15999,8 +16156,7 @@ def work(d, *, resume=None):
                                         "path": str(p), "content": _str_before,
                                     },
                                     effect_applied=lambda result: (
-                                        isinstance(result, str)
-                                        and " applied." in result),
+                                        _str_replace_was_applied(result)),
                                     after_snapshot=lambda: {
                                         "path": str(p),
                                         "content": (p.read_text(errors="ignore")
@@ -16012,30 +16168,37 @@ def work(d, *, resume=None):
                                         "str_replace SHADOW: effect withheld"))
                             else:
                                 obs = _validated_str_replace()
-                            if " applied." in obs:
+                            if _str_replace_was_applied(obs):
                                 from kernel_green_lock import note_applied_product_edit
                                 note_applied_product_edit(p)
                         else:
                             obs = str_replace_edit(p, *tool_str_args,
                                                    target_ref=tool_target_ref, root=root,
                                                    public_brief=_task_public_brief(d),
-                                                   journal=measurement.journal)
+                                                   journal=measurement.journal,
+                                                   model_read_revisions=model_read_revisions)
                     obs = _normalize_edit_rejection(obs, p, root=root)
                     if (_pdg is not None and _bound_reason is None
                             and _pd_outcome.advice and not _predispatch_blocked):
                         obs += "\n[kernel-retry] " + _pd_outcome.advice
+                    _str_replace_applied = _str_replace_was_applied(obs)
                     # E334: typed edit receipt (payload-fingerprinted).
                     bolt.receipt(
                         "edit", f"str_replace {p.name}",
                         f"{p}|{tool_str_args[0][:200]}|{tool_str_args[1][:200]}",
                         "REFUSED_PREDISPATCH" if _predispatch_blocked else
-                        "APPLIED" if "applied." in obs else
+                        "APPLIED" if _str_replace_applied else
                         "NO_OP" if "NO-OP" in obs else
                         "REJECTED" if "REJECTED" in obs else "FAILED",
                         obs, attempt=_edit_attempt,
                         target_path=receipt_target_path(root, p))
-                    if "applied." in obs and _hook_wiring_for_run is not None:
+                    if _str_replace_applied and _hook_wiring_for_run is not None:
                         _hook_wiring_for_run.note_applied(tool_call_id, (str(p),))
+                    if _str_replace_applied:
+                        try:
+                            model_read_revisions.observe_applied(root, p, p.read_bytes())
+                        except OSError:
+                            pass
                     if multifile:
                         _annotate_receipt(
                             bolt, paths=fileset.paths, scope=(resolved_path,),
@@ -16045,7 +16208,7 @@ def work(d, *, resume=None):
                             failure_tail=obs)
                     # E407: an APPLIED edit re-observes at the NEW revision — fresh-only
                     # rendering supersedes stale facts (over-refresh safe).
-                    if "applied." in obs and getattr(bolt, "world", None) is not None:
+                    if _str_replace_applied and getattr(bolt, "world", None) is not None:
                         try:
                             bolt.world.observe_source(
                                 path=str(p.relative_to(root)), content=p.read_text(),
@@ -16055,7 +16218,7 @@ def work(d, *, resume=None):
                             measurement.journal.emit('world_observation_error', operation='edit',
                                                      error_type=type(error).__name__)
                     # Relate the applied edit to the failing-test anchor.
-                    if "applied." in obs:
+                    if _str_replace_applied:
                         _rw = bolt.organ_out("edit_relevance", bolt.edit_relevance(
                             str(p.relative_to(root)) if p.is_absolute() else str(p)))
                         if _rw:
@@ -16071,8 +16234,8 @@ def work(d, *, resume=None):
                                     str(_p.relative_to(root))))
                             if _tw:
                                 obs = obs + "\n" + _tw
-                if "applied." in obs:
-                    if first_edit_step is None and "applied." in obs:
+                if _str_replace_applied:
+                    if first_edit_step is None:
                         first_edit_step = step
                     edits += 1
             elif line.startswith("edit "):
@@ -16136,6 +16299,9 @@ def work(d, *, resume=None):
                             after=_source_snapshot(root, fileset.paths),
                             selectors=tuple(getattr(bolt, "f2p_ids", ())),
                             failure_tail=obs)
+                elif (obs := model_read_revisions.refusal(
+                        root, p, operation="edit")) is not None:
+                    pass
                 else:
                     # WAVE 3 / D3, ADVERSARIAL-REVIEW fix: this is the SECOND live edit
                     # -application path (fence/whole-function-replace, taken whenever
@@ -16193,26 +16359,34 @@ def work(d, *, resume=None):
                                                   multi_file=True,
                                                   target_ref=tool_target_ref, root=root,
                                                   public_brief=_task_public_brief(d),
-                                                  journal=measurement.journal)
+                                                  journal=measurement.journal,
+                                                  model_read_revisions=model_read_revisions)
                         else:
                             if _hook_gate_route("edit", {"path": str(p)}):
                                 continue
                             obs = _replace_file(
                                 p, blocks[-1].strip(), root=root,
                                 public_brief=_task_public_brief(d),
-                                journal=measurement.journal)
+                                journal=measurement.journal,
+                                model_read_revisions=model_read_revisions)
                     else:
                         if _hook_gate_route("edit", {"path": str(p)}):
                             continue
                         obs = replace_fn(p, fn, blocks[-1].strip(),
                                          target_ref=tool_target_ref, root=root,
                                          public_brief=_task_public_brief(d),
-                                         journal=measurement.journal)
+                                         journal=measurement.journal,
+                                         model_read_revisions=model_read_revisions)
                     obs = _normalize_edit_rejection(
                         obs, p, root=root,
                         symbol=(fileset.entry_fn if multifile and fileset.entry_fn else fn))
                     if "applied." in obs and _hook_wiring_for_run is not None:
                         _hook_wiring_for_run.note_applied(tool_call_id, (str(p),))
+                    if "applied." in obs:
+                        try:
+                            model_read_revisions.observe_applied(root, p, p.read_bytes())
+                        except OSError:
+                            pass
                     if (_pdg2 is not None and _bound_reason2 is None
                             and _pd_outcome2.advice and not _predispatch_blocked2):
                         obs += "\n[kernel-retry] " + _pd_outcome2.advice

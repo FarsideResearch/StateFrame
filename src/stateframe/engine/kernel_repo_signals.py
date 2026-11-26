@@ -69,6 +69,15 @@ def enabled() -> bool:
 repo_signals_mode = mode
 
 
+class _GitUnavailable(Exception):
+    """The optional signals Git view could not be read."""
+
+
+def _record_git_skip(reason: str) -> None:
+    emit_reason("degrade", "repo_signals_git_unavailable", "repo_signals",
+                "repository signals were skipped", reason, journal=False)
+
+
 def _normal_path(value: object) -> str:
     text = str(value or "").replace("\\", "/").strip()
     if text.startswith("./"):
@@ -173,8 +182,13 @@ def _file_digest(path: Path) -> str:
 
 def _run_git(cwd: Path, args: Sequence[str], *, timeout: float = 3.0) -> str | None:
     """Run a read-only Git query with user config and pager effects disabled."""
-    from kernel_git_view import legacy_git_query
-    return legacy_git_query(cwd, [str(arg) for arg in args], timeout=timeout)
+    from kernel_git_view import GitObjectError, GitRequestError, legacy_git_query
+
+    try:
+        # A copied workspace without Git metadata must not borrow an enclosing repo.
+        return legacy_git_query(cwd, list(args), timeout=timeout, search_parents=False)
+    except (GitObjectError, GitRequestError, OSError, UnicodeError) as exc:
+        raise _GitUnavailable("Git metadata or object storage could not be read") from exc
 
 
 def _git_root(root: Path) -> Path | None:
@@ -230,15 +244,22 @@ def _status_paths(root: Path, repository: Path | None) -> list[str]:
     return sorted(set(paths))
 
 
-def capture_task_start(root: Path | str) -> dict[str, object]:
-    """Capture W0 before task edits; dirty-at-start status remains separate."""
+def capture_task_start(root: Path | str) -> dict[str, object] | None:
+    """Capture workspace contents and dirty paths when local Git metadata exists."""
     path = _safe_root(root)
-    repository = _git_root(path)
+    try:
+        repository = _git_root(path)
+        if repository is None and os.path.lexists(path / ".git"):
+            _record_git_skip("Git repository could not be resolved")
+            return None
+        dirty = _status_paths(path, repository)
+    except _GitUnavailable as exc:
+        _record_git_skip(str(exc))
+        return None
     files: dict[str, str] = {}
     for source in _workspace_paths(path):
         relative = source.relative_to(path).as_posix()
         files[relative] = _file_digest(source)
-    dirty = _status_paths(path, repository)
     return {
         "schema": "repo-snapshot/1",
         "files": files,
@@ -884,14 +905,19 @@ def _compact(value: object, limit: int = 180) -> str:
 
 def compute_repo_signals(root: Path | str, *, task: object = None, frame: object = None,
                          w0: Mapping[str, object] | None = None, target_path: object = None,
-                         receipts: object = None, base_commit: object = None) -> dict[str, object]:
-    """Compute the bounded v1 signal object from public workspace observations."""
+                         receipts: object = None, base_commit: object = None) -> dict[str, object] | None:
+    """Compute bounded signals from current source and any available Git history."""
     workspace = _safe_root(root)
     context = _context(task, frame)
     if receipts is not None and "receipts" not in context:
         context["receipts"] = receipts
-    start = copy.deepcopy(dict(w0)) if isinstance(w0, Mapping) else capture_task_start(workspace)
     current = capture_task_start(workspace)
+    if current is None:
+        return None
+    start = copy.deepcopy(dict(w0)) if isinstance(w0, Mapping) else current
+    if start.get("git_repository") is not None and current.get("git_repository") is None:
+        _record_git_skip("Git metadata disappeared after task start")
+        return None
     delta = task_delta(start, current)
     sources = _source_inventory(workspace)
     localization, task_paths, symbols = _localization(workspace, context, sources, target_path, receipts)
@@ -899,7 +925,11 @@ def compute_repo_signals(root: Path | str, *, task: object = None, frame: object
         task_paths or [str(row.get("path")) for row in localization["shortlist"][:1]
                       if row.get("path")]
     ))
-    history = _history_signals(workspace, context, history_targets, base_commit)
+    try:
+        history = _history_signals(workspace, context, history_targets, base_commit)
+    except _GitUnavailable as exc:
+        _record_git_skip(str(exc))
+        return None
     links = _test_links(workspace, context, sources, localization["shortlist"], receipts, delta, history)
     links = mark_test_links_stale(
         links,

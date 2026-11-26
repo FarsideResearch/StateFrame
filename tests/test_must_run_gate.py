@@ -1026,6 +1026,11 @@ def test_must_run_manifest_matches_reviewed_inventory():
     assert expected_optional and len(expected_optional) == len(actual_optional) and optional_violated == 0
 
 
+def test_must_run_manifest_assertion_witnesses_parse():
+    manifest, _digest = must_run_plugin._read_manifest(ROOT)
+    assert manifest.cells
+
+
 def test_pid_namespace_provision_probe_reports_unavailable_when_command_fails(monkeypatch):
     monkeypatch.setattr(
         must_run_plugin, "sys", SimpleNamespace(platform="linux", executable=sys.executable))
