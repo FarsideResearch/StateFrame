@@ -255,6 +255,8 @@ def _wire_metrics(label, decisions):
 
 
 def _env(root, scratch):
+    from _stateframe_home import isolated_stateframe_home
+
     return {
         **{name: value for name, value in os.environ.items()
            if not name.startswith(("STATEFRAME_", "REACT_", "KERNEL_", "LONG_HORIZON_"))},
@@ -262,7 +264,7 @@ def _env(root, scratch):
         "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONHASHSEED": "0",
         "TMPDIR": str(scratch),
-        "STATEFRAME_HOME": str(scratch / "stateframe-home"),
+        "STATEFRAME_HOME": isolated_stateframe_home(),
     }
 
 
@@ -737,6 +739,7 @@ def _worker(scratch, monkeypatch, script, *, switches=None, source="NEEDLE = 7\n
     import history_compaction
     import kernel_navigation_pages
     import kernel_stall_observation
+    from _stateframe_home import isolated_stateframe_home
     from capability_capacity_preflight import CapacityRefusal
     from capability_release_runner import prepare_request
     from kernel_measurement import ACTIVE_REQUEST
@@ -757,11 +760,12 @@ def _worker(scratch, monkeypatch, script, *, switches=None, source="NEEDLE = 7\n
     results = run / "worker/results"
     journals = run / "worker/measurement-runs"
     journals.mkdir(parents=True)
+    stateframe_home = isolated_stateframe_home()
     for name in list(os.environ):
         if name.startswith(("STATEFRAME_", "REACT_", "KERNEL_", "LONG_HORIZON_")):
             monkeypatch.delenv(name)
     for name, value in {
-        "STATEFRAME_HOME": str(scratch / "stateframe-home"),
+        "STATEFRAME_HOME": stateframe_home,
         "STATEFRAME_RESULTS_DIR": str(results),
         "STATEFRAME_PROJECTOR": "rich",
         "STATEFRAME_VIEW": "operational",

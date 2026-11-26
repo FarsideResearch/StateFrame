@@ -17,13 +17,20 @@ import hashlib
 import json
 import os
 import stat
+import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar
 from weakref import WeakKeyDictionary
 
+if __package__:
+    from .kernel_file_digest_memo import RACY_NS
+else:
+    from kernel_file_digest_memo import RACY_NS
+
 if TYPE_CHECKING:
+    from kernel_history_spool import HistorySpool
     from kernel_verdict_identity import RunIdentity, RunIdentityProvider
     from kernel_workspace_consumers import WorkspaceConsumers
     from kernel_workspace_tree import File, Symlink
@@ -79,37 +86,25 @@ def _open_regular_nofollow(root: Path, relative: str) -> int:
 
 
 def _read_regular(root: Path, relative: str) -> tuple[bytes, str, int]:
-    digest = hashlib.sha256()
-    chunks: list[bytes] = []
-    size = 0
-    fd = _open_regular_nofollow(root, relative)
-    try:
-        with os.fdopen(fd, "rb") as stream:
-            while True:
-                chunk = stream.read(1 << 20)
-                if not chunk:
-                    break
-                digest.update(chunk)
-                chunks.append(chunk)
-                size += len(chunk)
-    except BaseException:
-        # fdopen owns the descriptor once constructed.
-        raise
-    return b"".join(chunks), digest.hexdigest(), size
+    digest, size, body, _ = _capture_worker_file(
+        root, relative, keep_body=True, small_body=False)
+    assert body is not None
+    return body, digest, size
 
 
 def _hash_regular(root: Path, relative: str) -> tuple[str, int]:
-    digest = hashlib.sha256()
-    size = 0
-    fd = _open_regular_nofollow(root, relative)
-    with os.fdopen(fd, "rb") as stream:
-        while True:
-            chunk = stream.read(1 << 20)
-            if not chunk:
-                break
-            digest.update(chunk)
-            size += len(chunk)
-    return digest.hexdigest(), size
+    digest, size, _, _ = _capture_worker_file(
+        root, relative, keep_body=False, small_body=False)
+    return digest, size
+
+
+_FileSignature = tuple[int, int, int, int, int, int]
+_RootIdentity = tuple[Path, int, int]
+
+
+def _file_signature(info: os.stat_result) -> _FileSignature:
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
+            info.st_ctime_ns, info.st_mode)
 
 
 class SnapshotFiles(Mapping[str, bytes]):
@@ -122,7 +117,9 @@ class SnapshotFiles(Mapping[str, bytes]):
                  bodies: Mapping[str, bytes] | None = None,
                  own: Sequence[str] | set[str] = (),
                  start_root: str | os.PathLike[str] | None = None,
-                 live_root: str | os.PathLike[str] | None = None):
+                 live_root: str | os.PathLike[str] | None = None,
+                 reused_baseline: WorkspaceBaseline | None = None,
+                 reused_paths: set[str] | None = None):
         self._rows = dict(rows or {})
         self._bodies = dict(bodies or {})
         self._body_cache_size = sum(
@@ -133,6 +130,8 @@ class SnapshotFiles(Mapping[str, bytes]):
         self._live_races: set[str] = set()
         self._own = frozenset(own)  # no proven copy elsewhere: these bodies stay here
         self._unproven: set[str] = set()
+        self._reused_baseline = reused_baseline
+        self._reused_paths = reused_paths if reused_paths is not None else set()
 
     def __getitem__(self, path: str) -> bytes:
         if path not in self._rows:
@@ -144,6 +143,13 @@ class SnapshotFiles(Mapping[str, bytes]):
                     raise SnapshotChanged(path, "restored body differs from its digest")
                 self._unproven.discard(path)
             return body
+        if self._reused_baseline is not None and path in self._reused_paths:
+            try:
+                return self._reused_baseline[path]
+            except SnapshotChanged:
+                # A cold start copy can disappear. The live file still needs
+                # its own verified read if the caller requests current bytes.
+                self._reused_paths.discard(path)
         digest, size = self._rows[path]
         if self._live_root is not None:
             try:
@@ -233,6 +239,8 @@ class SnapshotFiles(Mapping[str, bytes]):
             "_own": sorted(self._own),
             "_start_root": None,
             "_live_root": self._live_root,
+            **({"_reused_baseline": self._reused_baseline,
+                "_reused_paths": self._reused_paths} if self._reused_paths else {}),
         }
 
     def __setstate__(self, state: Mapping[str, object]) -> None:
@@ -246,6 +254,87 @@ class SnapshotFiles(Mapping[str, bytes]):
         self._live_races = set()
         self._own = frozenset(state.get("_own", ()))
         self._unproven = set(self._bodies)
+        self._reused_baseline = state.get("_reused_baseline")
+        self._reused_paths = set(state.get("_reused_paths", ()))
+
+
+class WorkspaceBaseline(SnapshotFiles):
+    """Starting bytes plus process-local proofs of unchanged worker files.
+
+    Matching parent copies back the cold bodies. Owned bodies share the
+    small-file cache budget and spill to checkpointable disk storage beyond it.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._spool: HistorySpool | None = None
+        self._spooled_paths: dict[str, int] = {}
+        self._worker: _RootIdentity | None = None
+        self._signatures: dict[str, _FileSignature] = {}
+        self._observed_ns = 0
+
+    @classmethod
+    def capture(cls, root: str | os.PathLike[str], *,
+                start_snapshot: str | os.PathLike[str] | None = None) -> WorkspaceBaseline:
+        snapshot = cls()
+        _scan_workspace(root, start_snapshot=start_snapshot, starting=snapshot)
+        return snapshot
+
+    def _reuse_for(self, worker: _RootIdentity, now_ns: int) -> bool:
+        if self._worker is None:
+            # Restore discards all old signatures. The first live scan can
+            # build new proofs, and only from freshly verified bytes.
+            self._worker = worker
+        if self._worker != worker:
+            return False
+        if now_ns < self._observed_ns:
+            self._signatures.clear()
+        self._observed_ns = now_ns
+        return True
+
+    def _spill(self, path: str, body: bytes) -> None:
+        if self._spool is None:
+            from kernel_memfix_history import MemfixSpool
+
+            self._spool = MemfixSpool()
+        position = len(self._spool)
+        self._spool.append(body)
+        self._spooled_paths[path] = position
+
+    def __getitem__(self, path: str) -> bytes:
+        position = self._spooled_paths.get(path)
+        if position is None or self._spool is None:
+            return super().__getitem__(path)
+        try:
+            return self._spool[position]
+        except OSError as error:
+            raise SnapshotChanged(path, "spooled start file is unavailable") from error
+
+    def __getstate__(self) -> dict[str, object]:
+        if self._spool is not None:
+            import kernel_checkpoint as checkpoint
+
+            # Spool blocks can be persisted outside the guarded state stream.
+            # Scan the complete image before serializing any of those blocks.
+            if checkpoint._SECRETS:
+                tail = None
+                block_size = 1 << 20
+                for start in range(0, self._spool.spool_bytes, block_size):
+                    block = self._spool._read_exact(
+                        start, min(block_size, self._spool.spool_bytes - start))
+                    tail = checkpoint._check_registered_secrets(block, tail, final=False)
+                checkpoint._check_registered_secrets(b"", tail)
+        return {**super().__getstate__(), "_spool": self._spool,
+                "_spooled_paths": self._spooled_paths}
+
+    def __setstate__(self, state: Mapping[str, object]) -> None:
+        super().__setstate__(state)
+        self._spool = state["_spool"]
+        self._spooled_paths = state["_spooled_paths"]
+        # Worker stat proofs belong to the attempt that made them.
+        self._worker = None
+        self._signatures = {}
+        self._observed_ns = 0
 
 
 def host_done_facts_mode() -> str:
@@ -337,17 +426,18 @@ def _path_is_ignored(relative: Path) -> bool:
     return any(part in _IGNORED_PARTS for part in relative.parts)
 
 
-def _capture_worker_file(root: Path, relative: str, *, keep_body: bool,
-                          small_body: bool) -> tuple[str, int, bytes | None]:
+def _capture_worker_file(
+    root: Path, relative: str, *, keep_body: bool, small_body: bool,
+) -> tuple[str, int, bytes | None, _FileSignature]:
     digest = hashlib.sha256()
     size = 0
     fd = _open_regular_nofollow(root, relative)
-    info = os.fstat(fd)
-    chunks: list[bytes] | None = (
-        [] if keep_body or (small_body and info.st_size <= SnapshotFiles.SMALL_FILE_LIMIT)
-        else None
-    )
     with os.fdopen(fd, "rb") as stream:
+        signature = _file_signature(os.fstat(fd))
+        chunks: list[bytes] | None = (
+            [] if keep_body or (small_body and signature[2] <= SnapshotFiles.SMALL_FILE_LIMIT)
+            else None
+        )
         while True:
             chunk = stream.read(1 << 20)
             if not chunk:
@@ -356,8 +446,22 @@ def _capture_worker_file(root: Path, relative: str, *, keep_body: bool,
             size += len(chunk)
             if chunks is not None:
                 chunks.append(chunk)
+        if (size != signature[2]
+                or _file_signature(os.fstat(fd)) != signature
+                or _file_signature(os.lstat(root / relative)) != signature):
+            raise SnapshotChanged(relative, "file identity changed during read")
     body = b"".join(chunks) if chunks is not None else None
-    return digest.hexdigest(), size, body
+    return digest.hexdigest(), size, body, signature
+
+
+def _capture_scan_file(
+    root: Path, relative: str, *, keep_body: bool, small_body: bool,
+) -> tuple[str, int, bytes | None, _FileSignature]:
+    try:
+        return _capture_worker_file(root, relative, keep_body=keep_body, small_body=small_body)
+    except SnapshotChanged:
+        # An atomic replacement can leave a readable file at the same path.
+        return _capture_worker_file(root, relative, keep_body=keep_body, small_body=small_body)
 
 
 def workspace_snapshot(root: str | os.PathLike[str], *,
@@ -370,72 +474,122 @@ def workspace_snapshot(root: str | os.PathLike[str], *,
     small exclusion set also prevents runner cache churn from becoming a
     solver edit.
     """
+    return _scan_workspace(root, start_snapshot=start_snapshot, live=live)
+
+
+def current_workspace_snapshot(root: str | os.PathLike[str],
+                               baseline: Mapping[str, object]) -> SnapshotFiles:
+    if isinstance(baseline, WorkspaceBaseline):
+        return _scan_workspace(root, live=True, baseline=baseline)
+    return workspace_snapshot(root, live=True)
+
+
+def _scan_workspace(
+    root: str | os.PathLike[str], *,
+    start_snapshot: str | os.PathLike[str] | None = None, live: bool = False,
+    starting: WorkspaceBaseline | None = None, baseline: WorkspaceBaseline | None = None,
+) -> SnapshotFiles:
+    now_ns = time.time_ns()
+    cutoff_ns = now_ns - RACY_NS
     base = Path(os.path.realpath(root))
-    if not base.exists() or not base.is_dir():
+    try:
+        root_stat = base.lstat()
+    except OSError:
         return SnapshotFiles(live_root=base if live else None)
+    if not stat.S_ISDIR(root_stat.st_mode):
+        return SnapshotFiles(live_root=base if live else None)
+    worker = (base, root_stat.st_dev, root_stat.st_ino)
+    if starting is not None:
+        starting._worker = worker
+        starting._observed_ns = now_ns
+    if baseline is not None and not baseline._reuse_for(worker, now_ns):
+        baseline = None
+
     source_root = (Path(start_snapshot)
                    if start_snapshot is not None and not live else None)
     rows: dict[str, tuple[str, int]] = {}
     bodies: dict[str, bytes] = {}
     own: set[str] = set()
+    reused: set[str] = set()
     small_body_bytes = 0
-    for current, dirs, files in os.walk(base, topdown=True, followlinks=False):
+    for current, dirs, files, directory_fd in os.fwalk(base, follow_symlinks=False):
         current_path = Path(current)
-        dirs[:] = sorted(
-            name for name in dirs
-            if name not in _IGNORED_PARTS and not (current_path / name).is_symlink()
-        )
+        if current_path == base:
+            walked = os.fstat(directory_fd)
+            if (walked.st_dev, walked.st_ino) != worker[1:]:
+                break
+        relative_dir = current_path.relative_to(base)
+        dirs[:] = sorted(name for name in dirs if name not in _IGNORED_PARTS)
         for name in sorted(files):
-            path = current_path / name
-            if path.is_symlink() or not path.is_file():
+            if name in _IGNORED_PARTS:
                 continue
+            relative_text = (relative_dir / name).as_posix()
             try:
-                relative = path.relative_to(base)
-            except ValueError:
-                continue
-            if _path_is_ignored(relative):
-                continue
-            try:
-                relative_text = relative.as_posix()
-                source_digest = None
+                info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                if not stat.S_ISREG(info.st_mode):
+                    continue
+                if (baseline is not None and max(info.st_mtime_ns, info.st_ctime_ns) < cutoff_ns
+                        and baseline._signatures.get(relative_text) == _file_signature(info)):
+                    rows[relative_text] = baseline._rows[relative_text]
+                    reused.add(relative_text)
+                    continue
+
+                source_row = None
                 if source_root is not None:
                     try:
-                        source_digest, _source_size = _hash_regular(source_root, relative_text)
+                        source_row = _hash_regular(source_root, relative_text)
                     except OSError:
                         pass
-                # Without a matching start copy the original in-memory bytes are
-                # retained so callers keep the old snapshot contract.
-                keep_body = ((source_root is None and not live)
-                             or (source_root is not None and source_digest is None))
-                digest, size, body = _capture_worker_file(
-                    base, relative_text, keep_body=keep_body,
-                    small_body=not keep_body,
+                # Keep the observed start body when no matching parent copy backs it.
+                keep_body = not live and source_row is None
+                digest, size, body, signature = _capture_scan_file(
+                    base, relative_text, keep_body=keep_body, small_body=not keep_body,
                 )
-                matched_source = source_digest == digest
-                if not live and not matched_source and not keep_body:
+                if source_row is not None and source_row != (digest, size):
                     if body is None:
-                        body, digest, size = _read_regular(base, relative_text)
+                        digest, size, body, signature = _capture_scan_file(
+                            base, relative_text, keep_body=True, small_body=False)
                     keep_body = True
-                rows[relative_text] = (digest, size)
-                if body is not None:
-                    if keep_body:
-                        bodies[relative_text] = body
-                        own.add(relative_text)
-                    elif (size <= SnapshotFiles.SMALL_FILE_LIMIT
-                          and small_body_bytes + size <= SnapshotFiles.BODY_CACHE_LIMIT):
-                        bodies[relative_text] = body
-                        small_body_bytes += size
             except OSError:
-                # An unreadable path cannot be represented as a false edit.
-                # The host's test/check receipt remains the evidence gate.
+                # Preserve the snapshot's handling of unreadable entries.
                 continue
+            row = (digest, size)
+            rows[relative_text] = row
+            stable = max(signature[3], signature[4]) < cutoff_ns
+            if starting is not None and stable:
+                starting._signatures[relative_text] = signature
+            elif baseline is not None and stable and baseline._rows.get(relative_text) == row:
+                # A worker created just before startup may be racy on its first
+                # capture. A fresh stable read can prove the same start bytes.
+                baseline._signatures[relative_text] = signature
+            if body is not None:
+                fits = (size <= SnapshotFiles.SMALL_FILE_LIMIT
+                        and small_body_bytes + size <= SnapshotFiles.BODY_CACHE_LIMIT)
+                if keep_body and starting is None:
+                    bodies[relative_text] = body
+                    own.add(relative_text)
+                elif keep_body and not fits:
+                    starting._spill(relative_text, body)
+                elif fits:
+                    bodies[relative_text] = body
+                    small_body_bytes += size
+                    if keep_body:
+                        own.add(relative_text)
     ordered_rows = {relative: rows[relative] for relative in sorted(rows, key=Path)}
     ordered_bodies = {relative: bodies[relative] for relative in ordered_rows
                       if relative in bodies}
+    if starting is not None:
+        starting._rows = ordered_rows
+        starting._bodies = ordered_bodies
+        starting._own = frozenset(own)
+        starting._body_cache_size = small_body_bytes
+        starting.rebind_start_snapshot(source_root)
+        return starting
     return SnapshotFiles(
         ordered_rows, bodies=ordered_bodies, own=own,
         start_root=source_root if not live else None,
         live_root=base if live else None,
+        reused_baseline=baseline if reused else None, reused_paths=reused,
     )
 
 
@@ -1144,7 +1298,7 @@ def compute_done_facts(
             # Preserve legacy snapshot behavior for roots or paths the fence cannot admit.
             pass
     if pinned is None:
-        after = workspace_snapshot(root, live=True)
+        after = current_workspace_snapshot(root, before)
         deltas = diff_snapshots(before, after, journal=journal,
                                 consumer="host_done_facts")
         revision = revision or _snapshot_revision(after)

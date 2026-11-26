@@ -615,7 +615,7 @@ _EXPECTED_RESULT_CLASSES = {
              "REFUSED_ADMISSION", "REPEAT_SUPPRESSED"},
     "grep": {"HITS", "NO_HITS", "PARTIAL", "ERROR", "OUT_OF_RANGE", "REPEAT_SUPPRESSED"},
     "ls": {"OK"},
-    "list_files": {"HOST_OBSERVED", "REJECTED"},
+    "list_files": {"HOST_OBSERVED", "REJECTED", "REPEAT_SUPPRESSED"},
     **{tool: {"HOST_OBSERVED", "ERROR", "OUT_OF_RANGE", "REPEAT_SUPPRESSED"}
        for tool in ("where_defined", "who_calls", "references")},
     **{tool: {"RECALLED", "RECALL_REJECTED"}

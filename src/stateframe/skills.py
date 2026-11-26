@@ -10,6 +10,9 @@ import re
 import shutil
 import stat
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -25,6 +28,27 @@ NAME = re.compile(r"^[a-z][a-z0-9-]{1,40}$")
 MAX_BODY_BYTES = 32 * 1024
 MAX_DIRECTORY_BYTES = 1 << 20
 MAX_SKILLS = 16
+_BUNDLED_COMPARISON_CAPTION_PATH = (
+    Path(__file__).resolve().parent / "__bundled_skills__" / "comparison-caption"
+)
+_BUNDLED_COMPARISON_CAPTION_SOURCE = """---
+name: comparison-caption
+description: Write a source-backed comparison caption before committing to a figure form.
+---
+Use this skill only when creating or editing a figure that compares values.
+Read source evidence before drafting; do not infer unstated observations.
+Name both operands, the baseline, units, and time or group labels in one sentence.
+Use only the exact values and precision supported by the evidence.
+If the source does not support either operand or baseline, omit the comparative claim.
+For ties, say the values are tied and preserve their supported precision.
+Write the draft comparison sentence in your public response or figure specification before committing to a renderer.
+Honor any form mandated by the brief.
+If no form is mandated, choose the chart or table that makes both operands and the baseline easy to compare.
+Keep the finished caption in the project's usual caption location.
+Example: “Revenue rose from $40 to $52, a 30% increase (metrics.csv).”
+""".encode("utf-8")
+_BUNDLED_SKILLS = {_BUNDLED_COMPARISON_CAPTION_PATH: _BUNDLED_COMPARISON_CAPTION_SOURCE}
+_allow_bundled_comparison_caption = ContextVar("allow_bundled_comparison_caption", default=False)
 
 
 class SkillError(ValueError):
@@ -78,6 +102,21 @@ def _canonical_skill_root(path: Path) -> Path:
 
 def _read_skill_file(path: Path, root: Path, *, maximum: int, missing_ok: bool) -> bytes | None:
     """Walk the recorded canonical root from /, then read only below its descriptor."""
+    bundled_source = _BUNDLED_SKILLS.get(root)
+    if bundled_source is not None:
+        try:
+            relative = path.relative_to(root)
+        except ValueError as error:
+            raise SkillError(f"{path}: expected a file inside the skill directory") from error
+        if relative == Path("SKILL.md"):
+            if len(bundled_source) > maximum:
+                raise SkillError(f"{path}: file exceeds {maximum} bytes")
+            return bundled_source
+        if relative == Path("tools.json") and missing_ok:
+            return None
+        if relative == Path("tools.json"):
+            raise SkillError(f"{path}: expected a regular file inside the skill directory")
+        raise SkillError(f"{path}: file is not part of the bundled skill")
     try:
         relative = path.relative_to(root)
     except ValueError as error:
@@ -213,6 +252,16 @@ def _parse_skill_at_root(directory: Path) -> Skill:
                  _tool_names(tools_raw) if tools_raw is not None else ())
 
 
+@contextmanager
+def bundled_comparison_caption_selection(enabled: bool) -> Iterator[None]:
+    """Use the resolved run setting for skill resolution, including powerup preflight."""
+    token = _allow_bundled_comparison_caption.set(enabled)
+    try:
+        yield
+    finally:
+        _allow_bundled_comparison_caption.reset(token)
+
+
 def resolve_skills(values: Sequence[str], *, trusted: bool) -> tuple[Skill, ...]:
     if len(values) > MAX_SKILLS:
         raise SkillError(f"at most {MAX_SKILLS} skills may be selected")
@@ -220,14 +269,22 @@ def resolve_skills(values: Sequence[str], *, trusted: bool) -> tuple[Skill, ...]
     names = set()
     for value in values:
         path = safe_expanduser(Path(value))
-        if not path.is_dir() and os.sep not in value and (os.altsep is None or os.altsep not in value):
-            if not NAME.fullmatch(value):
-                raise SkillError(f"invalid skill name: {value}")
-            user_dir = _user_skills_dir_or_none()
-            if user_dir is None:
-                continue
-            path = user_dir / value
-        skill = parse_skill(path)
+        is_bundled_skill = (
+            _allow_bundled_comparison_caption.get()
+            and Path(value).parts == ("skills", "comparison-caption")
+            and not path.is_absolute() and not path.exists() and not path.is_symlink()
+        )
+        if is_bundled_skill:
+            skill = _parse_skill_at_root(_BUNDLED_COMPARISON_CAPTION_PATH)
+        else:
+            if not path.is_dir() and os.sep not in value and (os.altsep is None or os.altsep not in value):
+                if not NAME.fullmatch(value):
+                    raise SkillError(f"invalid skill name: {value}")
+                user_dir = _user_skills_dir_or_none()
+                if user_dir is None:
+                    continue
+                path = user_dir / value
+            skill = parse_skill(path)
         if skill.name in names:
             raise SkillError(f"duplicate selected skill: {skill.name}")
         names.add(skill.name)
@@ -295,7 +352,7 @@ def verify_records(records: Sequence[dict[str, object]], digest: str,
     for record in records:
         name = record.get("name")
         path = Path(str(record.get("path", "")))
-        if not path.is_dir():
+        if path not in _BUNDLED_SKILLS and not path.is_dir():
             raise SkillError(f"skill {name} missing")
         try:
             skill = _parse_skill_at_root(path)

@@ -3100,10 +3100,17 @@ class ParallelSupervisor:
             return None
         if spec.contract.check.command_kind == "none" or not spec.contract.check.selectors:
             raise ParallelHostError("subframe check receipt claims PASS without a check recipe")
-        from .engine.kernel_effects import scan
+        from .engine.kernel_effects import SCAN_STAT_MEMO_ENV, scan
         from .engine.kernel_unit_policy import _check_ignored, _manifest_digest
 
-        manifest = scan(workspace, exclude=_check_ignored)
+        # Both direct seals and artifact helpers use the resolved parent settings.
+        spec_path = worker.call_root.parent.parent / "spec.json"
+        memo_mode = None
+        if spec_path.is_file():
+            environment = _read_json(spec_path, "parent run spec").get("environment")
+            if isinstance(environment, dict):
+                memo_mode = environment.get(SCAN_STAT_MEMO_ENV, "off")
+        manifest = scan(workspace, exclude=_check_ignored, memo_mode=memo_mode)
         if receipt.product_manifest_digest != _manifest_digest(manifest):
             if candidate is None or not ParallelSupervisor._matches_checked_candidate_modes(
                     receipt, manifest, candidate):

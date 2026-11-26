@@ -5,13 +5,14 @@ import hashlib
 import json
 import os
 import re
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 try:
-    from stateframe.skills import (SkillError, catalog_lines,
+    from stateframe.skills import (Skill, SkillError, catalog_lines,
                                    read_skill_file, validate_measurements, verify_records, MAX_BODY_BYTES)
 except ModuleNotFoundError:  # engine child started by path: the host helper is a sibling of _child.py
-    from skills import (SkillError, catalog_lines,
+    from skills import (Skill, SkillError, catalog_lines,
                         read_skill_file, validate_measurements, verify_records, MAX_BODY_BYTES)
 from kernel_request_diet import RequestTokenMeter
 try:
@@ -23,8 +24,32 @@ MAX_CATALOG_TOKENS = 1200
 MAX_BODY_TOKENS = 8000
 MAX_RESIDENT = 2
 SECTION = "skill_bodies"
+_WRITE_FIGURES_SENTENCE_SWITCH = "STATEFRAME_R200_F094_WRITE_FIGURES_SENTENCE"
+_FIGURE_SENTENCE_SKILL = "comparison-caption"
+_FIGURE_SENTENCE_GUIDANCE = (
+    "For figure comparisons, first write one source-backed sentence naming both operands and the "
+    "baseline in your public response or figure specification. Then use the mandated form, or "
+    "choose a chart or table if none is mandated. Omit unsupported claims."
+)
 _BODY_NAME = re.compile(r"^USER-PROVIDED SKILL INSTRUCTIONS: ([a-z][a-z0-9-]{1,40}) ")
 _NOTICE_PREFIX = "[Skills omitted for budget]"
+
+
+def _write_figures_sentence_enabled(environment: Mapping[str, str] | None = None) -> bool:
+    """Read the opt-in from the resolved run environment; absence keeps release behavior."""
+    selected = os.environ if environment is None else environment
+    return selected.get(_WRITE_FIGURES_SENTENCE_SWITCH, "off").strip().lower() == "on"
+
+
+def _catalog_lines(skills: Sequence[Skill], records: Sequence[dict[str, object]], *,
+                   write_figures_sentence: bool) -> tuple[str, ...]:
+    lines = list(catalog_lines(skills, records))
+    if not write_figures_sentence:
+        return tuple(lines)
+    for index, (skill, _) in enumerate(zip(skills, lines, strict=True)):
+        if skill.name == _FIGURE_SENTENCE_SKILL and _FIGURE_SENTENCE_GUIDANCE not in lines[index]:
+            lines[index] = f"{lines[index]} {_FIGURE_SENTENCE_GUIDANCE}"
+    return tuple(lines)
 
 
 def note_budget_omission(messages: list[dict[str, object]], removed: object) -> None:
@@ -57,19 +82,28 @@ def note_budget_omission(messages: list[dict[str, object]], removed: object) -> 
 class SkillRuntime:
     def __init__(self, records: list[dict[str, object]], digest: str, endpoint: str | None,
                  measurements: dict[str, object] | None = None, *, auth_key: str | None = None,
-                 generation_endpoint: str | None = None):
+                 generation_endpoint: str | None = None,
+                 write_figures_sentence: bool | None = None):
         self.skills = verify_records(records, digest, measurements)
         self.records = tuple(records)
         self.by_name = {skill.name: skill for skill in self.skills}
+        self.write_figures_sentence = (
+            _write_figures_sentence_enabled() if write_figures_sentence is None else write_figures_sentence
+        )
         self.resident: list[str] = []
         self.evicted: list[str] = []
         self.meter = RequestTokenMeter(
             endpoint=endpoint, template_overhead_tokens=0,
             auth_key=auth_key, generation_endpoint=generation_endpoint,
         )
-        self.catalog_lines = catalog_lines(self.skills, self.records)
+        self.catalog_lines = _catalog_lines(
+            self.skills, self.records, write_figures_sentence=self.write_figures_sentence,
+        )
         if measurements is None:
-            measurements = measure_admission(self.skills, self.records, self.meter)
+            measurements = measure_admission(
+                self.skills, self.records, self.meter,
+                write_figures_sentence=self.write_figures_sentence,
+            )
         self.catalog_measurement = measurements["catalog"]
         count = self.catalog_measurement["tokens"]
         if count > MAX_CATALOG_TOKENS:
@@ -132,11 +166,20 @@ class SkillRuntime:
 _active: SkillRuntime | None = None
 
 
-def measure_admission(skills, records, meter) -> dict[str, object]:
+def measure_admission(skills: Sequence[Skill], records: Sequence[dict[str, object]],
+                      meter: RequestTokenMeter, *,
+                      write_figures_sentence: bool | None = None) -> dict[str, object]:
+    include_figure_sentence = (
+        _write_figures_sentence_enabled() if write_figures_sentence is None else write_figures_sentence
+    )
+    lines = _catalog_lines(
+        skills, records, write_figures_sentence=include_figure_sentence,
+    )
+
     def measure(content: str) -> dict[str, object]:
         count, method = meter.measure({"messages": [{"role": "user", "content": content}], "tools": []})
         return {"tokens": count, "method": method}
-    return {"catalog": measure("\n".join(catalog_lines(skills, records))),
+    return {"catalog": measure("\n".join(lines)),
             "bodies": {skill.name: measure(skill.body) for skill in skills}}
 
 
@@ -158,6 +201,7 @@ def configure(records: list[dict[str, object]], digest: str, endpoint: str | Non
     candidate = SkillRuntime(
         records, digest, endpoint, measurements,
         auth_key=auth_key, generation_endpoint=endpoint,
+        write_figures_sentence=_write_figures_sentence_enabled(),
     ) if records else None
     _active = candidate
 

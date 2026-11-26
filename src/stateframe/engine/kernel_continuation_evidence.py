@@ -181,7 +181,7 @@ READ_NOT_APPLIED_RESULTS_BY_TOOL = {
     "read": READ_NOT_APPLIED_RESULTS | frozenset({"REFUSED_ADMISSION"}),
     # These host producers have distinct refusal classes; keep each vocabulary
     # scoped to its producer instead of broadening shared read/search results.
-    "list_files": frozenset({"REJECTED"}),
+    "list_files": frozenset({"REJECTED", "REPEAT_SUPPRESSED"}),
     "recall": frozenset({"RECALL_REJECTED"}),
     "read_check_receipt": READ_NOT_APPLIED_RESULTS | frozenset({"NOT_FOUND", "REJECTED"}),
     "recall_evidence": frozenset({"RECALL_REJECTED"}),

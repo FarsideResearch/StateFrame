@@ -19,6 +19,7 @@ from kernel_read_receipts import refused_calls, finish_pending, enabled as read_
 from kernel_tool_reply import Outcome, tool_reply
 
 MAX_BATCH_CALLS = 16
+_CHECK_RECEIPT_DETAIL_CHARS = 1024
 RESTORE_CANDIDATE = "restore_candidate"
 
 
@@ -823,9 +824,16 @@ class NativeToolBatch:
     @staticmethod
     def render_model_receipts(receipts: list[dict]) -> str:
         lines = ["[NATIVE BATCH RECEIPTS]", "Every queued call has an explicit host receipt."]
+        compact_checks = os.environ.get("STATEFRAME_COMPACT_BATCH_CHECK_RECEIPTS", "off") == "on"
         for receipt in receipts:
             status = str(receipt.get("status", "UNKNOWN"))
             reason = str(receipt.get("reason", ""))
+            if compact_checks and receipt.get("tool") == "run_tests" and status == "RED":
+                # The journal keeps the full reason. A check batch can otherwise
+                # repeat a multi-selector traceback once per call in this panel.
+                summary, _, output = reason.partition("\n")
+                if len(output) > _CHECK_RECEIPT_DETAIL_CHARS:
+                    reason = f"{summary} [{len(output)} characters of check output omitted]"
             suffix = f"(reason={reason})" if reason else ""
             detail = receipt.get("detail", "")
             if detail:
