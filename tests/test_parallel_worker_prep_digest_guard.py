@@ -209,7 +209,7 @@ def test_default_off_result_rejects_a_corrupt_delivery_manifest_digest(tmp_path)
         released, released, tmp_path / "released", "http://127.0.0.1:30001/v1",
         tmp_path / "candidate", "http://127.0.0.1:30002/v1",
     )
-    with pytest.raises(AssertionError, match="default-off engine results differ"):
+    with pytest.raises(AssertionError, match="invalid delivery manifest digest"):
         parity._assert_default_off_result_parity(
             released, candidate, tmp_path / "released", "http://127.0.0.1:30001/v1",
             tmp_path / "candidate", "http://127.0.0.1:30002/v1",
@@ -218,4 +218,36 @@ def test_default_off_result_rejects_a_corrupt_delivery_manifest_digest(tmp_path)
         parity._assert_default_off_result_parity(
             candidate, candidate, tmp_path / "released", "http://127.0.0.1:30001/v1",
             tmp_path / "candidate", "http://127.0.0.1:30002/v1",
+        )
+
+
+def test_default_off_result_rejects_a_corrupt_reference_delivery_manifest_digest(tmp_path):
+    from kernel_delivery_manifest import build_manifest
+
+    valid = build_manifest(phase="submitted", files_changed=[], claims=[], receipts=[],
+                           open_items=[], payload={})
+    corrupt = {**valid, "manifest_id": "sha256:" + "0" * 64}
+    released = {"result": {"delivery_manifest": corrupt}, "seconds": 0.5, "exit_status": 0}
+    candidate = {"result": {"delivery_manifest": valid}, "seconds": 0.5, "exit_status": 0}
+
+    with pytest.raises(AssertionError, match="invalid delivery manifest digest"):
+        parity._assert_default_off_result_parity(
+            released, candidate, tmp_path / "released", "http://127.0.0.1:30001/v1",
+            tmp_path / "candidate", "http://127.0.0.1:30002/v1",
+        )
+
+
+def test_default_off_result_bytes_rejects_a_corrupt_reference_delivery_manifest_digest():
+    from kernel_delivery_manifest import build_manifest
+
+    valid = build_manifest(phase="submitted", files_changed=[], claims=[], receipts=[],
+                           open_items=[], payload={})
+    corrupt = {**valid, "manifest_id": "sha256:" + "0" * 64}
+    released = {"result": {"delivery_manifest": corrupt}, "seconds": 0.5, "exit_status": 0}
+    candidate = {"result": {"delivery_manifest": valid}, "seconds": 0.5, "exit_status": 0}
+
+    with pytest.raises(AssertionError, match="invalid delivery manifest digest"):
+        parity._assert_default_off_result_bytes_parity(
+            json.dumps(released, separators=(",", ":")).encode(),
+            json.dumps(candidate, separators=(",", ":")).encode(),
         )
