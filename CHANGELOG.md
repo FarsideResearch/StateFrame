@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.10.5 (2026-11-26)
 
 - Workspace effect scans can opt into reusing verified digests for stable files; the switch is off by default.
 - Completion and delivery reuse verified start-workspace bytes to avoid duplicate reads while retaining live-file checks.
