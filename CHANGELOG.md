@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.10.7 (2026-11-26)
 
 - Added opt-in `STATEFRAME_ARITHMETIC_UNITS` repair advice for numeric failures with revision-bound source and unit evidence; ordinary count multipliers retain their declared storage scale, and resumed requests reuse already-delivered advice.
 - Set `STATEFRAME_API_ATTRIBUTE_ROWS=on` to compare two discovered Python callables using current signatures and quoted contract clauses. Unfinished unrelated edits no longer suppress rows; off by default.
