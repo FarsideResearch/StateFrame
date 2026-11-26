@@ -237,8 +237,47 @@ def _source_plan_with_deferred_omissions(plan):
     return dict(plan, units=recovered) if len(recovered) > len(units) else plan
 
 
+def _price_enclosing_guard(control, guards, measure, *, closure, receipt):
+    from kernel_working_set_prepare import Trial, _violations
+    from kernel_working_set_render import render_enclosing_guard
+
+    revisions = closure.get("revisions", {})
+    delivered_ranges = {(path, revisions.get(path)): row.get("ranges", ())
+                        for path, row in receipt.get("paths", {}).items()}
+    rendered = render_enclosing_guard(control.rendered, guards, delivered_ranges)
+    if rendered is None or len(rendered.wire) > control.cap:
+        return None
+    certificate = rendered.certificate
+    measured = measure(rendered.wire)
+    if (not measured.contract_valid
+            or measured.method != control.measurement.method
+            or measured.tokenizer_identity != control.measurement.tokenizer_identity
+            or _violations(certificate.snapshot, rendered, measured)):
+        return None
+    trial = Trial(certificate.assignment_digest, certificate.body_sha256,
+                  len(rendered.wire), measured, ())
+    return replace(control, rendered=rendered, measurement=measured, trials=control.trials + (trial,))
+
+
+def _validate_enclosing_guard(capture, runtime, body, prepared, optional_inputs):
+    from kernel_stateframe_framefit5 import validate_final_product_boundary
+
+    # The validator authenticates source carriers against the active certificate.
+    control = capture._working_set_certificate
+    capture._working_set_certificate = prepared.rendered.certificate
+    try:
+        validate_final_product_boundary(
+            runtime, body["messages"], body.get("tools"), refresh_sources=False,
+            refresh_headcarry=False, optional_inputs=optional_inputs,
+        )
+        assert_certified_body(body, prepared)
+    finally:
+        capture._working_set_certificate = control
+
+
 def prepare_live(capture, runtime, body, *, dialect, reasoning_mode):
     """Prepare a certified wire, retrying plain if its cache-layout proof fails."""
+    from kernel_cache_layout_view import semantic_messages
     from kernel_frame_allocation_capture import FrozenRequestCounter
     from kernel_frame_optional_allocation import snapshot_optional_inputs
     from kernel_frame_source_snapshot import frame_source_snapshot
@@ -246,9 +285,10 @@ def prepare_live(capture, runtime, body, *, dialect, reasoning_mode):
     from kernel_request_candidate import candidate_source_plan
     from kernel_request_source_window import verify_final_source_delivery, source_delivery_satisfied
     from kernel_final_wire_budget import capture_source_witness_binding
-    from kernel_stateframe_framefit5 import _state_payload, _workspace_root
+    from kernel_stateframe_framefit5 import FrameFit5Error, _state_payload, _workspace_root
     from kernel_working_set_prepare import Blocked, prepare_candidate
     from kernel_working_set_shadow import freeze_shadow, SnapshotFailure
+    from kernel_working_set_windows import frozen_enclosing_guards
 
     plan = _source_plan_with_deferred_omissions(copy.deepcopy(candidate_source_plan(capture, runtime)))
     runtime._request_source_closure = plan
@@ -269,18 +309,20 @@ def prepare_live(capture, runtime, body, *, dialect, reasoning_mode):
     if limits is not None:
         snapshot = replace(snapshot, byte_cap=min(snapshot.byte_cap, limits.max_request_bytes),
                            prompt_limit=min(snapshot.prompt_limit, limits.max_prompt_tokens))
+    guards = frozen_enclosing_guards(snapshot, plan, getattr(runtime, "_empirical_frame_sources", {}))
 
     measure = live_measure(meter)
 
-    def qualify(prepared):
+    def qualify(prepared, *, frozen_sources=None):
         """Bind the closure proof to this certified body and its assignment."""
         body = json.loads(prepared.wire)
         assert_certified_body(body, prepared)
         certificate = prepared.rendered.certificate
-        capture._working_set_certificate = certificate
+        if frozen_sources is None:
+            capture._working_set_certificate = certificate
         selected = dict(certificate.assignment)
         closure = copy.deepcopy(plan)
-        sources = frame_source_snapshot(runtime, closure)
+        sources = frame_source_snapshot(runtime, closure) if frozen_sources is None else frozen_sources
         # CARRY-NOTE: bind closure proof to this certified assignment, never a legacy selector.
         from kernel_working_set_facts import _covered
         full = [slot for slot in certificate.snapshot.sources if selected[slot.key] == "FULL"]
@@ -298,10 +340,18 @@ def prepare_live(capture, runtime, body, *, dialect, reasoning_mode):
                 deferred.add(path)
         closure["deferred_paths"] = sorted(deferred)
         closure["source_contents"] = sources
-        capture._request_source_closure_override = closure
+        if frozen_sources is None:
+            capture._request_source_closure_override = closure
         receipt = verify_final_source_delivery(closure, body["messages"], sources=sources,
                                                payload=prepared.wire,
                                                verified_capture_witnesses=verified_capture_witnesses)
+        if frozen_sources is not None:
+            # A multiline predicate can itself contain source framing text.
+            # An advisory message must never acquire a delivery location.
+            note = certificate.snapshot.enclosing_guard.message()
+            location = f"$.messages[{body['messages'].index(note)}].content"
+            if any(location in rows for rows in receipt.get("final_message_locations", {}).values()):
+                raise ValueError("enclosing guard was interpreted as source delivery")
         binding = (capture_source_witness_binding(
             certificate, closure, sources, verified_capture_witnesses,
         ) if source_delivery_satisfied(receipt) else None)
@@ -357,12 +407,33 @@ def prepare_live(capture, runtime, body, *, dialect, reasoning_mode):
         raise RequestSealError(("cache_layout_refused: " if retried_plain else "") +
                                "certified working-set failed closure proof: " +
                                str(receipt.get("status")) + ":" + ",".join(proof_failures(receipt)))
-    certificate = prepared.rendered.certificate
-    capture.request_source_final_delivery = receipt
-    from kernel_cache_layout_view import semantic_messages
+    # The guard projection preserves the control's typed frame and optional inputs.
     frame = next(_state_payload(m)[1]["framefit5"] for m in semantic_messages(body["messages"])
                  if str(m.get("content", "")).startswith("[StateFrame]\n"))
     optional = snapshot_optional_inputs(frame, _workspace_root(runtime))
+    guard_firing = {}
+    if guards:
+        try:
+            guarded = _price_enclosing_guard(prepared, guards, measure, closure=closure, receipt=receipt)
+            proof = qualify(guarded, frozen_sources=sources) if guarded is not None else None
+            if proof is not None and source_delivery_satisfied(proof[3]):
+                _validate_enclosing_guard(capture, runtime, proof[0], guarded, optional)
+        except (ValueError, RequestSealError, FrameFit5Error, AssertionError):
+            # The optional projection must never invalidate the proven control.
+            proof = None
+        if proof is not None and source_delivery_satisfied(proof[3]):
+            prepared = guarded
+            body, closure, sources, receipt, witness_binding = proof
+            capture._working_set_certificate = prepared.rendered.certificate
+            capture._request_source_closure_override = closure
+            guard = prepared.rendered.certificate.snapshot.enclosing_guard
+            guard_firing["enclosing_guard"] = {
+                "path": guard.path, "revision": guard.revision, "arm": guard.arm,
+                "range": [guard.first_line, guard.last_line],
+                "headers": [[header.first_line, header.last_line] for header in guard.headers],
+            }
+    certificate = prepared.rendered.certificate
+    capture.request_source_final_delivery = receipt
     measured = prepared.measurement
     capture._frame_candidate_counter = FrozenRequestCounter.capture(
         body, meter, measured.prompt_tokens, measured.method, str(capture.request_id))
@@ -378,7 +449,7 @@ def prepare_live(capture, runtime, body, *, dialect, reasoning_mode):
         body_sha256=certificate.body_sha256, assignment_digest=prepared.assignment_digest,
         proof_passed=True, floor=prepared.floor_bytes, total=prepared.total_bytes,
         cap=prepared.cap, fits_without_degrade=prepared.fits_without_degrade,
-        measurement_method=measured.method, dispatch=False)
+        measurement_method=measured.method, dispatch=False, **guard_firing)
     return body, prepared
 
 

@@ -35,6 +35,14 @@ _REPORT_PANEL = (
 )
 
 
+def _arithmetic_units_enabled() -> bool:
+    return os.environ.get("STATEFRAME_ARITHMETIC_UNITS", "off").strip().lower() in {"on", "true"}
+
+
+def _api_attribute_rows_enabled() -> bool:
+    return os.environ.get("STATEFRAME_API_ATTRIBUTE_ROWS", "off").strip().lower() == "on"
+
+
 class FrameFit5Error(RuntimeError):
     """The frame-only request cannot prove its typed replacement state."""
 
@@ -1951,6 +1959,14 @@ def fit_headcarry_to_request_budget(
         raise ValueError("head-carry byte ceiling and measurement must be provided together")
     if (max_request_tokens is None) != (measure_request_tokens is None):
         raise ValueError("head-carry token ceiling and measurement must be provided together")
+    if (_arithmetic_units_enabled() and (max_request_bytes is not None or max_request_tokens is not None)
+            and messages and isinstance(messages[-1], dict)):
+        # Leave the head-carry intact if dropping the advisory makes this fit.
+        tail = messages[-1]
+        if _is_volatile_tail_message(tail) and _remove_arithmetic_units(tail):
+            if ((max_request_bytes is None or measure_request_bytes() <= max_request_bytes)
+                    and (max_request_tokens is None or measure_request_tokens() <= max_request_tokens)):
+                return 0
     if _headcarry_mode() != "on":
         return 0
     state_messages = [
@@ -2802,6 +2818,12 @@ def assemble_framefit5_request(
         )
         payload["state"] = state
         state_message["content"] = _serialize_state_message(payload)
+    if _arithmetic_units_enabled():
+        _attach_arithmetic_units(result, runtime, owner_presentation, source_plan, allocator_on)
+    if _api_attribute_rows_enabled():
+        _render_api_attribute_rows(
+            result, runtime, owner_contract, frame_request_allocation, sources,
+        )
     if projection_audit is not None:
         projection_audit["projected_count"] = projected_count
     if unallocated:
@@ -2813,6 +2835,81 @@ def assemble_framefit5_request(
             result, runtime, source_plan, qualified_surface=owner_presentation is not None,
         )
     return result
+
+
+def _api_attribute_rows(messages, runtime):
+    from kernel_r200_r015_edit_depends_choice import comparison
+    from kernel_frame_optional_allocation import FrameAllocationReplanNeeded
+    from kernel_host_authorship import ledger_of, row_kinds, structural_class
+    from kernel_stable_wire_ownership import request_frame_index
+
+    exchange = latest_complete_tool_exchange(messages)
+    if not exchange or runtime is None:
+        return None
+    capture = getattr(runtime, "_active_capture", None)
+    ledger = ledger_of(capture) or ledger_of(runtime)
+    kinds = row_kinds(ledger, messages, capture=capture)
+    try:
+        state_index = request_frame_index(messages, capture=capture)
+    except (FrameAllocationReplanNeeded, ValueError):
+        return None
+    if (type(state_index) is not int or not 0 <= state_index < len(messages)
+            or structural_class(messages, state_index, capture=capture) != "frame"
+            or kinds[state_index] not in (None, "state")
+            or any(kind == "state" and index != state_index
+                   for index, kind in enumerate(kinds))):
+        return None
+    state = messages[state_index]
+    frame = _state_payload(state)[1]["framefit5"]
+    try:
+        root = _workspace_root(runtime)
+    except (FrameFit5Error, OSError):
+        return None
+    actions = getattr(getattr(runtime, "actions", None), "actions", ())
+    return comparison(
+        messages, exchange, frame, root, _framefit5_delivered_source_ranges,
+        actions=actions, runtime=runtime,
+    )
+
+
+def _render_api_attribute_rows(messages, runtime, owner_contract, allocation, sources=None):
+    from kernel_edit_tool_names import is_edit_tool
+    from kernel_r200_r015_edit_depends_choice import fits, strip
+
+    tail = messages[-1]
+    original = tail.get("content")
+    payload, greenfact = _split_host_greenfact(_split_volatile_tail_content(original))
+    clean = strip(payload)
+    if clean != payload:
+        tail["content"] = _volatile_tail_content(clean, (), greenfact)
+    if not isinstance(owner_contract, Mapping) or not any(
+            is_edit_tool(name) for name in _owner_menu_names(owner_contract)):
+        return
+    pair = _api_attribute_rows(messages, runtime)
+    if pair is None:
+        return
+    without_rows = tail.get("content")
+    tail["content"] = _volatile_tail_content(clean, (pair[0],), greenfact)
+    if not fits(messages, owner_contract.get("admitted_tool_schemas", ()),
+                runtime, allocation, sources):
+        tail["content"] = without_rows
+
+
+def _final_api_attribute_rows_receipt(messages, runtime):
+    from kernel_cache_layout_view import semantic_messages
+    from kernel_r200_r015_edit_depends_choice import blocks
+
+    if not blocks(messages[-1].get("content")):
+        return None
+    # Cache layouts wrap the volatile tail. Require the block in both the
+    # physical provider surface and the semantic view that binds its evidence.
+    physical = json.loads(json.dumps(messages))
+    present = blocks(physical[-1].get("content"))
+    semantic = semantic_messages(physical)
+    pair = _api_attribute_rows(semantic, runtime)
+    if pair is None or present != [pair[0]] or blocks(semantic[-1].get("content")) != present:
+        raise FrameFit5Error("final API attribute rows lack their current declaration evidence")
+    return pair[1]
 
 
 def _split_marker_string(content: str) -> object | None:
@@ -3124,6 +3221,88 @@ def _report_denominators_fit(
         if _violations(snapshot, preview, Measurement(tokens, token_estimate(projected), method)):
             return False
     return True
+
+
+def _remove_arithmetic_units(tail: dict[str, object]) -> bool:
+    from kernel_r200_r002_repair_turn_numeric import is_advisory
+
+    def strip(value: str) -> str:
+        # Generated advice is one paragraph in the host-owned tail.
+        before_green = value.removesuffix(GREENFACT_TEXT)
+        parts = before_green.split("\n\n")
+        return ("\n\n".join(part for part in parts if not is_advisory(part))
+                + value[len(before_green):])
+
+    content = tail.get("content")
+    if isinstance(content, str):
+        updated = strip(content)
+    elif isinstance(content, list):
+        updated = []
+        for part in content:
+            value = part.get("text") if isinstance(part, dict) and part.get("type") == "text" else None
+            clean = strip(value) if isinstance(value, str) else None
+            if clean == value:
+                updated.append(part)
+            elif clean.strip():
+                updated.append({**part, "text": clean})
+    else:
+        return False
+    if updated == content:
+        return False
+    tail["content"] = updated
+    return True
+
+
+def _attach_arithmetic_units(messages, runtime, owner_presentation, source_plan, allocator_on):
+    from kernel_r200_r002_repair_turn_numeric import admit, replay_advisory
+
+    tail = messages[-1]
+    _remove_arithmetic_units(tail)
+    capture = getattr(runtime, "_active_capture", None)
+    if (capture is None or owner_presentation is None
+            or capture.request_id != getattr(runtime, "current_request_id", None)):
+        return
+    exchange = latest_complete_tool_exchange(messages)
+    if not exchange or len(exchange) != 2:
+        return
+    calls = exchange[0].get("tool_calls") or ()
+    if len(calls) != 1 or calls[0].get("function", {}).get("name") != "run_tests":
+        return
+    receipts = getattr(runtime, "_check_output_receipts", {})
+    if not isinstance(receipts, Mapping):
+        return
+    frame = None
+    for message in messages:
+        if not isinstance(message, Mapping):
+            continue
+        try:
+            candidate = _state_payload(message)[1].get("framefit5")
+        except FrameFit5Error:
+            continue
+        if isinstance(candidate, Mapping):
+            frame = candidate
+            break
+    if frame is None:
+        return
+    verdict = frame.get("last_verdict")
+    if not isinstance(verdict, Mapping) or verdict.get("status") != "FAIL":
+        return
+    receipt_id = verdict.get("check_receipt_id")
+    receipt = receipts.get(receipt_id)
+    if not isinstance(receipt, Mapping):
+        return
+
+    def render(line):
+        # Preserve the original content parts and keep GREENFACT at the end.
+        payload = _split_volatile_tail_content(tail.get("content"))
+        payload, greenfact = _split_host_greenfact(payload)
+        return _volatile_tail_content(payload, (line,), greenfact)
+
+    content = admit(messages, runtime, verdict, receipt, exchange[-1].get("content"),
+                    source_plan, allocator_on, render,
+                    replay_advisory=replay_advisory())
+    if content is not None:
+        tail["content"] = content
 
 
 def _is_micrograph_projection(line: str) -> bool:
@@ -4448,6 +4627,10 @@ def validate_final_product_boundary(
         raise FrameFit5Error("final frame-only request exceeds its token ceiling")
     from kernel_stateframe_f4 import assert_f4_invariants
     assert_f4_invariants(messages)
+    if _api_attribute_rows_enabled():
+        receipt = _final_api_attribute_rows_receipt(messages, runtime)
+        if receipt is not None:
+            validation["api_attribute_rows"] = receipt
     return validation
 
 

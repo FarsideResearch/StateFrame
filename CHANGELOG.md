@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Added opt-in `STATEFRAME_ARITHMETIC_UNITS` repair advice for numeric failures with revision-bound source and unit evidence; ordinary count multipliers retain their declared storage scale, and resumed requests reuse already-delivered advice.
+- Set `STATEFRAME_API_ATTRIBUTE_ROWS=on` to compare two discovered Python callables using current signatures and quoted contract clauses. Unfinished unrelated edits no longer suppress rows; off by default.
+- Opt in with `STATEFRAME_ENCLOSING_GUARD=on` to show off-screen Python branch headers for delivered source spans when the current request has room.
+- Enabled enclosing-guard notes carry exact headers as untrusted JSON source data, preserving marker-like and multiline text together with arm and line-range metadata.
+
 ## 0.10.6 (2026-11-26)
 
 - Optional repository signals are skipped when Git metadata or object storage becomes unavailable. The run can continue.
