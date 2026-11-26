@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.10.6 (2026-11-26)
 
 - Optional repository signals are skipped when Git metadata or object storage becomes unavailable. The run can continue.
 - Measure per-run disk allocation with `stateframe.storage_gc.run_allocation`, including the separate cost of shared environment seeds.
