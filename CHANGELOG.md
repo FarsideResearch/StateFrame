@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.10.8 (2026-11-26)
+
+- Added `stateframe doctor` to check Python and sandbox startup and, optionally, local model discovery and provider slot capacity.
+- Set `STATEFRAME_PYTEST_EXPECTATIONS=on` to compare an optional prediction with the reported outcome of one exact pytest node. Mismatches appear on the next request and in the run summary.
+- Opt in with `STATEFRAME_OUTCOME_MILESTONES=on` to plan multi-outcome briefs as milestones in a writable work record. Public outcomes such as a health-check endpoint count as outcomes, not check-only requests; off by default.
+- Opt-in `STATEFRAME_REQUESTED_EVIDENCE_PROBE=on` lets a stalled run ask for one targeted read before its normal progress stop, within the provider's learned byte and prompt limits.
+- Added opt-in `STATEFRAME_MIGRATION_SITE_PARTITION` guidance that reuses a grounded Python constructor or factory call edit across the remaining callers and flags callers that need review. Leave it off in this release: a run with it on can hang. The fix ships in a later release.
+
 ## 0.10.7 (2026-11-26)
 
 - Added opt-in `STATEFRAME_ARITHMETIC_UNITS` repair advice for numeric failures with revision-bound source and unit evidence; ordinary count multipliers retain their declared storage scale, and resumed requests reuse already-delivered advice.

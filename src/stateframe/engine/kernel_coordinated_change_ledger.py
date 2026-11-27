@@ -1227,6 +1227,26 @@ class CoordinatedChangeLedger:
     def remaining(self) -> tuple[ChangeItem, ...]:
         return tuple(item for item in self.items if item.status != STATUS_VERIFIED)
 
+    def migration_item(self, delta):
+        """Attach migration evidence without adding a completion obligation."""
+        from kernel_r200_r048_grounded_migration_edit import named_migration
+
+        matches = [item for item in self.items if item.defining_file == delta.path
+                   and (item.old, item.new) == (delta.old, delta.new)]
+        if len(matches) == 1:
+            return matches[0]
+        if not matches and named_migration(self.ticket, delta):
+            # A caller rewrite can be grounded before the ticket scanner has
+            # a symbol rename (e.g. an input default change).
+            key = f"callers:{delta.path}:{delta.symbol}:{delta.old}"
+            items = getattr(self, "_migration_items", None)
+            if items is None:
+                self._migration_items = items = {}
+            if key not in items:
+                items[key] = ChangeItem(key, REFERENCE_UPDATE, delta.old, delta.new, delta.path)
+            return items[key]
+        return None
+
     @property
     def scan(self) -> ScanResult:
         """Return the complete index when a caller explicitly requests it."""
@@ -2844,6 +2864,234 @@ def _render_runtime_ledger_uncached(runtime: object) -> str | None:
             suppressed_failure_details=suppressed_failures,
             revision=ledger.revision)
     return rendered
+
+
+def _migration_scope(runtime):
+    from kernel_request_source_window import editable_product_paths
+
+    paths = editable_product_paths(runtime)
+    return paths if isinstance(paths, tuple) else ()
+
+
+def _migration_source(root, relative):
+    from kernel_r200_r048_grounded_migration_edit import MAX_SOURCE_BYTES
+
+    if not relative.endswith(".py"):
+        return None
+    try:
+        path, canonical = _safe_relative(root, relative)
+        if canonical != relative:
+            return None
+        with path.open("rb") as stream:
+            raw = stream.read(MAX_SOURCE_BYTES + 1)
+        if len(raw) <= MAX_SOURCE_BYTES:
+            return raw.decode("utf-8")
+    except (CoordinatedChangeError, OSError, UnicodeError):
+        pass
+    return None
+
+
+def migration_edit_preimage(runtime, path, old, new):
+    from kernel_r200_r048_grounded_migration_edit import MAX_EDIT_BYTES
+
+    root = Path(runtime.owner.root).resolve()
+    try:
+        relative = path.relative_to(root).as_posix()
+    except ValueError:
+        return None
+    if relative in _migration_scope(runtime) and len((old + new).encode()) <= MAX_EDIT_BYTES:
+        before = _migration_source(root, relative)
+        if before is not None:
+            return relative, before
+    return None
+
+
+def _migration_ledger(runtime):
+    ledger = getattr(runtime, "coordinated_change_ledger", None)
+    if ledger is not None:
+        return ledger
+    row = runtime.owner.task_row
+    ticket = next((row[key] for key in (
+        "_bridge_ordinary_brief", "public_brief", "ticket_text", "brief", "msg",
+    ) if isinstance(row.get(key), str) and row[key].strip()), "")
+    if not ticket:
+        return None
+    # If ordinary coordination has yet to initialize, share its typed item
+    # representation without installing a new readiness owner or checkpoint.
+    ledger = getattr(runtime, "_migration_ledger", None)
+    if ledger is None:
+        runtime._migration_ledger = ledger = CoordinatedChangeLedger(
+            root=runtime.owner.root, ticket=ticket, scan=None, items=(),
+            revision="advisory", journal=runtime.journal)
+    return ledger
+
+
+def _migration_records(runtime):
+    from kernel_r200_r048_grounded_migration_edit import EDIT_ACTION, ScalarEdit
+
+    if not hasattr(runtime, "_migration_edit_records"):
+        reader = getattr(runtime.journal, "records", None)
+        records = reader(rebuild=False) if callable(reader) else ()
+        runtime._migration_edit_records = tuple(
+            (event["step"], event["role"], ScalarEdit(**event["edit"]))
+            for event in records
+            if event.get("kind") == LEDGER_EVENT and event.get("action") == EDIT_ACTION)
+    step = getattr(runtime.owner, "current_step", None)
+    return tuple((role, edit) for turn, role, edit in runtime._migration_edit_records
+                 if type(step) is int and turn < step)
+
+
+def initialize_migration(runtime, *, resuming: bool):
+    if resuming:
+        _migration_records(runtime)
+    else:
+        runtime._migration_edit_records = ()
+
+
+def _migration_source_after(root, path, records, *, pending_edit=None):
+    """Rebuild a recorded edit's postimage from current source and later receipts."""
+    source = _migration_source(root, path)
+    if source is None:
+        return None
+    edits = [edit for _, edit in records if edit.path == path]
+    if pending_edit is not None and pending_edit.path == path:
+        edits.append(pending_edit)
+    for edit in reversed(edits):
+        source = edit.preimage(source)
+        if source is None:
+            return None
+    return source
+
+
+def _producer_for(runtime, ledger, records, *, pending_edit=None):
+    from kernel_r200_r048_grounded_migration_edit import producer_delta
+
+    for role, edit in reversed(records):
+        if role != "producer":
+            continue
+        if edit.path not in _migration_scope(runtime):
+            return None
+        index = records.index((role, edit))
+        after = _migration_source_after(
+            ledger.root, edit.path, records[index + 1:], pending_edit=pending_edit)
+        before = edit.preimage(after)
+        delta = producer_delta(edit.path, before, after) if before is not None else None
+        item = ledger.migration_item(delta) if delta is not None else None
+        return (edit, delta, item) if item is not None else None
+    return None
+
+
+def record_migration_edit(runtime, capture, preimage, old, new, receipt):
+    from kernel_r200_r048_grounded_migration_edit import (
+        EDIT_ACTION, ScalarEdit, exemplar_for, producer_delta, source_edit_visible,
+    )
+
+    if preimage is None or not receipt:
+        return
+    path, before = preimage
+    ledger = _migration_ledger(runtime)
+    after = _migration_source(ledger.root, path) if ledger is not None else None
+    if after is None:
+        return
+    edit = ScalarEdit.applied(path, before, after, old, new, receipt)
+    messages = (getattr(capture, "_evictfix_final_wire_messages", None)
+                or getattr(runtime, "_last_wire_messages_for_reads", ()))
+    if edit is None or not source_edit_visible(edit, before, messages):
+        return
+    records = _migration_records(runtime)
+    if any(saved == edit for _, _, saved in runtime._migration_edit_records):
+        return
+    delta = producer_delta(path, before, after)
+    if delta is not None:
+        if ledger.migration_item(delta) is None:
+            return
+        role = "producer"
+    else:
+        producer = _producer_for(runtime, ledger, records, pending_edit=edit)
+        if producer is None:
+            return
+        producer_index = records.index(("producer", producer[0]))
+        candidates = records[producer_index + 1:]
+        exemplar_edit = next((saved for saved_role, saved in candidates
+                              if saved_role == "exemplar"), None)
+        if exemplar_edit is None:
+            if exemplar_for(producer[1], path, before, after) is None:
+                return
+            role = "exemplar"
+        elif exemplar_edit.path == path:
+            # Keep an exact receipt chain for later edits in the anchor file.
+            # It lets replay prove the exemplar still exists after unrelated
+            # scalar edits without trusting a stale whole-file revision.
+            role = "site"
+        else:
+            return
+    turn = runtime.owner.current_step
+    ledger._emit(LEDGER_EVENT, action=EDIT_ACTION, role=role, edit=edit.evidence(),
+                 step=turn)
+    runtime._migration_edit_records += ((turn, role, edit),)
+
+
+def migration_partition(runtime):
+    from kernel_r200_r048_grounded_migration_edit import (
+        CallerFile, Partition, classify, current_exemplar_location, exemplar_for,
+        producer_definition_matches,
+    )
+
+    records = _migration_records(runtime)
+    if not records or (ledger := _migration_ledger(runtime)) is None:
+        return None
+    previous = getattr(ledger, "_migration_partition_item", None)
+    if previous is not None:
+        previous._migration_partition = None
+        ledger._migration_partition_item = None
+    producer = _producer_for(runtime, ledger, records)
+    if producer is None:
+        return None
+    producer_edit, delta, item = producer
+    paths = _migration_scope(runtime)
+    producer_index = records.index(("producer", producer_edit))
+    candidates = records[producer_index + 1:]
+    observed_producer = _migration_source_after(
+        ledger.root, producer_edit.path, candidates)
+    current_producer = _migration_source(ledger.root, producer_edit.path)
+    if (observed_producer is None or current_producer is None
+            or not producer_definition_matches(delta, observed_producer, current_producer)):
+        return None
+    exemplar_index = next((index for index, (role, _) in enumerate(candidates)
+                           if role == "exemplar"), None)
+    exemplar_edit = candidates[exemplar_index][1] if exemplar_index is not None else None
+    if exemplar_edit is None or exemplar_edit.path not in paths:
+        return None
+    after = _migration_source_after(
+        ledger.root, exemplar_edit.path, candidates[exemplar_index + 1:])
+    before = exemplar_edit.preimage(after)
+    exemplar = exemplar_for(delta, exemplar_edit.path, before, after) if before is not None else None
+    if exemplar is None:
+        return None
+    following = [edit for role, edit in candidates[exemplar_index + 1:]
+                 if role == "site" and edit.path == exemplar_edit.path]
+    source = _migration_source(ledger.root, exemplar_edit.path)
+    exemplar_location = current_exemplar_location(
+        delta, exemplar, before, after, exemplar_edit, following, source)
+    if exemplar_location is None:
+        return None
+    decisions = []
+    for path in paths:
+        caller_source = source if path == exemplar_edit.path else _migration_source(ledger.root, path)
+        if caller_source is None:
+            continue
+        try:
+            caller_file = CallerFile(path, caller_source)
+        except (SyntaxError, ValueError, RecursionError):
+            continue
+        for call, caller in caller_file.relevant_calls(delta):
+            if path == exemplar.path and (caller.line, caller.column) == exemplar_location:
+                continue
+            decisions.append(classify(delta, exemplar, call, caller))
+    item._migration_partition = partition = Partition(
+        item.item_id, delta, producer_edit, exemplar_edit, tuple(decisions))
+    ledger._migration_partition_item = item
+    return partition
 
 
 __all__ = [

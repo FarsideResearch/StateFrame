@@ -3430,7 +3430,7 @@ def _done_tool_surface(tools: list[dict], row: dict) -> list[dict]:
 
 def _tools_for_probe_modes(*, probe_gate_on: bool,
                            observation_probe_on: bool,
-                           dependency_fact_on: bool = False) -> list[dict]:
+                           dependency_fact_on: bool = False, native_pytest: bool = True) -> list[dict]:
     """Select the per-request probe surface without changing the OFF base list."""
     from kernel_shell_tool import service as shell_service
     shell = shell_service()
@@ -3438,6 +3438,13 @@ def _tools_for_probe_modes(*, probe_gate_on: bool,
                   or (shell is not None and shell.settings.shell != "off")]
     from kernel_agent_tools import project_menu
     base_tools = project_menu(base_tools)
+    if native_pytest and os.environ.get("STATEFRAME_PYTEST_EXPECTATIONS") == "on":
+        from kernel_pytest_expectations import PREDICTION_SCHEMA
+        for index, tool in enumerate(base_tools):
+            if tool["function"]["name"] == "run_tests":
+                tool = base_tools[index] = copy.deepcopy(tool)
+                tool["function"]["parameters"]["properties"]["prediction"] = PREDICTION_SCHEMA
+                break
     _unit_module = sys.modules.get("kernel_unit_policy")
     _unit = _unit_module.active() if _unit_module is not None else None
     if _unit is not None:
@@ -4215,6 +4222,164 @@ def _live_action_references(measurement, bolt, fileset, target=None) -> dict[str
             "work_ids": work_ids, "step_numbers": step_numbers}
 
 
+def _requested_evidence_body(body, capture, runtime, endpoint, key):
+    """Spend prompt slack only when the complete source working set fits."""
+    from dataclasses import replace
+    from kernel_launch_identity_cost import reasoning_profile
+    from kernel_provider_dialect import RUN_CAPABILITY_CACHE, capabilities_for
+    from kernel_request_budget import _request_token_meter
+    from kernel_stateframe_framefit5 import VOLATILE_TAIL_MARKER
+    from kernel_tool_call_loop_breaker import REQUESTED_EVIDENCE_PROBE
+    from kernel_capacity_retry import learned_context_limit, learned_request_limits
+    from kernel_working_set_allocator import FULL
+    from kernel_working_set_live import live_measure
+    from kernel_working_set_prepare import _violations
+    from kernel_working_set_render import domain, render_assignment
+    from kernel_working_set_shadow import freeze_shadow
+    from kernel_working_set_snapshot import PreparationSnapshot
+
+    messages = body["messages"]
+    tail = messages[-1].get("content") if messages else None
+    if (not isinstance(tail, str) or not tail.startswith(VOLATILE_TAIL_MARKER)
+            or REQUESTED_EVIDENCE_PROBE in tail.splitlines()
+            or not any(tool.get("function", {}).get("name") == "read" for tool in body["tools"])):
+        return body
+    proposal = {**body, "messages": [*messages[:-1], {
+        **messages[-1], "content": tail + "\n" + REQUESTED_EVIDENCE_PROBE}]}
+    dialect = capabilities_for(endpoint, key, cache=RUN_CAPABILITY_CACHE).dialect
+    snapshot = freeze_shadow(
+        proposal, runtime, request_id=capture.request_id, dialect=dialect,
+        reasoning_mode=reasoning_profile(manifest=capture.journal.manifest).mode)
+    if not isinstance(snapshot, PreparationSnapshot):
+        return body
+    try:
+        retry_limits = getattr(capture, "_capacity_retry_limits", None)
+        model = body.get("model")
+        if retry_limits is None and isinstance(model, str):
+            provider_limit = learned_context_limit(capture.journal, endpoint, model, key)
+            if provider_limit is not None:
+                output_tokens = body.get("max_tokens")
+                if type(output_tokens) is not int or output_tokens < 1:
+                    return body
+                retry_limits = learned_request_limits(provider_limit, output_tokens)
+        byte_cap, prompt_limit = snapshot.byte_cap, snapshot.prompt_limit
+        if retry_limits is not None:
+            retry_bytes = getattr(retry_limits, "max_request_bytes", None)
+            retry_prompt = getattr(retry_limits, "max_prompt_tokens", None)
+            if (type(retry_bytes) is not int or retry_bytes < 0
+                    or type(retry_prompt) is not int or retry_prompt < 0):
+                return body
+            # Match live qualification before reserving room for its envelope.
+            byte_cap = min(byte_cap, retry_bytes)
+            prompt_limit = min(prompt_limit, retry_prompt)
+        # The normal qualifier still adds its host facts and envelope fields.
+        # Leave slack for those fields even when every available page is full.
+        snapshot = replace(snapshot, byte_cap=byte_cap - 4096,
+                           prompt_limit=prompt_limit - 1024,
+                           frame_limit=(None if snapshot.frame_limit is None
+                                        else snapshot.frame_limit - 1024))
+        assignment = {}
+        for slot in snapshot.slots:
+            modes = domain(snapshot, slot)
+            assignment[slot.key] = FULL if FULL in modes else modes[0]
+        trial = render_assignment(snapshot, assignment)
+        if len(trial.wire) > snapshot.byte_cap:
+            return body
+        measure = live_measure(_request_token_meter(runtime, capture, tokenizer_endpoint=endpoint))
+        if not _violations(snapshot, trial, measure(trial.wire)):
+            return proposal
+    except (ValueError, OSError):
+        pass  # The probe needs positive fit evidence. Let ordinary qualification proceed.
+    return body
+
+
+def _requested_evidence_reply(prepared, name, arguments, *, single_action):
+    """Bind the selected action to a provider response that saw the probe."""
+    from kernel_cache_layout_view import semantic_messages
+    from kernel_stateframe_framefit5 import VOLATILE_TAIL_MARKER
+    from kernel_tool_call_loop_breaker import MAX_REQUESTED_EVIDENCE_LINES, REQUESTED_EVIDENCE_PROBE
+
+    capture = prepared.capture
+    revision = getattr(capture, "_requested_evidence_revision", None)
+    if (revision is None or not capture.selected_response_event_id
+            or not getattr(capture, "_requested_evidence_rendered", False)):
+        return None
+    messages = semantic_messages(_sent_request_messages(prepared))
+    tail = messages[-1].get("content") if messages else None
+    if (not isinstance(tail, str) or not tail.startswith(VOLATILE_TAIL_MARKER)
+            or REQUESTED_EVIDENCE_PROBE not in tail.splitlines()):
+        return None
+    fields = {"request_id": capture.request_id, "response_id": capture.selected_response_event_id,
+              "delivered_send": capture.transport_attempt_id, "revision": revision}
+    read = None
+    required_read_fields = {"path", "start_line", "end_line"}
+    if (single_action and name == "read"
+            and required_read_fields <= set(arguments)
+            and set(arguments) <= required_read_fields | {"why"}
+            and ("why" not in arguments or isinstance(arguments["why"], str))):
+        path, first, last = (arguments[key] for key in ("path", "start_line", "end_line"))
+        if (isinstance(path, str) and 0 < len(path) <= 240 and path != "."
+                and "\\" not in path and path.isprintable()
+                and pathlib.PurePosixPath(path).as_posix() == path
+                and not pathlib.PurePosixPath(path).is_absolute()
+                and ".." not in pathlib.PurePosixPath(path).parts
+                and type(first) is int and type(last) is int
+                and 0 < first <= last < first + MAX_REQUESTED_EVIDENCE_LINES):
+            read = {"path": path, "start_line": first, "end_line": last}
+    capture.journal.emit("requested_evidence_probe_response", **fields, action=name,
+                         requested_read=read, dispatch=False)
+    return {**fields, **read} if read is not None else None
+
+
+def _requested_evidence_record_read(watch, journal, requested_read, result, delivery, probe_capture):
+    """Record only the exact, unclipped source span requested by the eliciting reply."""
+    if (result != "OK" or not isinstance(requested_read, Mapping)
+            or not isinstance(delivery, Mapping) or probe_capture is None):
+        return False
+    span = getattr(probe_capture, "identity", None)
+    if span is None:
+        return False
+    try:
+        requested_span = tuple(requested_read[key] for key in ("path", "start_line", "end_line"))
+        delivered_span = (span.path, span.first_line, span.last_line)
+        response_id = requested_read["response_id"]
+        request_id = requested_read["request_id"]
+        capture_id = probe_capture.capture_id
+    except (AttributeError, KeyError):
+        return False
+    if (getattr(probe_capture, "origin_response_id", None) != response_id
+            or getattr(span, "lossy_span", None) is not None
+            or type(getattr(span, "byte_start", None)) is not int
+            or type(getattr(span, "byte_end", None)) is not int
+            or span.byte_end <= span.byte_start
+            or delivered_span != requested_span
+            or delivery.get("clip_reason")):
+        return False
+    journal.emit(
+        "requested_evidence_probe_read", **requested_read,
+        source_revision=span.revision, capture_id=capture_id,
+        payload_sha256=span.payload_sha256, dispatch=False)
+    watch.requested_evidence_read = (request_id, capture_id)
+    return True
+
+
+def _requested_evidence_followup(watch, capture, action):
+    pending = getattr(watch, "requested_evidence_read", None)
+    if pending is None or not capture.selected_response_event_id:
+        return
+    watch.requested_evidence_read = None
+    origin, capture_id = pending
+    certificate = getattr(capture, "_working_set_certificate", None)
+    if certificate is None:
+        return
+    full = {witness.slot_id for witness in certificate.witnesses if witness.mode == "FULL"}
+    if any(slot.key in full and capture_id in slot.capture_ids for slot in certificate.snapshot.slots):
+        capture.journal.emit(
+            "requested_evidence_probe_used", request_id=capture.request_id, probe_request_id=origin,
+            capture_id=capture_id, delivered_send=capture.transport_attempt_id,
+            response_id=capture.selected_response_event_id, action=action, dispatch=False)
+
+
 def ask_tools(messages, mt=4000, temp=None, tools=None, known_refs=None):
     """Tool-call turn: returns (content, tool_calls) — tool_calls in wire shape.
 
@@ -4362,6 +4527,7 @@ def ask_tools(messages, mt=4000, temp=None, tools=None, known_refs=None):
                                                 "plan_cache_n": plan_capture.accounting.get("cache_n"),
                                                 "plan_prompt_n": plan_capture.accounting.get("prompt_n")})
     from kernel_pilot import POLICY, charge
+    _probe_tail = None
     for attempt in range(POLICY.transport_attempts + int(timeout_retry_active)):
         if (timeout_retry_active and attempt >= POLICY.transport_attempts
                 and timeout_retry_attempt != attempt):
@@ -4432,6 +4598,12 @@ def ask_tools(messages, mt=4000, temp=None, tools=None, known_refs=None):
                 if capture is None:
                     raise ValueError("step contracts require a captured StateFrame binding")
                 configure(body, tools, capture.snapshot_id)
+        if getattr(capture, "_requested_evidence_revision", None) is not None:
+            if _probe_tail is None:
+                proposal = _requested_evidence_body(body, capture, ACTIVE_RUNTIME.get(), API, KEY)
+                capture._requested_evidence_rendered = proposal is not body
+                _probe_tail = proposal["messages"]
+            body["messages"] = _probe_tail
         _ex = _cf.ThreadPoolExecutor(max_workers=1)
         fut = _ex.submit(_one_call, body, socket_timeout)
         try:
@@ -6432,6 +6604,20 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
                 owner._rec("unit_plan", "unit_gate_collection_error", reason)
             return None
 
+        _prediction = None
+        _report = None
+        _test_runner = _run_check
+        if os.environ.get("STATEFRAME_PYTEST_EXPECTATIONS") == "on":
+            from kernel_pytest_expectations import ACTIVE, run_reported
+            _prediction = ACTIVE.get()
+            if _prediction is not None and _prediction.execution_id is None:
+                def _test_runner(command):
+                    nonlocal _report
+                    completed, _report = run_reported(
+                        command, root=root, env=env, execution_id=_execution_id,
+                        profiled=_profiled_command, run=_run_check)
+                    return completed
+
         _unit_collected = None
         _unit_source_digest = ""
         from unit_planner_v2 import coalesce_collection
@@ -6443,7 +6629,7 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
         _check_output_truncated = None
         p, _shadow = _effect_test_subprocess(
             _compose_test_command(_cmd, targets), root=root, targets=targets, env=env,
-            runner=_run_check)
+            runner=_test_runner)
         if _shadow is not None:
             return _shadow_observation(_shadow)
         if getattr(p, "execution_stop", None) is not None:
@@ -6461,7 +6647,7 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
             _check_output_truncated = None
             p, _shadow = _effect_test_subprocess(
                 _compose_test_command((*_cmd, "--noconftest"), targets), root=root,
-                targets=targets, env=env, runner=_run_check)
+                targets=targets, env=env, runner=_test_runner)
             if _shadow is not None:
                 return _shadow_observation(_shadow)
             if getattr(p, "execution_stop", None) is not None:
@@ -6715,6 +6901,8 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
     # `File "...", line N` frame is not evidence, it is a rumour.
     if _test_tampering:
         meaning = _test_tampering
+    elif _report is not None and _prediction is not None:
+        _prediction.observe(_execution_id, _report)
     body = _pytest_failure_excerpt(tail)
     if _unit is not None:
         # The unit receipt is built after the disposable clone is scanned. Raw
@@ -8939,7 +9127,7 @@ def work(d, *, resume=None):
         _base_tools = _tools_for_probe_modes(
             probe_gate_on=_probe_gate_on,
             observation_probe_on=_observation_probe_on,
-            dependency_fact_on=_dependency_fact_on)
+            dependency_fact_on=_dependency_fact_on, native_pytest=d.get("runner_kind") != "generic")
         from kernel_work_record import tool_surface as work_record_tool_surface
         from kernel_obligation_assess import mode as _host_closure_mode
         from kernel_sweep_fixes import enabled as _sweep_fixes_enabled
@@ -9900,6 +10088,7 @@ def work(d, *, resume=None):
         if not interventions:
             msgs[:] = baseline_messages
         from kernel_stateframe_runtime import StateFrameRuntime
+        from kernel_stateframe_framefit5 import migration_site_partition_enabled
         from kernel_measurement import ACTIVE_REQUEST
         _working_backwards = d.get("_working_backwards")
         if isinstance(_working_backwards, Mapping):
@@ -9945,6 +10134,10 @@ def work(d, *, resume=None):
             startup_schema_budget=_agent_tools.startup_schema_budget if _agent_tools is not None else None)
         if _report_chronology is not None:
             bolt._report_chronology = _report_chronology
+        _migration_site_partition = migration_site_partition_enabled()
+        if _migration_site_partition:
+            from kernel_coordinated_change_ledger import initialize_migration
+            initialize_migration(measurement, resuming=resume is not None)
         if _minimal_launch:
             measurement._minimal_launch = True
         measurement.run_limitations = run_limitations
@@ -10646,10 +10839,15 @@ def work(d, *, resume=None):
         _loop_limit = _budget.tool_attempt_limit
         from kernel_tool_call_loop_breaker import UnboundedProgressWatch, stop_unbounded_no_progress
         _progress_watch = UnboundedProgressWatch() if step_cap is None else None
+        from kernel_tool_call_loop_breaker import requested_evidence_probe_enabled
+        _requested_evidence_on = (_progress_watch is not None and toolcall_mode and not _lean_on
+                                  and requested_evidence_probe_enabled())
         if (_progress_watch is not None and resume is not None
                 and "unbounded_progress_watch" in _restored):
             _progress_watch = UnboundedProgressWatch.from_snapshot(
                 _restored["unbounded_progress_watch"])
+        if _requested_evidence_on:
+            _progress_watch.enable_evidence_probe()
         if resume is not None and isinstance(_restored, Mapping):
             from kernel_edit_repair_hook import SNAPSHOT_KEY as _EDIT_REPAIR_KEY, restore_ledger
             restore_ledger(measurement, _restored.get(_EDIT_REPAIR_KEY))  # edit_repair_ledger
@@ -11037,6 +11235,7 @@ def work(d, *, resume=None):
         from kernel_read_receipts import begin_read_attempt, finish_pending as _finish_read_attempt
         for step in step_indices(step + 1, _loop_limit):
             _read_result = None
+            _requested_evidence_read = None
             _finish_read_attempt(measurement)
             _read_forwarded = False
             if _hook_wiring_for_run is not None and _pending_hook_action is not None:
@@ -11180,6 +11379,8 @@ def work(d, *, resume=None):
             tool_edit_protocol_args = None   # (tool_name, args) for edit_source / rewrite_source
             tool_probe_args = None        # structured probe arguments (gate or observation mode)
             tool_repro_args = None        # model-authored scratch reproduction arguments
+            _pytest_prediction = None
+            _pytest_note = ""
             tool_predict_args = None      # host-owned scratch prediction arguments
             tool_dependency_fact_args = None  # installed-dependency characterization request
             tool_work_args = None         # typed host-owned work-record operations
@@ -11626,6 +11827,18 @@ def work(d, *, resume=None):
                         break
                 measurement.system_outcome = "response_budget_exhausted"
                 break
+            if (_requested_evidence_on and _provider_request and not _frame_routes.ROUTES_ACTIVE
+                    and not getattr(_prepared.capture, "self_plan_wants_plan", False)
+                    and not measurement.system_outcome
+                    and _progress_watch.evidence_probe_due(step)
+                    and any(tool.get("function", {}).get("name") == "read" for tool in _request_tools or ())):
+                _evidence_revision = measurement.binding().get("artifact")
+                if _progress_watch.claim_evidence_probe(_evidence_revision, boundary=step):
+                    _prepared.capture._requested_evidence_revision = _evidence_revision
+                    measurement.journal.emit(
+                        "requested_evidence_probe_trigger", request_id=_prepared.capture.request_id,
+                        revision=_evidence_revision, step=step, reason="no_new_host_revision_or_evidence",
+                        dispatch=False)
             _capture_token = measurement.activate(_prepared)
 
             def _provider_request_once():
@@ -11678,6 +11891,9 @@ def work(d, *, resume=None):
                                     tools=_request_tools, known_refs=_action_known_refs)
                         else:
                             response = ask(list(_prepared.messages), temp=run_temp)
+                        if _migration_site_partition and _provider_request:
+                            from kernel_stateframe_framefit5 import record_migration_delivery
+                            record_migration_delivery(_prepared.capture, measurement)
                         if _unit is not None and _provider_request:
                             measurement._unit_first_request_sent = True
                         return response
@@ -11932,6 +12148,11 @@ def work(d, *, resume=None):
                         except (TypeError, ValueError):
                             _args = {}
                             _args_parse_error = True
+                        if _requested_evidence_on and _provider_request:
+                            _requested_evidence_followup(_progress_watch, _prepared.capture, _name)
+                            _requested_evidence_read = _requested_evidence_reply(
+                                _prepared, _name, _args,
+                                single_action=(len(calls) == 1 and (native_batch is None or native_batch.size == 1)))
                         if getattr(measurement, "stateframe_completion_owner_mode", "off") == "on":
                             from kernel_completion_owner import note_model_action
                             note_model_action(measurement, _fn.get("name") or "")
@@ -13086,6 +13307,9 @@ def work(d, *, resume=None):
                                 (_args.get("candidate_id") if isinstance(_args.get("candidate_id"), str) else None),
                             )
                         elif _name == "run_tests":
+                            if os.environ.get("STATEFRAME_PYTEST_EXPECTATIONS") == "on":
+                                from kernel_pytest_expectations import Prediction
+                                _pytest_prediction = Prediction.from_argument(_args.get("prediction"))
                             line = ("test " + str(_args.get("target") or "")).strip()
                         elif _name == "reproduce":
                             line = "reproduce"
@@ -15590,6 +15814,8 @@ def work(d, *, resume=None):
                     # and fresh reads close the same native continuation effect.
                     from kernel_read_exec import dispatch_live_read
                     from kernel_model_policy import resolve_model_policy
+                    _probe_scope = (getattr(measurement, "_read_attempt_scope", None)
+                                    if _requested_evidence_read is not None else None)
                     _read_visible_messages = msgs
                     _read_admission_restore = None
                     if getattr(bolt, "_report_chronology", None) is not None:
@@ -15610,6 +15836,10 @@ def work(d, *, resume=None):
                             visible_messages=_read_visible_messages,
                             page_line_limit=_lean_read_page_line_limit,
                             page_byte_limit=_lean_read_page_byte_limit)
+                        _probe_capture = getattr(_probe_scope, "capture", None)
+                        _requested_evidence_record_read(
+                            _progress_watch, measurement.journal, _requested_evidence_read,
+                            _read_result, _read_delivery, _probe_capture)
                     finally:
                         if _read_admission_restore is not None:
                             restore_report_chronology_read_admission(
@@ -16099,6 +16329,7 @@ def work(d, *, resume=None):
                     _pdg = getattr(bolt, "predispatch_gate", None)
                     _predispatch_blocked = False
                     _bound_reason = _bound_edit_refusal(root, p, tool_target_ref)
+                    _migration_preimage = None
                     from kernel_action_identity import canonical_edit
                     _edit_attempt = canonical_edit(
                         bolt, p, dialect="str_replace", old=tool_str_args[0],
@@ -16135,6 +16366,10 @@ def work(d, *, resume=None):
                                 {"path": str(p), "old_str": tool_str_args[0],
                                  "new_str": tool_str_args[1]}):
                             continue
+                        if _migration_site_partition:
+                            from kernel_coordinated_change_ledger import migration_edit_preimage
+                            _migration_preimage = migration_edit_preimage(
+                                measurement, p, *tool_str_args)
                         if os.environ.get("STATEFRAME_JQ_FINISH", "off") == "on":
                             from kernel_jq_finish import validated_str_replace
                             def _validated_str_replace():
@@ -16192,6 +16427,10 @@ def work(d, *, resume=None):
                         "REJECTED" if "REJECTED" in obs else "FAILED",
                         obs, attempt=_edit_attempt,
                         target_path=receipt_target_path(root, p))
+                    if _migration_preimage is not None and "applied." in obs:
+                        from kernel_coordinated_change_ledger import record_migration_edit
+                        record_migration_edit(measurement, _prepared.capture, _migration_preimage,
+                                              *tool_str_args, bolt.last_receipt_id)
                     if _str_replace_applied and _hook_wiring_for_run is not None:
                         _hook_wiring_for_run.note_applied(tool_call_id, (str(p),))
                     if _str_replace_applied:
@@ -16441,12 +16680,16 @@ def work(d, *, resume=None):
                     from kernel_generic_check import cause_excerpt_enabled
                     if cause_excerpt_enabled():
                         _check_options["cause_excerpt"] = _check_causes
-                if multifile and _test_selectors:
-                    obs, _test_codes = run_tests_for_selectors(
-                        root, fn, _test_selectors, d["rel"], row=d, **_check_options)
-                else:
-                    obs = run_tests(root, fn, rest or None, d["rel"], row=d, **_check_options)
-                    _test_codes = None
+                with _pytest_prediction.active() if _pytest_prediction is not None else nullcontext():
+                    if multifile and _test_selectors:
+                        obs, _test_codes = run_tests_for_selectors(
+                            root, fn, _test_selectors, d["rel"], row=d, **_check_options)
+                    else:
+                        obs = run_tests(root, fn, rest or None, d["rel"], row=d, **_check_options)
+                        _test_codes = None
+                if _pytest_prediction is not None and _pytest_prediction.mismatch:
+                    from kernel_pytest_expectations import record
+                    _pytest_note = record(measurement, _pytest_prediction.mismatch)
                 _unit_gate_observation = obs  # retain host-only raw evidence through string decoration
                 plain_observation = obs
                 if os.environ.get("STATEFRAME_EMPIRICAL_FIXES", "off") == "on":
@@ -17346,6 +17589,8 @@ def work(d, *, resume=None):
                     _scope_line = None
                 from unit_planner_v2 import coalesce_notice_observation
                 delivered_obs = coalesce_notice_observation(bolt, delivered_obs)
+                if _pytest_note:
+                    delivered_obs = _pytest_note + "\n" + delivered_obs
                 _trailer = ("\n" + _scope_line) if _scope_line else ""
                 _full_delivery = delivered_obs + _trailer if _check_causes else ""
                 if has_framefit5_state(msgs):

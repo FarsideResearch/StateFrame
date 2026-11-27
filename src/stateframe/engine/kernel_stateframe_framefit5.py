@@ -7,6 +7,7 @@ import json
 import os
 import sys
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path, PurePosixPath
 
 from kernel_stateframe_f4 import (
@@ -33,6 +34,11 @@ _REPORT_PANEL = (
     "\n\nReport denominators (task-declared CSV, eligible means confirmed by the rule, "
     "null means unknown): "
 )
+MIGRATION_SITE_PARTITION_ENV = "STATEFRAME_MIGRATION_SITE_PARTITION"
+
+
+def migration_site_partition_enabled() -> bool:
+    return os.environ.get(MIGRATION_SITE_PARTITION_ENV, "off").strip().lower() == "on"
 
 
 def _arithmetic_units_enabled() -> bool:
@@ -2789,6 +2795,9 @@ def assemble_framefit5_request(
             sources=sources,
             frame_request_allocation=frame_request_allocation,
         )
+    if migration_site_partition_enabled():
+        _fit_migration_site_partition(
+            result, runtime, owner_contract, sources, frame_request_allocation)
     if wire is not None:
         state_messages = [message for message in result
                           if str(message.get("content") or "").startswith(STATE_HEADER + "\n")]
@@ -2833,6 +2842,11 @@ def assemble_framefit5_request(
     if _report_denominators_enabled():
         _attach_report_denominators(
             result, runtime, source_plan, qualified_surface=owner_presentation is not None,
+        )
+    from kernel_obligation_seed import outcome_milestones_enabled
+    if outcome_milestones_enabled():
+        _project_outcome_milestones(
+            result, runtime, owner_contract, sources, frame_request_allocation,
         )
     return result
 
@@ -2910,6 +2924,305 @@ def _final_api_attribute_rows_receipt(messages, runtime):
     if pair is None or present != [pair[0]] or blocks(semantic[-1].get("content")) != present:
         raise FrameFit5Error("final API attribute rows lack their current declaration evidence")
     return pair[1]
+
+
+def _project_outcome_milestones(messages, runtime, owner_contract, sources, allocation):
+    """Add the optional planning panel only after assembling the existing evidence."""
+    from kernel_obligation_seed import outcome_milestone_sources
+    from kernel_work_record import (
+        WorkRecordStore, brief_for_owner, is_outcome_milestone_projection, render_work_record,
+    )
+
+    tail = messages[-1]
+    payload, greenfact_count = _split_host_greenfact(
+        _split_volatile_tail_content(tail["content"]),
+    )
+    stripped = _strip_prior_tail_fact(payload, is_outcome_milestone_projection)
+    if stripped != payload:
+        tail["content"] = _volatile_tail_content(stripped, (), greenfact_count)
+    record = getattr(runtime, "work_record", None)
+    owner = getattr(runtime, "owner", None)
+    if (not isinstance(record, WorkRecordStore) or owner is None
+            or _active_unit_spec() is not None):
+        return
+    if not isinstance(owner_contract, Mapping):
+        return
+    tools = owner_contract.get("admitted_tool_schemas")
+    if not isinstance(tools, list):
+        return
+    from kernel_completion_owner import callable_action_names
+    callable_names = callable_action_names(owner_contract)
+    if callable_names is not None and "work" not in callable_names:
+        return
+    if (str(getattr(runtime, "stateframe_host_closure_mode", "off")).strip().lower() == "on"
+            or not _outcome_milestone_work_ops_admitted(tools)):
+        return
+    clauses = outcome_milestone_sources(brief_for_owner(owner))
+    if not clauses:
+        return
+    fact = render_work_record(record, compact=True, max_chars=4096, outcome_sources=clauses)
+    if not fact:
+        return
+    candidate_tail = _volatile_tail_content(stripped, (fact,), greenfact_count)
+    candidate = [*messages[:-1], {**tail, "content": candidate_tail}]
+    if _outcome_milestones_fit(candidate, tools, runtime, sources, allocation):
+        tail["content"] = candidate_tail
+
+
+def _outcome_milestones_fit(messages, tools, runtime, sources, allocation):
+    from kernel_context import FRAME_CEILING_TOKENS, token_estimate
+    from kernel_request_budget import (
+        ENDPOINT_PROMPT_TOKEN_BUDGET, ENDPOINT_REQUEST_BYTES_PER_TOKEN,
+        HARD_MAX_REQUEST_BYTES,
+    )
+
+    ceiling = getattr(runtime, "frame_ceiling", None)
+    if type(ceiling) is not int or ceiling <= 0:
+        return False
+    token_limit = min(ceiling, ENDPOINT_PROMPT_TOKEN_BUDGET)
+    byte_limit = HARD_MAX_REQUEST_BYTES
+    if allocation is not None:
+        token_limit = min(token_limit, allocation.capacity["token_ceiling"])
+        byte_limit = min(byte_limit, allocation.capacity["byte_ceiling"])
+    capture = getattr(runtime, "_active_capture", None)
+    retry_limits = getattr(capture, "_capacity_retry_limits", None)
+    if retry_limits is not None:
+        token_limit = min(token_limit, retry_limits.max_prompt_tokens)
+        byte_limit = min(byte_limit, retry_limits.max_request_bytes)
+    measured_frame_budget = (
+        ceiling != FRAME_CEILING_TOKENS or "STATEFRAME_CEILING" in os.environ
+    )
+    token_reserve = 0
+    if capture is not None and measured_frame_budget:
+        from kernel_evictfix_mode import enabled as evictfix_enabled
+        if evictfix_enabled():
+            from kernel_frame_allocation_capture import _TOKEN_FIT_RESERVE
+            token_reserve = _TOKEN_FIT_RESERVE
+    fit_token_limit = max(1, token_limit - token_reserve)
+
+    # Before allocation, source carriers can still grow. Reserve the known
+    # closure and raw read ranges so the planning panel cannot compete with
+    # source delivery. Lossy read spans have no comparable raw size bound.
+    reserve = len(json.dumps(list(sources.values())).encode()) if isinstance(sources, Mapping) else 0
+    working_set = getattr(runtime, "working_set_state", None)
+    active_obligations = None
+    if working_set is not None:
+        try:
+            active_obligations = tuple(working_set.active_obligations())
+        except Exception:
+            return False
+    pending_source_messages = _outcome_pending_source_messages(
+        messages, sources, active_obligations,
+    )
+    if pending_source_messages is None:
+        return False
+    reserve += sum(
+        len(row["content"].partition("\n")[0].encode()) + 1
+        for row in pending_source_messages
+    )
+    if active_obligations is not None:
+        for obligation in active_obligations:
+            identity = obligation.identity
+            if identity.byte_start is None or identity.byte_end is None:
+                return False
+            reserve += 6 * (identity.byte_end - identity.byte_start) + 512
+    body = _outcome_milestone_token_body(messages, tools, runtime, capture)
+    size = len(json.dumps(body).encode()) + reserve
+    token_body = body
+    if pending_source_messages:
+        token_body = {**body, "messages": [*messages, *pending_source_messages]}
+    if capture is None:
+        measured_tokens = token_estimate(token_body)
+    else:
+        try:
+            from kernel_frame_allocation_capture import final_request_tokens
+            from kernel_request_budget import _request_token_meter
+
+            meter = _request_token_meter(runtime, capture)
+            measured_tokens, _method = final_request_tokens(token_body, meter, capture)
+        except Exception:
+            # This panel is advisory. If its request cannot be measured with
+            # the active fit authority, omit it and preserve the fitted frame.
+            return False
+    return (measured_tokens <= fit_token_limit
+            and size <= min(byte_limit, token_limit * ENDPOINT_REQUEST_BYTES_PER_TOKEN))
+
+
+def _outcome_pending_source_messages(
+        messages: Sequence[Mapping[str, object]], sources: Mapping[str, str] | None,
+        active_obligations: Sequence[object] | None,
+) -> list[dict[str, str]] | None:
+    """Model pending source windows and their fitter summary during panel fit checks."""
+    if not isinstance(sources, Mapping):
+        return [] if active_obligations is None or not active_obligations else None
+    if active_obligations is None:
+        candidates: list[tuple[str, str, str]] = []
+        for path, source in sources.items():
+            if not isinstance(path, str) or not isinstance(source, str):
+                return None
+            if not source:
+                continue
+            line_count = len(source.splitlines(keepends=True))
+            if not line_count:
+                continue
+            window = _outcome_rendered_source_window(path, source, None, 1, line_count)
+            if window is None:
+                return None
+            candidates.append((path, source, window))
+    else:
+        candidates: list[tuple[str, str, str]] = []
+        seen_ranges: set[tuple[str, int, int]] = set()
+        seen_windows: set[tuple[str, int, int]] = set()
+        read_source_chars = 0
+        for obligation in active_obligations:
+            identity = getattr(obligation, "identity", None)
+            path = getattr(identity, "path", None)
+            revision = getattr(identity, "revision", None)
+            first_line = getattr(identity, "first_line", None)
+            last_line = getattr(identity, "last_line", None)
+            byte_start = getattr(identity, "byte_start", None)
+            byte_end = getattr(identity, "byte_end", None)
+            if (not isinstance(path, str) or not isinstance(revision, str)
+                    or type(first_line) is not int or first_line < 1
+                    or type(last_line) is not int or last_line < first_line
+                    or type(byte_start) is not int
+                    or type(byte_end) is not int or byte_start < 0 or byte_end < byte_start):
+                return None
+            source = sources.get(path)
+            if not isinstance(source, str):
+                return None
+            key = (path, byte_start, byte_end)
+            if key in seen_ranges:
+                continue
+            seen_ranges.add(key)
+            window_key = (path, first_line, last_line)
+            if window_key in seen_windows:
+                continue
+            seen_windows.add(window_key)
+            try:
+                excerpt = source.encode("utf-8")[byte_start:byte_end].decode("utf-8")
+            except UnicodeDecodeError:
+                return None
+            window = _outcome_rendered_source_window(
+                path, source, revision, first_line, last_line,
+            )
+            if window is None:
+                return None
+            candidates.append((path, excerpt, window))
+            source_lines = source.splitlines(keepends=True)
+            read_source_chars += len("".join(source_lines[first_line - 1:last_line]))
+    pending: list[dict[str, str]] = []
+    for path, source, rendered_window in candidates:
+        if not isinstance(path, str) or not isinstance(source, str):
+            return None
+        if not source:
+            continue
+        # A delivered range must carry the same rendered source-window envelope
+        # used by the later fitter. Seeing its raw excerpt in unrelated text is
+        # not enough to prove that the window's token cost is already present.
+        if _outcome_value_contains_text(messages, rendered_window):
+            continue
+        pending.append({
+            "role": "user",
+            "content": rendered_window,
+        })
+    if active_obligations is not None and candidates:
+        read_summary = (
+            f"kept {len(candidates)} recent reads; about {read_source_chars} chars of source fit"
+        )
+        if not _outcome_value_contains_text(messages, read_summary):
+            pending.append({"role": "user", "content": read_summary})
+    return pending
+
+
+def _outcome_rendered_source_window(
+        path: str, source: str, revision: str | None, start_line: int, end_line: int,
+) -> str | None:
+    """Render a pending read with the exact envelope charged by FrameFit."""
+    from kernel_request_source_window import (
+        WINDOW_CONTENT_MARKER, _render_ranges, _safe_framefit_path, project_source_window,
+    )
+
+    source_bytes = source.encode("utf-8")
+    current_revision = "sha256:" + hashlib.sha256(source_bytes).hexdigest()
+    lines = source.splitlines(keepends=True)
+    if (_safe_framefit_path(path) != path
+            or revision is not None and revision != current_revision
+            or end_line > len(lines)
+            or start_line < 1 or end_line < start_line):
+        return None
+    revision = current_revision
+    raw_window = _render_ranges(
+        lines, [{"start_line": start_line, "end_line": end_line}],
+        path=path, revision=revision, total_lines=len(lines),
+    )
+    rendered = project_source_window(raw_window, owner="recent_editable_read")
+    if not rendered:
+        return None
+    receipt = (f"[read page] path={path} revision={revision} "
+               f"lines={start_line}-{end_line}/{len(lines)} complete=true")
+    marker = "\n" + WINDOW_CONTENT_MARKER + "\n"
+    if marker not in rendered:
+        return None
+    return rendered.replace(marker, "\n" + receipt + marker, 1)
+
+
+def _outcome_value_contains_text(value: object, target: str) -> bool:
+    if isinstance(value, str):
+        return target in value
+    if isinstance(value, Mapping):
+        return any(_outcome_value_contains_text(item, target) for item in value.values())
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return any(_outcome_value_contains_text(item, target) for item in value)
+    return False
+
+
+def _outcome_milestone_work_ops_admitted(tools: Sequence[object]) -> bool:
+    required = {"add_step", "add_field"}
+    for tool in tools:
+        if not isinstance(tool, Mapping):
+            continue
+        function = tool.get("function")
+        if not isinstance(function, Mapping) or function.get("name") != "work":
+            continue
+        parameters = function.get("parameters")
+        if not isinstance(parameters, Mapping):
+            continue
+        properties = parameters.get("properties")
+        if not isinstance(properties, Mapping):
+            continue
+        operations = properties.get("ops")
+        if not isinstance(operations, Mapping):
+            continue
+        items = operations.get("items")
+        variants = items.get("oneOf") if isinstance(items, Mapping) else None
+        if not isinstance(variants, Sequence) or isinstance(variants, (str, bytes, bytearray)):
+            continue
+        admitted: set[str] = set()
+        for variant in variants:
+            if not isinstance(variant, Mapping):
+                continue
+            variant_properties = variant.get("properties")
+            operation = variant_properties.get("op") if isinstance(variant_properties, Mapping) else None
+            name = operation.get("const") if isinstance(operation, Mapping) else None
+            if isinstance(name, str):
+                admitted.add(name)
+        if required <= admitted:
+            return True
+    return False
+
+
+def _outcome_milestone_token_body(messages, tools, runtime, capture):
+    body = {"messages": messages, "tools": tools}
+    route = getattr(capture, "frame_route", None)
+    model = getattr(route, "model", None)
+    if not isinstance(model, str) or not model:
+        journal = getattr(runtime, "journal", None)
+        manifest = getattr(journal, "manifest", None)
+        model = manifest.get("model") if isinstance(manifest, Mapping) else None
+    if isinstance(model, str) and model:
+        body["model"] = model
+    return body
 
 
 def _split_marker_string(content: str) -> object | None:
@@ -3305,6 +3618,116 @@ def _attach_arithmetic_units(messages, runtime, owner_presentation, source_plan,
         tail["content"] = content
 
 
+def _fit_migration_site_partition(messages, runtime, owner_contract, sources, allocation):
+    from kernel_coordinated_change_ledger import migration_partition
+    from kernel_context import token_estimate
+    from kernel_frame_allocation_capture import calibrated_estimate
+    from kernel_request_budget import ENDPOINT_PROMPT_TOKEN_BUDGET, HARD_MAX_REQUEST_BYTES
+    from kernel_r200_r048_grounded_migration_edit import parse_fact
+
+    # Normalize a carried tail even if the source changed since its last fit.
+    tail = messages[-1]
+    payload = _split_volatile_tail_content(tail["content"])
+    payload, greenfact = _split_host_greenfact(payload)
+    if isinstance(payload, str):
+        clean = "\n\n".join(part for part in payload.split("\n\n") if parse_fact(part) is None)
+        if clean != payload:
+            payload = clean
+            tail["content"] = _volatile_tail_content(payload, (), greenfact)
+    elif isinstance(payload, list):
+        clean = []
+        for part in payload:
+            text = part if isinstance(part, str) else (
+                part.get("text") if isinstance(part, Mapping) else None)
+            if not isinstance(text, str):
+                clean.append(part)
+                continue
+            kept = "\n\n".join(segment for segment in text.split("\n\n")
+                                 if parse_fact(segment) is None)
+            if kept == text:
+                clean.append(part)
+            elif kept.strip("\n"):
+                clean.append(kept if isinstance(part, str) else {**part, "text": kept})
+        if clean != payload:
+            payload = clean or None
+            tail["content"] = _volatile_tail_content(payload, (), greenfact)
+    if runtime is None or not isinstance(owner_contract, Mapping):
+        return
+    partition = migration_partition(runtime)
+    fact = partition.render() if partition is not None else None
+    if fact is None:
+        return
+
+    # Price the addition with intact messages/tools and reserve the entire
+    # source selection before fitter-controlled windows can yield to it.
+    proposed = _volatile_tail_content(payload, (fact,), greenfact)
+    body = {"messages": [*messages[:-1], {**tail, "content": proposed}],
+            "tools": owner_contract.get("admitted_tool_schemas", ())}
+    reserve = [{"role": "user", "content": source} for source in (sources or {}).values()]
+    state = getattr(runtime, "working_set_state", None)
+    ledger = getattr(runtime, "read_capture_ledger", None)
+    if state is not None and ledger is not None:
+        from kernel_measurement import _read_journal_blob
+
+        captures = {item.capture_id: item for item in ledger.all()}
+        try:
+            for obligation in state.active_obligations():
+                page = json.loads(_read_journal_blob(
+                    runtime.journal.path, captures[obligation.capture_ids[-1]].original_page_blob_ref))
+                reserve.append({"role": "user", "content": page})
+        except (IndexError, KeyError, OSError, ValueError):
+            return
+    occupied = {"messages": [*body["messages"], *reserve], "tools": body["tools"]}
+    byte_limit = min(HARD_MAX_REQUEST_BYTES, MAX_PRODUCT_BYTES)
+    token_limit = min(runtime.frame_ceiling, ENDPOINT_PROMPT_TOKEN_BUDGET)
+    if allocation is not None:
+        byte_limit = min(byte_limit, allocation.capacity["byte_ceiling"])
+        token_limit = min(token_limit, allocation.capacity["token_ceiling"])
+    capture = getattr(runtime, "_active_capture", None)
+    retry = getattr(capture, "_capacity_retry_limits", None)
+    if retry is not None:
+        byte_limit = min(byte_limit, retry.max_request_bytes)
+        token_limit = min(token_limit, retry.max_prompt_tokens)
+    meter = getattr(capture, "_request_token_meter", None) or getattr(runtime, "_request_token_meter", None)
+    if (len(json.dumps(occupied).encode()) <= byte_limit
+            and max(token_estimate(occupied), calibrated_estimate(occupied, meter)) <= token_limit):
+        tail["content"] = proposed
+
+
+def record_migration_delivery(capture, runtime):
+    """Observe the final fitted wire rather than an intermediate projection."""
+    from kernel_cache_layout_view import semantic_messages
+    from kernel_coordinated_change_ledger import LEDGER_EVENT, migration_partition
+    from kernel_r200_r048_grounded_migration_edit import DELIVERY_ACTION, parse_fact
+
+    messages = (getattr(capture, "_evictfix_final_wire_messages", None)
+                or getattr(runtime, "_last_wire_messages_for_reads", ()))
+    tail = next((row for row in reversed(semantic_messages(messages))
+                 if _is_volatile_tail_message(row)), None)
+    if tail is None:
+        return
+    content = tail.get("content")
+    parts = [content] if isinstance(content, str) else content
+    texts = [part if isinstance(part, str) else part.get("text")
+             for part in parts or () if isinstance(part, (str, Mapping))]
+    facts = [fact for text in texts if isinstance(text, str) for line in text.splitlines()
+             if (fact := parse_fact(line)) is not None]
+    expected = migration_partition(runtime) if not facts else None
+    omitted = parse_fact(expected.render()) if expected is not None else None
+    if not facts and omitted is None:
+        return
+    capture.journal.emit(LEDGER_EVENT, action=DELIVERY_ACTION,
+                         request_id=capture.request_id, step=capture.step,
+                         partition=facts[0]["partition"] if len(facts) == 1 else
+                         omitted["partition"] if omitted is not None else None,
+                         delivered_instances=len(facts),
+                         sites=[{key: site["caller"][key]
+                                 for key in ("path", "revision", "line", "column", "end_line")}
+                                | {"classification": site["classification"]}
+                                for fact in facts for site in fact["sites"]],
+                         dispatch=False)
+
+
 def _is_micrograph_projection(line: str) -> bool:
     prefix = "micrograph: "
     if not line.startswith(prefix):
@@ -3330,23 +3753,50 @@ def _strip_projection_lines(text: str) -> str:
 
 def _strip_prior_micrograph_fact(payload: object) -> object:
     """Remove every prior assembler projection, even after host facts were appended."""
-    def strip_text(text: str) -> str:
+    def strip_projection(text: str) -> str:
         segments = text.split("\n\n")
         retained = [segment for segment in segments if not _is_micrograph_projection(segment)]
         joined = text if len(retained) == len(segments) else "\n\n".join(retained)
         return _strip_projection_lines(joined)
 
+    return _map_tail_text(payload, strip_projection)
+
+
+def _strip_prior_tail_fact(payload: object, matches: Callable[[str], bool]) -> object:
+    def strip_fact(text: str) -> str:
+        # The generated fact is one JSON line, with a leading blank separator
+        # when it follows another fact in the same text part.
+        kept: list[str] = []
+        skip_separator = False
+        for line in text.split("\n"):
+            if skip_separator:
+                skip_separator = False
+                if not line:
+                    continue
+            if not matches(line):
+                kept.append(line)
+                continue
+            if kept and kept[-1] == "":
+                kept.pop()
+            elif not kept:
+                skip_separator = True
+        return "\n".join(kept)
+
+    return _map_tail_text(payload, strip_fact)
+
+
+def _map_tail_text(payload: object, transform: Callable[[str], str]) -> object:
     if isinstance(payload, str):
-        return strip_text(payload) or None
+        return transform(payload) or None
     if isinstance(payload, Sequence) and not isinstance(payload, (str, bytes, bytearray)):
         parts: list[object] = []
         for part in payload:
             if isinstance(part, str):
-                stripped = strip_text(part)
+                stripped = transform(part)
                 if stripped or stripped == part:
                     parts.append(stripped)
             elif isinstance(part, Mapping) and isinstance(part.get("text"), str):
-                stripped = strip_text(part["text"])
+                stripped = transform(part["text"])
                 if stripped or stripped == part["text"]:
                     updated = copy.deepcopy(dict(part))
                     updated["text"] = stripped

@@ -23,6 +23,7 @@ from kernel_obligation_seed import (
     extract_obligations,
     host_seed_operations,
     open_obligations as _open_seed_obligations,
+    outcome_milestones_enabled,
     public_manifest_for_owner,
 )
 
@@ -311,15 +312,104 @@ def _take_bounded(rows: list[dict], limit: int) -> tuple[list[dict], int]:
     return rows[:left] + rows[-right:], len(rows) - limit
 
 
+OUTCOME_MILESTONE_PREFIX = "[OUTCOME MILESTONES] "
+_OUTCOME_MILESTONE_FIELD = "outcome_milestone"
+_OUTCOME_MILESTONE_RULE = (
+    "Work backward from each requested outcome. Cut at the earliest point a real user "
+    "can take the action and see the expected result if development stops there. "
+    "Assign each prerequisite to the first outcome that needs it. Wire that outcome's "
+    "real caller now and defer infrastructure used only by later outcomes. "
+    "Use an open work goal, add_step and add_field. Keep milestones in delivery order. "
+    "Put 'User action: … | Expected result: …' "
+    "in milestone step text. Set the outcome_milestone field to an object with "
+    "source_clauses (1–8 IDs from this brief) and prerequisites (0–8 existing earlier "
+    "step IDs, in dependency order). Reuse prerequisite IDs. For the next action, "
+    "resolve missing prerequisites and exercise the user path. Work-record status "
+    "is advisory for milestones. Use existing checks to verify completion."
+)
+
+
+def is_outcome_milestone_projection(line: str) -> bool:
+    if not line.startswith(OUTCOME_MILESTONE_PREFIX):
+        return False
+    try:
+        payload = json.loads(line[len(OUTCOME_MILESTONE_PREFIX):])
+    except ValueError:
+        return False
+    return isinstance(payload, dict) and payload.get("rule") == _OUTCOME_MILESTONE_RULE
+
+
+def _outcome_milestone_refs(step: Mapping[str, object]) -> tuple[list[str], list[str]] | None:
+    # Host-seeded work (including the untyped fallback) retains its normal
+    # completion authority even if a model adds milestone metadata to it.
+    if step["id"] == "step-0" or _host_brief_step(step):
+        return None
+    metadata = step["fields"].get(_OUTCOME_MILESTONE_FIELD)
+    if not isinstance(metadata, Mapping) or set(metadata) != {"source_clauses", "prerequisites"}:
+        return None
+    try:
+        clauses = _refs(metadata["source_clauses"], "source_clauses")
+        prerequisites = _refs(metadata["prerequisites"], "prerequisites")
+    except ValueError:
+        return None
+    prefix = "User action: "
+    text = step["text"]
+    action, separator, result = text.removeprefix(prefix).partition(" | Expected result: ")
+    if (not text.startswith(prefix) or not separator or not action.strip() or not result.strip()
+            or not clauses or any(not re.fullmatch(r"obl-[0-9]{3,4}", ref) for ref in clauses)
+            or any(not _ID_RE.fullmatch(ref) for ref in prerequisites)):
+        return None
+    return clauses, prerequisites
+
+
+def _outcome_milestone_projection(steps: Sequence[Mapping[str, object]],
+                                  sources: Mapping[str, str]) -> dict | None:
+    """Bind the active milestone to public clauses and earlier work-record steps."""
+    earlier = {}
+    for step in steps:
+        fields = step["fields"]
+        if (step["status"] in {"todo", "doing", "blocked"} and step["id"] != "step-0"
+                and not _host_brief_step(step) and _OUTCOME_MILESTONE_FIELD in fields):
+            refs = _outcome_milestone_refs(step)
+            if refs is None:
+                return None
+            clause_ids, prerequisite_ids = refs
+            if (any(ref not in sources for ref in clause_ids)
+                    or any(ref not in earlier for ref in prerequisite_ids)):
+                return None
+            return {
+                "active_outcome": {
+                    "id": step["id"], "goal_id": step["goal_id"],
+                    "status": step["status"], "text": step["text"], "source_clauses": clause_ids,
+                },
+                "prerequisites": [earlier[ref] for ref in prerequisite_ids],
+            }
+        if step["status"] != "dropped":
+            earlier[step["id"]] = {key: step[key] for key in ("id", "status", "text")}
+    return {}
+
+
 def render_work_record(state: Mapping[str, object] | "WorkRecordStore",
                        *, max_chars: int = MAX_RENDER_CHARS,
-                       compact: bool = False) -> str:
+                       compact: bool = False,
+                       outcome_sources: Mapping[str, str] | None = None) -> str:
     """Render a deterministic, bounded model-facing work-record block."""
     if isinstance(state, WorkRecordStore):
         state = state.snapshot()
     validated = _validate_record_shape(state)
     if type(max_chars) is not int or max_chars < 256:
         raise ValueError("max_chars must be an integer of at least 256")
+    if outcome_sources is not None:
+        if not outcome_sources:
+            return ""
+        outcome = _outcome_milestone_projection(validated["steps"], outcome_sources)
+        if outcome is None:
+            return ""
+        goals = [row["id"] for row in validated["goals"] if row["status"] == "open"]
+        payload = {"rule": _OUTCOME_MILESTONE_RULE, "source_clauses": outcome_sources,
+                   "open_goals": goals, **outcome}
+        rendered = OUTCOME_MILESTONE_PREFIX + _canonical(payload)
+        return rendered if len(rendered.encode("utf-8")) <= max_chars else ""
     if compact:
         open_goals = [
             {"id": row["id"], "status": row["status"], "title": row["title"]}
@@ -457,6 +547,17 @@ def open_work(state: Mapping[str, object] | "WorkRecordStore") -> list[str]:
         state = state["work_record"]
     validated = _validate_record_shape(state)
     host_seeded = any(_host_brief_step(row) for row in validated["steps"])
+    advisory_milestones = outcome_milestones_enabled()
+    seed_refs = set()
+    if advisory_milestones:
+        for row in validated["steps"]:
+            if _host_brief_step(row):
+                fields = row["fields"]
+                seed_refs.add(fields["obligation_id"])
+                parent = fields.get("parent_obligation_id")
+                if isinstance(parent, str):
+                    seed_refs.add(parent)
+    earlier_steps = set()
     result: list[str] = []
     for row in validated["goals"]:
         if row["status"] not in {"open", "blocked"}:
@@ -468,7 +569,14 @@ def open_work(state: Mapping[str, object] | "WorkRecordStore") -> list[str]:
             continue
         result.append(row["id"])
     for row in validated["steps"]:
+        refs = _outcome_milestone_refs(row) if advisory_milestones else None
+        advisory = (refs is not None and (not seed_refs or seed_refs.issuperset(refs[0]))
+                    and earlier_steps.issuperset(refs[1]))
+        if advisory_milestones and row["status"] != "dropped":
+            earlier_steps.add(row["id"])
         if row["status"] not in {"todo", "doing", "blocked"}:
+            continue
+        if advisory:
             continue
         if _host_brief_step(row):
             ident = row["fields"].get("obligation_id")
@@ -754,6 +862,7 @@ class WorkRecordStore:
             ident = _record_id(op["id"])
             original = self._step(ident)
             self._assert_not_locked(original, action="split")
+            original_index = self.steps.index(original)
             values = op["into"]
             if not isinstance(values, list) or not 2 <= len(values) <= 8:
                 raise ValueError("into must contain 2 to 8 step texts")
@@ -773,6 +882,10 @@ class WorkRecordStore:
                 self.steps.insert(index, row)
                 index += 1
                 created.append(row["id"])
+            if outcome_milestones_enabled():
+                self._rewrite_split_milestone_prerequisites(
+                    ident, created, start_index=original_index + len(created) + 1,
+                )
             return created
         if name == "amend_step":
             self._exact_op(op, name, {"id", "text"})
@@ -860,6 +973,34 @@ class WorkRecordStore:
     @staticmethod
     def _clip_reason(value: str) -> str:
         return value if len(value) <= 48 else value[:45] + "..."
+
+    def _rewrite_split_milestone_prerequisites(
+            self, prerequisite_id: str, replacements: Sequence[str], *, start_index: int,
+    ) -> None:
+        """Keep downstream advisory milestones bound to every split prerequisite."""
+        for step in self.steps[start_index:]:
+            if step["status"] not in {"todo", "doing", "blocked"}:
+                continue
+            refs = _outcome_milestone_refs(step)
+            if refs is None:
+                continue
+            _source_clauses, prerequisites = refs
+            if prerequisite_id not in prerequisites:
+                continue
+            rewritten = [
+                replacement
+                for reference in prerequisites
+                for replacement in (
+                    replacements if reference == prerequisite_id else (reference,)
+                )
+            ]
+            if len(rewritten) > MAX_BASIS_REFS:
+                raise ValueError(
+                    "splitting prerequisite would exceed the outcome milestone reference limit"
+                )
+            metadata = dict(step["fields"][_OUTCOME_MILESTONE_FIELD])
+            metadata["prerequisites"] = rewritten
+            step["fields"][_OUTCOME_MILESTONE_FIELD] = metadata
 
     @staticmethod
     def _assert_not_locked(row: Mapping[str, object], *, action: str) -> None:
