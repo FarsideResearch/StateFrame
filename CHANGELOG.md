@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.10.8 (2026-11-26)
 
 - Added opt-in `STATEFRAME_MIGRATION_SITE_PARTITION` guidance for reusing grounded Python constructor and factory call edits and reviewing caller exceptions. Leave it off in this release: a run with it on can hang; the fix ships in a later release.
 - Fixed migration partitions to ignore unaffected positional callers, reject changed producer signatures, and preserve grounded exemplars through context edits and replay.
