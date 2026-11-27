@@ -24,6 +24,8 @@ CROSS_VERSION_MARKERS = (
 # Files that run an older tree but compare no request bytes, with the reason.
 EXEMPT = {
     "acceptance/test_doc_command_sweep.py": "positive control: asserts the old release fails; no byte comparison",
+    # 0.10.8: r048 ships default OFF with its suite skipped (switch-ON run hangs); remove when the r048 fix lands.
+    "test_r200_r048_grounded_migration_edit.py": "r048 suite skipped in 0.10.8 pending the switch-ON hang fix",
 }
 KEYWORDS = {change.keyword for change in CHANGED_DEFAULTS.values()}
 

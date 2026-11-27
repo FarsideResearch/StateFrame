@@ -17,8 +17,6 @@ _defer_subcommand_imports = _startup_optimization_enabled()
 if not _defer_subcommand_imports:
     from . import inspect_run
 
-from .resume import ResumeRefused
-from .runner import RunError, RunOptions, resume_run, run
 from . import routes
 from .task_row import TaskRowError
 from .workcopy import WorkCopyError
@@ -35,6 +33,18 @@ from .engine.kernel_safe_paths import safe_expanduser, safe_home
 
 if TYPE_CHECKING:
     from .engine.kernel_execution_boundary import Boundary
+    from .runner import RunOptions
+
+
+def run(*args, **kwargs):
+    from .runner import run as run_task
+    return run_task(*args, **kwargs)
+
+
+def resume_run(*args, **kwargs):
+    from .runner import resume_run as resume_task
+    return resume_task(*args, **kwargs)
+
 
 def _task_text(value: str) -> str:
     """``--task`` is literal text, or ``@path`` to read it from a file."""
@@ -264,7 +274,7 @@ class _JSONArgumentParser(argparse.ArgumentParser):
         raise ValueError(message)
 
 
-def build_parser(*, json_errors: bool = False) -> argparse.ArgumentParser:
+def build_parser(*, json_errors: bool = False, doctor_only: bool = False) -> argparse.ArgumentParser:
     parser_class = _JSONArgumentParser if json_errors else argparse.ArgumentParser
     parser = parser_class(
         prog="stateframe",
@@ -272,8 +282,24 @@ def build_parser(*, json_errors: bool = False) -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"stateframe {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
 
-    run_cmd = commands.add_parser("run", help="fix a task in a repository (works on a safe copy)")
-    _add_task_arguments(run_cmd, for_run=True)
+    if not doctor_only:
+        run_cmd = commands.add_parser("run", help="fix a task in a repository (works on a safe copy)")
+        _add_task_arguments(run_cmd, for_run=True)
+
+    doctor_cmd = commands.add_parser(
+        "doctor", help="check host and local model server readiness",
+        description="Check Python and sandbox startup. With a configured local provider, "
+                    "also check model discovery and reported slot sizes using GET requests.")
+    endpoint = doctor_cmd.add_argument("--endpoint", metavar="URL", default=os.environ.get("STATEFRAME_ENDPOINT"),
+                                       help="loopback provider URL (default: $STATEFRAME_ENDPOINT)")
+    model = doctor_cmd.add_argument("--model", metavar="NAME", default=os.environ.get("STATEFRAME_MODEL"),
+                                    help="model name (default: $STATEFRAME_MODEL)")
+    endpoint.contract_default_kind = model.contract_default_kind = "runtime"
+    doctor_cmd.add_argument("--api-key-env", metavar="VAR", help="environment variable holding the API key")
+    doctor_cmd.add_argument("--json", action="store_true", help="print one JSON diagnostic report")
+    if doctor_only:
+        # Other command registrations load POSIX-only modules, including fcntl.
+        return parser
 
     resume_cmd = commands.add_parser(
         "resume", help="continue an interrupted run where it stopped (same engine, same settings)")
@@ -377,6 +403,8 @@ def build_parser(*, json_errors: bool = False) -> argparse.ArgumentParser:
 
 def _run_options(args: argparse.Namespace, endpoint: Endpoint, *, warn: bool = True,
                  execution_boundary: Boundary | None = None) -> RunOptions:
+    from .runner import RunOptions
+
     if args.shell_sandbox == "off" and args.shell != "unrestricted":
         raise ToolSettingsError("--shell-sandbox off requires --shell unrestricted")
     host_authorization = None
@@ -730,6 +758,29 @@ def main(argv: list[str] | None = None) -> int:
         token.startswith("--") and "--json".startswith(token.partition("=")[0])
         for token in option_argv
     ))
+    if argv and argv[0] == "doctor":
+        parser = build_parser(json_errors=True, doctor_only=True)
+        try:
+            args = parser.parse_args(argv)
+        except ValueError:
+            # Argparse includes stray tokens in errors, which can expose a pasted URL or key.
+            return _report_error(args, "stateframe doctor: invalid arguments. See stateframe doctor --help.")
+        from .doctor import diagnose
+
+        try:
+            report = diagnose(args.endpoint, args.model, args.api_key_env)
+        except KeyboardInterrupt:
+            return _report_error(args, "stateframe: interrupted", 130)
+        if args.json:
+            print(json.dumps(report, indent=2))
+        else:
+            for name, check in report["checks"].items():
+                print(f"{name} [{check['status']}] {check['detail']}")
+        return report["exit_code"]
+
+    from .resume import ResumeRefused
+    from .runner import RunError
+
     try:
         parser = build_parser(json_errors=args.json)
         args = parser.parse_args(argv)

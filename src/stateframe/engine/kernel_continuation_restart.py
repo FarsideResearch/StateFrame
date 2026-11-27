@@ -418,7 +418,7 @@ SAFE_TAIL = frozenset({
     "edit_handle_map", "edit_handle_map_failed", "edit_repair_request", "edit_repair_request_failed",
     # Opt-in check-truth failure records (audit only): the fallback they describe is re-derived on replay.
     "check_execution_binding_register_failed", "check_truth_vacuity_journal_failed",
-    "check_execution_binding_scope_failed",
+    "check_execution_binding_scope_failed", "pytest_expectation_mismatch",
     # Opt-in host-row identity records (audit only, dispatch=False): they describe the authorship comparison and carry no resume state.
     "host_identity_shadow", "host_identity_missing", "host_authorship_manifest",
     # SHADOW state is replayed with its reads/primary requests, without effects.
@@ -474,6 +474,10 @@ SAFE_TAIL = frozenset({
     # resume, so this row lands after the checkpoint. REJECT here would refuse every
     # resume of a run that still has a retired switch set.
     "retired_switch_ignored",
+    # Requested-evidence probe records audit a replayable request and observational read;
+    # none is continuation authority, and the probe is re-derived from restored state.
+    "requested_evidence_probe_trigger", "requested_evidence_probe_response",
+    "requested_evidence_probe_read", "requested_evidence_probe_used",
     # Check-receipt execution-binding scope could not be resolved; the receipt falls back
     # to the unpinned scope. Audit only (dispatch=False), re-derived from the same pinned
     # inputs on replay, so the tail row carries no authority.

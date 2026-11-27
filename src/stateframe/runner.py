@@ -1087,6 +1087,7 @@ OPT_IN_SWITCHES = {
     "STATEFRAME_ENCLOSING_GUARD": ("off", "on"),  # off-screen Python if headers
     "STATEFRAME_EVICTFIX": ("on", "legacy"),
     "STATEFRAME_MICROGRAPH": ("on", "off"),  # experimental; the engine defaults to off
+    "STATEFRAME_MIGRATION_SITE_PARTITION": ("off", "on"),
     "STATEFRAME_STABLE_TOOL_HEAD": ("on", "off"),  # append-only tool list per run; on by default
     "STATEFRAME_COMPACT_BATCH_CHECK_RECEIPTS": ("off", "on"),
     "STATEFRAME_SHELL_STATE": ("on", "off"),  # shell cwd and exported variables persist between calls
@@ -1097,14 +1098,17 @@ OPT_IN_SWITCHES = {
     "STATEFRAME_REQUIREMENT_RECHECK": ("on", "off"),  # first done answered once with the task's requirement checklist
     "STATEFRAME_QGATES": ("off", "on"),  # typed intake and first-edit question gates; off by default
     "STATEFRAME_OBLIGATION_SEED_LOSSLESS": ("on", "off"),  # exact seed occurrences and overflow reporting
+    "STATEFRAME_OUTCOME_MILESTONES": ("off", "on"),
     "STATEFRAME_FINAL_CACHE_LAYOUT": ("on", "off"),  # cacheable final request layout: volatile authority last; on by default
     "STATEFRAME_WORKING_SET_STABLE_FIRST": ("on", "off"),
     "STATEFRAME_PROVIDER": ("llama.cpp",),  # operator-confirmed llama.cpp dialect override
     "STATEFRAME_STABLE_WIRE": ("on", "off"),  # append-only source windows and a split stable frame
+    "STATEFRAME_PYTEST_EXPECTATIONS": ("off", "on"),
     "STATEFRAME_HOST_ROW_IDENTITY": ("off", "shadow", "on"),  # host-authored rows tracked out of band; off by default
     "STATEFRAME_STABLE_WIRE_HEADROOM": (),  # retained, not-current source window tokens per epoch
     "STATEFRAME_STABLE_WIRE_RETAIN_PREFIX": ("on", "off"),  # relayouts may keep not-current windows in the prefix
     "STATEFRAME_ZERO_PROGRESS_NUDGE_STEP": (),  # positive int step for the one no-edit/no-check nudge; default 35
+    "STATEFRAME_REQUESTED_EVIDENCE_PROBE": ("off", "on"),
     "STATEFRAME_PARALLEL_MAX_SUBFRAMES": ("6",),
     "STATEFRAME_PARALLEL_MIN_SUBFRAMES": ("2",),
     "STATEFRAME_PARALLEL_MAX_PATHS_PER_SUBFRAME": ("6",),
@@ -1193,6 +1197,8 @@ OPT_IN_ALIASES = {
     "STATEFRAME_ARITHMETIC_UNITS": {"false": "off", "true": "on"},
     "STATEFRAME_API_ATTRIBUTE_ROWS": {"false": "off"},
     "STATEFRAME_ENCLOSING_GUARD": {"false": "off"},
+    "STATEFRAME_MIGRATION_SITE_PARTITION": {"false": "off"},
+    "STATEFRAME_REQUESTED_EVIDENCE_PROBE": {"false": "off", "true": "on"},
 }
 # The host can consume these settings without an engine reader. Parallel and launch inputs
 # cross the child boundary as typed spec records. Schedule witness can also have an engine reader.
@@ -2285,6 +2291,7 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
     environment.update(resolve_parallel_timing_env(parallel_enabled=mode != "off"))
     environment.update(opt_in)
     environment.update(options.extra_env)
+    _normalize_pytest_expectations(environment)
     environment.pop(_STARTUP_SWITCH, None)
     # Promotion uses the recorded setting even on engines without a schedule-witness reader.
     host_schedule_witness = None
@@ -3088,6 +3095,15 @@ def _provider_preflight_warnings(capabilities: Mapping[str, object]) -> list[str
     return warnings
 
 
+def _normalize_pytest_expectations(environment: dict[str, str]) -> None:
+    name = "STATEFRAME_PYTEST_EXPECTATIONS"
+    value = environment.get(name, "off")
+    if value == "off":
+        environment.pop(name, None)  # Keep the released environment and journal snapshot.
+    elif value != "on":
+        raise RunError(f"{name} must be off or on")
+
+
 def _provider_environment(options: RunOptions) -> dict[str, str]:
     """Resolve the same operator/profile environment used by the engine."""
     result = dict(os.environ)
@@ -3095,6 +3111,7 @@ def _provider_environment(options: RunOptions) -> dict[str, str]:
     result.update(resolve_opt_in_switches(
         parallel_enabled=options.parallel_mode != "off"))
     result.update(options.extra_env)
+    _normalize_pytest_expectations(result)
     if options.parallel_mode == "off":
         result = {name: value for name, value in result.items()
                   if not name.startswith("STATEFRAME_PARALLEL_")}
@@ -3650,11 +3667,12 @@ def _published_engine_status(path: Path, previous: tuple[int, int, int] | None,
     return None
 
 
-def _queue_wait_warning(run: Path) -> str | None:
-    """Summarize the longest durable queue wait, including failed sends."""
+def _journal_advisories(run: Path, *, pytest_expectations: bool = False) -> dict[str, object]:
+    """Project advisory facts from the current attempt's live or sealed journal."""
     from .engine.kernel_journal_store import journal_paths, open_journal
 
     longest = 0.0
+    mismatches = []
     # A finished run seals each journal as events.jsonl.xz; journal_paths/open_journal read both layouts.
     for path in journal_paths(run / "worker" / "measurement-runs"):
         try:
@@ -3665,12 +3683,25 @@ def _queue_wait_warning(run: Path) -> str | None:
                         seconds = record.get("seconds_waited")
                         if isinstance(seconds, (int, float)) and math.isfinite(seconds):
                             longest = max(longest, seconds)
+                    elif pytest_expectations and record.get("kind") == "pytest_expectation_mismatch":
+                        fields = ("execution_id", "nodeid", "expected", "observed")
+                        if all(isinstance(record.get(key), str) for key in fields):
+                            mismatches.append({key: record[key] for key in fields})
         except (OSError, UnicodeError, ValueError):
             continue
+    result: dict[str, object] = {}
     if longest > 0:
-        return (f"warning: the model server queued requests for up to {longest:.1f} s; "
-                "consider fewer parallel runs")
-    return None
+        result["provider_queue_wait_warning"] = (
+            f"warning: the model server queued requests for up to {longest:.1f} s; "
+            "consider fewer parallel runs")
+    if mismatches:
+        result["pytest_expectation_mismatches"] = mismatches
+    return result
+
+
+def _queue_wait_warning(run: Path) -> str | None:
+    warning = _journal_advisories(run).get("provider_queue_wait_warning")
+    return warning if isinstance(warning, str) else None
 
 
 def _print_queue_wait_warning(run: Path, printer) -> None:
@@ -5696,9 +5727,8 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
     if isinstance(summary.get("candidate_error"), str):
         candidate_error = str(summary["candidate_error"])
         printer(candidate_error)
-    queue_wait_warning = _queue_wait_warning(run_dir)
-    if queue_wait_warning is not None:
-        summary["provider_queue_wait_warning"] = queue_wait_warning
+    summary.update(_journal_advisories(
+        run_dir, pytest_expectations=spec["environment"].get("STATEFRAME_PYTEST_EXPECTATIONS") == "on"))
     printer(str(summary["cached_share_display"]))
     summary["problems"] = _problems_summary(run_dir, options)
     _print_problems(summary["problems"], printer, str(summary["problems"]["log_level"]))

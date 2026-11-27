@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+- Added opt-in `STATEFRAME_MIGRATION_SITE_PARTITION` guidance for reusing grounded Python constructor and factory call edits and reviewing caller exceptions. Leave it off in this release: a run with it on can hang; the fix ships in a later release.
+- Fixed migration partitions to ignore unaffected positional callers, reject changed producer signatures, and preserve grounded exemplars through context edits and replay.
+- Fixed grounded migration partitions to treat calls using the unchanged default as unaffected and review forwarded arguments before accepting an already-renamed keyword.
+- Fixed migration partitions to treat only explicit argument expansion as forwarding and invalidate advice when a referenced module default changes.
+- Preserved migration partitions when the exemplar edit adds `from __future__ import annotations` above the rewritten caller.
+- Tests: the parallel-off parity check now compares result structure instead of wall-clock seconds, and load-sensitive worker and replay fixtures wait for observed readiness instead of fixed delays.
+- Fix: when a repeated search is suppressed after history was trimmed or summarized, the engine now cuts only at whole tool exchanges. The next request keeps every executed sibling result and an explicit refusal for the suppressed call, instead of declaring calls with no results.
+- Added `stateframe doctor` to check Python and sandbox startup and, optionally, local model discovery and provider slot capacity.
+- Native pytest checks can compare an optional prediction with the reported outcome of one exact node. Set `STATEFRAME_PYTEST_EXPECTATIONS=on` to see mismatches on the next request and in the run summary.
+- Added opt-in `STATEFRAME_OUTCOME_MILESTONES` planning for multi-outcome briefs with a writable work record, including public outcomes such as a health-check endpoint without treating its name as a check-only request. The panel requires admitted `add_step` and `add_field` operations, stays hidden in host-closure intent-only mode, preserves EVICTFIX's measured token reserve, and retains provider model identity during reassembly.
+- Fixed milestone qualification for user-facing test commands, reserved token budget for pending source, kept milestone dependencies advisory after prerequisite splits, and hid panels when `work` is not callable.
+- Fixed milestone fit accounting to charge rendered revision-bound source windows, and excluded test-verification clauses from eligible outcomes while retaining explicit user-facing test runners.
+- Fixed milestone fitting to reserve FrameFit's retained-read summary, excluded regression-test work from requested outcomes, and qualified public commands that list failing tests.
+- Added the opt-in `STATEFRAME_REQUESTED_EVIDENCE_PROBE` advisory. A stalled composed run can ask for one targeted native read before its normal progress stop.
+- Fixed: requested-evidence reads with the optional `why` field retain their validated path and evidence binding through the next edit.
+- Fixed: requested-evidence admission honors learned provider byte and prompt caps before adding advisory text.
+- Fixed: requested-evidence delivery and resume coverage now uses deterministic local decisions and verifies source evidence against the eliciting response.
+
 ## 0.10.7 (2026-11-26)
 
 - Added opt-in `STATEFRAME_ARITHMETIC_UNITS` repair advice for numeric failures with revision-bound source and unit evidence; ordinary count multipliers retain their declared storage scale, and resumed requests reuse already-delivered advice.

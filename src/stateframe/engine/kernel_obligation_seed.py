@@ -25,6 +25,7 @@ from kernel_sentence_boundaries import sentence_ranges
 
 MODE_ENV = "STATEFRAME_OBLIGATION_SEED"
 LOSSLESS_MODE_ENV = "STATEFRAME_OBLIGATION_SEED_LOSSLESS"
+OUTCOME_MILESTONES_ENV = "STATEFRAME_OUTCOME_MILESTONES"
 SCHEMA = "stateframe-obligation/1"
 PROVENANCE = "HOST_BRIEF"
 MAX_OBLIGATION_TEXT = 400
@@ -144,6 +145,10 @@ def lossless_mode() -> str:
 
 def lossless_enabled() -> bool:
     return lossless_mode() == "on"
+
+
+def outcome_milestones_enabled() -> bool:
+    return os.environ.get(OUTCOME_MILESTONES_ENV, "off").strip() == "on"
 
 
 def _canonical(value: object) -> str:
@@ -722,6 +727,22 @@ def _kind(clause: str) -> ObligationKind:
     return "behaviour"
 
 
+def _public_test_runner_clause(clause: str) -> bool:
+    """Keep public commands about tests distinct from implementation test work."""
+    if re.match(
+            r"\s*(?:add|write|create|include|provide|implement|extend)\s+"
+            r"(?:(?:a|an|the)\s+)?"
+            r"(?:(?:unit|integration|regression|acceptance|smoke|automated)\s+)*"
+            r"tests?\b", clause, re.IGNORECASE):
+        return False
+    return bool(re.search(
+        r"\b(?:cli|command|option|endpoint|api)\b.{0,80}"
+        r"\b(?:run|execute|launch|start|list|show|display|view|inspect|search|filter|find|"
+        r"export|report)\w*\b.{0,40}\b(?:tests?|pytest|test\s+suite)\b",
+        clause, re.IGNORECASE,
+    ))
+
+
 def extract_obligations(brief: str, manifest: object = None, *,
                         source_id: str = "brief") -> tuple[Obligation, ...]:
     """Extract stable obligations from host-provided public text and files."""
@@ -817,6 +838,32 @@ def _extract_legacy_obligations(brief: str, manifest: object = None) -> tuple[Ob
             source_label=clause.label or "",
         ))
     return tuple(result)
+
+
+def outcome_milestone_sources(brief: str) -> dict[str, str]:
+    """Project a small, complete clause index from an eligible public brief."""
+    if not brief or len(brief.encode("utf-8")) > 8192:
+        return {}
+    clauses = [row for row in extract_obligations(brief)
+               if not row.unmappable]
+    if not 2 <= len(clauses) <= 12:
+        return {}
+    normalized = " ".join(brief.split())
+    if any(row.overflow or len(row.text) > MAX_OBLIGATION_TEXT
+           or " ".join(row.text.split()) not in normalized for row in clauses):
+        return {}
+    # Check-only clauses and constraints support outcomes but do not qualify a
+    # brief by themselves. Repeated occurrences count as one requested outcome.
+    outcomes = {
+        row.text for row in clauses
+        if row.kind in {"behaviour", "interface", "rename"}
+        # Test work is verification, even when it mentions a CLI/API. Count it
+        # only when the clause explicitly asks for a user-callable test runner.
+        and (not re.search(r"\b(?:tests?|lint|pytest)\b", row.text, re.IGNORECASE)
+             or row.kind == "interface" and _public_test_runner_clause(row.text))
+        and not re.match(r"\s*checks?\b", row.text, re.IGNORECASE)
+    }
+    return {row.id: row.text for row in clauses} if len(outcomes) >= 2 else {}
 
 
 def _coerce_obligation(value: Obligation | Mapping[str, object]) -> Obligation:

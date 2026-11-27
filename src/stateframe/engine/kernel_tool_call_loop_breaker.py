@@ -28,6 +28,18 @@ _SEEN_FILTER_BYTES = 8 * 1024 * 1024
 _SEEN_FILTER_HASHES = 24
 _LEGACY_SEEN_FILTER_BYTES = 128 * 1024
 
+REQUESTED_EVIDENCE_PROBE = (
+    "[Requested repository evidence] What missing repository fact could change your next edit? "
+    "If there is one, call read on a single workspace file with an explicit start_line and "
+    "end_line (at most 12 lines) that would settle it. Otherwise proceed with your next action."
+)
+MAX_REQUESTED_EVIDENCE_LINES = 12
+REQUESTED_EVIDENCE_IDLE_OBSERVATIONS = 4
+
+
+def requested_evidence_probe_enabled() -> bool:
+    return os.environ.get("STATEFRAME_REQUESTED_EVIDENCE_PROBE", "off").strip().lower() == "on"
+
 _EDIT_TOOLS = frozenset({"edit", "str_replace", "replace_module", "file_create", "write", "replace",
                          *PROTOCOL_EDIT_TOOL_NAMES})
 _TEST_TOOLS = frozenset({"run_tests", "test", "pytest"})
@@ -308,13 +320,24 @@ class UnboundedProgressWatch:
                     self._seen_filter = bytearray(_SEEN_FILTER_BYTES)
             state["seen_filter"] = base64.b64encode(self._seen_filter).decode("ascii")
             state["batch_tail_pending"] = self._batch_tail_pending
+        if getattr(self, "_requested_evidence_revision", None) is not None:
+            state["requested_evidence_revision"] = self._requested_evidence_revision
+        if hasattr(self, "_requested_evidence_idle"):
+            state["requested_evidence_idle"] = self._requested_evidence_idle
+        if getattr(self, "requested_evidence_read", None) is not None:
+            state["requested_evidence_read"] = list(self.requested_evidence_read)
         return state
 
     @classmethod
     def from_snapshot(cls, state: object) -> UnboundedProgressWatch:
+        if not isinstance(state, Mapping):
+            raise ValueError("invalid progress watch snapshot")
+        state = dict(state)
+        probe_revision = state.pop("requested_evidence_revision", "")
+        probe_idle = state.pop("requested_evidence_idle", None)
+        probe_read = state.pop("requested_evidence_read", None)
         old_fields = {"schema", "threshold", "streak", "seen", "receipt_cursor", "last_boundary"}
-        if (not isinstance(state, Mapping)
-                or (state.get("schema"), frozenset(state)) not in {
+        if ((state.get("schema"), frozenset(state)) not in {
                     ("unbounded-progress-watch/1", frozenset(old_fields)),
                     ("unbounded-progress-watch/2", frozenset(old_fields | {"batch_tail_pending"})),
                     ("unbounded-progress-watch/3", frozenset(old_fields | {"seen_filter"})),
@@ -372,7 +395,41 @@ class UnboundedProgressWatch:
                 for key in seen:
                     watch._remember_filter(key)
         watch._batch_tail_pending = tail
+        if probe_idle is not None:
+            if type(probe_idle) is not int or not 0 <= probe_idle <= watch.threshold:
+                raise ValueError("invalid requested evidence progress")
+            watch._requested_evidence_idle = probe_idle
+        if probe_revision != "":
+            if (probe_idle is None or not isinstance(probe_revision, str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", probe_revision)):
+                raise ValueError("invalid requested evidence probe revision")
+            watch._requested_evidence_revision = probe_revision
+        if probe_read is not None:
+            if (probe_idle is None or not isinstance(probe_read, list) or len(probe_read) != 2
+                    or any(not isinstance(value, str) or not 0 < len(value) <= 160 for value in probe_read)):
+                raise ValueError("invalid requested evidence read")
+            watch.requested_evidence_read = tuple(probe_read)
         return watch
+
+    def enable_evidence_probe(self) -> None:
+        if not hasattr(self, "_requested_evidence_idle"):
+            self._requested_evidence_idle = 0
+
+    def evidence_probe_due(self, boundary: int) -> bool:
+        idle = getattr(self, "_requested_evidence_idle", 0)
+        return (boundary == self._last_boundary and self.streak < self.threshold
+                and idle >= min(REQUESTED_EVIDENCE_IDLE_OBSERVATIONS, self.threshold // 2))
+
+    def claim_evidence_probe(self, artifact: object, *, boundary: int) -> bool:
+        """Offer one probe partway through an observed, still-live stall."""
+        if (not self.evidence_probe_due(boundary)
+                or not isinstance(artifact, str) or not artifact):
+            return False
+        revision = hashlib.sha256(artifact.encode()).hexdigest()
+        if getattr(self, "_requested_evidence_revision", None) == revision:
+            return False
+        self._requested_evidence_revision = revision
+        return True
 
     def _new(self, value: object) -> bool:
         key = hashlib.sha256(json.dumps(
@@ -480,6 +537,14 @@ class UnboundedProgressWatch:
                 self._batch_tail_pending = batch_origin
         self._receipt_cursor = len(receipts)
         self._last_boundary = boundary
+        if hasattr(self, "_requested_evidence_idle"):
+            # Native steps close in prepare(), after the ordinary stop check. Track
+            # novelty here and consider the advisory only when a provider send is due.
+            if progress:
+                self._requested_evidence_idle = 0
+                self.__dict__.pop("_requested_evidence_revision", None)
+            elif charge_idle:
+                self._requested_evidence_idle = min(self._requested_evidence_idle + 1, self.threshold)
         if progress:
             self.streak = 0
         elif charge_idle:

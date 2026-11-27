@@ -613,6 +613,41 @@ def test_run_specific_result_ids_normalize_without_changing_shape():
             _normalize_default_off_run_specific_ids({"prepared_event_id": invalid_id})
 
 
+def test_default_off_summary_parity_allows_only_released_candidate_keys():
+    released = {"result": "SUBMITTED", "wall_seconds": 0.0, "exit_code": 0}
+    candidate = {
+        **released,
+        "wall_seconds": 1.25,
+        "no_change": False,
+        "start_files_skipped": [],
+        "start_files_skipped_total": 0,
+    }
+    _assert_default_off_timed_mapping_parity(
+        released, candidate, "wall_seconds", "summaries",
+        candidate_only_keys=_DEFAULT_OFF_CANDIDATE_ONLY_SUMMARY_KEYS)
+
+    with pytest.raises(AssertionError, match="added unexpected keys"):
+        _assert_default_off_timed_mapping_parity(
+            released, {**candidate, "planted_unexpected_key": True}, "wall_seconds", "summaries",
+            candidate_only_keys=_DEFAULT_OFF_CANDIDATE_ONLY_SUMMARY_KEYS)
+
+    for invalid_wall_seconds in (0, "0.0", -0.1, float("nan"), float("inf")):
+        with pytest.raises(AssertionError):
+            _assert_default_off_timed_mapping_parity(
+                released, {**released, "wall_seconds": invalid_wall_seconds},
+                "wall_seconds", "summaries")
+
+
+def test_default_off_result_bytes_parity_ignores_only_seconds_value():
+    released = b'{"result":"SUBMITTED","seconds":0.0,"exit_status":0}'
+    candidate = b'{"result":"SUBMITTED","seconds":1.25,"exit_status":0}'
+    _assert_default_off_result_bytes_parity(released, candidate)
+
+    with pytest.raises(AssertionError):
+        _assert_default_off_result_bytes_parity(
+            released, b'{"result":"DRAFT","seconds":1.25,"exit_status":0}')
+
+
 def test_off_cache_profile_uses_omitted_defaults_without_explicit_cache_switches(tmp_path):
     profile_path = _write_off_cache_profile(tmp_path)
     switches = profiles.load(str(profile_path))

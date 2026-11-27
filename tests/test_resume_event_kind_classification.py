@@ -268,6 +268,20 @@ def test_callsite_census_tail_events_are_safe() -> None:
     assert all(reject_reason(kind) is None for kind in census_kinds)
 
 
+def test_requested_evidence_probe_events_are_safe_resume_tail() -> None:
+    probe_kinds = {
+        "requested_evidence_probe_trigger",
+        "requested_evidence_probe_response",
+        "requested_evidence_probe_read",
+        "requested_evidence_probe_used",
+    }
+    assert probe_kinds <= restart.SAFE_TAIL
+    assert all(
+        restart.resume_tail_rejection_reason([{"kind": kind}], allowed_tail=restart.SAFE_TAIL) is None
+        for kind in probe_kinds
+    )
+
+
 def test_every_capacity_journal_kind_has_an_explicit_resume_policy() -> None:
     observed = {kind for kind in _journal_event_kinds() if kind.startswith("capacity_")}
     policies = restart.CAPACITY_EVENT_CLASSIFICATION

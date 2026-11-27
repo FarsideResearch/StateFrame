@@ -43,6 +43,15 @@
       ]
     },
     {
+      "name": "doctor",
+      "flags": "--api-key-env= --endpoint= --help --json --model= -h",
+      "exit_codes": [
+        0,
+        2,
+        130
+      ]
+    },
+    {
       "name": "gc",
       "flags": "--apply --help --include-unfinished --json --keep-last= --older-than= --prune-seeds -h",
       "exit_codes": [
