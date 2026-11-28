@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass, field
 import hashlib
 import json
 import os
+import stat
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
@@ -223,6 +224,63 @@ class CaptureLedger:
 
 
 ReceiptLedger = CaptureLedger
+
+
+def complete_contract_read(
+        evidence: object, delivery: object,
+) -> tuple[ReceiptIdentity, str] | None:
+    """Bind a settled read to its entire lossless file, including the final byte."""
+    if (not isinstance(evidence, Mapping) or not isinstance(delivery, Mapping)
+            or evidence.get("producer") != "workspace_read"
+            or evidence.get("authority") != "HOST_OBSERVED_READ"
+            or evidence.get("omitted_chars") != 0
+            or delivery.get("result_class") != "OK"
+            or delivery.get("delivery_status") != "DELIVERED"
+            or delivery.get("decoded_with_replacement") is not False
+            or delivery.get("truncated") is not False
+            or evidence.get("start_line") != 1
+            or evidence.get("end_line") != evidence.get("total_lines")
+            or delivery.get("byte_start") != 0):
+        return None
+    path, revision, payload = (
+        evidence.get(key) for key in ("path", "file_revision", "content")
+    )
+    if not isinstance(path, str) or not isinstance(revision, str) or not isinstance(payload, str):
+        return None
+    try:
+        raw = payload.encode("utf-8")
+        payload_digest = hashlib.sha256(raw).hexdigest()
+        if (not raw or revision != f"sha256:{payload_digest}"
+                or delivery.get("revision") != revision
+                or delivery.get("page_bytes_sha256") != revision
+                or delivery.get("byte_end") != len(raw)
+                or delivery.get("requested_bytes_delivered") != len(raw)):
+            return None
+        identity = ReceiptIdentity(path, revision, 1, evidence["end_line"],
+                                   0, len(raw), payload_digest, None)
+    except (TypeError, ValueError):
+        return None
+    return identity, payload
+
+
+def contract_read_is_current(root: Path, identity: Mapping[str, object]) -> bool:
+    """Recheck only the bound bytes. An enlarged or redirected file is stale."""
+    path, size = identity.get("path"), identity.get("byte_end")
+    if not isinstance(path, str) or type(size) is not int or size <= 0:
+        return False
+    try:
+        candidate = root / path
+        if not candidate.is_relative_to(root) or candidate.resolve(strict=True) != candidate:
+            return False
+        flags = getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+        with open(candidate, "rb", opener=lambda path, mode: os.open(path, mode | flags)) as source:
+            if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+                return False
+            raw = source.read(size + 1)
+        return (len(raw) == size
+                and f"sha256:{hashlib.sha256(raw).hexdigest()}" == identity.get("revision"))
+    except (OSError, RuntimeError, ValueError, OverflowError):
+        return False
 
 
 def _request_index(runtime: object) -> int:

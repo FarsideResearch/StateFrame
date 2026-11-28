@@ -17,6 +17,8 @@ from stateframe.engine.kernel_safe_probe import ProbeCleanupError
 def test_startup_capability_and_fail_closed_errors(tmp_path, monkeypatch, check, outcome):
     from stateframe.engine import kernel_safe_probe
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(runner.os, 'getloadavg', lambda: (0.0, 0.0, 0.0))
+    monkeypatch.setattr(runner.os, 'cpu_count', lambda: 8)
     monkeypatch.setenv('HOST_SECRET', 'credential')
     monkeypatch.setenv('PYTHONPATH', str(tmp_path))
     seen = []

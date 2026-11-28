@@ -14,7 +14,8 @@ from dataclasses import dataclass
 from kernel_request_reprepare import RequestPreparationContractError
 
 PRIMARY = "framefit5_primary"
-AUXILIARY = frozenset({"self_plan", "turtle", "summary", "public_review", "bind_quantity", "decide2"})
+AUXILIARY = frozenset({"self_plan", "turtle", "summary", "public_review", "bind_quantity",
+                       "decide2", "public_identifier_slot"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +89,9 @@ def validate_auxiliary_response(capture, choice) -> None:
             or not isinstance(call.get("function"), Mapping)
             or call["function"].get("name") != "decide2_answer" for call in calls)):
         raise RequestKindError("auxiliary_workspace_response_forbidden")
+    if getattr(capture, "request_kind", None) == "public_identifier_slot":
+        from kernel_r200_f012_draft_caller_freely import selected_name
+        selected_name(capture, choice)
 
 
 def require_capture(capture, runtime=None) -> None:
@@ -117,6 +121,9 @@ def classify(capture, runtime, body: Mapping[str, object], *, side_call_contract
         elif side_call_contract is not None or (body.get("tools") and not (
                 kind == "self_plan" and body.get("tool_choice") == "none")):
             raise RequestKindError("auxiliary_workspace_tools_forbidden")
+        if kind == "public_identifier_slot":
+            from kernel_r200_f012_draft_caller_freely import validate_body
+            validate_body(capture, body)
         return False
     frame = has_framefit5_state(body.get("messages", []))
     primary = (kind == PRIMARY or framefit_expected(runtime) or frame

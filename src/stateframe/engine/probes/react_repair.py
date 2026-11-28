@@ -4430,6 +4430,10 @@ def ask_tools(messages, mt=4000, temp=None, tools=None, known_refs=None):
 
     def _one_call(body, call_timeout):
         if capture is not None:
+            if (os.environ.get("STATEFRAME_DEGENERATION_REPLAN") == "on"
+                    or os.environ.get("STATEFRAME_DEGENERATION_GREEDY_REPLAN") == "on"):
+                capture.degeneration_output_ceiling = output_ceiling
+                capture.degeneration_replan = False
             if frozen_timeout_retry_active:
                 return capture.send_with_frozen_timeout_retry(body, API, KEY)
             if timeout_retry_active:
@@ -4707,7 +4711,8 @@ def ask_tools(messages, mt=4000, temp=None, tools=None, known_refs=None):
         raw_content = m.get("content") if isinstance(m, Mapping) else None
         content = raw_content.strip() if isinstance(raw_content, str) else ""
         reasoning_content = m.get("reasoning_content") if isinstance(m, Mapping) else ""
-        if choice.get("finish_reason") == "length":
+        replan = getattr(capture, "degeneration_replan", False)
+        if replan or choice.get("finish_reason") == "length":
             if action_schema_mode:
                 from kernel_step_contract import record_action_envelope_metrics
                 record_action_envelope_metrics(
@@ -4718,7 +4723,7 @@ def ask_tools(messages, mt=4000, temp=None, tools=None, known_refs=None):
             next_max_tokens = min(mt * 2, output_ceiling)
             retry_available = attempt + 1 < POLICY.transport_attempts
             ceiling_exhausted = next_max_tokens <= mt
-            if typed_truncation and ceiling_exhausted:
+            if replan or (typed_truncation and ceiling_exhausted):
                 # earlier run rule 11d (kernel_response_truncation): at the ceiling a truncated completion is never parsed;
                 # journal it and end typed on the FIRST truncation (a seeded identical retry repeats the loop).
                 from kernel_response_truncation import EVENT, MODEL_NOTE, RESULT_CLASS
@@ -9398,6 +9403,11 @@ def work(d, *, resume=None):
         if not _lean_on and os.environ.get("STATEFRAME_REPORT_CHRONOLOGY", "off").strip().lower() == "on":
             from kernel_request_evidence_closure import report_chronology
             _report_chronology = report_chronology(d, brief)
+        _design_cue = None
+        if os.environ.get("STATEFRAME_TASK_HIERARCHY", "off").strip().lower() == "on":
+            from kernel_task_hierarchy import design_action_cue
+
+            _design_cue = design_action_cue(information.ordinary_brief)
         if _lean_on:
             from kernel_lean import BoundedToolMessages
             msgs = BoundedToolMessages(msgs)
@@ -11209,6 +11219,13 @@ def work(d, *, resume=None):
         # True save/load resume (kernel_checkpoint): restore before the loop, snapshot at each boundary.
         import kernel_checkpoint as _kernel_checkpoint
         _repeat_state_version: int | None = None
+        if (os.environ.get("STATEFRAME_PUBLIC_IDENTIFIER_SLOT", "off") == "on"
+                and os.environ.get(_kernel_checkpoint.RESTORE_ENV)):
+            from kernel_r200_f012_draft_caller_freely import requires_full_replay
+            if requires_full_replay():
+                _kernel_checkpoint.refuse_restored_setup(
+                    POC.parent, ValueError("public identifier slot requires installed source revalidation"),
+                    source=os.environ[_kernel_checkpoint.RESTORE_ENV])
         _checkpoint_restored = _kernel_checkpoint.restore_point(sys._getframe(), POC)
         if not _checkpoint_restored:
             _repeat_state_version = 1
@@ -11697,6 +11714,11 @@ def work(d, *, resume=None):
                 rewrite_applied=_repeat_rewrite_applied, provider_request=_provider_request,
                 suffix_count=len(_leg_suffix), retained_wires=_repeat_retained_wires,
             )
+            # Keep first-request guidance out of the transcript carried into later frames.
+            _initial_design_request = _provider_request and step == 0 and _design_cue is not None
+            if _initial_design_request:
+                _leg_msgs = [*_leg_msgs, {"role": "user", "content": _design_cue}]
+                _leg_uncapped = [*_leg_uncapped, {"role": "user", "content": _design_cue}]
             if not _provider_request:
                 _prepared = measurement.prepare_queued_native_action(
                     msgs, uncapped=_uncapped_messages, tools=_request_tools)
@@ -11846,6 +11868,24 @@ def work(d, *, resume=None):
                 rerouted = False
                 reroute_action = None
                 while True:
+                    delivery_journal = None
+                    original_journal_emit = None
+                    if getattr(measurement, "viable_alternatives", None) is not None:
+                        from kernel_stateframe_framefit5 import viable_pair_delivery_receipt
+
+                        # Carry the receipt on the classified submission row so a crash cannot
+                        # strand a separate, unclassified delivery event after the checkpoint.
+                        delivery_journal = measurement.journal
+                        original_journal_emit = delivery_journal.emit
+
+                        def emit_with_viable_pair_receipt(kind, *args, **fields):
+                            if kind == "request_submitted":
+                                receipt = viable_pair_delivery_receipt(measurement, fields)
+                                if receipt is not None:
+                                    fields = {**fields, "viable_alternatives_delivery": receipt}
+                            return original_journal_emit(kind, *args, **fields)
+
+                        delivery_journal.emit = emit_with_viable_pair_receipt
                     try:
                         if _unit is not None and _provider_request and not getattr(
                                 measurement, "_unit_first_request_sent", False) and (
@@ -11952,6 +11992,9 @@ def work(d, *, resume=None):
                                 prepare_host_inputs=_prepare_host_inputs, suffix=_leg_suffix,
                                 retained_wires=_repeat_retained_wires,
                             )
+                        if _initial_design_request:
+                            _retry_msgs = [*_retry_msgs, {"role": "user", "content": _design_cue}]
+                            _retry_uncapped = [*_retry_uncapped, {"role": "user", "content": _design_cue}]
                         if _provider_request and _request_host_text_preparer is not None:
                             _prepared = measurement.prepare(
                                 _retry_msgs, uncapped=_retry_uncapped,
@@ -11991,6 +12034,9 @@ def work(d, *, resume=None):
                             action=reroute_action,
                             outcome="rerouted",
                         )
+                    finally:
+                        if original_journal_emit is not None:
+                            delivery_journal.emit = original_journal_emit
 
             try:
                 from kernel_working_set_stop import check_test_injection
@@ -12260,7 +12306,9 @@ def work(d, *, resume=None):
                         # the next turn can explain why the attempted action was
                         # rejected rather than losing the model's hypothesis.
                         if _continuity_delta is not None:
-                            measurement.ingest_decision_continuity_delta(_continuity_delta)
+                            measurement.ingest_decision_continuity_delta(
+                                _continuity_delta, action=_name,
+                            )
                         bolt.last_why = str(_args.get("why") or "")[:160]
                         _validated_args = _args
                         _input_expansions = ()
@@ -16330,6 +16378,23 @@ def work(d, *, resume=None):
                     _predispatch_blocked = False
                     _bound_reason = _bound_edit_refusal(root, p, tool_target_ref)
                     _migration_preimage = None
+                    if (os.environ.get("STATEFRAME_PUBLIC_IDENTIFIER_SLOT", "off") == "on"
+                            and _bound_reason is None and not _outside_edit_scope(resolved_path)
+                            and not (_hook_wiring_for_run is not None
+                                     and _hook_wiring_for_run.protected(p))):
+                        from kernel_r200_f012_draft_caller_freely import resolve_edit
+                        _resolved_new, _stale_slot = resolve_edit(
+                            measurement, p, *tool_str_args, step=step,
+                            call_id=tool_call_id or f"text-{step}", task=_task_public_brief(d),
+                            endpoint=API, key=KEY, model=MODEL)
+                        if _stale_slot:
+                            _bound_reason = "public identifier slot evidence changed during selection"
+                        if _resolved_new != tool_str_args[1]:
+                            tool_str_args = (tool_str_args[0], _resolved_new)
+                            if toolcall_mode:
+                                _args = {**_args, "new_str": _resolved_new}
+                                if _pending_hook_action is not None:
+                                    _pending_hook_action = (_name, _args, tool_call_id, True)
                     from kernel_action_identity import canonical_edit
                     _edit_attempt = canonical_edit(
                         bolt, p, dialect="str_replace", old=tool_str_args[0],

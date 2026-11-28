@@ -355,8 +355,113 @@ def _fl04_api() -> _Fl04Api:
         return _API
 
 
+class _AnchorScan:
+    def __init__(self):
+        self.digest = hashlib.sha256()
+        self.bases = {}
+        self.sequence = 0
+        self.max_line = 0
+        self.submitted = None
+        self.prefix = None
+        self.payload = None
+        self.stamp = None
+
+    def append(self, line, row):
+        self.max_line = max(self.max_line, len(line))
+        if not line.strip():
+            return
+        if not isinstance(row, dict):
+            raise CaptureBoundaryError("public journal record is not an object")
+        sequence = row.get("sequence")
+        if type(sequence) is not int or sequence <= self.sequence:
+            raise CaptureBoundaryError("public journal prefix cannot be aligned")
+        self.sequence = sequence
+        self.digest.update(line)
+        request_id = row.get("request_id")
+        if row.get("kind") == "response_received" and isinstance(request_id, str):
+            self.bases.pop(request_id, None)
+        if row.get("kind") != "request_submitted":
+            return
+        if not isinstance(request_id, str) or not request_id:
+            raise CaptureBoundaryError("request anchor has no request id")
+        payload = row.get("payload_utf8")
+        if "payload_ref" in row:
+            base = self.bases.get(request_id)
+            identical = {"base_attempt": 1, "identical_wire": True, "changed_keys": []}
+            if (base and base[0] and row["payload_ref"] == base[0]
+                    and row.get("payload_delta") == identical
+                    and row.get("payload_hash") == base[1] and base[1]):
+                payload = base[2]
+            else:
+                payload = None
+        elif row.get("transport_attempt", 1) == 1:
+            self.bases[request_id] = (row.get("event_id"), row.get("payload_hash"), payload)
+        self.submitted = row
+        self.payload = payload
+        self.prefix = "sha256:" + self.digest.hexdigest()
+
+    def result(self, path, limit):
+        from kernel_measurement import resolve_journal_blob_refs
+
+        if self.max_line > limit:
+            raise CaptureBoundaryError("public journal prefix exceeds capture bound")
+        if self.submitted is None:
+            raise CaptureBoundaryError("public journal has no submitted request anchor")
+        payload = self.payload
+        if isinstance(payload, Mapping) and (type(payload.get("bytes")) is not int
+                                             or payload["bytes"] > limit):
+            raise CaptureBoundaryError("request anchor exceeds capture bound")
+        try:
+            payload = resolve_journal_blob_refs(payload, path)
+            if not isinstance(payload, str):
+                raise CaptureBoundaryError("latest request anchor has no verified payload")
+            if ("payload_hash" in self.submitted
+                    and self.submitted["payload_hash"] != _digest_bytes(payload.encode("utf-8"))):
+                raise CaptureBoundaryError("request anchor hash mismatch")
+        except (ValueError, OSError, EOFError, RecursionError) as exc:
+            raise CaptureBoundaryError("public request payload is invalid") from exc
+        return {**self.submitted, "payload_utf8": payload}, self.prefix
+
+
+def _scan_anchor(path: Path, limit: int) -> _AnchorScan:
+    from kernel_measurement import open_journal
+
+    scan = _AnchorScan()
+    try:
+        with open_journal(path, binary=True) as stream:
+            while line := stream.readline(limit + 1):
+                if len(line) > limit:
+                    raise CaptureBoundaryError("public journal prefix exceeds capture bound")
+                scan.append(line, json.loads(line) if line.strip() else None)
+    except (ValueError, OSError, EOFError, RecursionError) as exc:
+        raise CaptureBoundaryError("public journal is invalid") from exc
+    return scan
+
+
+def _file_stamp(info):
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _writer_anchor(journal, path, limit):
+    # Only the continuation journal holds an exclusive, identity-checked writer.
+    # Sealed files and journals without a live writer use the standalone reader.
+    if getattr(journal, "_fd", None) is None or getattr(journal, "_pid", None) != os.getpid():
+        return _scan_anchor(path, limit).result(path, limit)
+    with journal._lock:
+        journal.assert_owner()
+        stamp = _file_stamp(os.fstat(journal._fd))
+        scan = getattr(journal, "_fl_writer_anchor", None)
+        if scan is None or scan.stamp != stamp or scan.sequence != journal._sequence:
+            scan = _scan_anchor(path, limit)
+            if scan.sequence != journal._sequence or _file_stamp(path.stat()) != stamp:
+                raise CaptureBoundaryError("journal changed during anchor capture")
+            scan.stamp = stamp
+            journal._fl_writer_anchor = scan
+        return scan.result(path, limit)
+
+
 def _journal_capture(
-    journal_path: Path, max_line_bytes: int,
+    journal_path: Path, max_line_bytes: int, *, journal=None,
 ) -> tuple[Mapping[str, object], str]:
     """Find the settled request and hash its prefix without loading the journal.
 
@@ -365,6 +470,15 @@ def _journal_capture(
     This keeps one JSONL record in memory at a time, then streams only through
     the immutable request cutoff to build the prefix digest.
     """
+
+    if os.environ.get("STATEFRAME_FL_WRITER_ANCHOR") == "on":
+        from kernel_continuation_journal import JournalError
+        try:
+            return _writer_anchor(journal, journal_path, max_line_bytes)
+        except (OSError, JournalError) as exc:
+            raise CaptureBoundaryError("cannot verify live journal owner") from exc
+    if os.environ.get("STATEFRAME_FL_SINGLE_PASS_ANCHOR") == "on":
+        return _scan_anchor(journal_path, max_line_bytes).result(journal_path, max_line_bytes)
 
     submitted: Mapping[str, object] | None = None
     try:
@@ -639,6 +753,25 @@ def _controller(runtime: object) -> _Controller:
     return current
 
 
+def _detach_writer_anchor(journal: object) -> bool:
+    """Drop the process-local scan after capture is permanently disabled."""
+    if journal is None:
+        return True
+    lock = getattr(journal, "_lock", None)
+    try:
+        if lock is None:
+            setattr(journal, "_fl_writer_anchor", None)
+        else:
+            with lock:
+                setattr(journal, "_fl_writer_anchor", None)
+    except Exception:  # noqa: BLE001 - a diagnostic capture failure must not stop the run
+        try:
+            setattr(journal, "_fl_writer_anchor", None)
+        except Exception:  # noqa: BLE001 - the owning journal may be immutable
+            return False
+    return getattr(journal, "_fl_writer_anchor", None) is None
+
+
 def _capture(runtime: object, action: str, observation: str, reasons: tuple[str, ...]) -> object:
     api = _fl04_api()
     journal = runtime.journal
@@ -650,7 +783,7 @@ def _capture(runtime: object, action: str, observation: str, reasons: tuple[str,
     controller = _controller(runtime)
     if controller.captures >= max_count:
         raise CaptureBoundaryError("per-run capture count bound reached")
-    submitted, journal_prefix_hash = _journal_capture(journal_path, max_bytes)
+    submitted, journal_prefix_hash = _journal_capture(journal_path, max_bytes, journal=journal)
     cutoff = submitted["sequence"]
     payload = submitted["payload_utf8"]
     assert isinstance(payload, str)
@@ -755,12 +888,15 @@ def observe_settled_boundary(runtime: object, action: str, observation: str) -> 
             return
         controller.disabled = True
         journal = getattr(runtime, "journal", None)
+        anchor_fields: dict[str, bool] = {}
+        if os.environ.get("STATEFRAME_FL_WRITER_ANCHOR") == "on":
+            anchor_fields["writer_anchor_detached"] = _detach_writer_anchor(journal)
         emit = getattr(journal, "emit", None)
         if callable(emit):
             emit(
                 "fl_checkpoint_capture_disabled", producer="kernel_fl_checkpoint_capture",
                 event_schema=SCHEMA, reason="capture_boundary_error", error=_safe_error(error),
-                dispatch=False,
+                dispatch=False, **anchor_fields,
             )
     except Exception as error:  # noqa: BLE001 - capture must never break a run
         journal = getattr(runtime, "journal", None)

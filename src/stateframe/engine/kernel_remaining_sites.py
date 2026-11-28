@@ -12,8 +12,10 @@ from kernel_request_evidence_closure import ticket_identity_for_runtime
 import kernel_request_source_window as source_window
 
 MODE_ENV = "STATEFRAME_REMAINING_SITES"
+COMPACT_MODE_ENV = "STATEFRAME_R200_R082_MINIMIZE_REMAINING_SITES"
 GREEN_NAG_MODE_ENV = "STATEFRAME_GREEN_NAG_SITES"
 _PANEL_PREFIX = "[host] Ticket sites still containing "
+_COMPACT_PREFIX = "\n[host] Remaining ticket site: "
 _ASSIGNMENT_VALUE = (
     r"(?:true|false|True|False|null|None|undefined|[-+]?\d+(?:\.\d+)?|"
     r"0[xX][0-9A-Fa-f]+|\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|`[^`]*`)"
@@ -71,10 +73,22 @@ class GreenNagDecision:
     record: bool
 
 
+@dataclass(frozen=True, slots=True)
+class CompactCarrier:
+    call_id: str
+    content: str
+    suffix: str
+
+
 def enabled(environ: Mapping[str, object] | None = None) -> bool:
     """Enable the optional panel only by explicit opt-in."""
     values = os.environ if environ is None else environ
     return str(values.get(MODE_ENV, "off")).strip().lower() == "on"
+
+
+def compact_enabled(environ: Mapping[str, object] | None = None) -> bool:
+    values = os.environ if environ is None else environ
+    return str(values.get(COMPACT_MODE_ENV, "off")).strip().lower() == "on"
 
 
 def green_nag_enabled(environ: Mapping[str, object] | None = None) -> bool:
@@ -502,7 +516,7 @@ def _changed_descriptions(
     return ", ".join(descriptions[:-1]) + " and " + descriptions[-1]
 
 
-def render_remaining_sites(runtime: object) -> str:
+def render_remaining_sites(runtime: object, *, compact: bool = False) -> str:
     """Render current executable literal sites; return empty on uncertainty/error."""
     try:
         owner = getattr(runtime, "owner", None)
@@ -544,6 +558,9 @@ def render_remaining_sites(runtime: object) -> str:
         patterns = tuple(literal for literal in patterns if literal in grouped)
 
         current_sources = {path: _read_source(root, path) for path in parents}
+        if compact and (len(paths) < 2 or any(
+                path not in parents or current_sources.get(path) is None for path in paths)):
+            return ""
         candidate_paths = {site.path for sites in grouped.values() for site in sites}
         changed_lines_by_path: dict[str, frozenset[int]] = {}
         for path in candidate_paths:
@@ -571,6 +588,20 @@ def render_remaining_sites(runtime: object) -> str:
             current_counts: dict[str, int] = {}
             for site in sites:
                 current_counts[site.path] = current_counts.get(site.path, 0) + 1
+            if compact:
+                # Count executable matches on edited lines too; the compact hint
+                # is useful only when another literal site made real progress.
+                if not any(
+                        (parents[path] == "" and bool(current_sources[path]))
+                        or len(_source_matches(path, current_sources[path], parent_pattern))
+                        < parent_counts.get(path, 0)
+                        for path in paths):
+                    continue
+                site = sites[0]
+                current = current_sources.get(site.path)
+                if current is None or site.revision != source_window._digest(current):
+                    return ""
+                return f"{_COMPACT_PREFIX}{site.path}:{site.line}"
             locations = ", ".join(f"{site.path}:{site.line}" for site in sites)
             changed = _changed_descriptions(
                 parents, paths, parent_counts, current_counts, current_sources)
@@ -596,6 +627,112 @@ def _strip_panel_suffix(content: str) -> str:
             for line in suffix_lines):
         return content[:start]
     return content
+
+
+def replace_compact_carrier(
+        messages: list[object], previous: CompactCarrier | None = None, *,
+        attachment: tuple[str, str] | None = None,
+) -> CompactCarrier | None:
+    """Replace only a suffix owned by this capture, leaving tool output opaque."""
+    current: CompactCarrier | None = None
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if not isinstance(message, Mapping) or message.get("role") != "tool":
+            continue
+        content, call_id = message.get("content"), message.get("tool_call_id")
+        if not isinstance(content, str) or not isinstance(call_id, str):
+            continue
+        if previous and call_id == previous.call_id and content == previous.content + previous.suffix:
+            content = previous.content
+        if attachment and current is None and call_id == attachment[0]:
+            current = CompactCarrier(call_id, content, attachment[1])
+            content += current.suffix
+        if content != message["content"]:
+            messages[index] = {**message, "content": content}
+    return current
+
+
+def compact_attachment(messages: list[object], runtime: object) -> tuple[str, str] | None:
+    """Bind a location to the immediate tool exchange and current trusted green."""
+    from kernel_greenfact import _green_revision
+    from kernel_stateframe_f4 import latest_complete_tool_exchange
+
+    exchange = latest_complete_tool_exchange(messages)
+    if not exchange:
+        return None
+    result = exchange[-1]
+    call_id = result["tool_call_id"]
+    call = next(call for call in exchange[0]["tool_calls"] if call["id"] == call_id)
+    function = call.get("function")
+    content = result.get("content")
+    if (not isinstance(content, str) or not isinstance(function, Mapping)
+            or function.get("name") != "run_tests"):
+        return None
+    if any(message.get("role") == "assistant" for message in messages[messages.index(result) + 1:]
+           if isinstance(message, Mapping)):
+        return None
+    revision, _ = _green_revision(runtime)
+    if revision is None:
+        return None
+    receipts = getattr(runtime, "host_check_receipts", ())
+    summary_lines = set(content.splitlines())
+    delivered = [receipt for receipt in receipts if isinstance(receipt, Mapping)
+                 and receipt.get("summary") in summary_lines]
+    if not delivered or not all(receipt.get("status") == "PASS"
+                                and receipt.get("execution_complete") is True
+                                and receipt.get("revision") == revision
+                                for receipt in delivered):
+        return None
+    panel = render_remaining_sites(runtime, compact=True)
+    if panel and _green_revision(runtime)[0] == revision:
+        return call_id, panel
+    return None
+
+
+def _effective_prompt_limit(capture: object) -> int | None:
+    from kernel_request_budget import ENDPOINT_PROMPT_TOKEN_BUDGET
+
+    limits = [ENDPOINT_PROMPT_TOKEN_BUDGET]
+    budget = getattr(capture, "request_budget_final_wire", None)
+    if isinstance(budget, Mapping) and "max_prompt_tokens" in budget:
+        limit = budget["max_prompt_tokens"]
+        if type(limit) is not int or limit <= 0:
+            return None
+        limits.append(limit)
+    learned = getattr(capture, "_capacity_retry_limits", None)
+    if learned is not None:
+        limit = getattr(learned, "max_prompt_tokens", None)
+        if type(limit) is not int or limit <= 0:
+            return None
+        limits.append(limit)
+    return min(limits)
+
+
+def fits_working_set(body: object, runtime: object, capture: object, meter: object,
+                     dialect: str, reasoning_mode: str) -> bool:
+    """Price the richest working set before offering an optional pointer."""
+    from dataclasses import replace
+
+    from kernel_working_set_live import live_measure
+    from kernel_working_set_prepare import _violations
+    from kernel_working_set_render import materialize, propose_slots, render_assignment
+    from kernel_working_set_shadow import freeze_shadow
+    from kernel_working_set_snapshot import PreparationSnapshot
+
+    prompt_limit = _effective_prompt_limit(capture)
+    if prompt_limit is None:
+        return False
+    snapshot = freeze_shadow(body, runtime, request_id=capture.request_id,
+                             dialect=dialect, reasoning_mode=reasoning_mode)
+    if not isinstance(snapshot, PreparationSnapshot):
+        return False
+    snapshot = replace(snapshot, frame_limit=runtime.frame_ceiling, layouts=("plain",))
+    richest = {slot.key: slot.richest_first[0][0] for slot in propose_slots(snapshot)}
+    proposed = materialize(render_assignment(snapshot, richest, "plain"))
+    measured = live_measure(meter)(proposed.wire)
+    return (measured.contract_valid and type(measured.prompt_tokens) is int
+            and measured.prompt_tokens <= prompt_limit
+            and not _violations(snapshot, proposed, measured))
 
 
 def maybe_append_remaining_sites(
@@ -630,17 +767,23 @@ def maybe_append_remaining_sites(
 
 
 __all__ = [
+    "COMPACT_MODE_ENV",
+    "CompactCarrier",
     "GREEN_NAG_MODE_ENV",
     "GreenNagDecision",
     "MODE_ENV",
     "TicketSite",
     "current_workspace_revision",
     "decide_green_nag",
+    "compact_attachment",
+    "compact_enabled",
     "enabled",
+    "fits_working_set",
     "green_nag_enabled",
     "inventory_ticket_sites",
     "maybe_append_remaining_sites",
     "record_green_nag_decision",
     "remaining_site_inventory",
+    "replace_compact_carrier",
     "render_remaining_sites",
 ]

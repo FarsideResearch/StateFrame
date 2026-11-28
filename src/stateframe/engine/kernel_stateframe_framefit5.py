@@ -2289,6 +2289,248 @@ def _compose_allocated_frame_only(
     return result
 
 
+_VIABLE_PAIR_PANEL = "viable_alternatives"
+_VIABLE_PAIR_PANEL_TOKENS = 120
+
+
+def viable_pair_fits_panel(panel: Mapping[str, object]) -> bool:
+    from kernel_context import token_estimate
+
+    return token_estimate({_VIABLE_PAIR_PANEL: panel}) <= _VIABLE_PAIR_PANEL_TOKENS
+
+
+def _viable_pair_request_fits(
+        runtime: object, capture: object, messages: list[dict[str, object]],
+        source_plan: Mapping[str, object] | None,
+) -> bool:
+    """Price the intact envelope. Leave the advisory out under source pressure."""
+    from kernel_context import token_estimate
+    from kernel_read_receipts import enabled as working_set_enabled
+    from kernel_request_budget import (
+        FREE_STAGE,
+        _lean_request_limits,
+        _request_token_meter,
+    )
+
+    preparation = getattr(capture, "_request_preparation_input", None)
+    body = getattr(capture, "_capacity_retry_original_body", None)
+    surface = getattr(capture, "final_tool_surface", None)
+    request_id = capture.request_id
+    if getattr(preparation, "request_id", None) == request_id:
+        body = json.loads(preparation.body)
+    if (not isinstance(body, Mapping) or not isinstance(surface, Mapping)
+            or surface.get("request_id") != request_id
+            or not isinstance(surface.get("tools"), list)):
+        return False
+    body = {**body, "messages": messages, "tools": surface["tools"]}
+    meter = _request_token_meter(runtime, capture)
+    if working_set_enabled():
+        return isinstance(source_plan, Mapping) and _viable_pair_working_set_fits(
+            runtime, capture, body, source_plan, meter,
+        )
+    tokens, method = meter.measure(body)
+    byte_limit, prompt_limit = _lean_request_limits(
+        body, FREE_STAGE, exact_tokenizer=method == "tokenize",
+    )
+    budget = getattr(capture, "request_budget_final_wire", None) or {}
+    limits = getattr(capture, "_capacity_retry_limits", None)
+    return (
+        len(json.dumps(body).encode("utf-8"))
+        <= min(byte_limit, budget.get("max_request_bytes", byte_limit),
+               getattr(limits, "max_request_bytes", byte_limit))
+        and tokens <= min(prompt_limit, budget.get("max_prompt_tokens", prompt_limit),
+                          getattr(limits, "max_prompt_tokens", prompt_limit))
+        and token_estimate(body) <= runtime.frame_ceiling
+    )
+
+
+def _viable_pair_working_set_fits(runtime, capture, body, source_plan, meter) -> bool:
+    from dataclasses import replace
+
+    from kernel_cache_layout_candidate import compose_stable_guidance, final_layout_mode
+    from kernel_greenfact import GREENFACT_TEXT
+    from kernel_launch_identity_cost import reasoning_profile
+    from kernel_working_set_live import (
+        STABLE_FIRST_ENV,
+        _source_plan_with_deferred_omissions,
+        live_measure,
+    )
+    from kernel_working_set_prepare import _layout_candidates, _violations
+    from kernel_working_set_render import propose_slots
+    from kernel_working_set_shadow import freeze_shadow
+    from kernel_working_set_snapshot import PreparationSnapshot
+
+    # Price the complete preferred envelope with all source slots at their
+    # richest policy mode. The advisory never competes with a source slot.
+    body = compose_stable_guidance(capture, copy.deepcopy(body))
+    tail = body["messages"][-1]
+    if not isinstance(tail.get("content"), str):
+        return False
+    if not tail["content"].endswith(GREENFACT_TEXT):
+        tail["content"] += GREENFACT_TEXT  # reserve the later conditional host fact
+    context = copy.copy(runtime)
+    context._request_source_closure = _source_plan_with_deferred_omissions(
+        copy.deepcopy(source_plan),
+    )
+    snapshot = freeze_shadow(
+        body, context, request_id=capture.request_id,
+        dialect="openai-strict" if "max_completion_tokens" in body else "llama.cpp",
+        reasoning_mode=reasoning_profile(manifest=capture.journal.manifest).mode,
+    )
+    if not isinstance(snapshot, PreparationSnapshot):
+        return False
+    limits = getattr(capture, "_capacity_retry_limits", None)
+    layouts = ("plain",)
+    if final_layout_mode() == "on":
+        layouts += ("final_cache",)
+        if os.environ.get(STABLE_FIRST_ENV, "off").strip().lower() == "on":
+            layouts += ("stable_first",)
+    snapshot = replace(
+        snapshot, layouts=layouts, frame_limit=runtime.frame_ceiling,
+        byte_cap=min(snapshot.byte_cap, getattr(limits, "max_request_bytes", snapshot.byte_cap)),
+        prompt_limit=min(snapshot.prompt_limit,
+                         getattr(limits, "max_prompt_tokens", snapshot.prompt_limit)),
+    )
+    try:
+        richest = {slot.key: slot.richest_first[0][0] for slot in propose_slots(snapshot)}
+        measure = live_measure(meter)
+        return all(not _violations(snapshot, candidate, measure(candidate.wire))
+                   for candidate in _layout_candidates(snapshot, richest))
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def _viable_pair_for_frame(alternatives: object, frame: Mapping[str, object]) -> dict | None:
+    sites = [frame.get("next_site"), *frame.get("open_sites", ())]
+    paths = [site["path"] for site in sites
+             if isinstance(site, Mapping) and isinstance(site.get("path"), str)]
+    pair = alternatives.for_edit(paths)
+    return pair if pair is not None else alternatives.for_evidence(paths)
+
+
+def _owned_state_message(
+        messages: Sequence[Mapping[str, object]], runtime: object,
+        capture: object = None,
+) -> Mapping[str, object] | None:
+    """Use structural ownership and reject explicit ledger disagreement."""
+    from kernel_frame_optional_allocation import FrameAllocationReplanNeeded
+    from kernel_host_authorship import ledger_of, row_kinds, structural_class
+    from kernel_stable_wire_ownership import request_frame_index
+
+    ledger = ledger_of(capture) or ledger_of(runtime)
+    kinds = row_kinds(ledger, messages, capture=capture)
+    try:
+        state_index = request_frame_index(messages, capture=capture)
+    except (FrameAllocationReplanNeeded, ValueError):
+        return None
+    if (type(state_index) is not int or not 0 <= state_index < len(messages)
+            or structural_class(messages, state_index, capture=capture) != "frame"
+            or kinds[state_index] not in (None, "state")
+            or any(kind == "state" and index != state_index
+                   for index, kind in enumerate(kinds))):
+        return None
+    return messages[state_index]
+
+
+def _fit_viable_pair(runtime: object, messages: list[dict[str, object]],
+                     source_plan: Mapping[str, object] | None) -> None:
+    alternatives = getattr(runtime, "viable_alternatives", None)
+    if alternatives is None:
+        return
+    capture = getattr(runtime, "_active_capture", None)
+    state_message = _owned_state_message(messages, runtime, capture)
+    if not isinstance(state_message, dict):
+        return
+    payload, state = _state_payload(state_message)
+    frame = state["framefit5"]
+    if frame.pop(_VIABLE_PAIR_PANEL, None) is not None:
+        state_message["content"] = _serialize_state_message(payload)
+    panel = _viable_pair_for_frame(alternatives, frame)
+    if (panel is None or not viable_pair_fits_panel(panel) or capture is None
+            or capture.request_id != getattr(runtime, "current_request_id", None)):
+        return
+    original = state_message["content"]
+    frame[_VIABLE_PAIR_PANEL] = panel
+    state_message["content"] = _serialize_state_message(payload)
+    if not _viable_pair_request_fits(runtime, capture, messages, source_plan):
+        state_message["content"] = original
+
+
+def viable_pair_delivery_receipt(
+        runtime: object, submission_fields: Mapping[str, object],
+) -> dict[str, object] | None:
+    """Build a receipt for the exact final wire before its submit event is committed."""
+    request_id = submission_fields.get("request_id")
+    attempt = submission_fields.get("transport_attempt")
+    payload_sha256 = submission_fields.get("payload_hash")
+    journal = getattr(runtime, "journal", None)
+    alternatives = getattr(runtime, "viable_alternatives", None)
+    request_records = getattr(journal, "request_records", None)
+    if (not isinstance(request_id, str) or not request_id or alternatives is None
+            or type(attempt) is not int or attempt < 1
+            or not isinstance(payload_sha256, str)
+            or not payload_sha256.startswith("sha256:")
+            or len(payload_sha256) != len("sha256:") + 64
+            or not callable(request_records)):
+        return None
+    try:
+        int(payload_sha256.removeprefix("sha256:"), 16)
+    except ValueError:
+        return None
+
+    events = tuple(request_records(request_id))
+    preparations = [
+        event for event in events
+        if isinstance(event, Mapping)
+        and event.get("kind") == "request_final_wire_prepared"
+        and event.get("request_id") == request_id
+        and event.get("transport_attempt") == attempt
+        and type(event.get("sequence")) is int
+        and event["sequence"] > 0
+    ]
+    if not preparations:
+        return None
+    prepared = max(
+        preparations,
+        key=lambda event: event.get("sequence", 0)
+        if type(event.get("sequence")) is int else 0,
+    )
+    if (prepared.get("provider_request") is not True
+            or prepared.get("payload_sha256") != payload_sha256):
+        return None
+    from kernel_cache_layout_view import semantic_messages
+
+    prepared_messages = prepared.get("messages")
+    if not isinstance(prepared_messages, (list, tuple)):
+        return None
+    try:
+        capture = getattr(runtime, "_active_capture", None)
+        messages = semantic_messages(prepared_messages)
+        state_message = _owned_state_message(messages, runtime, capture)
+        if state_message is None:
+            return None
+        frame = _state_payload(state_message)[1]["framefit5"]
+    except (FrameFit5Error, IndexError, KeyError, RecursionError, TypeError, ValueError):
+        return None
+    panel = frame.get(_VIABLE_PAIR_PANEL) if isinstance(frame, Mapping) else None
+    if not isinstance(panel, Mapping):
+        return None
+    try:
+        if (not viable_pair_fits_panel(panel)
+                or dict(panel) != _viable_pair_for_frame(alternatives, frame)):
+            return None
+    except (KeyError, RecursionError, TypeError, ValueError):
+        return None
+    pair_sha256 = "sha256:" + _sha256(_json_text(panel).encode("utf-8"))
+    return {
+        "event_schema": "stateframe-viable-alternatives-delivery/1",
+        "transport_attempt": attempt,
+        "payload_sha256": payload_sha256,
+        "pair_sha256": pair_sha256,
+        "pair": copy.deepcopy(dict(panel)),
+    }
+
+
 def compose_frame_only(
         prepared: Sequence[Mapping[str, object]],
         source_messages: Sequence[Mapping[str, object]],
@@ -2642,6 +2884,13 @@ def assemble_framefit5_request(
         frame_request_allocation: FrameRequestAllocation | None = None,
 ) -> list[dict[str, object]]:
     """Build one complete FrameFit5 provider surface for prep and every recovery path."""
+    consumer_memory_on = os.environ.get(
+        "STATEFRAME_EFFECT_CONSUMER_MEMORY", "off"
+    ).strip().lower() in {"on", "true", "1", "yes"}
+    if consumer_memory_on and runtime is not None:
+        from kernel_r200_f046_remember_product_consumer import install
+
+        install()
     from kernel_read_receipts import enabled as allocator_enabled
     allocator_on = allocator_enabled()
     unallocated = frame_request_allocation is None
@@ -2696,6 +2945,10 @@ def assemble_framefit5_request(
                     for message in prepared_for_composition)):
         normalized_input = finalize_frame_only_wire_order(prepared_for_composition)
         preserved_tail_content = copy.deepcopy(normalized_input[-1].get("content"))
+        if consumer_memory_on:
+            stripped_tail = effect_consumer_tail(preserved_tail_content, None)
+            if stripped_tail is not None:
+                preserved_tail_content = stripped_tail
         preserve_tail = True
 
     result = compose_frame_only(
@@ -2833,6 +3086,7 @@ def assemble_framefit5_request(
         _render_api_attribute_rows(
             result, runtime, owner_contract, frame_request_allocation, sources,
         )
+    _fit_viable_pair(runtime, result, source_plan)
     if projection_audit is not None:
         projection_audit["projected_count"] = projected_count
     if unallocated:
@@ -3322,6 +3576,31 @@ def _split_host_greenfact(content: object) -> tuple[object, int]:
             return parts, 1
         return parts, 0
     return content, 0
+
+
+def effect_consumer_tail(content: object, fact: str | None) -> str | None:
+    """Replace optional consumer memory in the owned text tail, preserving other bytes."""
+    from kernel_r200_f046_remember_product_consumer import PREFIX
+
+    if not isinstance(content, str) or not content.startswith(VOLATILE_TAIL_MARKER):
+        return None
+    green = GREENFACT_TEXT if content.endswith(GREENFACT_TEXT) else ""
+    text = content.removesuffix(green) if green else content
+    parts = text.split("\n\n")
+    retained = []
+    for part in parts:
+        if part.startswith(PREFIX):
+            try:
+                row = json.loads(part[len(PREFIX):])
+            except ValueError:
+                row = None
+            if (isinstance(row, dict) and {"binding", "callback", "consumer"} <= row.keys()
+                    and row.keys() <= {"binding", "callback", "consumer", "firing"}
+                    and all(isinstance(value, str) for value in row.values())):
+                continue
+        retained.append(part)
+    text = "\n\n".join(retained)
+    return text + ("\n\n" + fact if fact else "") + green
 
 
 def _volatile_tail_content(

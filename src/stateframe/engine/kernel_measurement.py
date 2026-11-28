@@ -3367,30 +3367,46 @@ class RequestCapture:
         if getattr(self, "request_kind", None) == "framefit5_primary" and self.qualified_request is None:
             from kernel_request_kind import reject_changed_body_retry
             reject_changed_body_retry(self)
-        # Resubmit the same draft input; primary qualification reuses its
-        # sealed output only after checking the input digest and live authority.
-        retried_body = copy.deepcopy(dict(body))
-        if retried_body != body:
-            from kernel_request_kind import reject_changed_body_retry
-            reject_changed_body_retry(self)
-        # Journal the sealed provider temperature, not a draft default.
         submitted_body = (self.qualified_request.body
-                          if self.qualified_request is not None else retried_body)
-        retry_temperature = submitted_body.get("temperature", 1.0)
+                          if self.qualified_request is not None else body)
+        ceiling = getattr(self, "degeneration_output_ceiling", None)
+        temperature = submitted_body.get("temperature")
+        zero_temperature = type(temperature) in (int, float) and temperature == 0
+        greedy_replan = (os.environ.get("STATEFRAME_DEGENERATION_GREEDY_REPLAN") == "on"
+                         and zero_temperature)
+        replan_requested = (os.environ.get("STATEFRAME_DEGENERATION_REPLAN") == "on"
+                            or greedy_replan)
+        # Sampling can recover a complete terminal call on the retry, so only
+        # suppress the identical request when the submitted policy is greedy.
+        replan = (replan_requested and zero_temperature
+                  and getattr(self, "request_kind", None) == "framefit5_primary"
+                  and type(ceiling) is int and submitted_body.get("max_tokens") == ceiling)
+        if not replan:
+            # Resubmit the same draft input; primary qualification reuses its
+            # sealed output only after checking the input digest and live authority.
+            retried_body = copy.deepcopy(dict(body))
+            if retried_body != body:
+                from kernel_request_kind import reject_changed_body_retry
+                reject_changed_body_retry(self)
         discarded = self.journal.emit(
             "degeneration_detected",
             request_id=self.request_id,
             step=self.step,
-            retry_scheduled=True,
+            retry_scheduled=not replan,
             discarded_response=True,
             usage=counts,
             **_journal_safe_fields(response_journal_fields(
                 finding, response,
-                retry_temperature=float(retry_temperature),
+                retry_temperature=float(submitted_body.get("temperature", 1.0)),
                 logical_prompt_tokens=self.v43g_logical_prompt_tokens,
                 logical_completion_tokens=self.v43g_logical_completion_tokens,
             )),
         )
+        if replan:
+            # Finish journaling the actual response. ask_tools consumes the typed
+            # truncation before decoding any tool calls from this choice.
+            self.degeneration_replan = True
+            return None
         discarded_runtime = (getattr(self, "_wire_truth_runtime", None)
                              or getattr(self, "completion_owner_runtime", None))
         if discarded_runtime is not None:
@@ -4482,6 +4498,10 @@ class RequestCapture:
                     prompt_tokens = getattr(measurement, "prompt_tokens", None)
                     if isinstance(original_body, dict) and type(prompt_tokens) is int:
                         try:
+                            if getattr(self, "_compact_remaining_site_carriers", ()):
+                                # The tighter provider envelope must first fit required evidence.
+                                original_body = self._clear_compact_remaining_site(original_body)
+                                self._capacity_retry_original_body = copy.deepcopy(original_body)
                             capacity_retry_limits = retry_limits(
                                 len(wire), prompt_tokens,
                                 reported_context_limit(server_error_body),
@@ -4959,6 +4979,77 @@ class RequestCapture:
             except Exception:
                 pass
 
+    def _clear_compact_remaining_site(self, body: dict[str, object]) -> dict[str, object]:
+        from kernel_remaining_sites import replace_compact_carrier
+
+        for attribute, carrier in getattr(self, "_compact_remaining_site_carriers", ()):
+            messages = body.get("messages") if attribute is None else getattr(self, attribute, None)
+            if isinstance(messages, list):
+                clean = list(messages)
+                replace_compact_carrier(clean, carrier)
+                if attribute is None:
+                    body = {**body, "messages": clean}
+                else:
+                    setattr(self, attribute, clean)
+        self.__dict__.pop("_compact_remaining_site_carriers", None)
+        return body
+
+    def _refresh_compact_remaining_site(
+            self, body: dict[str, object], runtime: object, endpoint: str, *,
+            dialect: str, profile: object) -> dict[str, object]:
+        from kernel_context import token_estimate
+        from kernel_remaining_sites import compact_attachment, replace_compact_carrier
+        from kernel_request_budget import (
+            HARD_MAX_REQUEST_BYTES, _request_token_meter, _wire_bytes,
+        )
+
+        try:
+            body = self._clear_compact_remaining_site(body)
+            budget = getattr(self, "request_budget_final_wire", None)
+            messages = body.get("messages")
+            if (runtime is None or not isinstance(budget, Mapping)
+                    or budget.get("status") != "READY" or not isinstance(messages, list)):
+                return body
+            from kernel_remaining_sites import _effective_prompt_limit
+            prompt_limit = _effective_prompt_limit(self)
+            if prompt_limit is None:
+                return body
+            attachment = compact_attachment(messages, runtime)
+            if attachment is None:
+                return body
+            proposed = list(messages)
+            carrier = replace_compact_carrier(proposed, attachment=attachment)
+            candidate = {**body, "messages": proposed}
+            meter = _request_token_meter(runtime, self, tokenizer_endpoint=endpoint)
+            prompt_tokens, _ = meter.measure(candidate) if carrier is not None else (None, None)
+            if (carrier is None
+                    or _wire_bytes(candidate) > min(budget["max_request_bytes"], HARD_MAX_REQUEST_BYTES)
+                    or token_estimate(candidate) > runtime.frame_ceiling
+                    or type(prompt_tokens) is not int or prompt_tokens < 0
+                    or prompt_tokens > prompt_limit):
+                return body
+            from kernel_read_receipts import enabled as working_set_enabled
+            if working_set_enabled() and getattr(self, "request_kind", None) == "framefit5_primary":
+                from kernel_remaining_sites import fits_working_set
+                if not fits_working_set(candidate, runtime, self, meter, dialect, profile.mode):
+                    return body
+            # FrameFit5 rebuilds the newest exchange from this request-local copy.
+            # Keep the owner transcript clean for the following turn and replay.
+            attribute = "_framefit5_semantic_messages"
+            semantic = getattr(self, attribute, None)
+            carriers = [(None, carrier)]
+            if isinstance(semantic, list):
+                semantic = list(semantic)
+                semantic_carrier = replace_compact_carrier(semantic, attachment=attachment)
+                if semantic_carrier is None:
+                    return body
+                setattr(self, attribute, semantic)
+                carriers.append((attribute, semantic_carrier))
+            self._compact_remaining_site_carriers = tuple(carriers)
+            return candidate
+        except Exception:
+            return body
+
     @cleanup_request_host_span_profile
     def send(self, body: dict[str, object], endpoint: str, key: str, *,
              deadline: float | None = None,
@@ -5006,9 +5097,10 @@ class RequestCapture:
                                       request_id=self.request_id, step=self.step, dispatch=False)
             # REMAINING_SITES (default OFF): refresh literal-site facts at the shared send boundary.
             try:
-                from kernel_remaining_sites import maybe_append_remaining_sites
+                from kernel_remaining_sites import compact_enabled, maybe_append_remaining_sites
                 from kernel_pilot import ACTIVE_RUNTIME
-                maybe_append_remaining_sites(body.get("messages"), ACTIVE_RUNTIME.get())
+                if not compact_enabled():
+                    maybe_append_remaining_sites(body.get("messages"), ACTIVE_RUNTIME.get())
             except Exception:
                 pass
         _reconcile_frame_journal_gate(self, body)
@@ -5054,6 +5146,9 @@ class RequestCapture:
         except Exception as error:
             return self._handle_boundary_contract_error(error, state, recovery_on)
         finally:
+            if (getattr(self, "_compact_remaining_site_carriers", ())
+                    and (self.response_event_id is not None or self.qualified_request is None)):
+                self._clear_compact_remaining_site(body)
             # Caller inputs are needed only until the pre-dispatch recovery
             # decision. Do not retain a second full prompt after this send.
             self._source_replan_inputs = None
@@ -6113,6 +6208,21 @@ class RequestCapture:
         # Classification also runs for direct recovery entry and refuses a
         # missing frame/runtime before the legacy writers below can execute.
         classify(self, wire_truth_runtime, body, side_call_contract=side_call_contract)
+        from kernel_remaining_sites import compact_enabled
+        if compact_enabled() and side_call_contract is None:
+            if self.qualified_request is None:
+                body = self._refresh_compact_remaining_site(
+                    body, wire_truth_runtime, endpoint, dialect=provider_capabilities.dialect,
+                    profile=final_profile,
+                )
+            else:
+                # An outer timeout retry returns with the original draft. Reuse
+                # its frozen splice and let the existing seal validate the input.
+                from kernel_remaining_sites import replace_compact_carrier
+                for attribute, carrier in getattr(self, "_compact_remaining_site_carriers", ()):
+                    if attribute is None and isinstance(body.get("messages"), list):
+                        replace_compact_carrier(
+                            body["messages"], carrier, attachment=(carrier.call_id, carrier.suffix))
         if (wire_truth_runtime is not None and side_call_contract is None
                 and getattr(self, "request_kind", None) in (None, "framefit5_primary")
                 and has_framefit5_state(body.get("messages", []))):
@@ -6155,6 +6265,8 @@ class RequestCapture:
                     preparation = replace(
                         preparation, source_layout_proposal=blocked.source_layout_proposal,
                     )
+                if getattr(self, "_compact_remaining_site_carriers", ()):
+                    body = self._clear_compact_remaining_site(body)
                 wire_truth_runtime.prepare_request_replacement(
                     self, preparation, body, deadline=deadline, endpoint=endpoint, key=key)
                 record = self.qualified_request

@@ -790,15 +790,15 @@ def _cache_path(root: Path) -> Path:
         raise StructuralIndexError("external structural cache directory is unavailable") from last_error
 
 
-def _load_cache(path: Path) -> dict[str, object]:
+def _load_cache(path: Path) -> dict[str, object] | None:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return {}
+        return None
     if not isinstance(raw, Mapping) or raw.get("schema") != SCHEMA or raw.get("version") != CACHE_VERSION:
-        return {}
+        return None
     files = raw.get("files")
-    return dict(files) if isinstance(files, Mapping) else {}
+    return dict(files) if isinstance(files, Mapping) else None
 
 
 def _cached_entry(value: object, *, body: bytes, namespace: Namespace, path: str) -> tuple[ContentHandle, CoverageRef, Mapping[str, object], bytes] | None:
@@ -825,24 +825,74 @@ def _cached_entry(value: object, *, body: bytes, namespace: Namespace, path: str
         return None
 
 
-def _save_cache(path: Path, files: Mapping[str, object]) -> None:
-    payload = {"schema": SCHEMA, "version": CACHE_VERSION, "files": dict(files)}
-    temporary: Path | None = None
+def _replace_cache_bytes(path: Path, data: bytes) -> None:
+    fd, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    temporary = Path(name)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-        os.close(descriptor)
-        temporary = Path(temporary_name)
-        temporary.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+        with os.fdopen(fd, "wb") as out:
+            out.write(data)
         os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _read_cache_blob(manifest: Path, ref: str) -> object:
+    if not re.fullmatch("[0-9a-f]{64}", ref):
+        return None
+    try:
+        data = manifest.with_suffix(".entry-" + ref).read_bytes()
+        if hashlib.sha256(data).hexdigest() == ref:
+            return json.loads(data)
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _save_entry_manifest(manifest: Path, files: Mapping[str, object]) -> None:
+    import fcntl
+
+    # Focused queries can publish different entries at once. Merge their
+    # completed blobs under the directory lock before replacing the manifest.
+    directory = os.open(manifest.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fcntl.flock(directory, fcntl.LOCK_EX)
+        refs = _load_cache(manifest) or {}
+        superseded = set()
+        for name, entry in files.items():
+            if isinstance(entry, str):
+                continue  # Existing reference, possibly advanced by another writer.
+            data = json.dumps(entry, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+            ref = hashlib.sha256(data).hexdigest()
+            _replace_cache_bytes(manifest.with_suffix(".entry-" + ref), data)
+            prior = refs.get(name)
+            if isinstance(prior, str) and prior != ref and re.fullmatch("[0-9a-f]{64}", prior):
+                superseded.add(prior)
+            refs[name] = ref
+        if _save_cache(manifest, refs) and superseded:
+            retained = {ref for ref in refs.values() if isinstance(ref, str)}
+            for prior in superseded - retained:
+                manifest.with_suffix(".entry-" + prior).unlink(missing_ok=True)
+    finally:
+        os.close(directory)
+
+
+def _save_cache(path: Path, files: Mapping[str, object]) -> bool:
+    payload = {"schema": SCHEMA, "version": CACHE_VERSION, "files": dict(files)}
+    try:
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+        if os.environ.get("STATEFRAME_CATALOG_COMPARE_BYTES") == "on":
+            try:
+                with path.open("rb") as existing:
+                    if existing.read(len(encoded) + 1) == encoded:
+                        return True
+            except OSError:
+                pass  # A missing or unreadable file needs normal publication.
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _replace_cache_bytes(path, encoded)
+        return True
     except OSError as exc:
         logger.debug("structural cache unavailable at %s: %s", path, type(exc).__name__)
-    finally:
-        if temporary is not None:
-            try:
-                temporary.unlink(missing_ok=True)
-            except OSError:
-                pass
+        return False
 
 
 def _graph_dependencies(root: Path, modules: Sequence[ModuleRecord], coverage: Mapping[str, CoverageRef]) -> tuple[DependencyRecord, ...]:
@@ -909,7 +959,15 @@ def build_structural_index(
     paths = scan.paths
     overrides = {str(key).replace("\\", "/"): value for key, value in (source_overrides or {}).items()}
     cache_path = _cache_path(resolved) if use_cache else None
-    persisted = _load_cache(cache_path) if cache_path is not None and not overrides else {}
+    manifest = (cache_path.with_name(cache_path.name + ".manifest")
+                if cache_path is not None and not overrides
+                and os.environ.get("STATEFRAME_CATALOG_ENTRY_BLOBS") == "on" else None)
+    persisted = _load_cache(manifest) if manifest is not None else None
+    cache_dirty = persisted is None
+    if persisted is None and cache_path is not None and not overrides:
+        persisted = _load_cache(cache_path)
+        cache_dirty = manifest is not None or persisted is None
+    persisted = persisted or {}
     cache_files: dict[str, object] = dict(persisted)
     modules: list[ModuleRecord] = []
     configs: list[ConfigRecord] = []
@@ -935,7 +993,10 @@ def build_structural_index(
             source_reads += 1
         else:
             body = override.encode("utf-8") if isinstance(override, str) else bytes(override)
-        cached = _cached_entry(persisted.get(relpath), body=body, namespace=active_namespace, path=relpath)
+        entry = persisted.get(relpath)
+        if manifest is not None and isinstance(entry, str):
+            entry = _read_cache_blob(manifest, entry)
+        cached = _cached_entry(entry, body=body, namespace=active_namespace, path=relpath)
         if cached is not None:
             content, file_coverage, outline, cached_body = cached
             cache_hits += 1
@@ -951,6 +1012,7 @@ def build_structural_index(
                            "parser": "unavailable", "degraded": True, "degraded_reason": type(exc).__name__}
             file_coverage = _coverage(content, outline)
             if cache_path is not None and not overrides and len(body) <= MAX_CACHED_BODY_BYTES:
+                cache_dirty = True
                 cache_files[relpath] = {
                     "content": content.to_dict(), "coverage": file_coverage.to_dict(),
                     "outline": dict(outline), "body_base64": base64.b64encode(body).decode("ascii"),
@@ -971,8 +1033,16 @@ def build_structural_index(
         types.extend(file_types)
         configs.extend(file_configs)
 
-    if cache_path is not None and not overrides:
-        _save_cache(cache_path, cache_files)
+    if cache_path is not None and not overrides and (
+        cache_dirty or os.environ.get("STATEFRAME_CATALOG_SKIP_CLEAN_WRITE") != "on"
+    ):
+        if manifest is None:
+            _save_cache(cache_path, cache_files)
+        else:
+            try:
+                _save_entry_manifest(manifest, cache_files)
+            except OSError as exc:
+                logger.debug("structural cache unavailable at %s: %s", manifest, type(exc).__name__)
     dependencies: list[DependencyRecord] = []
     for module in modules:
         dependency_coverage = CoverageRef(
