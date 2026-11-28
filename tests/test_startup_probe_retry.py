@@ -20,6 +20,8 @@ def probes(monkeypatch):
     """Replace the sandboxed probe with a script of results; record the wall each call was given."""
     calls, script = [], []
     monkeypatch.delenv("STATEFRAME_STARTUP_PROBE_SECONDS", raising=False)
+    monkeypatch.setattr(runner.os, "getloadavg", lambda: (0.0, 0.0, 0.0))
+    monkeypatch.setattr(runner.os, "cpu_count", lambda: 8)
 
     def fake(argv, workspace, *, timeout, **_kwargs):
         calls.append(timeout)

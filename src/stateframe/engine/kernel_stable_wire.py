@@ -1156,13 +1156,16 @@ def _project_stable_wire(capture, runtime, body, *, meter, inputs,
     headroom_rebase = (not first_epoch and not structural_rebase and not rerender_rebase
                        and (retained_method == "unavailable" or retained_tokens > headroom))
 
+    current_only = (measure and os.environ.get("STATEFRAME_STABLE_WIRE_CURRENT_ONLY") == "on")
+    current_only_rebase = bool(current_only and retained)
+
     reason = ("start" if first_epoch else "structural" if structural_rebase
               else "rerender" if rerender_rebase else None)
     must_relayout = first_epoch or structural_rebase or rerender_rebase
-    if headroom_rebase:
+    if headroom_rebase or current_only_rebase:
         epoch += 1
         must_relayout = True
-        reason = "headroom"
+        reason = "current_only" if current_only_rebase else "headroom"
 
     first_seen_rank = {key: index for index, key in enumerate(seen_keys)}
     if structural_rebase:
@@ -1171,7 +1174,7 @@ def _project_stable_wire(capture, runtime, body, *, meter, inputs,
             copy.deepcopy(current), key=lambda row: first_seen_rank[str(row["key"])])
     kept_prefix = 0
     report = None
-    retain = retain_prefix()
+    retain = retain_prefix() and not current_only
     # On replay the recorded request tells which prefix the original send kept.
     # Meter-driven headroom/envelope relayouts are reconstructed from the recorded epoch.
     # Window equality alone misses a relayout that keeps k equal to all windows.
@@ -1181,7 +1184,7 @@ def _project_stable_wire(capture, runtime, body, *, meter, inputs,
         epoch += 1
         must_relayout = True
         reason = "envelope"
-    if (headroom_rebase or rerender_rebase or replay_epoch_relayout) and not structural_rebase:
+    if (headroom_rebase or current_only_rebase or rerender_rebase or replay_epoch_relayout) and not structural_rebase:
         candidate_delivered, projected, status_content, kept_prefix, report = _choose_relayout(
             body, meter, inputs, capture, previous_delivered, current, first_seen_rank, epoch,
             ownership=ownership, measure=measure, headroom_limit=headroom,

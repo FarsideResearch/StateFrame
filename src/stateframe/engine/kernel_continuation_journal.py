@@ -2597,6 +2597,16 @@ class ContinuationJournal(AuditJournal):
                 raise ValueError("journal record exceeds limit")
             offset = self._size
             sequence_before, head_before = self._sequence, self._head
+            anchor = getattr(self, "_fl_writer_anchor", None)
+            if anchor is not None:
+                from kernel_fl_checkpoint_capture import _file_stamp
+                try:
+                    stamp = _file_stamp(os.fstat(self._fd))
+                except OSError:
+                    stamp = None
+                if (anchor.stamp != stamp
+                        or anchor.sequence != self._sequence or getattr(self, "_publication_batch", None) is not None):
+                    self._fl_writer_anchor = anchor = None
             bytes_written = 0
             write_attempted = False
             try:
@@ -2631,6 +2641,17 @@ class ContinuationJournal(AuditJournal):
                         intent.unlink()
                         _sync_directory(intent.parent)
                 self._size += len(line)
+                if anchor is not None:
+                    # This record is durable and has its final bytes. Batch and resumed
+                    # writers rebuild on their next capture after a discontinuity.
+                    from kernel_fl_checkpoint_capture import CaptureBoundaryError
+                    try:
+                        if kind == "request_submitted":
+                            stored_record["record_hash"] = record_hash
+                        anchor.append(line, stored_record)
+                        anchor.stamp = _file_stamp(os.fstat(self._fd))
+                    except (CaptureBoundaryError, OSError):
+                        self._fl_writer_anchor = None
                 self._publish_record(record, offset, len(encoded_record))
                 if writer_rows is not None:
                     keys.insert(hash_position, "record_hash")

@@ -4416,10 +4416,11 @@ def apply_diet(
     # The caller may protect source/menu messages explicitly. Keep non-read
     # tool exchanges intact; read exchanges are removable only as an LRU unit.
     protected_messages = tuple(protected_messages) + _paired_tool_exchange_messages(messages)
-    normalized, duplicate_items, stale_indices, stale_source_ranges = _normalized_messages(
-        messages, evidence_ids, protected_contents, protected_messages,
-        native_tools, required_source_paths,
-    )
+    if not (allocator_on and os.environ.get("STATEFRAME_ALLOCATOR_SKIP_NORMALIZATION") == "on"):
+        normalized, duplicate_items, stale_indices, stale_source_ranges = _normalized_messages(
+            messages, evidence_ids, protected_contents, protected_messages,
+            native_tools, required_source_paths,
+        )
     if allocator_on:
         normalized = copy.deepcopy(messages)
         duplicate_items, stale_indices, stale_source_ranges = [], [], []

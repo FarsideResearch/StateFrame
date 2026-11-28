@@ -3465,6 +3465,16 @@ def _attach_receipt_alignment(receipt: CheckReceipt, *, check: CheckDefinition,
 SHARED_CHECK_CACHE_ENV = "STATEFRAME_SHARED_CHECK_CACHE"
 
 
+class PassingCheckCache(dict):
+    """Share only executed passing proofs, including when rehydrating receipt history."""
+
+    def __setitem__(self, key, receipt):
+        if receipt.status == PASS and receipt.execution == EXECUTED:
+            super().__setitem__(key, receipt)
+        else:
+            self.pop(key, None)
+
+
 def shared_check_cache_mode(runtime: object | None = None) -> str:
     """Read the opt-in single exact-instance proof cache mode; invalid values fail closed to off.
 

@@ -3043,6 +3043,200 @@ def note_provider_request(runtime: object, messages: Sequence[Mapping[str, objec
         note_sealed_request(runtime, messages, tools)
 
 
+VIABLE_PAIR_FIELD = "viable_pair"
+_VIABLE_PAIR_TEXT_LIMITS = {
+    "evidence_path": 120, "key": 48, "edit_path": 120, "dependent_edit": 120,
+}
+_VIABLE_VALUE_LIMIT = 48
+_VIABLE_PAIR_LIMIT = 4
+
+
+def viable_alternatives_enabled() -> bool:
+    return os.environ.get("STATEFRAME_VIABLE_ALTERNATIVES", "off").strip().lower() in {
+        "on", "1", "true",
+    }
+
+
+def _viable_pair_schema() -> dict[str, object]:
+    def text(maximum: int) -> dict[str, object]:
+        return {"type": "string", "minLength": 1, "maxLength": maximum}
+
+    properties = {name: text(limit) for name, limit in _VIABLE_PAIR_TEXT_LIMITS.items()}
+    properties["alternatives"] = {
+        "type": "array", "minItems": 2, "maxItems": 2, "uniqueItems": True,
+        "items": text(_VIABLE_VALUE_LIMIT),
+    }
+    return {
+        "type": "object", "properties": properties, "required": list(properties),
+        "additionalProperties": False,
+        "description": (
+            "Keep two plausible string values of a top-level JSON key open until a "
+            "complete read of evidence_path distinguishes them. Name the dependent "
+            "edit in a different existing file. Keep the whole declaration brief."
+        ),
+    }
+
+
+def _viable_pair_text(value: object, maximum: int) -> bool:
+    return (isinstance(value, str) and 0 < len(value) <= maximum
+            and value == value.strip() and value.isprintable())
+
+
+def _viable_pair_path(root: Path, value: str) -> bool:
+    from kernel_public_localization import public_path
+    from kernel_request_source_window import _safe_framefit_path
+
+    if public_path(value) != value or _safe_framefit_path(value) != value:
+        return False
+    try:
+        candidate = (root / value).resolve(strict=True)
+        return candidate.is_file() and candidate.relative_to(root).as_posix() == value
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _unique_json_object(items: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in items:
+        if key in result:
+            raise ValueError("duplicate JSON member")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"unsupported JSON constant {value}")
+
+
+def _viable_pair_projection(pair: Mapping[str, object], root: Path) -> dict[str, object]:
+    from kernel_read_receipts import contract_read_is_current
+
+    result = dict(pair["declaration"])
+    resolution = pair.get("resolution")
+    if isinstance(resolution, Mapping) and contract_read_is_current(root, resolution["identity"]):
+        result.update({
+            "observed": resolution["observed"],
+            "contradicted": next(value for value in result["alternatives"]
+                                 if value != resolution["observed"]),
+            "evidence_revision": resolution["identity"]["revision"],
+        })
+    return result
+
+
+class ViableAlternatives:
+    """Four live declarations backed by the continuity journal."""
+
+    def __init__(self, root: Path, snapshot: object = None) -> None:
+        self.root = root
+        state = snapshot if isinstance(snapshot, Mapping) else {}
+        self.pairs: dict[str, dict[str, object]] = copy.deepcopy(state.get("pairs", {}))
+        self.capacity_misses = state.get("capacity_misses", 0)
+
+    def snapshot(self) -> dict[str, object]:
+        return {"pairs": copy.deepcopy(self.pairs), "capacity_misses": self.capacity_misses}
+
+    def declare(self, value: object, runtime: object) -> dict[str, object]:
+        from kernel_stateframe_framefit5 import _editable_site
+
+        rejected = {"accepted": False, "reason": "invalid_viable_pair"}
+        if (not isinstance(value, Mapping)
+                or set(value) != {*_VIABLE_PAIR_TEXT_LIMITS, "alternatives"}
+                or any(not _viable_pair_text(value[name], limit)
+                       for name, limit in _VIABLE_PAIR_TEXT_LIMITS.items())):
+            return rejected
+        evidence_path, edit_path = value["evidence_path"], value["edit_path"]
+        alternatives = value["alternatives"]
+        if (not isinstance(alternatives, list) or len(alternatives) != 2
+                or not all(_viable_pair_text(item, _VIABLE_VALUE_LIMIT) for item in alternatives)
+                or alternatives[0] == alternatives[1] or evidence_path == edit_path
+                or not _viable_pair_path(self.root, evidence_path)
+                or not _viable_pair_path(self.root, edit_path)
+                or not _editable_site(runtime, self.root, edit_path)):
+            return rejected
+        declaration = {**value, "alternatives": sorted(alternatives)}
+        from kernel_stateframe_framefit5 import viable_pair_fits_panel
+
+        largest_panel = {**declaration, "observed": alternatives[0],
+                         "contradicted": alternatives[1], "evidence_revision": "sha256:" + "0" * 64}
+        if not viable_pair_fits_panel(largest_panel):
+            return rejected
+        # One downstream contract per predicate. Repetition cannot replace a sibling.
+        slot = digest([evidence_path, value["key"], edit_path])
+        if slot in self.pairs:
+            same = self.pairs[slot]["declaration"] == declaration
+            return {"accepted": same, "reason": "already_declared" if same else "pair_conflict"}
+        if len(self.pairs) == _VIABLE_PAIR_LIMIT:
+            retired = next((key for key, pair in sorted(self.pairs.items())
+                            if "observed" in _viable_pair_projection(pair, self.root)), None)
+            if retired is None:
+                self.capacity_misses += 1
+                return {"accepted": False, "reason": "viable_pair_capacity"}
+            del self.pairs[retired]
+        self.pairs[slot] = {"declaration": declaration}
+        return {"accepted": True, "reason": "viable_pair_declared", "pair_id": digest(declaration)}
+
+    def observe(self, record: Mapping[str, object],
+                receipts: Sequence[object]) -> Iterator[dict[str, object]]:
+        """Yield exact resolution changes for this closed native read."""
+        from kernel_read_receipts import (
+            complete_contract_read,
+            contract_read_is_current,
+        )
+
+        if record.get("tool") != "read" or record.get("result") != "OK":
+            return
+        evidence = record.get("read_evidence")
+        if not isinstance(evidence, Mapping):
+            return
+        matching = [pair for _, pair in sorted(self.pairs.items())
+                    if pair["declaration"]["evidence_path"] == evidence.get("path")]
+        if not matching:
+            return
+        reads = [receipt for receipt in receipts if isinstance(receipt, Mapping)
+                 and receipt.get("kind") == "read" and receipt.get("result_class") == "OK"
+                 and receipt.get("target_path") == evidence.get("path")]
+        if len(reads) != 1:
+            return
+        observation = complete_contract_read(evidence, reads[0].get("delivery"))
+        if observation is None:
+            return
+        identity, payload = observation
+        binding = dataclasses.asdict(identity)
+        if not contract_read_is_current(self.root, binding):
+            return
+        try:
+            document = json.loads(payload, object_pairs_hook=_unique_json_object,
+                                  parse_constant=_reject_json_constant)
+        except (ValueError, RecursionError):
+            return
+        if not isinstance(document, dict):
+            return
+        for pair in matching:
+            declaration = pair["declaration"]
+            observed = document.get(declaration["key"])
+            if not isinstance(observed, str) or observed not in declaration["alternatives"]:
+                continue
+            resolution = {"identity": binding, "observed": observed}
+            if pair.get("resolution") != resolution:
+                pair["resolution"] = resolution
+                yield {"pair_id": digest(declaration), **resolution}
+
+    def _for_path(self, paths: Sequence[str], field: str) -> dict[str, object] | None:
+        for path in paths:
+            matches = [_viable_pair_projection(pair, self.root)
+                       for _, pair in sorted(self.pairs.items())
+                       if pair["declaration"][field] == path]
+            if matches:
+                return next((pair for pair in matches if "observed" not in pair), matches[0])
+        return None
+
+    def for_edit(self, paths: Sequence[str]) -> dict[str, object] | None:
+        return self._for_path(paths, "edit_path")
+
+    def for_evidence(self, paths: Sequence[str]) -> dict[str, object] | None:
+        return self._for_path(paths, "evidence_path")
+
+
 def _prepare_request_capture(runtime: object) -> RequestCapture:
     """Keep normal and early-stop request identities on the same authority."""
     origin = getattr(runtime, "_source_replan_origin_request_id", None)
@@ -3174,6 +3368,10 @@ class StateFrameRuntime:
                  multi_file: bool = False, edit_contract: dict | None = None, workspace=None,
                  resume=None, endpoint_profile: object | None = None, startup_schema_budget=None):
         self.owner = owner
+        # Research-only guide authoring cues are inert unless the explicit
+        # default-OFF task-pack cell is selected.
+        from kernel_guide_task_pack import settings as guide_task_pack_settings
+        self.stateframe_guide_task_pack_settings = guide_task_pack_settings()
         self.stateframe_micrograph_mode = os.environ.get("STATEFRAME_MICROGRAPH", "off").strip().lower()
         self.micrograph_wire = None
         if self.stateframe_micrograph_mode != "off":
@@ -5568,6 +5766,10 @@ class StateFrameRuntime:
         from kernel_obligation_assess import shared_check_cache_mode
         self.stateframe_shared_check_cache_mode = shared_check_cache_mode(self)
         self.host_check_cache: dict[str, object] = {}
+        if os.environ.get("STATEFRAME_SHARED_CHECK_PASS_ONLY") == "on":
+            from kernel_obligation_assess import PassingCheckCache
+            self.stateframe_shared_check_cache_mode = "on"
+            self.host_check_cache = PassingCheckCache()
         from kernel_recall import ensure_runtime_store
         self.recall_store = ensure_runtime_store(self)
         from kernel_timeline import TimelineIndex
@@ -5749,9 +5951,9 @@ class StateFrameRuntime:
                                   producer="stateframe_decision_cache")
         self.timeline_index.decision_graph = self.decision_cache
         self.decision_continuity = None
+        latest_continuity_state = None
         if self.stateframe_decision_continuity_mode != "off":
             from kernel_decision_continuity import DecisionContinuityStore
-            latest_continuity_state = None
             records = getattr(self.journal, "records", None)
             if resume is not None and callable(records):
                 for event in records():
@@ -5858,6 +6060,12 @@ class StateFrameRuntime:
                                        target_symbol=getattr(owner, 'fn', None),
                                        directory=self.journal.path.parent)
                             if self.projector_kind == 'rich' else None)
+        if (viable_alternatives_enabled() and self.stateframe_framefit_mode == "on"
+                and self.decision_continuity is not None and self.step_ledger is not None
+                and self._unit_policy is None):
+            saved = (latest_continuity_state.get("viable_alternatives")
+                     if latest_continuity_state is not None else None)
+            self.viable_alternatives = ViableAlternatives(Path(owner.root).resolve(), saved)
         self._display_batch_records: list[dict[str, object]] = []
         from kernel_model_policy import resolve_model_policy
         from kernel_tokens_row6_state import RepeatState
@@ -7339,9 +7547,13 @@ class StateFrameRuntime:
                                      step: int | None = None) -> None:
         if self.decision_continuity is None:
             return
+        state = self.decision_continuity.snapshot()
+        alternatives = getattr(self, "viable_alternatives", None)
+        if alternatives is not None:
+            state["viable_alternatives"] = alternatives.snapshot()
         self.journal.emit(
             "decision_continuity_state",
-            state=self.decision_continuity.snapshot(),
+            state=state,
             update_result=copy.deepcopy(dict(result)) if isinstance(result, Mapping) else None,
             reason=reason,
             step=getattr(self.owner, "current_step", step),
@@ -7386,10 +7598,27 @@ class StateFrameRuntime:
         )
         return None
 
-    def ingest_decision_continuity_delta(self, delta: object) -> dict[str, object] | None:
+    def ingest_decision_continuity_delta(
+            self, delta: object, *, action: str | None = None,
+    ) -> dict[str, object] | None:
         """Host-validate one action delta; invalid or dangling claims are non-fatal."""
         if self.decision_continuity is None:
             return None
+        alternatives = getattr(self, "viable_alternatives", None)
+        if alternatives is not None and isinstance(delta, Mapping) and VIABLE_PAIR_FIELD in delta:
+            delta = dict(delta)
+            proposal = delta.pop(VIABLE_PAIR_FIELD)
+            pair_result = (alternatives.declare(proposal, self) if action == "read" else
+                           {"accepted": False, "reason": "viable_pair_requires_native_read"})
+            reason = pair_result["reason"]
+            if reason in {"viable_pair_declared", "viable_pair_capacity"}:
+                self._decision_continuity_persist(reason=reason, result=pair_result)
+            elif not pair_result["accepted"]:
+                self.journal.emit("decision_continuity_delta_rejected", update_result=pair_result,
+                                  step=getattr(self.owner, "current_step", None),
+                                  producer="stateframe_decision_continuity")
+            if not delta:
+                return pair_result
         bound_revision = self._decision_continuity_revision()
         result = self.decision_continuity.apply_delta(
             delta,
@@ -7407,6 +7636,53 @@ class StateFrameRuntime:
                 producer="stateframe_decision_continuity",
             )
         return result
+
+    def _settle_viable_alternatives(
+            self, record: Mapping[str, object], receipts: Sequence[object],
+    ) -> None:
+        alternatives = getattr(self, "viable_alternatives", None)
+        if alternatives is None:
+            return
+        for resolution in alternatives.observe(record, receipts):
+            # A file may return to a previously observed revision after edits.
+            # Restore the binding without issuing the same resolution twice.
+            records = getattr(self.journal, "records", None)
+            if callable(records):
+                events = records(rebuild=False)
+            else:
+                from kernel_measurement import iter_journal_records
+
+                events = iter_journal_records(self.journal.path)
+            seen = any(
+                event.get("kind") == "decision_continuity_state"
+                and event.get("reason") == "viable_pair_resolved"
+                and event.get("update_result") == resolution
+                for event in events
+            )
+            events.close()
+            self._decision_continuity_persist(
+                reason="viable_pair_rebound" if seen else "viable_pair_resolved",
+                result=resolution, step=record.get("step"),
+            )
+
+    def _decision_continuity_tool_surface(self, tools: list[dict]) -> list[dict]:
+        from kernel_decision_continuity import tool_surface
+
+        selected = tool_surface(tools)
+        if getattr(self, "viable_alternatives", None) is None:
+            return selected
+        selected = copy.deepcopy(selected)
+        for tool in selected:
+            function = tool.get("function", {})
+            if function.get("name") != "read":
+                continue
+            properties = function["parameters"]["properties"]
+            delta = properties.setdefault("decision_delta", {
+                "type": "object", "properties": {}, "additionalProperties": False,
+                "minProperties": 1,
+            })
+            delta["properties"][VIABLE_PAIR_FIELD] = _viable_pair_schema()
+        return selected
 
     def _decision_continuity_message(self) -> dict[str, str] | None:
         store = getattr(self, "decision_continuity", None)
@@ -13389,8 +13665,7 @@ class StateFrameRuntime:
             selected = [*selected, _boundary_dispute_tool()]
         selected = self._append_requirements_ledger_tools(selected)
         selected = self._append_test_integrity_dispute_tool(selected)
-        from kernel_decision_continuity import tool_surface as decision_continuity_tool_surface
-        selected = decision_continuity_tool_surface(selected)
+        selected = self._decision_continuity_tool_surface(selected)
         selected = self._coherent_done_only_menu(selected)
         self.journal.emit(
             "tool_menu_composed", stages=list(MENU_STAGE_ORDER),
@@ -13458,8 +13733,7 @@ class StateFrameRuntime:
             from kernel_decision_cache import tool_surface as decision_cache_tool_surface
             selected = decision_cache_tool_surface(selected)
             selected = self._append_requirements_ledger_tools(selected)
-            from kernel_decision_continuity import tool_surface as decision_continuity_tool_surface
-            selected = decision_continuity_tool_surface(selected)
+            selected = self._decision_continuity_tool_surface(selected)
             selected = self._coherent_done_only_menu(selected)
             self.completion_menu = tuple(tool["function"]["name"] for tool in selected)
             self._question_done_available = any(
@@ -13504,8 +13778,7 @@ class StateFrameRuntime:
         from kernel_decision_cache import tool_surface as decision_cache_tool_surface
         selected = decision_cache_tool_surface(selected)
         selected = self._append_requirements_ledger_tools(selected)
-        from kernel_decision_continuity import tool_surface as decision_continuity_tool_surface
-        selected = decision_continuity_tool_surface(selected)
+        selected = self._decision_continuity_tool_surface(selected)
         selected = self._coherent_done_only_menu(selected)
         self.completion_menu = tuple(tool["function"]["name"] for tool in selected)
         self._question_done_available = any(
@@ -16462,6 +16735,8 @@ class StateFrameRuntime:
         if self.decision_continuity is not None:
             self.decision_continuity.record_exchange(record, pending=continuity_pending)
             self._decision_continuity_organs_dirty = True
+            if getattr(self, "viable_alternatives", None) is not None:
+                self._settle_viable_alternatives(record, pending_receipts)
             self._decision_continuity_persist(reason="action_closed", step=record.get("step"))
             self._refresh_decision_continuity_from_organs()
         if self.continuation is not None:
@@ -23106,6 +23381,10 @@ class StateFrameRuntime:
             messages, message_replacements = sanitize_messages(messages)
             uncapped, uncapped_replacements = sanitize_messages(uncapped)
             replacements = (*message_replacements, *uncapped_replacements)
+        guide_task_pack = getattr(self, "stateframe_guide_task_pack_settings", None)
+        if provider_request and guide_task_pack is not None and guide_task_pack.enabled:
+            from kernel_guide_task_pack import assemble_request_cues
+            messages, uncapped = assemble_request_cues(messages, uncapped, guide_task_pack)
         tools, tool_replacements = sanitize_value(tools)
         replacements = (*replacements, *tool_replacements)
         from kernel_terminal_policy import deliver_pending_advisories

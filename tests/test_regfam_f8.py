@@ -62,6 +62,7 @@ PENDING_RELEASE_SELECTION: dict[str, int] = {
     "tests/test_rp3_intake_grounding_work.py": 1,  # intake front-door confidence parity remains unselected
     "tests/test_tool_class_protocol_parity_K1.py": 6,  # migrated literal-detection inventory has no approved cell
     "tests/test_tool_class_protocol_parity_K23.py": 3,  # protocol-list migration checks have no approved cell
+    "tests/test_eff_e28_alt_catalog_compare_bytes_before_replace.py": 1,  # catalog compare-bytes off parity, no approved cell yet (0.10.10)
     "tests/test_tool_class_protocol_parity_K4.py": 5,  # protocol edit classification/source checks have no approved cell
     "tests/test_tool_class_protocol_parity_K5.py": 4,  # protocol literal inventory/locator checks have no approved cell
     "tests/test_tool_class_protocol_parity_K6.py": 3,  # protocol constant/import audits have no approved cell

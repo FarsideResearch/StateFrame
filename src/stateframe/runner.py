@@ -849,6 +849,27 @@ def _startup_probe_seconds() -> float:
     return seconds
 
 
+def _startup_probe_walls(base_wall: float) -> tuple[tuple[float, float], float | None, int | None]:
+    """Scale startup probe walls for host load, keeping both attempts within 600 seconds."""
+    try:
+        loadavg = float(os.getloadavg()[0])
+    except (AttributeError, IndexError, NotImplementedError, OSError, TypeError, ValueError):
+        loadavg = None
+    try:
+        cpu_count = os.cpu_count()
+    except (OSError, TypeError):
+        cpu_count = None
+
+    ratio = (loadavg / cpu_count
+             if loadavg is not None and math.isfinite(loadavg)
+             and cpu_count is not None and cpu_count > 0 else 1.0)
+    override = os.environ.get("STATEFRAME_STARTUP_PROBE_SECONDS") is not None
+    scaled_base = base_wall if override else base_wall * max(1.0, ratio)
+    first_wall = min(scaled_base, 300.0)
+    retry_wall = min(2.0 * first_wall, 600.0 - first_wall)
+    return (first_wall, retry_wall), loadavg, cpu_count
+
+
 def _probe_stopped_by_host(result: object) -> bool:
     """A wall timeout, or a SIGKILL our own cleanup delivered: load, never a broken interpreter."""
     if getattr(result, "timed_out", False):
@@ -864,30 +885,33 @@ def _startup_probe(python: str, code: str, *, label: str,
     """Contain interpreter startup itself, before importing any project packages.
 
     A heavily loaded host can push a healthy interpreter past the wall limit, so a timeout (and
-    only a timeout) is retried once with double the wall. A non-zero exit or an oversized output is
-    a real failure and is reported at once.
+    only a timeout) is retried once with a larger wall. Both attempts together stay within 600 s.
+    A non-zero exit or an oversized output is a real failure and is reported at once.
     """
     from .engine import kernel_safe_probe
     from .engine.kernel_exec_session import ExecSessionError
 
-    base_wall = _startup_probe_seconds()
-    walls = (base_wall, 2 * base_wall)
+    walls, loadavg, cpu_count = _startup_probe_walls(_startup_probe_seconds())
     argv = [python, *probe_args] if probe_args is not None else [python, "-I", "-B", "-c", code]
-    for wall in walls:
+    for attempt, wall in enumerate(walls):
         try:
             with tempfile.TemporaryDirectory(prefix="stateframe-startup-") as directory:
                 result = kernel_safe_probe.run_probe(argv, Path(directory),
                                                      timeout=wall)
         except (OSError, ExecSessionError, ValueError) as error:
             raise RunError(f"{label} startup probe could not run safely: {error}") from error
+        if result.output_truncated:
+            raise RunError(f"{label} startup probe exceeded its 65536 byte output limit")
         if not _probe_stopped_by_host(result):
             break
     else:
-        raise RunError(f"{label} startup probe timed out under load: it did not finish within "
-                       f"{walls[0]} s and then {walls[1]} s. The interpreter may be fine and the "
+        load_text = "unavailable" if loadavg is None else f"{loadavg:g}"
+        cpu_text = "unavailable" if cpu_count is None else str(cpu_count)
+        raise RunError(f"{label} startup probe timed out under load on its load-scaled wall: "
+                       f"loadavg={load_text}, cpu_count={cpu_text}, wall used={walls[0]:g} s "
+                       f"and then {walls[1]:g} s (up to {sum(walls):g} s total). "
+                       "The interpreter may be fine and the "
                        "host overloaded; retry when the machine is less busy")
-    if result.output_truncated:
-        raise RunError(f"{label} startup probe exceeded its 65536 byte output limit")
     if result.exit_code != 0:
         detail = result.output.decode("utf-8", "replace").strip()[-1000:]
         failure = ("cannot import pytest" if "pytest" in code else "could not start")
@@ -895,7 +919,7 @@ def _startup_probe(python: str, code: str, *, label: str,
         raise RunError(f"{label} {failure} in the isolated startup probe; the interpreter is broken "
                        f"or incomplete (exit {result.exit_code}, not a timeout); {install}"
                        f"sandbox restrictions must permit interpreter startup: {detail or 'no diagnostic output'}")
-    if on_clean_success is not None and wall == base_wall and not getattr(result, "probe_failures", ()):
+    if on_clean_success is not None and attempt == 0 and not getattr(result, "probe_failures", ()):
         on_clean_success()
     return result.output
 
@@ -1052,10 +1076,24 @@ WRITE_FIGURES_SENTENCE_SWITCH = "STATEFRAME_R200_F094_WRITE_FIGURES_SENTENCE"
 # Engine switches a user may set in the shell: exactly these names and values,
 # ambient over the profile. Never a blanket STATEFRAME_* passthrough.
 OPT_IN_SWITCHES = {
+    "STATEFRAME_EFFECT_CONSUMER_MEMORY": ("off", "on"),
     "STATEFRAME_REPORT_CHRONOLOGY": ("off", "on"),
     "STATEFRAME_R200_F060_READ_ONLY_VIEW": ("off", "on"),
     "STATEFRAME_ARITHMETIC_UNITS": ("off", "on"),
     "STATEFRAME_API_ATTRIBUTE_ROWS": ("off", "on"),
+    "STATEFRAME_CATALOG_SKIP_CLEAN_WRITE": ("off", "on"),
+    "STATEFRAME_FL_SINGLE_PASS_ANCHOR": ("off", "on"),
+    "STATEFRAME_DEGENERATION_REPLAN": ("off", "on"),
+    "STATEFRAME_DEGENERATION_GREEDY_REPLAN": ("off", "on"),
+    "STATEFRAME_ALLOCATOR_SKIP_NORMALIZATION": ("off", "on"),
+    "STATEFRAME_STABLE_WIRE_CURRENT_ONLY": ("off", "on"),
+    "STATEFRAME_CATALOG_COMPARE_BYTES": ("off", "on"),
+    "STATEFRAME_CHECKPOINT_AFTER_CHECK": ("off", "on"),
+    "STATEFRAME_SHARED_CHECK_PASS_ONLY": ("off", "on"),
+    "STATEFRAME_CATALOG_ENTRY_BLOBS": ("off", "on"),
+    "STATEFRAME_FL_WRITER_ANCHOR": ("off", "on"),
+    "STATEFRAME_R200_R082_MINIMIZE_REMAINING_SITES": ("off", "on"),
+    "STATEFRAME_PUBLIC_IDENTIFIER_SLOT": ("off", "on"),
     "STATEFRAME_WORKSPACE_OBJECTS": ("on", "off"),  # object-backed workspace snapshots
     "STATEFRAME_PROMPT_CACHE_UNPINNED": ("off", "on"),  # let llama.cpp choose a slot; default off
     "STATEFRAME_EXACT_TOKEN_COUNT_CACHE": ("off", "on"),
@@ -1072,6 +1110,7 @@ OPT_IN_SWITCHES = {
     "STATEFRAME_TURN_PANELS": ("off", "on"),
     "STATEFRAME_UNIT_PLAN_V2": ("off", "on"),  # index-ordered multi-file unit plan
     "STATEFRAME_SEAM_RECALL": ("off", "on"),  # cross-file seam_violations recall
+    "STATEFRAME_VIABLE_ALTERNATIVES": ("off", "on"),
     "STATEFRAME_UNIT_COALESCE": ("off", "on"),
     "STATEFRAME_UNIT_POLICY_VISIBLE_ASSERTS": ("off", "on"),
     "STATEFRAME_SEND_INDEX_HEADER": ("off", "on"),  # label each chat POST with its send and attempt number
@@ -1096,6 +1135,7 @@ OPT_IN_SWITCHES = {
     "STATEFRAME_GIT_COMMIT": ("on", "off"),  # git_commit/git_branch tools; patch series per branch after the run
     "STATEFRAME_EDIT_SCOPE_WIDEN": ("on", "off"),  # scoped runs admit an edited product file outside the scope
     "STATEFRAME_REQUIREMENT_RECHECK": ("on", "off"),  # first done answered once with the task's requirement checklist
+    "STATEFRAME_TASK_HIERARCHY": ("off", "on"),
     "STATEFRAME_QGATES": ("off", "on"),  # typed intake and first-edit question gates; off by default
     "STATEFRAME_OBLIGATION_SEED_LOSSLESS": ("on", "off"),  # exact seed occurrences and overflow reporting
     "STATEFRAME_OUTCOME_MILESTONES": ("off", "on"),
@@ -1150,6 +1190,7 @@ OPT_IN_SWITCHES = {
     "STATEFRAME_EDIT_PROTOCOL": ("legacy_safe", "handles"),  # one edit interface per run; legacy_safe by default
     "STATEFRAME_COLLAB_DRIFT": ("off", "on"),  # edits on a file that moved since delivery merge instead of refusing; off by default
     "STATEFRAME_STRICT_DRIFT": ("off", "on"),  # on forces today's SOURCE_CHANGED refusal even with COLLAB_DRIFT on
+    "STATEFRAME_GUIDE_TASK_PACK": ("off", "neither", "ordering", "result_check", "both"),
 }
 PARALLEL_CONTROL_SWITCHES = frozenset({
     "STATEFRAME_PARALLEL_DROP_TOOL_AFTER_TERMINAL",
@@ -1189,6 +1230,10 @@ INTERNAL_BENCHMARK_SWITCHES = {
 # Accepted aliases -> the engine's own value (EVICTFIX "off" is sent as "legacy").
 OPT_IN_ALIASES = {
     "STATEFRAME_EVICTFIX": {"off": "legacy"},
+    "STATEFRAME_EFFECT_CONSUMER_MEMORY": {
+        "0": "off", "false": "off", "no": "off",
+        "1": "on", "true": "on", "yes": "on",
+    },
     "STATEFRAME_EXCEPTION_CAUSE_EXCERPT": {"false": "off"},
     "STATEFRAME_REPORT_CHRONOLOGY": {"false": "off", "0": "off", "no": "off"},
     "STATEFRAME_REPORT_DENOMINATORS": {"false": "off", "0": "off"},
@@ -1196,9 +1241,13 @@ OPT_IN_ALIASES = {
     WRITE_FIGURES_SENTENCE_SWITCH: {"false": "off"},
     "STATEFRAME_ARITHMETIC_UNITS": {"false": "off", "true": "on"},
     "STATEFRAME_API_ATTRIBUTE_ROWS": {"false": "off"},
+    "STATEFRAME_R200_R082_MINIMIZE_REMAINING_SITES": {"false": "off"},
     "STATEFRAME_ENCLOSING_GUARD": {"false": "off"},
     "STATEFRAME_MIGRATION_SITE_PARTITION": {"false": "off"},
     "STATEFRAME_REQUESTED_EVIDENCE_PROBE": {"false": "off", "true": "on"},
+    "STATEFRAME_VIABLE_ALTERNATIVES": {"0": "off", "false": "off", "1": "on", "true": "on"},
+    "STATEFRAME_TASK_HIERARCHY": {"false": "off"},
+    "STATEFRAME_PUBLIC_IDENTIFIER_SLOT": {"false": "off", "0": "off"},
 }
 # The host can consume these settings without an engine reader. Parallel and launch inputs
 # cross the child boundary as typed spec records. Schedule witness can also have an engine reader.

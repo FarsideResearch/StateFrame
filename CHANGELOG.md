@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.10.9 (2026-11-27)
+
+- Added opt-in `STATEFRAME_EFFECT_CONSUMER_MEMORY` for Python refactors: it recalls a verified callback registration and its consumer, rejecting ambiguous package exports and keeping current consumer facts across producer signature changes.
+- Added opt-in `STATEFRAME_R200_R082_MINIMIZE_REMAINING_SITES`, which adds a compact pointer to the remaining sites after a green check on a partial multi-file change.
+- Added opt-in `STATEFRAME_VIABLE_ALTERNATIVES`, which carries one bounded, source-linked pair of still-viable interpretations for the current open edit or evidence site when it fits the request budget. Request bytes are unchanged when it is off.
+- Added the default-off `STATEFRAME_GUIDE_TASK_PACK` research setting (`neither`, `ordering`, `result_check`, or `both`).
+- Added opt-in `STATEFRAME_PUBLIC_IDENTIFIER_SLOT`, which lets an eligible TypeScript edit replace a drafted namespace-import call with a callable export proven by the installed module.
+- Added opt-in `STATEFRAME_TASK_HIERARCHY`, which adds a design-focus message to the first request when the brief names one immediate user action.
+- Added default-off speed switches for checkpoints, the structural catalog, stable wire, the working-set allocator, shared check reuse, continuation-journal capture, and degeneration recovery (`STATEFRAME_CHECKPOINT_AFTER_CHECK`, `STATEFRAME_CATALOG_ENTRY_BLOBS`, `STATEFRAME_CATALOG_COMPARE_BYTES`, `STATEFRAME_CATALOG_SKIP_CLEAN_WRITE`, `STATEFRAME_STABLE_WIRE_CURRENT_ONLY`, `STATEFRAME_ALLOCATOR_SKIP_NORMALIZATION`, `STATEFRAME_SHARED_CHECK_PASS_ONLY`, `STATEFRAME_FL_WRITER_ANCHOR`, `STATEFRAME_FL_SINGLE_PASS_ANCHOR`, `STATEFRAME_DEGENERATION_REPLAN`, `STATEFRAME_DEGENERATION_GREEDY_REPLAN`). Each leaves request bytes unchanged when off.
+
 ## 0.10.8 (2026-11-26)
 
 - Added `stateframe doctor` to check Python and sandbox startup and, optionally, local model discovery and provider slot capacity.

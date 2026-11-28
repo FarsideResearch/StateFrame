@@ -1450,6 +1450,7 @@ def _journal_state(obj) -> dict:
         state.pop(name, None)
     # Repeated-cursor snapshots are derived cache data; do not duplicate them
     # beside the authoritative journal records in a checkpoint.
+    state.pop("_fl_writer_anchor", None)  # Process-local verified prefix and native hash state.
     state.pop("_records_since_cache", None)
     state.pop("_records_since_cache_bytes", None)
     path = getattr(obj, "path", None)
@@ -4742,8 +4743,19 @@ def _save_point(frame, step: int, poc, entered: float) -> None:
         return
     if _STATE["restored_step"] == step:
         return  # the state on disk IS this boundary
-    if step % _every():
-        return
+    off_cycle = step % _every() != 0
+    if off_cycle:
+        if (current != "save" or os.environ.get("STATEFRAME_CHECKPOINT_AFTER_CHECK") != "on"
+                or _STATE.get("extra_check_save")):
+            return
+        runtime = frame.f_locals.get("measurement")
+        receipt = getattr(runtime, "last_completed_receipt", None)
+        if (not isinstance(receipt, dict) or receipt.get("turn") != step - 1
+                or receipt.get("kind") != "test"
+                or receipt.get("result_class") not in {
+                    "GREEN", "RED", "PASS", "PARTIAL_PASS", "FAIL", "PASSED", "FAILED",
+                }):
+            return
     out = Path(poc)
     run_dir = out.parent
     if current == "save":
@@ -4799,6 +4811,8 @@ def _save_point(frame, step: int, poc, entered: float) -> None:
         finally:
             if gc_was_enabled:
                 gc.enable()
+        if off_cycle:
+            _STATE["extra_check_save"] = True
         _STATE["saved"] += 1
         if not background:
             _STATE["consecutive_failed"] = 0

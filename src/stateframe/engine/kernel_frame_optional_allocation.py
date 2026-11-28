@@ -300,3 +300,209 @@ def singleton_alias_candidate(frame: Mapping[str, object]) -> dict[str, object] 
             "encoding_mode": "singleton_next_site",
         },
     )
+
+
+def _effect_consumer_fact(runtime, capture, body):
+    from kernel_host_authorship import ledger_of, row_kinds, structural_class
+    from kernel_r200_f046_remember_product_consumer import enabled, select
+    from kernel_stateframe_framefit5 import _state_payload
+    from kernel_stable_wire_ownership import request_frame_index
+
+    if not enabled() or getattr(runtime, "_unit_policy", None) is not None:
+        return None
+    messages = body["messages"]
+    try:
+        index = request_frame_index(messages, capture=capture)
+    except (FrameAllocationReplanNeeded, ValueError):
+        return None
+    if structural_class(messages, index, capture=capture) != "frame":
+        return None
+    ledger = ledger_of(capture) or ledger_of(runtime)
+    kinds = row_kinds(ledger, messages, capture=capture)
+    # The frame can be re-rendered after the ledger recorded its original bytes.
+    if kinds[index] not in (None, "state") or any(
+            kind == "state" and position != index for position, kind in enumerate(kinds)):
+        return None
+    return select(runtime, _state_payload(messages[index])[1]["framefit5"])
+
+
+def _with_effect_consumer_fact(body, fact):
+    from kernel_stateframe_framefit5 import _is_volatile_tail_message, effect_consumer_tail
+
+    tails = [i for i, row in enumerate(body["messages"]) if _is_volatile_tail_message(row)]
+    if len(tails) != 1:
+        return None
+    index = tails[0]
+    row = body["messages"][index]
+    content = effect_consumer_tail(row["content"], fact)
+    if content is None:
+        return None
+    messages = list(body["messages"])
+    messages[index] = {**row, "content": content}
+    return {**body, "messages": messages}
+
+
+def _with_allocated_consumer(prepared, fact, measure):
+    import json
+    from dataclasses import replace
+    from kernel_cache_layout_view import semantic_messages
+    from kernel_r200_f046_remember_product_consumer import MAX_ROW_TOKENS
+    from kernel_working_set_allocator import DEFAULT_MODES
+    from kernel_working_set_prepare import (
+        MAX_MEASUREMENTS, Measurement, PreparedCandidate, Trial, _violations,
+    )
+    from kernel_working_set_proof import verify_certificate
+    from kernel_working_set_render import render_assignment
+
+    if (not fact or measure is None or not isinstance(prepared, PreparedCandidate)
+            or len(prepared.trials) >= MAX_MEASUREMENTS):
+        return prepared
+    certificate = prepared.rendered.certificate
+    snapshot = certificate.snapshot
+    fixed = _with_effect_consumer_fact(json.loads(snapshot.fixed_body), fact)
+    expected = _with_effect_consumer_fact(json.loads(prepared.wire), fact)
+    if fixed is None or expected is None:
+        return prepared
+    if len(json.dumps(expected).encode()) > snapshot.byte_cap:
+        return prepared
+    try:
+        modes = {mode.name: mode for mode in DEFAULT_MODES}
+        rendered = render_assignment(
+            replace(snapshot, fixed_body=json.dumps(fixed).encode()),
+            {key: modes[name] for key, name in certificate.assignment}, certificate.layout,
+        )
+        # Cached layouts rebase the volatile overlay's offsets. Compare the
+        # reconstructed messages so only the added fact can change evidence.
+        baseline = json.loads(prepared.wire)
+        decoded = json.loads(rendered.wire)
+        baseline["messages"] = semantic_messages(baseline["messages"])
+        decoded["messages"] = semantic_messages(decoded["messages"])
+        stripped = _with_effect_consumer_fact(decoded, None)
+        if (stripped is None or sum(str(row.get("content")).count(fact)
+                                    for row in decoded["messages"]) != 1
+                or stripped != baseline):
+            return prepared
+        raw = measure(rendered.wire)
+        metered = raw if isinstance(raw, Measurement) else Measurement(*raw)
+        if (not metered.contract_valid or metered.method != prepared.measurement.method
+                or metered.tokenizer_identity != prepared.measurement.tokenizer_identity
+                or metered.prompt_tokens - prepared.measurement.prompt_tokens > MAX_ROW_TOKENS
+                or _violations(snapshot, rendered, metered)):
+            return prepared
+        verify_certificate(rendered.wire, rendered.certificate)
+    except (ValueError, TypeError, KeyError, OSError):
+        return prepared
+    trial = Trial(rendered.certificate.assignment_digest, rendered.certificate.body_sha256,
+                  len(rendered.wire), metered, ())
+    return replace(prepared, rendered=rendered, measurement=metered,
+                   trials=(*prepared.trials, trial))
+
+
+def _with_legacy_consumer(runtime, capture, body):
+    import json
+    from kernel_cache_layout_candidate import _checked_final_cache_projection
+    from kernel_cache_layout_view import FINAL_LAYOUT_NAME, is_cache_layout, semantic_messages
+    from kernel_context import token_estimate
+    from kernel_context_capacity import _OUTPUT_KEYS, check_capacity, resolve_n_ctx
+    from kernel_endpoint_size import ENDPOINT_SIZE
+    from kernel_frame_allocation_capture import final_request_tokens, rebind_final_layout_trim
+    from kernel_measurement import _prompt_token_estimate
+    from kernel_r200_f046_remember_product_consumer import MAX_ROW_TOKENS
+    from kernel_request_budget import _request_token_meter
+    from kernel_request_diet import request_tokenizer_credentials
+    from kernel_request_source_window import source_delivery_satisfied, verify_final_source_delivery
+    from kernel_stateframe_capacity import within_protected_capacity
+
+    semantic = body
+    projected = is_cache_layout(body["messages"])
+    if projected:
+        if body["messages"][-1].get("name") != FINAL_LAYOUT_NAME:
+            return body
+        semantic = {**body, "messages": semantic_messages(body["messages"])}
+    fact = _effect_consumer_fact(runtime, capture, semantic)
+    if not fact:
+        return body
+    trial = _with_effect_consumer_fact(semantic, fact)
+    if trial is None or trial == semantic:
+        return body
+    if projected:
+        try:
+            if _checked_final_cache_projection(semantic) != body:
+                return body
+            trial = _checked_final_cache_projection(trial)
+        except ValueError:
+            return body
+    inputs = capture._frame_candidate_inputs
+    byte_limit, token_limit = inputs["byte_ceiling"], inputs["token_ceiling"]
+    wire = json.dumps(trial).encode()
+    if len(wire) > byte_limit or token_estimate(trial) > runtime.frame_ceiling:
+        return body
+    key, endpoint = request_tokenizer_credentials(capture)
+    n_ctx = (resolve_n_ctx(endpoint, key or "") if endpoint else None) or ENDPOINT_SIZE.context_tokens
+    route = getattr(capture, "frame_route", None)
+    route_limit = route.settings.get("context_tokens") if route is not None else None
+    if type(route_limit) is int and route_limit > 0:
+        n_ctx = min(n_ctx, route_limit)
+    output = next((trial[name] for name in _OUTPUT_KEYS
+                   if type(trial.get(name)) is int and trial[name] > 0), 0)
+    if check_capacity(_prompt_token_estimate(trial), output, n_ctx)[0] != "ok":
+        return body
+    meter = _request_token_meter(runtime, capture)
+    baseline, method = final_request_tokens(body, meter, capture)
+    metered, trial_method = final_request_tokens(trial, meter, capture, wire_bytes=len(wire))
+    if (trial_method != method or metered > token_limit or metered - baseline > MAX_ROW_TOKENS
+            or not within_protected_capacity(trial, exact_tokenizer=method == "tokenize")):
+        return body
+    plan = copy.deepcopy(inputs["source_plan"])
+    receipt = verify_final_source_delivery(plan, trial["messages"], payload=wire,
+                                           sources=inputs["sources"])
+    if not source_delivery_satisfied(receipt):
+        return body
+    rebind_final_layout_trim(trial, meter, capture, byte_limit=byte_limit,
+                            token_limit=token_limit, wire=wire)
+    inputs["receipt"] = copy.deepcopy(receipt)
+    capture.request_source_final_delivery = receipt
+    return trial
+
+
+def install_effect_consumer_allocation():
+    """Attach the optional selection to the two complete-envelope fitters."""
+    from contextvars import ContextVar
+    from functools import wraps
+    import kernel_final_wire_allocation as final_wire
+    import kernel_working_set_live as live
+    import kernel_working_set_prepare as solver
+
+    active_fact = ContextVar("effect_consumer_fact", default=None)
+    prepare_live = live.prepare_live
+    prepare_candidate = solver.prepare_candidate
+    prepare_hook_body = final_wire._prepare_qualified_hook_body
+
+    @wraps(prepare_live)
+    def live_fit(capture, runtime, body, **kwargs):
+        token = active_fact.set(_effect_consumer_fact(runtime, capture, body))
+        try:
+            return prepare_live(capture, runtime, body, **kwargs)
+        finally:
+            active_fact.reset(token)
+
+    @wraps(prepare_candidate)
+    def allocated_fit(snapshot, *, measure=None):
+        prepared = prepare_candidate(snapshot, measure=measure)
+        return _with_allocated_consumer(prepared, active_fact.get(), measure)
+
+    @wraps(prepare_hook_body)
+    def legacy_fit(runtime, body, request_id):
+        result = prepare_hook_body(runtime, body, request_id)
+        capture = getattr(runtime, "_active_capture", None)
+        if (getattr(capture, "request_id", None) != request_id
+                or getattr(capture, "_working_set_certificate", None) is not None
+                or not hasattr(capture, "_frame_candidate_inputs")):
+            return result
+        # The legacy cache projection and its source fitting are complete at
+        # this seam. Price their exact body with the optional fact added.
+        return _with_legacy_consumer(runtime, capture, result)
+
+    live.prepare_live = live_fit
+    solver.prepare_candidate = allocated_fit
+    final_wire._prepare_qualified_hook_body = legacy_fit

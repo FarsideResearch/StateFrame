@@ -7,6 +7,7 @@ event kinds keep their shape either way.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +18,7 @@ import kernel_obligation_assess as obligations
 import kernel_safe_probe
 from kernel_counterexample_visibility import collect_counterexamples
 from kernel_measurement import AuditJournal
+from kernel_pilot import ACTIVE_PARENT, ACTIVE_RUNTIME
 from kernel_stateframe_runtime import StateFrameRuntime
 
 SNAPSHOT = "sha256:" + "a" * 64  # workspace snapshots are sha256 identities in the engine
@@ -45,7 +47,7 @@ def _bundle() -> SimpleNamespace:
 
 
 @pytest.fixture
-def probe(monkeypatch: pytest.MonkeyPatch) -> Probe:
+def probe(monkeypatch: pytest.MonkeyPatch) -> Iterator[Probe]:
     fake = Probe()
 
     def run_probe(argv, workspace, *, timeout=10, **_kwargs):
@@ -58,7 +60,14 @@ def probe(monkeypatch: pytest.MonkeyPatch) -> Probe:
     monkeypatch.setattr(obligations, "workspace_snapshot", lambda *_a, **_k: SNAPSHOT)
     monkeypatch.setattr(obligations, "assess_obligations", lambda *_a, **_k: ())
     monkeypatch.setattr(obligations, "needs_work_payload", lambda *_a, **_k: None)
-    return fake
+    # Direct runtime construction attaches a parent and worker to the current context.
+    parent = ACTIVE_PARENT.set(None)
+    runtime = ACTIVE_RUNTIME.set(None)
+    try:
+        yield fake
+    finally:
+        ACTIVE_RUNTIME.reset(runtime)
+        ACTIVE_PARENT.reset(parent)
 
 
 def _runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str | None,
