@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.10.9 (2026-11-27)
 
 - Added opt-in `STATEFRAME_EFFECT_CONSUMER_MEMORY` for Python refactors: it recalls a verified callback registration and its consumer, rejecting ambiguous package exports and keeping current consumer facts across producer signature changes.
 - Added opt-in `STATEFRAME_R200_R082_MINIMIZE_REMAINING_SITES`, which adds a compact pointer to the remaining sites after a green check on a partial multi-file change.
